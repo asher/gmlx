@@ -270,7 +270,7 @@ def install_gguf_adapter(raw_model, config, plan: LoraAdapter, *, slot: int = 0)
     n_head_kv = cfg.get("num_key_value_heads",
                         text_cfg.get("num_key_value_heads", n_head))
     return install_lora_adapter(_text_root(raw_model, plan), plan, n_head=n_head,
-                                n_head_kv=n_head_kv, slot=slot)
+                                n_head_kv=n_head_kv, slot=slot, config=cfg)
 
 
 def _text_root(model, plan):

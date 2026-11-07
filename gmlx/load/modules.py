@@ -2389,11 +2389,115 @@ class LoRAKQuantLinear(nn.Module):
         return r
 
 
+def _owned_f32(x: mx.array) -> mx.array:
+    """An f32 copy of ``x`` in fresh memory: never a view of a loaded
+    array or of the adapter file."""
+    return mx.array(np.array(x.astype(mx.float32), dtype=np.float32))
+
+
+class LoRAKQuantEmbedding(nn.Module):
+    """A token embedding (kquant, float or MLX quantized) with a LoRA delta
+    applied live, where llama.cpp adds it: after the lookup and before any
+    embedding multiplier the model applies.
+
+    Forward: ``base(ids) + scale * A[ids] @ B.T``, where ``A`` is
+    ``(n_vocab, rank)`` and ``B`` is ``(n_embd, rank)``, the GGUF layout of
+    a ``token_embd`` pair. ``A`` is held as an f32 copy, so the gather is
+    exact and a rewrite of the adapter file cannot reach it. ``B`` is kept
+    only as its transposed table at the base's output dtype, with no scale
+    in it: the static scale and the published row factor multiply the f32
+    rank-r gather, which is cast once before the ``addmm``. The output
+    dtype is the base's, so the graph's dtype is unchanged.
+
+    Attributes the wrapper does not own read through to the base
+    (``weight``, ``scales``, ``as_linear`` and the rest), so ``hasattr``
+    answers as it does on the base.
+    """
+
+    _lora_bt: dict
+    _kq_extra: list
+
+    def __init__(self, base: nn.Module, a: mx.array, b: mx.array, scale: float,
+                 slot: int = 0):
+        super().__init__()
+        self.base = base
+        self.lora_a = _owned_f32(a)                 # (n_vocab, rank)
+        self.scale = float(scale)
+        self.slot = int(slot)
+        dtype = base(mx.array([0], dtype=mx.uint32)).dtype
+        object.__setattr__(self, "_out_dtype", dtype)
+        # (rank, n_embd) per slot; outside the parameter tree, and not
+        # _kq_tables, which distill clears: no B is kept to rebuild it.
+        object.__setattr__(self, "_lora_bt", {self.slot: self._bt(b)})
+        # Further adapters on the same table: (a, scale, slot) each.
+        object.__setattr__(self, "_kq_extra", [])
+        mx.eval(self.lora_a, self._lora_bt[self.slot])
+        self.freeze()
+
+    def __getattr__(self, key):
+        try:
+            return super().__getattr__(key)
+        except AttributeError:
+            pass
+        base = self.get("base")
+        if base is None:
+            raise AttributeError(key)
+        return getattr(base, key)
+
+    def _bt(self, b: mx.array) -> mx.array:
+        return mx.array(np.ascontiguousarray(
+            np.array(b.astype(mx.float32), dtype=np.float32).T)).astype(self._out_dtype)
+
+    def add_slot(self, a: mx.array, b: mx.array, scale: float, slot: int) -> None:
+        """Install another adapter (``a (n_vocab, rank)``, ``b (n_embd,
+        rank)``) on this table under row-channel ``slot``."""
+        if slot in self.slots:
+            raise ValueError(f"LoRA slot {slot} already installed on this target")
+        a_c, t = _owned_f32(a), self._bt(b)
+        mx.eval(a_c, t)
+        self._lora_bt[int(slot)] = t
+        self._kq_extra.append((a_c, float(scale), int(slot)))
+
+    @property
+    def slots(self) -> tuple:
+        return (self.slot,) + tuple(e[2] for e in self._kq_extra)
+
+    def _delta(self, y, ids, a, scale, slot):
+        t = self._lora_bt[slot]
+        if t.dtype != y.dtype:
+            t = t.astype(y.dtype)
+        z = a[ids]                                   # (..., rank) f32
+        f = lora_rows.dense_row_factor(slot, z.shape[:-1], mx.float32)
+        z = z * scale
+        if f is not None:
+            z = z * f
+        z = z.astype(y.dtype)
+        if z.ndim < 2:
+            return y + z @ t
+        return mlx_guards.addmm(y, z, t)
+
+    def __call__(self, ids):
+        y = self.base(ids)
+        if not lora_rows.slot_off(self.slot):
+            y = self._delta(y, ids, self["lora_a"], self.scale, self.slot)
+        for a, scale, slot in self._kq_extra:
+            if not lora_rows.slot_off(slot):
+                y = self._delta(y, ids, a, scale, slot)
+        return y
+
+    def _extra_repr(self):
+        r = (f"rank={self['lora_a'].shape[-1]}, scale={self.scale:g}, "
+             f"base={type(self['base']).__name__}")
+        if self._kq_extra:
+            r += f", slots={self.slots}"
+        return r
+
+
 def lora_base(m):
-    """The base module of a LoRA-wrapped linear, else ``m`` itself. A
-    drafter binds the target's head through it: its draft calls publish
-    no row vector."""
-    return m.base if isinstance(m, LoRAKQuantLinear) else m
+    """The base module of a LoRA-wrapped linear or embedding, else ``m``
+    itself. A drafter binds the target's head and embedding through it:
+    its draft calls publish no row vector."""
+    return m.base if isinstance(m, (LoRAKQuantLinear, LoRAKQuantEmbedding)) else m
 
 
 class ExpertLoRA:
@@ -2792,10 +2896,42 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
     return len(targets)
 
 
+def _hadamard_qembedding(module) -> bool:
+    return any(c.__name__ == "HadamardQuantizedEmbedding" for c in type(module).__mro__)
+
+
+def _embedding_refusal(module, lm, config) -> str | None:
+    """Why ``module`` cannot take the token embedding pair ``lm``, or None:
+    the install's backstop for the header check of
+    :func:`adapter.embedding_refusal`."""
+    from . import adapter as _adapter
+    from .hadamard_modules import is_folded
+
+    if is_folded(module) or _hadamard_qembedding(module):
+        return _adapter._EMBD_FOLDED
+    if isinstance(module, nn.Embedding):
+        n_vocab, n_embd = module.weight.shape
+    else:
+        n_vocab, n_embd = int(module.num_embeddings), int(module.dims)
+    if lm.a.ndim != 2 or lm.b.ndim != 2 or lm.a.shape[0] != n_vocab \
+            or lm.b.shape[0] != n_embd:
+        return _adapter.embd_shape_message(lm.a.shape, lm.b.shape, n_vocab, n_embd)
+    cfg = config or {}
+    text_cfg = cfg.get("text_config") or {}
+    if cfg.get("tie_word_embeddings") or text_cfg.get("tie_word_embeddings"):
+        return _adapter._EMBD_TIED
+    if "granite_switch" in (cfg.get("model_type"), text_cfg.get("model_type")):
+        return _adapter._EMBD_GRANITE_SWITCH
+    return None
+
+
+_EMBEDDING_LEAVES = (KQuantEmbedding, nn.Embedding, nn.QuantizedEmbedding)
+
+
 def install_lora_adapter(model: nn.Module, plan,
                          *, n_head: int | None = None,
                          n_head_kv: int | None = None,
-                         slot: int = 0) -> int:
+                         slot: int = 0, config: dict | None = None) -> int:
     """Wrap each Linear named by a LoRA ``plan`` with its live adapter delta.
 
     A second leaf-swap pass (mirrors :func:`install_kquant_modules`): walks
@@ -2808,9 +2944,13 @@ def install_lora_adapter(model: nn.Module, plan,
     for ``k_proj``). Missing head counts on such a target raise rather than apply
     an un-permuted delta onto a de-permuted base (which would corrupt attention).
 
+    A ``token_embd`` pair wraps the token embedding in a
+    :class:`LoRAKQuantEmbedding`. ``config`` (the model's config dict) says
+    whether the embedding is also the output head, which refuses the pair.
+
     Two loud failures, never a silent drop (a dropped adapter weight serves a
-    subtly wrong model): a target that names an unwrappable module (MoE-expert /
-    embedding adapters are deferred) and a target with no matching module at all.
+    subtly wrong model): a target that names an unwrappable module and a
+    target with no matching module at all.
     """
     targets = dict(plan.modules)   # module_path -> LoraModule
     wrapped: set[str] = set()
@@ -2826,6 +2966,14 @@ def install_lora_adapter(model: nn.Module, plan,
         if lm.experts:
             continue
         existing = by_path.get(path)
+        if lm.embedding and isinstance(existing, LoRAKQuantEmbedding):
+            why = _embedding_refusal(existing.base, lm, config)
+            if why is not None:
+                raise ValueError(why)
+            existing.add_slot(lm.a, lm.b, lm.scale, slot)
+            wrapped.add(path)
+            del targets[path]
+            continue
         if isinstance(existing, LoRAKQuantLinear):
             if lm.transform == "qk_permute":
                 nh = n_head_kv if path.endswith("k_proj") else n_head
@@ -2848,10 +2996,17 @@ def install_lora_adapter(model: nn.Module, plan,
         lm = targets.get(path)
         if lm is None or lm.experts:
             return module
-        if not isinstance(module, (KQuantLinear, nn.Linear)):
+        if lm.embedding and (isinstance(module, _EMBEDDING_LEAVES)
+                             or _hadamard_qembedding(module)):
+            why = _embedding_refusal(module, lm, config)
+            if why is not None:
+                raise ValueError(why)
+            wrapped.add(path)
+            return LoRAKQuantEmbedding(module, lm.a, lm.b, lm.scale, slot=slot)
+        if lm.embedding or not isinstance(module, (KQuantLinear, nn.Linear)):
             raise NotImplementedError(
                 f"LoRA target {path!r} is a {type(module).__name__}, not a "
-                f"wrappable Linear (embedding LoRA is deferred)")
+                f"wrappable Linear (only the token embedding takes a LoRA pair)")
         b = lm.b
         if lm.transform == "qk_permute":
             nh = n_head_kv if path.endswith("k_proj") else n_head

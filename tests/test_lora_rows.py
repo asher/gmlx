@@ -467,3 +467,54 @@ def test_row_tuple_reads_the_row_lora():
     for settings in (None, SimpleNamespace(lora=None)):
         with pytest.raises(lora_rows.LoraRowsError):
             lora_rows.row_tuple(settings)
+
+
+# the token embedding wrapper reads the same channel
+
+
+def _embed_wrap():
+    base = nn.Embedding(10, 4)
+    base.weight = mx.array((np.arange(40, dtype=np.float32).reshape(10, 4) % 5) * 0.5)
+    a = mx.array((np.arange(20, dtype=np.float32).reshape(10, 2) % 3) - 1.0)
+    b = mx.array((np.arange(8, dtype=np.float32).reshape(4, 2) % 4) * 0.25)
+    return modules.LoRAKQuantEmbedding(base, a, b, 0.5), base
+
+
+def test_embedding_mixed_rows_equal_each_row_alone():
+    wrap, base = _embed_wrap()
+    ids = mx.array([[1, 4, 9], [2, 2, 7]])
+    lora_rows.configure("rows", 1)
+    with mx.stream(mx.cpu):
+        lora_rows.set_rows([0.0, 1.5])
+        y = wrap(ids)
+        lora_rows.clear_rows()
+        for i, s in enumerate((0.0, 1.5)):
+            with lora_rows.tuple_scope((s,), 1):
+                solo = wrap(ids[i:i + 1])
+            assert mx.array_equal(y[i:i + 1], solo), i
+        assert mx.array_equal(y[0:1], base(ids[0:1]))
+        with lora_rows.tuple_scope((0.0,), 1):
+            assert mx.array_equal(wrap(ids[1:2]), base(ids[1:2]))
+
+
+def test_embedding_rows_mode_unpublished_raises():
+    wrap, _base = _embed_wrap()
+    lora_rows.configure("rows", 1)
+    with pytest.raises(lora_rows.LoraRowsError):
+        wrap(mx.array([[1, 2]]))
+
+
+def test_embedding_uid_publish_reads_registered_rows():
+    wrap, base = _embed_wrap()
+    lora_rows.configure("rows", 1)
+    ids = mx.array([[1, 4], [3, 8]])
+    with mx.stream(mx.cpu), lora_rows.bind(lora_rows.UidRegistry()):
+        lora_rows.register_uid(7, (1.5,))
+        lora_rows.register_uid(9, None)
+        with lora_rows.published([7, 9]):
+            y = wrap(ids)
+        assert lora_rows._local.current is None
+        with lora_rows.tuple_scope((1.5,), 1):
+            want = wrap(ids[:1])
+    assert mx.array_equal(y[:1], want)
+    assert mx.array_equal(y[1:], base(ids[1:]))
