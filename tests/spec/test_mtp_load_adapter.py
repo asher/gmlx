@@ -144,3 +144,19 @@ def test_the_cli_hook_installs_the_adapter_once(monkeypatch):
     cli._cli_adapter_hook(args)(trunk, {})
     cli._apply_cli_adapter(args, SimpleNamespace(language_model=trunk), {})
     assert applied == ["/m/a.gguf"]
+
+
+def test_an_adapter_failure_names_the_adapter_stage(fake_load, capsys):
+    import gmlx.load.loadlog as loadlog
+
+    ml, _trunk, order = fake_load
+
+    def refuse(lm, config):
+        raise ValueError("adapter arch llama != base arch qwen35moe")
+
+    with pytest.raises(ValueError):
+        with loadlog.load_ui(False, "/m/t.gguf"):
+            ml.load_mtp_model("/m/t.gguf", before_wire=refuse)
+    err = capsys.readouterr().err
+    assert "load failed applying adapter: adapter arch llama" in err
+    assert order == []

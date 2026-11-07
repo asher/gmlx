@@ -1507,7 +1507,9 @@ def _apply_cli_adapter(args, model, config) -> None:
                  or (header_meta(args.gguf) or {}).get("arch"))
     n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch)
     object.__setattr__(trunk, "_kq_cli_adapter", adapter)
-    print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
+    import gmlx.load.loadlog as loadlog
+
+    loadlog.note(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
 
 
 def _streamed_adapter_refusal(args) -> str | None:

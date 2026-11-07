@@ -2250,6 +2250,7 @@ def load_mtp_model(
 
     materialize_module_arrays(model, drafter)
     if before_wire is not None:
+        loadlog.stage("applying adapter")
         before_wire(model.language_model, config)
     if wire:
         _wire_target(model, gguf_path)

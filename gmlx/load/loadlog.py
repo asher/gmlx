@@ -118,6 +118,16 @@ def stage(label: str) -> None:
         state.spinner.update(f"{state.base}: {label}")
 
 
+def note(msg: str) -> None:
+    """A stdout line shown during a load; routed around the spinner when one
+    is animating."""
+    state = _STATE.get()
+    if state is not None and state.spinner is not None:
+        state.spinner.println(msg)
+    else:
+        print(msg)
+
+
 def fact(key: str, value) -> None:
     """Record a summary datum (arch, codec histogram, drafter kind, ...)."""
     state = _STATE.get()
