@@ -307,9 +307,10 @@ TOP_LOGPROBS_K=20 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ```
 
 The values are the model's own distribution: the log-softmax of its raw
-logits, in 32-bit floats. Logit bias, penalties, XTC, structured output and
-the profile's sampling values change which token the server samples. They do
-not change the logprobs. A token that the thinking budget forces in reports
+logits. The model writes its logits in 16-bit floats, and the server takes
+the log-softmax in 32-bit floats. Logit bias, penalties, XTC, structured
+output and the profile's sampling values change which token the server
+samples. They do not change the logprobs. A token that the thinking budget forces in reports
 the logprob that the model gave it. The token that ends the reply gets its
 entry too. A logprob below -9999 comes back as -9999.0.
 
