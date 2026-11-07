@@ -217,7 +217,7 @@ def job(pool, e, key, need, **kw):
             pool.caches[e.model_path].items[key] = int(need)
         finally:
             pool.lora_settle(e, "the test's LoRA")
-    on_worker(run)
+    on_worker(run, e.kind)
 
 
 def live_sums(pool):
@@ -518,6 +518,30 @@ def test_a_turn_short_of_more_than_a_release_frees_does_not_wait(
         assert not pool.entry_resident(qwen)
         assert v.lora.pending == 4 * GB
         assert w.timeouts == []
+    finally:
+        q.run()
+
+
+def test_a_turn_whose_shed_covers_it_books_beside_a_queued_release(
+        monkeypatch):
+    """The turn sheds its own idle LoRA bytes before it looks at a release
+    queued on the other worker: when the shed covers it, it books with no
+    wait and evicts nothing."""
+    pool = make_pool(monkeypatch, 12, retry=1)
+    image(pool, "zimage", 3)
+    qwen = chat(pool, "qwen3", 3, busy=0)
+    v = video(pool, "v", 3, busy=True)
+    job(pool, v, "old", 2 * GB)
+    q = Queued(pool, monkeypatch, "zimage")
+    w = waits(pool)
+    try:
+        # 3 + 3 + 3 + 2 held of 12: 2 GB more is 1 GB short, and the
+        # idle 2 GB of "old" covers it.
+        turn(pool, v, 2 * GB)
+        assert w.timeouts == []
+        assert pool.entry_resident(qwen)
+        assert pool.caches["v"].items == {}
+        assert v.lora.pending == 2 * GB
     finally:
         q.run()
 
