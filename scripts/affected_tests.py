@@ -15,7 +15,9 @@ knows only from import time, selects every test file that imports it.
 
 A changed test file selects itself and the tests that import it, a changed
 conftest its folder, a docs change the docs tests, and any other file the
-tests that name it. This is the inner loop; the gate runs before a push.
+tests that name it. A file READERS lists, such as an oracle fixture or an
+example workflow, also selects the tests that read it. This is the inner
+loop; the gate runs before a push.
 
 --run drops KQUANT_TEST_GGUF_DIR, as the gate does, so no real-model test
 runs. Stdlib only.
@@ -42,6 +44,20 @@ WORKERS = 8
 MAP_AGE = timedelta(days=28)
 # gmlx imports in code a test runs in a child interpreter
 _CODE_IMPORT = re.compile(r"^\s*(?:from\s+(gmlx[\w.]*)\s+import\s+([\w, ]+)|import\s+(gmlx[\w.]*))", re.M)
+# Files the tests read by a path the scan cannot see, built from parts or
+# from a name the test computes. A key ending in / is a folder. Each
+# selects its readers and the tests that import them.
+READERS = {
+    "tests/fixtures/video/oracle/": ("tests/video/video_oracle_fixture.py",),
+    "tests/fixtures/image/oracle/": ("tests/image/oracle_fixture.py", "tests/image/test_image_check7.py",
+                                     "tests/image/test_image_oracle_harness.py"),
+    "scripts/video_oracle/run.py": ("tests/video/test_video_oracle_harness.py",),
+    # the video runner loads the image runner
+    "scripts/image_oracle/run.py": ("tests/image/test_image_oracle_harness.py",
+                                    "tests/video/test_video_oracle_harness.py"),
+    "gmlx/comfyui_pack/example_workflows/": ("tests/test_comfyui_pack.py",),
+    "tests/comfyui_pack/workflows/": ("tests/test_comfyui_pack.py",),
+}
 
 
 def _git(*args: str, root: Path | None = None) -> str:
@@ -255,6 +271,13 @@ def _named(path: str, scan: Scan) -> set[str]:
     return found | {PurePosixPath(h).parent.as_posix() for h in hits if PurePosixPath(h).name == "conftest.py"}
 
 
+def _readers(path: str, scan: Scan) -> set[str]:
+    """Test files that read ``path`` by a path READERS names."""
+    readers = [r for key, rs in READERS.items()
+               if path == key or (key.endswith("/") and path.startswith(key)) for r in rs]
+    return {f for r in readers for f in (r, *scan.importers(r)) if is_test(f)}
+
+
 def select(paths: list[str], root: Path | None = None, test_map: dict | None = None) -> tuple[list[str], list[str]]:
     """Test files and folders for ``paths``, and the paths that selected none."""
     root = root or ROOT
@@ -294,6 +317,7 @@ def select(paths: list[str], root: Path | None = None, test_map: dict | None = N
             found = {p.relative_to(root).as_posix() for g in changed_paths.DOCS_TESTS for p in root.glob(g)}
         else:
             found = _named(path, scan)
+        found |= _readers(path, scan)
         folders |= {f for f in found if (root / f).is_dir()}
         if found or path in folders:
             picked |= found
