@@ -65,7 +65,7 @@ def opened(monkeypatch):
 def _client(allow_urls=False):
     """A stand-in server with the gate, whose routes record that they ran.
     The images routes read their body as the served ones do: the gate
-    leaves it to them, and they run its checks on it."""
+    leaves it to them, and they run its checks on it as they parse it."""
     app = FastAPI()
     ran = []
 
@@ -78,11 +78,12 @@ def _client(allow_urls=False):
         from gmlx.serve.patches import images
 
         try:
-            await images._read_body(request.url.path.rsplit("/", 1)[1],
-                                    request)
+            fields, _, _ = await images._read_body(
+                request.url.path.rsplit("/", 1)[1], request)
         except ImageRequestError as e:
             return images._from_request_error(request.url.path, e)
-        return await route(request)
+        ran.append(fields)
+        return {"ok": True}
     for path in ("/v1/chat/completions", "/v1/responses", "/v1/messages",
                  "/v1/audio/speech"):
         app.add_api_route(path, route, methods=["POST"])
@@ -632,7 +633,7 @@ def test_without_a_media_folder_every_path_is_refused():
 def test_inline_media_over_the_limit_is_refused_before_decoding(monkeypatch):
     monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", 8)
     decoded = []
-    monkeypatch.setattr(mg.base64, "b64decode",
+    monkeypatch.setattr(mg, "b64decode",
                         lambda *a, **k: decoded.append(1) or b"")
     for part in ({"type": "image_url", "image_url": {"url": PNG_URI}},
                  {"type": "input_audio", "input_audio": {"data": WAV_B64 * 4}},

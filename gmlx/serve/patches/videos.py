@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import binascii
 import contextlib
 import importlib
@@ -38,10 +37,9 @@ from .body_intake import (
     BodyRefused,
     _mib,
     arriving_note,
-    check_media,
     log_refusal,
     read_form_to_disk,
-    read_in_ram,
+    read_json,
 )
 
 _log = logging.getLogger(__name__)
@@ -51,14 +49,6 @@ FIELDS = ("prompt", "model", "seconds", "size", "seed", "prompt_upsampling",
           "first_frame", "last_frame", "input_reference", "guides",
           "guide_no_audio", "references")
 KEYFRAMES = ("first_frame", "last_frame")
-# A JSON body is held about four times while it is read: the body, the
-# gate's json.loads, the route's, and a data-URL keyframe's decode,
-# measured at 4.0. The post-V6 parse change removes the copies. Two of
-# them are strs (the gate's json.loads and the route's), which widen in a
-# body that is not ASCII, and the values it parses to add
-# body_intake.JSON_VALUE_BYTES each.
-JSON_COPIES = 4.25
-JSON_STR_COPIES = 2
 _KINDS = {"video": "--guide", "audio": "--guide-audio"}
 # The entry plans and encoder tokenizers the estimate reads, by entry.
 _PLANS: dict = {}
@@ -171,8 +161,10 @@ def _data_url(value, name: str, folder: str, take) -> str:
         raise Refused(400, f"{name} is an image as a data URL "
                       "(data:image/png;base64,...) in a JSON body, or a "
                       "file in a multipart form", name)
+    from .media_gate import b64decode
+
     try:
-        data = base64.b64decode(value.split(",", 1)[1], validate=True)
+        data = b64decode(value[value.index(",") + 1:], validate=True)
     except (binascii.Error, ValueError):
         raise Refused(400, f"{name} is not base64", name) from None
     if take is not None:
@@ -479,13 +471,7 @@ async def create(request: Request):
                 await asyncio.to_thread(post.settle)
                 fields = dict(pairs)
             else:
-                raw = await read_in_ram(request, copies=JSON_COPIES,
-                                        str_copies=JSON_STR_COPIES)
-                await check_media(request, raw)
-                try:
-                    fields = json.loads(raw or b"{}")
-                except ValueError:
-                    raise Refused(400, "the body is no JSON object") from None
+                fields = await read_json(request)
                 if not isinstance(fields, dict):
                     raise Refused(400, "the body is no JSON object")
                 files = {}

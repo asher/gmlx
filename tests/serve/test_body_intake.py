@@ -2,7 +2,10 @@
 body against, the bytes free beside what the pool holds."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from gmlx.serve.patches import _common
 from gmlx.serve.patches import body_intake as bi
@@ -79,3 +82,50 @@ def test_a_slow_form_waits_afresh_for_each_chunk(tmp_path, monkeypatch):
     # A full wait for each chunk, and for the end of the stream.
     assert len(waits) > len(body) // 100
     assert set(waits) == {bi.STALL_S}
+
+
+def _json_request(body: bytes, ctype: str = "application/json"):
+    from starlette.requests import Request
+
+    chunks = [body[i:i + (64 << 10)] for i in range(0, len(body), 64 << 10)]
+
+    async def receive():
+        if chunks:
+            return {"type": "http.request", "body": chunks.pop(0),
+                    "more_body": bool(chunks)}
+        return {"type": "http.disconnect"}
+    return Request({"type": "http", "method": "POST", "path": "/v1/videos",
+                    "query_string": b"", "headers": [
+                        (b"content-type", ctype.encode()),
+                        (b"content-length", str(len(body)).encode())]},
+                   receive)
+
+
+@pytest.mark.parametrize("body", [
+    '{"prompt": "un caf\u00e9 \u4e00 \U0001F600", "seed": 1}'.encode(),
+    # A body that holds a \x or \U of its own takes the escape's slow way.
+    '{"prompt": "C:\\\\xampp \u00e9 \\\\U", "x": [1.5, null]}'.encode(),
+    # A surrogate encoded as UTF-8 reads as json.loads reads it.
+    b'{"prompt": "a \xed\xa0\x80 b \xc3\xa9"}',
+    b'\xef\xbb\xbf{"prompt": "\xc3\xa9"}',
+    '{"prompt": "\u00e9\U0001F600"}'.encode("utf-16"),
+])
+def test_a_json_body_reads_as_json_loads_reads_it(body):
+    """The body is escaped to ASCII or decoded as it is, whichever holds
+    less, and either way parses to what json.loads makes of its bytes."""
+    import asyncio
+
+    assert asyncio.run(bi.read_json(_json_request(body), 1 << 30)) == \
+        json.loads(body)
+
+
+def test_a_json_body_that_is_not_utf8_is_refused_as_json_loads_refuses_it():
+    import asyncio
+
+    body = b'{"prompt": "caf\xe9 au lait \xc3\xa9"}'
+    with pytest.raises(bi.BodyRefused) as e:
+        asyncio.run(bi.read_json(_json_request(body), 1 << 30))
+    with pytest.raises(UnicodeDecodeError) as want:
+        json.loads(body)
+    assert e.value.status == 400
+    assert str(e.value) == f"the request body is not valid JSON ({want.value})"

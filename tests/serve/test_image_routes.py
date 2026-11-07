@@ -1058,8 +1058,8 @@ def test_the_gate_leaves_an_images_body_to_the_route_and_its_price(
     body = json.dumps({"prompt": "x", "images": [{"image_url": uri}]})
     monkeypatch.setattr(mg, "BODY_MAX_BYTES", len(body) // 2)
     monkeypatch.setattr(mg, "MEDIA_MAX_BYTES", len(png) // 2)
-    monkeypatch.setattr(body_intake, "free_bytes", lambda: body_intake.json_held(
-        body.encode(), images.JSON_COPIES, images.JSON_STR_COPIES))
+    monkeypatch.setattr(body_intake, "free_bytes",
+                        lambda: body_intake.json_price(body.encode()))
     r = TestClient(_gated_app()).post(
         "/v1/images/edits", content=body,
         headers={"content-type": "application/json"})
@@ -1086,9 +1086,9 @@ def test_an_images_body_past_the_memory_free_answers_413_before_its_read(
         r = send(conn, "/v1/images/generations", b"{", length=8 << 20)
         assert r.status == 413, r.body
         assert json.loads(r.body)["error"]["message"] == (
-            "the request body is 8.0 MiB, its read holds 5 times that, and "
-            "1.0 MiB of memory is free beside the models loaded; send a "
-            "smaller body, or unload a model to make room")
+            "the request body is 8.0 MiB, its read and parse hold at least "
+            "16.0 MiB, and 1.0 MiB of memory is free beside the models "
+            "loaded; send a smaller body, or unload a model to make room")
         assert r.getheader("connection") == "close"
         assert closed(other)
         conn.close()
@@ -1104,16 +1104,17 @@ def _edit_form(prompt: str) -> tuple[bytes, str]:
     return body, f"multipart/form-data; boundary={b}"
 
 
-def test_an_images_body_is_priced_at_the_copies_its_parse_holds(
+def test_an_images_json_body_is_priced_at_what_its_read_and_parse_hold(
         served, monkeypatch):
-    """The read and the parse hold a JSON body a few times over: the price
-    counts each copy, so a body fits only where all of them fit."""
-    from gmlx.serve.patches import body_intake
+    """A JSON body is read into one buffer and parsed once: it fits only
+    where what its read and parse hold at their peak fits."""
+    from gmlx.serve.patches import body_intake as bi
 
-    body = json.dumps({"prompt": "a" * (256 << 10)}).encode()
-    need = _json_need(body, images.JSON_COPIES)
+    prompt = "a" * (256 << 10)
+    body = json.dumps({"prompt": prompt}).encode()
+    need = bi.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
-        monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
+        monkeypatch.setattr(bi, "free_bytes", lambda f=free: f)
         r = TestClient(_gated_app()).post(
             "/v1/images/generations", content=body,
             headers={"content-type": "application/json"})
@@ -1121,7 +1122,8 @@ def test_an_images_body_is_priced_at_the_copies_its_parse_holds(
         if status == 413:
             assert " with the values it parses to, " in \
                 r.json()["error"]["message"]
-    assert len(served.jobs) == 1
+    (req, _), = served.jobs
+    assert req.prompt == prompt
 
 
 @pytest.mark.parametrize("wide", [False, True])
@@ -1193,7 +1195,7 @@ def _request(path: str, body: bytes, ctype: str):
                    receive)
 
 
-@pytest.mark.parametrize("kind", ["form"])
+@pytest.mark.parametrize("kind", ["json", "form"])
 def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
                                                        kind):
     """An edit of a photo, inline in JSON or a file in a form, fits at
@@ -1240,16 +1242,6 @@ def test_an_edit_with_a_photo_is_read_within_its_price(served, monkeypatch,
     assert e.value.status == 413, e.value
 
 
-def _json_need(body: bytes, copies: float) -> int:
-    """What a JSON body's read and parse hold, as priced: its copies, two
-    of them strs at 4 bytes a character in a body that is not ASCII or
-    holds a \\u escape, and 80 bytes for each value it can parse to."""
-    wide = not body.isascii() or b"\\u" in body
-    count = sum(body.count(c) for c in (b",", b":", b"[", b"{"))
-    return math.ceil(len(body) * (copies + (6 if wide else 0))) + \
-        80 * (count + 1)
-
-
 def _shaped(shape: str, n: int = 64 << 10) -> bytes:
     """A JSON body of about ``n`` bytes whose parse the price must bound:
     lists of small values, a dict of short keys, a prompt with one emoji
@@ -1274,20 +1266,21 @@ SHAPES = ["objects", "floats", "strs", "pairs", "emoji_escaped",
 @pytest.mark.parametrize("shape", SHAPES)
 def test_an_images_json_body_is_priced_by_what_its_parse_makes(
         served, monkeypatch, shape):
-    """Small values parse to far more than their text, and one emoji
-    widens every str of the body: each shape is refused a byte under its
-    price and fits at it."""
+    """Small values parse to far more than their text, and an emoji widens
+    the str it is in: each shape is refused a byte under its price and fits
+    at it, and reads as json.loads reads it."""
     from gmlx.serve.patches import body_intake
 
     body = _shaped(shape)
-    need = _json_need(body, 5)
+    need = body_intake.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = TestClient(_gated_app()).post(
             "/v1/images/generations", content=body,
             headers={"content-type": "application/json"})
         assert r.status_code == status, r.text
-    assert len(served.jobs) == 1
+    (req, _), = served.jobs
+    assert req.prompt == json.loads(body)["prompt"]
 
 
 def test_an_images_body_with_no_length_stops_at_the_memory_free(
@@ -1311,8 +1304,8 @@ def test_an_images_body_with_no_length_stops_at_the_memory_free(
     assert r.status_code == 413, r.text
     msg = r.json()["error"]["message"]
     assert msg.startswith("the request body is over "), msg
-    assert ", its read holds 5 times that, and 64.0 KiB of memory is " \
-        "free" in msg
+    assert ", its read and parse hold at least " in msg
+    assert "and 64.0 KiB of memory is free" in msg
     assert served.jobs == []
 
 

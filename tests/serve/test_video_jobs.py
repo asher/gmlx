@@ -1133,9 +1133,9 @@ def test_a_json_body_past_the_free_figure_is_a_413_with_no_byte_read(
         r = send(conn, "/v1/videos", b"{", length=8 << 20)
         assert r.status == 413, r.body
         assert json.loads(r.body)["error"]["message"] == (
-            "the request body is 8.0 MiB, its read holds 4.25 times that, "
-            "and 1.0 MiB of memory is free beside the models loaded; send "
-            "a smaller body, or unload a model to make room")
+            "the request body is 8.0 MiB, its read and parse hold at least "
+            "16.0 MiB, and 1.0 MiB of memory is free beside the models "
+            "loaded; send a smaller body, or unload a model to make room")
         assert closed(other)
         conn.close()
 
@@ -1186,14 +1186,16 @@ def test_a_form_that_stalls_frees_the_room_it_holds(routes, monkeypatch):
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
 
 
-def test_a_video_body_is_priced_at_the_copies_its_parse_holds(
+def test_a_video_json_body_is_priced_at_what_its_read_and_parse_hold(
         routes, monkeypatch):
-    """A JSON body is held a few times over while it is read and parsed:
-    it fits only where all its copies fit."""
+    """A JSON body is priced at what its one read and parse hold, each str
+    at the width of its own characters, so a prompt that is not ASCII
+    leaves its keyframe at a byte a character: it fits only where that
+    fits."""
     url = "data:image/png;base64," + base64.b64encode(_png()).decode()
-    body = json.dumps({"prompt": "a" * (256 << 10),
+    body = json.dumps({"prompt": "un caf\u00e9 " + "a" * (256 << 10),
                        "first_frame": url}).encode()
-    need = _json_need(body, 4.25)
+    need = body_intake.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,
@@ -1230,14 +1232,69 @@ def test_a_video_forms_text_is_priced_at_its_own_width(routes, monkeypatch,
     assert routes.store.pending == {}
 
 
-def _json_need(body: bytes, copies: float) -> int:
-    """What a JSON body's read and parse hold, as priced: its copies, two
-    of them strs at 4 bytes a character in a body that is not ASCII or
-    holds a \\u escape, and 80 bytes for each value it can parse to."""
-    wide = not body.isascii() or b"\\u" in body
-    count = sum(body.count(c) for c in (b",", b":", b"[", b"{"))
-    return math.ceil(len(body) * (copies + (6 if wide else 0))) + \
-        80 * (count + 1)
+def _photo(w: int, h: int) -> bytes:
+    """A PNG of noise, which compresses as little as a photo does."""
+    import numpy as np
+    from PIL import Image
+
+    pixels = np.random.default_rng(0).integers(0, 256, (h, w, 3), np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(pixels).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_a_keyframe_job_is_read_within_its_price(routes, monkeypatch,
+                                                 tmp_path):
+    """A job with a photo for its first frame and a prompt that is not
+    ASCII fits at three times its body and a little more, where the copies
+    of the body the read and the parse made, all at four bytes a character,
+    took ten; and what its read, its parse and the keyframe's decode hold
+    at their peak never passes the price: one byte less is refused."""
+    import asyncio
+    import tracemalloc
+
+    from starlette.requests import Request
+
+    url = "data:image/png;base64," + base64.b64encode(_photo(768, 768)) \
+        .decode()
+    body = json.dumps({"prompt": "un caf\u00e9 au soleil, la cam\u00e9ra "
+                       "avance lentement", "first_frame": url},
+                      ensure_ascii=False).encode()
+    budget = 3 * len(body) + body_intake._SLACK
+    monkeypatch.setattr(body_intake, "free_bytes", lambda: budget)
+    r = routes.client.post("/v1/videos", content=body,
+                           headers={"content-type": "application/json"})
+    assert r.status_code == 200, r.text
+
+    def run(free):
+        chunks = [body[i:i + (64 << 10)]
+                  for i in range(0, len(body), 64 << 10)]
+
+        async def receive():
+            if chunks:
+                return {"type": "http.request", "body": chunks.pop(0),
+                        "more_body": bool(chunks)}
+            return {"type": "http.disconnect"}
+        req = Request({"type": "http", "method": "POST", "path": "/v1/videos",
+                       "query_string": b"", "headers": [
+                           (b"content-type", b"application/json"),
+                           (b"content-length", str(len(body)).encode())]},
+                      receive)
+
+        async def read():
+            doc = await body_intake.read_json(req, free)
+            await asyncio.to_thread(videos._data_url, doc["first_frame"],
+                                    "first_frame", str(tmp_path), None)
+        return read
+    tracemalloc.start()
+    try:
+        asyncio.run(run(budget)())
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    with pytest.raises(body_intake.BodyRefused) as e:
+        asyncio.run(run(peak - 1)())
+    assert e.value.status == 413, e.value
 
 
 def _shaped(shape: str, n: int = 64 << 10) -> bytes:
@@ -1264,11 +1321,11 @@ SHAPES = ["objects", "floats", "strs", "pairs", "emoji_escaped",
 @pytest.mark.parametrize("shape", SHAPES)
 def test_a_json_body_is_priced_by_what_its_parse_makes(routes, monkeypatch,
                                                        shape):
-    """Small values parse to far more than their text, and one emoji
-    widens every str of the body: each shape is refused a byte under its
-    price and fits at it."""
+    """Small values parse to far more than their text, and an emoji widens
+    the str it is in: each shape is refused a byte under its price and fits
+    at it."""
     body = _shaped(shape)
-    need = _json_need(body, 4.25)
+    need = body_intake.json_price(body)
     for free, status in ((need - 1, 413), (need, 200)):
         monkeypatch.setattr(body_intake, "free_bytes", lambda f=free: f)
         r = routes.client.post("/v1/videos", content=body,

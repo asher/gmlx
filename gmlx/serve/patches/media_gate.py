@@ -54,7 +54,6 @@ loader with a path or write a file.
 
 from __future__ import annotations
 
-import base64
 import binascii
 import contextlib
 import contextvars
@@ -308,6 +307,12 @@ def _too_large(field: str) -> MediaRefused:
                         "for one image, audio clip or video. Send a smaller one.")
 
 
+def b64decode(value, validate: bool = False) -> bytes:
+    """``base64.b64decode`` of ``value``, a str read with no ASCII copy of
+    it first: the price of a body the route reads counts no such copy."""
+    return binascii.a2b_base64(value, strict_mode=validate)
+
+
 def _data_uri(value: str, kind: str, field: str = "media") -> bytes | None:
     """The decoded bytes of a ``data:<kind>/...;base64,`` URI, else None.
     A payload over :data:`MEDIA_MAX_BYTES` is refused before it is
@@ -321,7 +326,7 @@ def _data_uri(value: str, kind: str, field: str = "media") -> bytes | None:
     if _over_media_bytes(len(payload) // 4 * 3 - 3):
         raise _too_large(field)
     try:
-        data = base64.b64decode(payload, validate=False)
+        data = b64decode(payload, validate=False)
     except (binascii.Error, ValueError):
         return None
     if _over_media_bytes(len(data)):
@@ -425,7 +430,7 @@ def _base64_image(payload, field: str) -> bytes | None:
     if len(payload) // 4 * 3 > MEDIA_MAX_BYTES + 3:
         raise _too_large(field)
     try:
-        data = base64.b64decode(payload, validate=False)
+        data = b64decode(payload, validate=False)
     except (binascii.Error, ValueError):
         return None
     if len(data) > MEDIA_MAX_BYTES:
@@ -454,7 +459,7 @@ def check_audio_data(value, field: str) -> None:
     if len(text) // 4 * 3 > MEDIA_MAX_BYTES + 3:
         raise _too_large(field)
     try:
-        base64.b64decode(text, validate=True)
+        b64decode(text, validate=True)
     except (binascii.Error, ValueError):
         raise MediaRefused(f"{field} must be {want}") from None
 
@@ -551,7 +556,7 @@ def _check_edit_image(value, field: str, tally: Tally) -> None:
         if _over_media_bytes(len(value) // 4 * 3 - 3):
             raise _too_large(field)
         try:
-            data = base64.b64decode(value, validate=True)
+            data = b64decode(value, validate=True)
         except (binascii.Error, ValueError):
             data = None
         if data:
