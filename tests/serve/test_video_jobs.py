@@ -166,6 +166,26 @@ def test_a_clip_whose_completed_record_cannot_be_written_fails(
     assert store.metrics()["clip_s"] is None
 
 
+def test_a_clip_deleted_as_it_goes_out_counts_in_the_store_until_sent(
+        tmp_path):
+    """A DELETE removes a clip an answer still sends through its link:
+    its bytes stay on disk, so the store counts them until the answer
+    ends, and a new job cannot carry the store past its limit."""
+    store, clock, driver = _store(
+        tmp_path, lambda j, s: _clip(j, s, b"x" * 1000),
+        store_max_bytes=5000)
+    job = _submit(store)
+    driver.run()
+    room = store.room()
+    _rec, link, linked = store.serve(job.id)
+    assert linked
+    store.delete(job.id)
+    assert not os.path.exists(store.clip(job.id))
+    assert store.room() == room
+    os.unlink(link)
+    assert store.room() == room + 1000
+
+
 def test_a_queued_job_cancelled_never_runs_and_its_inputs_go(tmp_path):
     ran = []
     store, clock, driver = _store(tmp_path, lambda j, s: ran.append(j))

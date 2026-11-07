@@ -304,13 +304,29 @@ class VideoJobs:
 
     def _held(self) -> int:
         """The bytes on disk and reserved: the clips, the inputs of the
-        jobs, and the reservation of each POST still arriving in place of
-        what it wrote so far. Under ``lock``."""
+        jobs, the clips a DELETE or the sweep removed that an answer still
+        sends through its link, and the reservation of each POST still
+        arriving in place of what it wrote so far. Under ``lock``."""
         inputs = self._dir("inputs")
         return (self._bytes(self._dir("files"))
                 + sum(self._bytes(os.path.join(inputs, n))
                       for n in os.listdir(inputs) if n not in self.pending)
+                + self._sent_bytes()
                 + sum(self.pending.values()))
+
+    def _sent_bytes(self) -> int:
+        """The bytes of the links in serving/ whose clip is gone from
+        files/: a link to a clip still there counts with the clip."""
+        serving = os.path.join(self.root, "serving")
+        n = 0
+        with contextlib.suppress(FileNotFoundError):
+            with os.scandir(serving) as it:
+                for entry in it:
+                    with contextlib.suppress(OSError):
+                        st = entry.stat()
+                        if st.st_nlink == 1:
+                            n += st.st_size
+        return n
 
     def room(self) -> int:
         """The bytes left in the store for a new job's inputs, after a
