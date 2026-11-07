@@ -170,8 +170,10 @@ architecture you do not have skips, so one small model is enough to
 exercise a path. The Qwen-Image 2.1 rows find their DiT by its tensor
 names instead, as the loader does, because the GGUFs of
 `unsloth/Qwen-Image-2.1-GGUF` carry no metadata keys at all. The `gmlx kld`
-parity rows find their files by name and size, because they compare with
-a fixture that llama.cpp recorded on those exact files.
+parity rows and the assistant prefill rows find their files by name and
+size, because they compare with a fixture that llama.cpp recorded on those
+exact files. The prefill rows find them through `tests/llama_fixture.py`,
+which also checks the sha256 of each file of at most 512 MiB.
 
 | Module | Extra gate | What it checks |
 |--------|------------|----------------|
@@ -199,6 +201,7 @@ a fixture that llama.cpp recorded on those exact files.
 | `tests/image/test_image_check6_qwen.py` | `GMLX_IMAGE_FIXTURES` | A whole Qwen-Image 2.1 run from the oracle's conditioning and noise ends within the gate of the oracle's fp32 latents, on its schedule. |
 | `tests/image/test_image_check7_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step at 512x512 under one live LoRA or two matches the oracle on merged weights, and each leaf its exact product. Wrong tables fail. |
 | `tests/models/test_nemotron_transcribe_speech.py` | `GMLX_TEST_NEMOTRON_TRANSCRIBE` and `GMLX_SPEECH_FIXTURES` in place of `KQUANT_TEST_GGUF_DIR` | The Nemotron 3.5 Transcribe encoder holds the transformers oracle's tolerances on three clips. Its tiny tests run in the CPU tier. |
+| `tests/serve/test_prefill_logp.py` | `Qwen3.5-9B-Q4_K_M.gguf` or `gemma-4-12B-it-Q6_K.gguf` of the fixture's sizes | A prompt that continues the first k generated tokens tokenizes to the generation prompt and those k ids, and scores the next token close to the decode logprob. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_qwen3vl_integration.py` | None | A Qwen3-VL pair loads with every tensor used, the text model and the pair agree before the final norm, and prompt layout and image features match llama.cpp. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |

@@ -38,6 +38,8 @@ _PATCH_MODULES = {
     "test_patches_sampling",
     "test_lora_multi_id",
     "test_systemone_route",
+    "test_assistant_prefill",
+    "test_prefill_logp",
 }
 
 

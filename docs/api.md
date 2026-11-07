@@ -164,6 +164,8 @@ and 0 or no value counts all of them. The other fields differ by route:
 | `logprobs` | Honored | Ignored | Ignored | Token logprobs, as [Logprobs](#logprobs) shows |
 | `top_logprobs` | Honored | Ignored | Ignored | 0 to 100, capped by `TOP_LOGPROBS_K` |
 | `return_tokens_as_token_ids` | Honored | Ignored | Ignored | Names each logprob token as `token_id:<id>` |
+| `continue_final_message` | Honored | Ignored | Ignored | Continues the last assistant message, as [Assistant prefill](#assistant-prefill) shows |
+| `add_generation_prompt` | Honored | Ignored | Ignored | `false` renders the messages with no generation prompt |
 | `stop` | Honored | Ignored | Ignored | Anthropic clients use `stop_sequences` |
 | `stop_sequences` | Ignored | Ignored | Honored | Anthropic spelling of `stop` |
 | `chat_template_kwargs` | Honored | Honored | Honored | Template variables that override the profile's. `chat_template` itself gets a 400. |
@@ -334,6 +336,74 @@ longer, because the server also computes the alternatives. While an image or
 video job runs, each of its pauses for chat waits through at least one chat
 step, so those pauses get longer too. `GMLX_IMAGE_CHAT_SHARE` sets the
 balance, but even at `0` each pause waits through one chat step.
+
+### Assistant prefill
+
+To have the model continue a reply that you started, end `messages` with
+the partial assistant message. Then send `continue_final_message: true`
+with `add_generation_prompt: false`, as for llama-server:
+
+```sh
+curl localhost:8080/v1/chat/completions -d '{
+  "model": "qwen3.8-27b-ud-q6",
+  "messages": [{"role": "user", "content": "Name three rivers."},
+               {"role": "assistant", "content": "1. The Nile\n2."}],
+  "continue_final_message": true,
+  "add_generation_prompt": false
+}'
+```
+
+For the templates below, the server renders the same prompt that
+llama-server renders for the same messages.
+The reply holds only the new text, in `content` or `reasoning_content`.
+`usage.prompt_tokens` counts the prefill, and `max_tokens`, `logprobs` and
+`stop` apply to the new tokens only.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `continue_final_message` | `false` | `true` continues the content, or the reasoning when the message has only `reasoning_content`. A part name picks it. |
+| `add_generation_prompt` | `true` | `false` renders the messages with no generation prompt. Send it with `continue_final_message`. |
+
+A part name is `"content"` or `"reasoning_content"`. `"content"` closes the
+reasoning before the content.
+
+These chat templates can continue a message: Qwen3.5 and later Qwen
+templates, the other templates that write tool calls in the same
+`<tool_call>` and `<function=...>` form, Gemma 4 without `mmproj:` and
+SmolLM2-135M-Instruct. A request to any other model gets a 400, and so does
+a request to a model whose processor builds its prompt in Python. A last
+message with `tool_calls`, both fields true, and `response_format` with
+`continue_final_message` also get a 400. An
+[assistant](assistant.md#served-assistants) without `tools` refuses both
+fields, because its turns build their own prompt.
+
+`add_generation_prompt: false` alone renders the messages as they are, so
+a last assistant message stays a finished turn.
+
+gmlx differs from llama-server in these ways:
+
+- Prefill is opt-in. llama-server continues any last assistant message,
+  and gmlx continues it only when the request sets
+  `continue_final_message`.
+- `continue_final_message` needs the last message to be an assistant
+  message. llama-server continues any last message.
+- A last message with no content and no `reasoning_content` gets a 400.
+  llama-server renders the other messages with no generation prompt.
+- An `add_generation_prompt` that is not a boolean gets a 400. llama-server
+  reads it as true and then refuses the request because both fields are
+  true.
+- `response_format` with `continue_final_message` gets a 400.
+- Templates outside the list above get a 400.
+- A Gemma 4 model set up with `mmproj:` gets a 400 for
+  `continue_final_message`. Its processor adds a space after the system
+  message, so its prompt is not the one llama-server renders.
+- gmlx merges all system messages into one system message at the start.
+  llama-server keeps each one where the client sent it.
+- The reply holds only the new text. A llama-server reply that is not
+  streamed also holds the prefill. Its stream does not.
+- llama-server turns thinking on when the template has a switch, and gmlx
+  keeps the template's default. Send `chat_template_kwargs` with
+  `enable_thinking` to get the same prompt from both servers.
 
 ### Media in requests
 

@@ -265,6 +265,7 @@ include = [
     "gmlx/serve/media_decode.py",
     "gmlx/serve/patches/context_copy.py",
     "gmlx/serve/patches/mtp_thinking.py",
+    "gmlx/serve/patches/prefill.py",
     "gmlx/serve/patches/spec_processors.py",
     "gmlx/serve/residency.py",
     "gmlx/spec/admission.py",

@@ -4,6 +4,7 @@
 Each subcommand runs one llama.cpp tool and writes one plain JSON fixture
 under tests/fixtures/. The binaries come from environment variables:
 
+  GMLX_LLAMA_SERVER        llama-server
   GMLX_LLAMA_PERPLEXITY    llama-perplexity
 
 A fixture holds the llama.cpp commit (``llama_cpp``), the time it was made
@@ -15,6 +16,9 @@ the old fixture names against its recorded sha256.
 
   GMLX_LLAMA_PERPLEXITY=.../llama-perplexity python scripts/llama_fixtures.py \\
       kld-reference --reference Qwen3.5-9B-BF16.gguf --model Qwen3.5-9B-Q4_K_M.gguf
+  GMLX_LLAMA_SERVER=.../llama-server python scripts/llama_fixtures.py \\
+      continuation Qwen3.5-9B-Q4_K_M.gguf gemma-4-12B-it-Q6_K.gguf \\
+      SmolLM2-135M-Instruct-Q8_0.gguf
 """
 
 from __future__ import annotations
@@ -26,15 +30,23 @@ import importlib.util
 import json
 import os
 import re
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import urllib.request
 from pathlib import Path
+
+# Set, not defaulted: a fixture must not depend on the caller's environment.
+# No import above loads mlx.
+os.environ["MLX_ENABLE_TF32"] = "0"
 
 REPO = Path(__file__).resolve().parent.parent
 FIXTURES = REPO / "tests" / "fixtures"
 BINARIES = {
+    "llama-server": "GMLX_LLAMA_SERVER",
     "llama-perplexity": "GMLX_LLAMA_PERPLEXITY",
 }
 KLD_TEXT = FIXTURES / "kld" / "streaming.txt"
@@ -94,11 +106,16 @@ def check_recorded_files(fixture: Path, paths: list[Path]) -> None:
                 "record the new file")
 
 
+def _shown(path: Path) -> Path:
+    path = path.resolve()
+    return path.relative_to(REPO) if path.is_relative_to(REPO) else path
+
+
 def write_fixture(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, sort_keys=True, indent=1,
                                ensure_ascii=True) + "\n")
-    print(f"wrote {path.relative_to(REPO)}")
+    print(f"wrote {_shown(path)}")
 
 
 def run_logged(argv: list[str], log: Path) -> str:
@@ -194,6 +211,256 @@ def cmd_kld_reference(args) -> int:
     return 0
 
 
+# continuation: llama-server /apply-template on a final assistant message.
+CONTINUATION_FIXTURE = FIXTURES / "llama_continuation.json"
+# GGUF file name -> (run label suffix, template fixture, thinking values).
+# None sends no enable_thinking: the template has no switch.
+CONTINUATION_GGUFS = {
+    "Qwen3.5-9B-Q4_K_M.gguf": ("qwen35_9b", "qwen35_9b_template.jinja",
+                               (False, True)),
+    "gemma-4-12B-it-Q6_K.gguf": ("gemma4_12b", "gemma4_12b_template.jinja",
+                                 (False, True)),
+    "SmolLM2-135M-Instruct-Q8_0.gguf": ("smollm2", "smollm2_template.jinja",
+                                        (None,)),
+}
+CONTINUATION_HISTORY = [{"role": "system", "content": "Be brief."},
+                        {"role": "user", "content": "Hi"}]
+_C = {"role": "assistant", "content": "Hello"}
+_R = {"role": "assistant", "content": "", "reasoning_content": "plan"}
+_RC = {"role": "assistant", "content": "Hello", "reasoning_content": "plan"}
+# Case name -> (final message or None, continue_final_message or None).
+CONTINUATION_CASES = {
+    "content": (_C, True),
+    "reasoning": (_R, True),
+    "reasoning-and-content": (_RC, True),
+    "string-content": (_RC, "content"),
+    "string-reasoning": (_RC, "reasoning_content"),
+    "no-generation-prompt": (None, None),
+}
+# llama.cpp's log name of each dedicated handler -> gmlx's handler name
+# (gmlx.gen.continuation.handler_for).
+_HANDLER_LOG_NAMES = {
+    "Ministral/Magistral Large 3": "ministral-3",
+    "LLM-jp Harmony v1": "llm-jp-harmony",
+    "Harmony XML": "harmony-xml",
+    "GPT-OSS": "gpt-oss",
+    "Muse Spark": "muse-spark",
+    "Muse Glimmer": "muse-glimmer",
+    "Functionary v3.2": "functionary-v3-2",
+    "Kimi K2 Thinking": "kimi-k2",
+    "Kimi K3": "kimi-k3",
+    "K2 Horizon": "k2-horizon",
+    "Ling 3.0 (Bailing V3)": "ling3",
+    "Cohere2 MoE": "cohere2moe",
+    "LFM2": "lfm2",
+    "LFM2.5": "lfm2-5",
+    "GigaChatV3": "gigachat-v3",
+    "MiniMax-M3": "minimax-m3",
+    "DeepSeek V3.2/V4": "deepseek-v3-2",
+    "Gemma4": "gemma4",
+    "MiniCPM5": "minicpm5",
+    "TranslateGemma": "translate-gemma",
+    "Qwen3-Coder": "qwen3-coder",
+}
+_HANDLER_RE = re.compile(
+    r"Using specialized template: (.+?)\s*$|using differential autoparser",
+    re.M)
+
+
+def gguf_template(path: Path) -> tuple[str, dict]:
+    """The chat template of a GGUF and what decides its BOS cut."""
+    sys.path.insert(0, str(REPO))
+    from gmlx.load.headerscan import scan_gguf
+
+    kv = scan_gguf(str(path), include_tensors=False, array_limit=1 << 20).kv
+    tmpl = kv.get("tokenizer.chat_template")
+    if not isinstance(tmpl, str) or not tmpl:
+        raise SystemExit(f"error: {path.name} has no tokenizer.chat_template")
+    tokens = kv.get("tokenizer.ggml.tokens")
+    bos_id = kv.get("tokenizer.ggml.bos_token_id")
+    bos = tokens[bos_id] if tokens is not None and bos_id is not None else ""
+    return tmpl, {"add_bos": bool(kv.get("tokenizer.ggml.add_bos_token")),
+                  "bos": bos}
+
+
+def check_template_fixture(name: str, text: str) -> Path:
+    """Write the template as a new fixture, or refuse when an existing one
+    differs."""
+    path = FIXTURES / name
+    if path.is_file():
+        if path.read_text() != text:
+            raise SystemExit(
+                f"error: {name} differs from the template in the GGUF; remove "
+                "it to record the GGUF's template")
+    else:
+        path.write_text(text)
+        print(f"wrote {_shown(path)}")
+    return path
+
+
+def continuation_body(case: str, thinking) -> dict:
+    final, cont = CONTINUATION_CASES[case]
+    body: dict = {"messages": [*CONTINUATION_HISTORY]
+                  + ([final] if final else []),
+                  "add_generation_prompt": False}
+    if cont is not None:
+        body["continue_final_message"] = cont
+    if thinking is not None:
+        body["chat_template_kwargs"] = {"enable_thinking": thinking}
+    return body
+
+
+class LlamaServer:
+    """One llama-server process, its output in a log file. Ready once it
+    logs the address it listens on."""
+
+    def __init__(self, argv: list[str], log: Path):
+        self.log_path = log
+        self.lines: list[str] = []
+        self._ready = threading.Event()
+        self._lock = threading.Lock()
+        print("$ " + " ".join(argv), flush=True)
+        self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True,
+                                     errors="replace")
+        self._reader = threading.Thread(target=self._read, daemon=True)
+        self._reader.start()
+
+    def _read(self):
+        with open(self.log_path, "w") as f:
+            for line in self.proc.stdout:
+                f.write(line)
+                f.flush()
+                with self._lock:
+                    self.lines.append(line)
+                if "listening on" in line:
+                    self._ready.set()
+        self._ready.set()
+
+    def wait_ready(self, timeout: float) -> None:
+        if not self._ready.wait(timeout) or self.proc.poll() is not None:
+            self.stop()
+            raise SystemExit(f"error: llama-server did not start; see "
+                             f"{self.log_path}")
+
+    def output(self) -> str:
+        with self._lock:
+            return "".join(self.lines)
+
+    def stop(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        self._reader.join(timeout=60)
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def post_json(url: str, body: dict) -> tuple[int, dict]:
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def logged_handler(startup: str, template: str) -> str:
+    """The handler class llama-server logged as it rendered the template's
+    example at startup. A dedicated handler logs once, when the template
+    loads, and the autoparser on each render. The gemma4 handler logs the
+    legacy case at another level, so the template source decides it, as in
+    common/chat.cpp."""
+    found = list(_HANDLER_RE.finditer(startup))
+    if not found:
+        raise SystemExit("error: llama-server logged no chat handler; it "
+                         "needs -v")
+    name = found[-1].group(1)
+    if name is None:
+        return "autoparser"
+    if name not in _HANDLER_LOG_NAMES:
+        raise SystemExit(f"error: unknown llama.cpp handler {name!r}")
+    handler = _HANDLER_LOG_NAMES[name]
+    if handler == "gemma4" and "{#- OpenAI Chat Completions:" not in template:
+        return "gemma4-legacy"
+    return handler
+
+
+def cmd_continuation(args) -> int:
+    tool = binary("llama-server")
+    ggufs = [Path(p).expanduser().resolve() for p in args.gguf]
+    for p in ggufs:
+        if not p.is_file():
+            raise SystemExit(f"error: no such file: {p}")
+        if p.name not in CONTINUATION_GGUFS:
+            raise SystemExit(
+                f"error: {p.name} is not a continuation GGUF; the script "
+                f"knows {', '.join(sorted(CONTINUATION_GGUFS))}")
+    out = Path(args.out)
+    templates = [FIXTURES / CONTINUATION_GGUFS[p.name][1] for p in ggufs]
+    check_recorded_files(out, ggufs + [t for t in templates if t.is_file()])
+    commit = llama_commit(tool)
+    ident = _image_fixtures().file_identity
+    portable = _image_fixtures().portable_argv
+    argvs, files, rows = {}, {}, []
+    for gguf in ggufs:
+        label, tmpl_name, thinking_values = CONTINUATION_GGUFS[gguf.name]
+        text, bos = gguf_template(gguf)
+        tmpl = check_template_fixture(tmpl_name, text)
+        run = f"llama-server/{label}"
+        port = str(free_port())
+        # -m loads the same GGUF, so bos_token and add_bos come from it.
+        argv = [tool, "-m", str(gguf), "--jinja", "--chat-template-file",
+                str(tmpl), "--host", "127.0.0.1", "--port", port,
+                "-c", "512", "-ngl", "0", "--no-warmup", "-v"]
+        server = LlamaServer(
+            argv, Path(args.log_dir) / f"continuation-{label}.log")
+        try:
+            server.wait_ready(args.start_timeout)
+            handler = logged_handler(server.output(), text)
+            for thinking in thinking_values:
+                tag = {None: "", False: "/think-off", True: "/think-on"}[thinking]
+                for case in CONTINUATION_CASES:
+                    body = continuation_body(case, thinking)
+                    status, reply = post_json(
+                        f"http://127.0.0.1:{port}/apply-template", body)
+                    if status != 200:
+                        raise SystemExit(
+                            f"error: {label} {case}: HTTP {status}: {reply}")
+                    prompt = reply["prompt"]
+                    rows.append({
+                        "id": f"{label}{tag}/{case}",
+                        "run": run,
+                        "gguf": gguf.name,
+                        "template": tmpl.name,
+                        "handler": handler,
+                        "body": body,
+                        "prompt": prompt,
+                        # llama.cpp cuts a leading BOS text from the render
+                        # when the vocab adds BOS (common/chat.cpp).
+                        "bos_cut": bool(bos["add_bos"] and bos["bos"]
+                                        and "bos_token" in text
+                                        and not prompt.startswith(bos["bos"])),
+                    })
+        finally:
+            server.stop()
+        argvs[run] = portable([a if a != port else "PORT" for a in argv])
+        files[gguf.name] = ident(gguf)
+        files[tmpl.name] = ident(tmpl)
+    write_fixture(out, {"llama_cpp": commit, "created": now(), "argv": argvs,
+                        "files": files, "rows": rows})
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -215,6 +482,18 @@ def main(argv: list[str] | None = None) -> int:
     kr.add_argument("--log-dir", default=".",
                     help="where each run's output log goes")
     kr.set_defaults(fn=cmd_kld_reference)
+    co = sub.add_parser(
+        "continuation",
+        help="llama-server /apply-template of a final assistant message "
+        "continued, for each template, thinking on and off and each mode")
+    co.add_argument("gguf", nargs="+",
+                    help="the GGUFs whose templates the rows render")
+    co.add_argument("--out", default=str(CONTINUATION_FIXTURE))
+    co.add_argument("--start-timeout", type=float, default=600.0,
+                    help="seconds to wait for llama-server to load a GGUF")
+    co.add_argument("--log-dir", default=".",
+                    help="where each server's output log goes")
+    co.set_defaults(fn=cmd_continuation)
     args = ap.parse_args(argv)
     return args.fn(args)
 

@@ -294,8 +294,10 @@ CLAIMS: tuple[Claim, ...] = (
                     "gmlx.serve.patches.row_failed")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "GenerationArguments.to_template_kwargs",
-          "patches.chat_behavior (chat_template_kwargs transform)",
-          wrappers=("gmlx.serve.patches.chat_behavior",)),
+          "patches.chat_behavior (chat_template_kwargs transform); "
+          "patches.prefill (the continuation and add_generation_prompt)",
+          wrappers=("gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._preprocess_request",
           "patches.apc.install_retire_render_capture (ids hop and "
@@ -313,9 +315,11 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.openai", "apply_chat_template",
           "patches.apc.install_retire_render_capture (render-context "
           "memo, module attr); render.install_faithful_history (inner "
-          "key-merge wrap)",
+          "key-merge wrap); prefill.install_assistant_prefill (continues "
+          "the final assistant message)",
           wrappers=("gmlx.serve.patches.apc",
                     "gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill",
                     "gmlx.serve.patches.render")),
     # estimate._estimate_bound follows the chat route's merge.
     Claim("gmlx._vendor.mlx_vlm.server.openai", "_normalize_instruction_messages",
@@ -349,12 +353,13 @@ CLAIMS: tuple[Claim, ...] = (
           "aliases",
           how="route", paths=("/messages", "/v1/messages")),
     Claim("gmlx._vendor.mlx_vlm.server.anthropic", "apply_chat_template",
-          "patches.render, patches.apc and patches.chat_behavior (faithful "
-          "history, retire capture, thinking seed and developer-role "
-          "normalization wrap every render binding _render_target_modules "
-          "captures)",
+          "patches.render, patches.prefill, patches.apc and "
+          "patches.chat_behavior (faithful history, assistant prefill, "
+          "retire capture, thinking seed and developer-role normalization "
+          "wrap every render binding _render_target_modules captures)",
           wrappers=("gmlx.serve.patches.apc",
                     "gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill",
                     "gmlx.serve.patches.render")),
     # The Messages route's conversion step: gmlx claims it and calls the
     # stock helpers as the stock body does.
@@ -395,10 +400,12 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.serve.patches.audio_cascade",
                     "gmlx.serve.patches.native_audio")),
     Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.apply_chat_template",
-          "patches.render, patches.apc and patches.chat_behavior (gmlx wraps "
-          "the member beside both route-module copies)",
+          "patches.render, patches.prefill, patches.apc and "
+          "patches.chat_behavior (gmlx wraps the member beside both "
+          "route-module copies)",
           wrappers=("gmlx.serve.patches.apc",
                     "gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill",
                     "gmlx.serve.patches.render")),
     Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.build_gen_args",
           "patches._common._install_gen_args_transform (each "

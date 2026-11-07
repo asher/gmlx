@@ -284,7 +284,11 @@ def predict_next_ids(ctx: dict, assistant_msg: dict | None) -> list[int] | None:
     """Render and tokenize the hypothetical next-turn prefix.
 
     ``assistant_msg=None`` renders the request's own messages with no
-    reply appended -- the render-stable core a next turn extends."""
+    reply appended -- the render-stable core a next turn extends. None
+    for a prefill render: its next request extends the prefill, not a new
+    turn."""
+    if ctx.get("prefill"):
+        return None
     msgs = list(ctx["messages"])
     if assistant_msg is not None:
         msgs.append(assistant_msg)
@@ -361,10 +365,10 @@ def prompt_stable_lcp(ctx: dict, prompt_ids) -> int | None:
     past the LCP (the gen-prompt tail and any template-opened thinking
     block) are replaced when the client echoes the conversation back, so
     a checkpoint above it can never be adopted by turn 2. Memoized on the
-    ctx; returns None when the context is missing, carries media, or
-    prediction fails.
+    ctx; returns None when the context is missing, carries media, comes
+    from a prefill render, or prediction fails.
     """
-    if not ctx or ctx.get("media"):
+    if not ctx or ctx.get("media") or ctx.get("prefill"):
         return None
     memo = ctx.get("_p_stable")
     if memo is not None:
@@ -415,10 +419,11 @@ def next_turn_lcp(ctx: dict | None, seq: list[int], generated: list[int],
     retirement the text is what the client will actually echo, so no
     closer is applied. Returns None (caller keeps today's behavior)
     when the context is missing, carries media (re-encoding text cannot
-    reproduce expanded media token ids), or any step of the prediction
+    reproduce expanded media token ids), comes from a prefill render (the
+    next request extends the prefill), or any step of the prediction
     fails.
     """
-    if not ctx or ctx.get("media"):
+    if not ctx or ctx.get("media") or ctx.get("prefill"):
         return None
     try:
         full_text = _decode_generated(ctx, generated)

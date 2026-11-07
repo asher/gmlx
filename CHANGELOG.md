@@ -42,6 +42,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before the end marker when the thinking budget runs out, and llama-server's
   `reasoning_budget_tokens` and `reasoning_budget_message` name the two
   fields. See [Thinking budget](docs/api.md#thinking-budget).
+- `/v1/chat/completions` continues a partial last assistant message with
+  `continue_final_message` and `add_generation_prompt: false`, in the prompt
+  llama-server renders, and `add_generation_prompt: false` alone renders no
+  generation prompt. See [Assistant prefill](docs/api.md#assistant-prefill).
 
 ### Changed
 
