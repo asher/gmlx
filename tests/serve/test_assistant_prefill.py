@@ -156,6 +156,9 @@ def chat(monkeypatch):
             monkeypatch.setattr(obj, attr, getattr(obj, attr))
     rg = _RG()
     monkeypatch.setattr(_RUNTIME, "response_generator", rg, raising=False)
+    # A render called in the test's own context sets the prompt the
+    # splitters read; later tests on this worker must not see it.
+    prompt_token = sp_chat._LAST_RENDERED_PROMPT.set(None)
     retire_key._reset_for_tests()
     sp_chat.install_chat_template_kwargs()
     install_estimate()
@@ -185,6 +188,7 @@ def chat(monkeypatch):
     post.loads = loads
     post.reinstall = reinstall
     yield post
+    sp_chat._LAST_RENDERED_PROMPT.reset(prompt_token)
     retire_key._reset_for_tests()
     serving.clear_resolved_models()
 
