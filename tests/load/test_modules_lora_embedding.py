@@ -219,13 +219,7 @@ def _mint_adapter(path, a, b, dtype=np.float32):
     return str(path)
 
 
-def test_a_rewrite_of_the_adapter_file_does_not_reach_the_served_rows(tmp_path):
-    a, b = _pair()
-    path = _mint_adapter(tmp_path / "e.gguf", np.array(a), np.array(b))
-    m = _Tiny()
-    adapter.apply_gguf_adapter(m, {"tie_word_embeddings": False}, path, base_arch="llama")
-    ids = mx.array([[1, 3, 8]])
-    before = np.array(m.model.embed_tokens(ids))
+def _rewrite(path):
     reader = gguf.GGUFReader(path)
     spans = [(int(t.data_offset), int(t.n_bytes)) for t in reader.tensors]
     del reader
@@ -233,7 +227,53 @@ def test_a_rewrite_of_the_adapter_file_does_not_reach_the_served_rows(tmp_path):
         for off, n in spans:
             fh.seek(off)
             fh.write(b"\x7f" * n)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float16], ids=["f32", "f16"])
+def test_the_file_round_trip_serves_the_numpy_layout(tmp_path, dtype):
+    """The ggml ne order of a token_embd pair, through a minted file, lands
+    as A (n_vocab, r) and B (n_embd, r)."""
+    a, b = _pair()
+    path = _mint_adapter(tmp_path / "e.gguf", np.array(a), np.array(b), dtype)
+    ids = np.array([[1, 3, 8], [11, 0, 5]])
+    with mx.stream(mx.cpu):
+        m = _Tiny()
+        adapter.apply_gguf_adapter(m, {"tie_word_embeddings": False}, path, base_arch="llama")
+        got = np.array(m.model.embed_tokens(mx.array(ids)))
+    assert np.array_equal(got, _ref(m.model.embed_tokens.base, a, b, ids, 1.0))
+
+
+def test_a_rewrite_of_the_adapter_file_does_not_reach_the_served_rows(tmp_path):
+    """The loader copies the pair out of the file."""
+    a, b = _pair()
+    path = _mint_adapter(tmp_path / "e.gguf", np.array(a), np.array(b))
+    m = _Tiny()
+    adapter.apply_gguf_adapter(m, {"tie_word_embeddings": False}, path, base_arch="llama")
+    ids = mx.array([[1, 3, 8]])
+    before = np.array(m.model.embed_tokens(ids))
+    _rewrite(path)
     assert np.array_equal(np.array(m.model.embed_tokens(ids)), before)
+
+
+def test_the_wrapper_owns_its_a_over_a_zero_copy_plan(tmp_path):
+    """A plan whose A is a view of the mapped file: the wrapper's own f32
+    copy keeps a rewrite of the file from its rows."""
+    from gmlx.load.wire import load_gguf_wire_bytes
+
+    a, b = _pair()
+    path = _mint_adapter(tmp_path / "e.gguf", np.array(a), np.array(b))
+    arrays, _q, _arch, meta, _s = load_gguf_wire_bytes(path, zero_copy=True, expect_quant=False)
+    plan = adapter.build_adapter_plan(meta, arrays, base_arch="llama")
+    m = _Tiny()
+    adapter.install_gguf_adapter(m, {"tie_word_embeddings": False}, plan)
+    w = m.model.embed_tokens
+    assert w.lora_a is not plan.modules["model.embed_tokens"].a
+    assert w.lora_a.dtype == mx.float32
+    ids = mx.array([[1, 3, 8]])
+    before = np.array(w(ids))
+    del arrays, plan
+    _rewrite(path)
+    assert np.array_equal(np.array(w(ids)), before)
 
 
 def test_the_install_keeps_only_the_f32_a_and_one_table(tmp_path):
