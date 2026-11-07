@@ -1718,10 +1718,14 @@ def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
         assert len(s_toks) == 24
         assert all(lp is not None and len(top) == _LP_K for lp, top in s_lps)
         k = _first_divergence(s_toks, p_toks)
-        n = len(s_toks) if k is None else k + 1
+        n = len(s_toks) if k is None else k
         assert n >= 4, (s_toks, p_toks)
-        for (s_lp, s_top), (p_lp, p_top) in zip(s_lps[:n], p_lps[:n]):
-            assert abs(s_lp - p_lp) <= _LP_TOL
+        # At the first divergence the emitted tokens differ, but the
+        # alternatives still describe the same position.
+        for i, ((s_lp, s_top), (p_lp, p_top)) in enumerate(
+                zip(s_lps[:n + 1], p_lps[:n + 1])):
+            if i < n:
+                assert abs(s_lp - p_lp) <= _LP_TOL
             # Deep in the tail a bf16 step is a large move in nats but no
             # move in probability, so the alternatives compare as
             # probabilities.
