@@ -456,3 +456,70 @@ def test_salvage_rides_the_exception_ahead_of_inner_frames():
     tg.salvage(e, [0], ahead=True)
     tg.salvage(e, [])
     assert e._kq_salvage == [0, 1, 2]
+
+
+class _Rewinding:
+    def __init__(self, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def rewind(self, delivered):
+        self.calls.append(list(delivered))
+        if self.fail:
+            raise RuntimeError("rewind broke")
+
+
+def _ledger(st, uid, prompt, committed, *, max_tokens=16, lp=None, tc=None):
+    row = tg._Row(prompt, max_tokens, {"k": uid}, lp, tc)
+    row.committed = list(committed)
+    st.ledger[uid] = row
+    return row
+
+
+def test_requeue_rebuilds_rows_from_the_ledger_in_order():
+    """The helper every requeue goes through: rewind, resumed processors,
+    the rebuilt set, and the group at the head of the queue in order."""
+    from gmlx.gen.penalties import OutputPenalty
+
+    gen = FakeGen([(99, [0], 4, {}, None, None)], FakeGB([], []))
+    st = tg._TickState()
+    tc = _Rewinding()
+    pen = OutputPenalty(1.5)
+    _ledger(st, 7, [1, 2], [11, 12], lp=[pen], tc=tc)
+    _ledger(st, 8, [3], [], tc=_Rewinding())
+    _ledger(st, 9, [4], [41, 42], max_tokens=2)       # budget spent
+    done = tg._requeue(gen, st, [7, 5, 9, 8])          # 5 has no entry
+    assert done == [7, 8]
+    assert [e[0] for e in gen._unprocessed_sequences] == [7, 8, 99]
+    uid, replay, remaining, kw, lp, crit = gen._unprocessed_sequences[0]
+    assert (replay, remaining, kw, crit) == ([1, 2, 11, 12], 14, {"k": 7}, tc)
+    assert lp[0] is not pen and isinstance(lp[0], OutputPenalty)
+    assert tc.calls == [[11, 12]]
+    assert st.ledger[8].tc.calls == [[]]
+    assert st.rebuilt == {7, 8}
+    assert 9 not in st.ledger
+
+
+@pytest.mark.parametrize("tc", [object(), _Rewinding(fail=True)],
+                         ids=["no-rewind", "rewind-raises"])
+def test_rebuild_row_requeues_whatever_its_criteria_does(tc):
+    gen = FakeGen([], FakeGB([8], [2]))
+    st = tg._TickState()
+    _ledger(st, 8, [3, 4], [5], tc=tc)
+    tg._rebuild_row(gen, st, 8)
+    assert gen.removed == [8]
+    assert gen._unprocessed_sequences[0][:3] == (8, [3, 4, 5], 15)
+
+
+def test_rebuild_row_rewinds_the_criteria_to_the_delivered_tokens(
+        wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    tc = _Rewinding()
+    gen._unprocessed_sequences[1] = (8, [4, 5, 6], 16, {}, None, tc)
+    gen._generation_batch = FakeGB([7, 8], [1, 3])
+    script.append(([], [resp(7, 11), resp(8, 21)]))
+    script.extend([MEM_ERR, MEM_ERR])
+    for _ in range(3):
+        tick(gen)
+    assert gen.removed == [8] and tc.calls == [[21]]

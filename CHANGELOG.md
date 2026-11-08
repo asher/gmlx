@@ -279,6 +279,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   llama-server does.
 - A `response_format` request that `gmlx serve` cuts off to free memory now
   resumes on its schema, where it could fail every running request.
+- A thinking-budget close that `gmlx serve` cuts off to free memory now
+  finishes when the request resumes, where the model could think on past
+  its budget.
 
 ## [0.5.4] - 2026-10-29
 

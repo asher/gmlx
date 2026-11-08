@@ -222,3 +222,158 @@ def test_single_stream_thinking_off_keeps_the_model_first_token(model):
     out = _stream(model, SPENT, crit, 1, processors=_ban())
     assert out[0][0] == plain[0][0]
     assert out[0][0] not in MESSAGE + [NL, END]
+
+
+# --- A row requeued in the middle of its forced close ---------------------
+
+
+def _requeue_run(model, prompt, crit, n, cut, *, lost=0):
+    """Deliver ``cut`` tokens, run ``lost`` more ticks whose tokens never
+    reach the ledger, then retire and requeue the row as the tick guard
+    does. Returns the delivered tokens and the replay's responses."""
+    import gmlx.serve.tick_guard as tg
+
+    lm = model.language_model
+    proc = SimpleNamespace(tokenizer=SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(lm, proc, prefill_step_size=None, logprobs_cap=_K)
+    (uid,) = gen.insert(
+        [prompt], n, thinking_budget_criteria=[crit],
+        logits_processors=[_ban()],
+        row_settings=[RowSettings(logprobs=True, top_k=_K)],
+        prompt_kwargs=[{"inputs_embeds": lm.input_embeds(mx.array([prompt]))}])
+    st = tg._state(gen)
+    tg._harvest_pending(gen, st)
+    delivered = []
+    if cut == 0:
+        assert gen.next()[1] == []      # the prefill: no token out yet
+    while len(delivered) < cut:
+        delivered += [r.token for r in gen.next()[1]]
+    for _ in range(lost):
+        gen.next()
+    st.ledger[uid].committed = list(delivered)
+    st.ledger[uid].kwargs = {
+        "inputs_embeds": lm.input_embeds(mx.array([prompt + delivered]))}
+    tg._rebuild_row(gen, st, uid)
+    rest = []
+    while gen.has_work:
+        rest += gen.next()[1]
+    gen.close()
+    return delivered, rest
+
+
+@pytest.mark.parametrize("cut", [2, 3, 4, 5],
+                         ids=["MESSAGE0", "MESSAGE1", "MESSAGE2", "END"])
+def test_a_requeue_mid_close_keeps_the_forced_end_marker(model, cut):
+    """The cut leaves one forced id outstanding. The rewound criteria owes
+    it, the replay's first token is it, and the close lands once."""
+    uncut = [r.token for r in _decode(model, _criteria("Go now"), 10)]
+    crit = _criteria("Go now")
+    delivered, rest = _requeue_run(model, PROMPT, crit, 10, cut)
+    whole = delivered + [r.token for r in rest]
+    assert whole[:2] == uncut[:2]
+    assert whole[2:6] == MESSAGE + [END]
+    assert whole.count(END) == 1
+    assert crit._forced_closes == 1
+    # The replayed id reports the model's raw logprob at the replay's last
+    # position, and the top-k is the model's distribution there.
+    first = rest[0]
+    assert first.token == whole[cut]
+    ref = _raw_logprobs(model, PROMPT + delivered)[-1]
+    assert first.token_logprob == pytest.approx(ref[first.token], abs=3e-2)
+    want = np.argsort(-ref)[:_K].tolist()
+    assert sorted(t for t, _ in first.top_logprobs) == sorted(want)
+
+
+def test_a_spent_row_retired_before_its_first_token_replays_the_close(model):
+    crit = _criteria("Go now", prompt=SPENT)
+    delivered, rest = _requeue_run(model, SPENT, crit, 6, 0)
+    assert delivered == []
+    assert [r.token for r in rest][:4] == MESSAGE + [END]
+    assert crit._forced_closes == 1
+
+
+def test_a_lost_tick_replays_the_dropped_id(model):
+    """A tick fed the criteria and never reached the client. The replay
+    sends that id again, and the close is whole once."""
+    crit = _criteria("Go now")
+    delivered, rest = _requeue_run(model, PROMPT, crit, 10, 3, lost=1)
+    whole = delivered + [r.token for r in rest]
+    assert rest[0].token == MESSAGE[1]
+    assert whole[2:6] == MESSAGE + [END] and whole.count(END) == 1
+
+
+_STATE = ("in_thinking", "thinking_token_count", "_force_left",
+          "_forced_index", "_steering", "_steer_left", "_spent", "_strikes",
+          "_forced_closes", "budget_exceeded", "_tail", "done")
+
+
+def _snap(c):
+    return {k: (list(v) if isinstance(v, list) else v)
+            for k, v in ((k, getattr(c, k)) for k in _STATE)}
+
+
+def _feed(c, model_tokens, n):
+    """The batch loop: the first token (maybe forced), then each emitted
+    token fed back with the forced id swapped in. The emitted tokens and
+    the id outstanding after them."""
+    src = iter(model_tokens)
+    first = c.first_forced_token_id()
+    nxt = first if first is not None else next(src)
+    out, f = [], first
+    while len(out) < n:
+        out.append(nxt)
+        c(nxt)
+        f = c.pop_forced_token_id()
+        nxt = f if f is not None else next(src)
+    return out, f
+
+
+_MODEL = [30 + (i % 8) for i in range(400)]
+
+
+@pytest.mark.parametrize("prompt", [PROMPT, SPENT])
+def test_a_rewound_criteria_matches_the_live_one_at_every_cut(prompt):
+    for n in range(1, 12):
+        live = _criteria("Go now", prompt=prompt)
+        out, owed = _feed(live, _MODEL, n)
+        ref = _snap(live)
+        assert live.closing() == (owed is not None), n
+        live.rewind(out)
+        assert _snap(live) == ref, n
+        assert live.first_forced_token_id() == owed, n
+        assert live.first_forced_token_id() is None   # asked once
+
+
+def test_a_stand_down_during_a_rewind_prints_nothing(capsys):
+    """A model that reopens its block after every close stands the
+    budget down. Replaying that prints the line once, live, not again."""
+    reopen = [START] * 40
+    live = _criteria(None)
+    out, _ = _feed(live, [30, 31] + reopen, 40)
+    assert live.done
+    assert "stood down" in capsys.readouterr().err
+    ref = _snap(live)
+    live.rewind(out)
+    assert _snap(live) == ref
+    assert capsys.readouterr().err == ""
+
+
+def test_the_resume_slot_owes_none_once_without_the_budget_test():
+    """A spent-budget row rewound after its close landed owes nothing: its
+    replay's first token is the model's. A criteria never rewound still
+    runs the spent-budget test."""
+    landed = _criteria("Go now", prompt=SPENT)
+    out, owed = _feed(landed, _MODEL, 6)
+    assert out[:4] == MESSAGE + [END] and owed is None
+    landed.rewind(out)
+    assert landed.first_forced_token_id() is None
+    fresh = _criteria("Go now", prompt=SPENT)
+    assert fresh.first_forced_token_id() == MESSAGE[0]
+
+
+def test_closing_is_true_while_a_forced_id_is_out():
+    for n in range(1, 9):
+        c = _criteria("Go now")
+        out, owed = _feed(c, _MODEL, n)
+        assert c.closing() == (2 <= n <= 5), (n, out)

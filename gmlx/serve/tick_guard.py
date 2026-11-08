@@ -233,28 +233,52 @@ def _resumed_processors(lp, committed):
             for p in lp]
 
 
+def _requeue(gen, st: _TickState, uids) -> list:
+    """Put rows the caller took out of the engine back at the head of the
+    queue, in order. Each replays its prompt plus every token it
+    delivered, with its criteria rewound and its processors resumed to
+    that point. Every requeue goes through here, so none skips a step.
+    Returns the uids requeued."""
+    entries, done = [], []
+    for uid in uids:
+        row = st.ledger.get(uid)
+        if row is None:
+            _log.error("[tick-guard] no ledger entry for %s; removed without "
+                       "requeue", uid)
+            continue
+        remaining = None
+        if isinstance(row.max_tokens, int):
+            remaining = max(row.max_tokens - len(row.committed), 0)
+            if remaining == 0:
+                # the row had already delivered its budget; it is done
+                st.ledger.pop(uid, None)
+                continue
+        rewind = getattr(row.tc, "rewind", None)
+        if rewind is not None:
+            # This runs inside the memory-error handler: a failed rewind
+            # still requeues the row.
+            try:
+                rewind(list(row.committed))
+            except Exception:
+                _log.warning("[tick-guard] row %s: criteria rewind failed",
+                             uid, exc_info=True)
+        entries.append((uid, row.prompt_ids + row.committed, remaining,
+                        row.kwargs, _resumed_processors(row.lp, row.committed),
+                        row.tc))
+        st.rebuilt.add(uid)
+        done.append(uid)
+    gen._unprocessed_sequences[:0] = entries
+    for uid in done:
+        row = st.ledger[uid]
+        _log.warning("[tick-guard] row %s retired and requeued: replaying "
+                     "%d prompt + %d delivered tokens", uid,
+                     len(row.prompt_ids), len(row.committed))
+    return done
+
+
 def _rebuild_row(gen, st: _TickState, uid) -> None:
-    row = st.ledger.get(uid)
     gen.remove(uid)
-    if row is None:
-        _log.error("[tick-guard] no ledger entry for %s; removed without "
-                   "requeue", uid)
-        return
-    remaining = None
-    if isinstance(row.max_tokens, int):
-        remaining = max(row.max_tokens - len(row.committed), 0)
-        if remaining == 0:
-            # the row had already delivered its budget; it is done
-            st.ledger.pop(uid, None)
-            return
-    replay = row.prompt_ids + row.committed
-    gen._unprocessed_sequences.insert(
-        0, (uid, replay, remaining, row.kwargs,
-            _resumed_processors(row.lp, row.committed), row.tc))
-    st.rebuilt.add(uid)
-    _log.warning("[tick-guard] row %s retired and requeued: replaying "
-                 "%d prompt + %d delivered tokens", uid,
-                 len(row.prompt_ids), len(row.committed))
+    _requeue(gen, st, [uid])
 
 
 def _contain_fault(st: _TickState, e: RuntimeError) -> bool:

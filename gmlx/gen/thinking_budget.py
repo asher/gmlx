@@ -160,6 +160,11 @@ def _report_stand_down(forced_closes: int) -> None:
           file=sys.stderr, flush=True)
 
 
+# A criteria's resume slot when no rewind filled it. An owed None means the
+# replay owes no id and its first token is the model's.
+_NO_RESUME = object()
+
+
 def alias_end_seqs(tokenizer, end_seq) -> tuple:
     """Token ids of each alias close of the pair ``end_seq`` closes."""
     if not end_seq:
@@ -481,6 +486,8 @@ def seq_thinking_budget_criteria_cls():
                 if self._prompt_open and reasoning_ids is not None else 0)
             self.thinking_token_count = self._count_seed
             self._first_asked = False
+            self._resume = _NO_RESUME
+            self._replaying = False
             self._reset_stand_down()
 
         def _reset_stand_down(self):
@@ -502,17 +509,44 @@ def seq_thinking_budget_criteria_cls():
             self._steer_left = []
             self._steering = False
             self._first_asked = False
+            self._resume = _NO_RESUME
             self._reset_stand_down()
+
+        def rewind(self, delivered):
+            """Rebuild the state a requeued row had after ``delivered``, the
+            tokens the client got, by replaying them. The id the criteria
+            handed out after the last of them is owed: the replay's first
+            token asks for it once."""
+            self._replaying = True
+            try:
+                self.reset_thinking_state()
+                self.forced_token_id = None
+                # The class method: an instance wrapper routes elsewhere.
+                owed = type(self).first_forced_token_id(self)
+                for tok in delivered:
+                    owed = self(int(tok))
+            finally:
+                self._replaying = False
+            self._resume = owed
+            self._first_asked = False
+            self.forced_token_id = None
+
+        def closing(self) -> bool:
+            """An id is handed out and has not come back yet."""
+            return bool(self._force_left or self._steering)
 
         def first_forced_token_id(self, speculative=False):
             """The id that replaces the first generated token, asked once
             before it is sampled, or None. A block the prompt opens with
             its budget already spent starts the close there, so no model
             token gets in first. A speculative batch never reads this
-            criteria, so it forces nothing."""
+            criteria, so it forces nothing. After a rewind, the owed id."""
             if speculative or self._first_asked:
                 return None
             self._first_asked = True
+            if self._resume is not _NO_RESUME:
+                owed, self._resume = self._resume, _NO_RESUME
+                return owed
             if (not self.enable_thinking or not self.in_thinking or self.done
                     or self._force_left or self._steering
                     or self.thinking_budget is None
@@ -527,7 +561,8 @@ def seq_thinking_budget_criteria_cls():
             if self._strikes >= 3:
                 self.done = True
                 self.budget_exceeded = False
-                _report_stand_down(self._forced_closes)
+                if not self._replaying:
+                    _report_stand_down(self._forced_closes)
 
         def _steer_next(self):
             if not self._steer_left:
