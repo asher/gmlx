@@ -14,8 +14,8 @@ loop calls between decode steps, takes the job out of the queue and runs
 one step per call, so chat keeps decoding while a job runs. The job must
 leave the engine as it found it: it never drains cancellations, never
 touches the stop tokens and never reseeds the RNG. Each step runs under
-the wired limit and the model's prefill command-buffer caps, and
-restores any rope position state it changed. An engine cancel for the
+the wired limit, the model's prefill command-buffer caps and a text row's
+rope position state, and puts the chat rope state back after. An engine cancel for the
 job's uid never reaches it, since the batch loop drains that uid and
 finds no row; the job's stop event is its only cancel.
 
@@ -191,13 +191,18 @@ def _take_queued(rg) -> list:
 @contextlib.contextmanager
 def _step_scope(model):
     """One job step: the wired limit, the model's prefill command-buffer
-    caps, and the rope position state of multimodal models put back
-    afterwards."""
+    caps, and the rope position state of a text row. A step starts with no
+    stored positions and zero deltas, the state a text forward leaves, so
+    each chunk is numbered from its cache offset; the chat state is put
+    back afterwards."""
     from gmlx.serve import cb_phase
 
     holders = [model, getattr(model, "language_model", None)]
     saved = [(h, name, getattr(h, name)) for h in holders if h is not None
              for name in _ROPE_STATE if hasattr(h, name)]
+    for holder, name, _ in saved:
+        setattr(holder, name, None if name == "_position_ids"
+                else mx.zeros((1, 1), dtype=mx.int32))
     before = cb_phase.snapshot()
     cb_phase.flip("prefill", model)
     wired: Any = contextlib.nullcontext()

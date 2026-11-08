@@ -400,6 +400,50 @@ def test_a_step_leaves_rng_rope_state_and_buffer_caps_as_they_were(monkeypatch):
     assert mx.array_equal(mx.random.state[0], before).item()
 
 
+def test_a_step_runs_on_a_text_rows_rope_state(monkeypatch):
+    """Each step sees no stored positions and zero int32 deltas, the state
+    a text row leaves, on every holder with the field. A live image row's
+    state is back after the step."""
+    import types
+
+    import mlx.core as mx
+
+    from gmlx.serve import cb_phase
+
+    install_engine_jobs()
+    monkeypatch.setitem(cb_phase._state, "kq", None)
+    lm = types.SimpleNamespace(_rope_deltas=mx.array([[7]]),
+                               _position_ids=mx.ones((3, 1, 9), dtype=mx.int32))
+    outer = types.SimpleNamespace(language_model=lm, _rope_deltas=mx.array([[5]]))
+    rg = object.__new__(_GEN.ResponseGenerator)
+    rg._stop, rg.requests, rg.model = False, queue.Queue(), outer
+    rg.__dict__["_kq_engine_is_diffusion"] = False
+    monkeypatch.setattr(mx.metal, "is_available", lambda: False)
+    seen = []
+
+    def job(rg_, should_stop):
+        def step():
+            for _ in range(2):
+                seen.append((lm._position_ids, lm._rope_deltas,
+                             outer._rope_deltas, hasattr(outer, "_position_ids")))
+                lm._rope_deltas = mx.array([[3]])
+                yield
+        return step()
+
+    stale = (lm._position_ids, lm._rope_deltas, outer._rope_deltas)
+    rg.requests.put(_GEN.QueuedGenerationRequest(
+        rqueue=queue.Queue(), raw_inputs={"_kq_engine_step_job": (job, threading.Event(), "the job")},
+        prompt_tokens=1, args=_GEN.GenerationArguments(max_tokens=1)))
+    for _ in range(3):
+        rg._collect_pending_requests(active=True)
+    assert len(seen) == 2
+    for positions, deltas, outer_deltas, outer_has_positions in seen:
+        assert positions is None and not outer_has_positions
+        for d in (deltas, outer_deltas):
+            assert d.dtype == mx.int32 and d.shape == (1, 1) and d.item() == 0
+    assert (lm._position_ids, lm._rope_deltas, outer._rope_deltas) == stale
+
+
 def test_a_diffusion_engine_passes_step_jobs_through():
     install_engine_jobs()
     rg = object.__new__(_GEN.ResponseGenerator)
