@@ -270,6 +270,9 @@ def _ref_quantize_rows(x, *, group_size=None, stream=None):
 
 def _ref_matmul(x8, x_scales, w8, w_scales, *, group_size=None,
                 out_dtype=mx.bfloat16, stream=None):
+    # As mlx-kquant's op: w_scales is float32 [N], one a row.
+    if w_scales.shape != w8.shape[:1] or w_scales.dtype != mx.float32:
+        raise ValueError(f"w_scales is {w_scales.dtype} {w_scales.shape}")
     k = x8.shape[-1]
     g = k if group_size is None else group_size
     y = mx.zeros((*x8.shape[:-1], w8.shape[0]), mx.float32)
@@ -356,7 +359,12 @@ def test_the_conversion_makes_each_block_linear_int8(tiny_gguf, monkeypatch,
         w = kq.dequantize(base["weight"], base["scales"], base.kquant_type,
                           mx.float32)
         codes, scales = kq.int8_quantize_rows(w)
+        # The op gives a weight [N, K] scales [N, 1]; int8_matmul takes
+        # them as [N].
+        assert scales.shape == (w.shape[0], 1)
         assert leaf.weight.dtype == mx.int8
+        assert leaf.scales.shape == (w.shape[0],)
+        assert leaf.scales.dtype == mx.float32
         assert mx.array_equal(leaf.weight, codes)
         assert mx.array_equal(leaf.scales, scales.reshape(-1))
         sim, _sw = _sim_codes(w)
@@ -403,11 +411,9 @@ def _sim_product(x: mx.array, w: mx.array, group: int | None) -> mx.array:
 
 
 # G3's bar for one int8 call against the sim's float32 product rounded
-# to bf16 (design 6.1): G3 measured 1.02e-4, and the bar is about 10x
-# that. Set before the op first ran; a miss is a finding.
-G3_BF16_REL = 1.02e-4
-G3_MARGIN = 10
-CALL_REL = G3_BF16_REL * G3_MARGIN
+# to bf16, as design 6.1 fixed it before any kernel ran: G3 measured
+# 1.02e-4, margin about 10x. A miss is a finding.
+CALL_REL = 1e-3
 
 
 def test_an_int8_forward_runs_the_int8_ops_on_each_block_linear(
@@ -529,6 +535,41 @@ def test_an_int8_load_and_forward_leave_the_file_as_it_was(tiny_gguf,
     del model
     mx.clear_cache()
     assert digest() == before
+
+
+def test_the_conversion_clears_the_cache_after_each_matrix(tiny_gguf,
+                                                           monkeypatch):
+    """Each matrix's float32 weight goes back to MLX's cache before the
+    next one is read, and the cache is cleared then: MLX reuses a freed
+    buffer only near its own size, so a cache kept across the four sizes
+    of a block would hold more than memfit.int8_transient counts."""
+    events = []
+    monkeypatch.setattr(kq, "int8_quantize_rows", lambda *a, **k: (
+        events.append("quantize"), _ref_quantize_rows(*a, **k))[1],
+        raising=False)
+    monkeypatch.setattr(kq, "int8_matmul", _ref_matmul, raising=False)
+    clear = mx.clear_cache
+    monkeypatch.setattr(mx, "clear_cache", lambda: (
+        events.append("clear"), clear())[1])
+    events.clear()
+    _load(monkeypatch, tiny_gguf, "int8")
+    run = [e for e in events if e in ("quantize", "clear")]
+    first = run.index("quantize")
+    assert run[first:first + 2 * len(_PATHS)] == (
+        ["quantize", "clear"] * len(_PATHS))
+
+
+def test_an_int8_linear_takes_one_scale_a_row_as_n_not_n_by_1():
+    """int8_quantize_rows gives a weight [N, K] scales [N, 1], and
+    int8_matmul takes w_scales [N]: an Int8Linear refuses the op's own
+    shape, so a conversion that kept it fails at the leaf, not in the
+    kernel."""
+    w = mx.zeros((64, 32), mx.int8)
+    with pytest.raises(ValueError, match="one float32 scale an output row"):
+        Int8Linear(w, mx.ones((64, 1), mx.float32))
+    with pytest.raises(ValueError, match="one float32 scale an output row"):
+        Int8Linear(w, mx.ones((64,), mx.float16))
+    assert Int8Linear(w, mx.ones((64,), mx.float32)).scales.shape == (64,)
 
 
 def test_a_leaf_the_conversion_cannot_take_changes_nothing(monkeypatch):

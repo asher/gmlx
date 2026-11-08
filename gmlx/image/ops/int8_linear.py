@@ -106,7 +106,11 @@ def _set(root: nn.Module, path: str, new: nn.Module) -> None:
 def convert(model: nn.Module, patterns: dict) -> int:
     """Replace each leaf that ``patterns`` names with an ``Int8Linear``:
     its weight read at float32, then ``int8_quantize_rows`` over each
-    output row, one evaluation a matrix, the leaf dropped as it goes.
+    output row, one evaluation a matrix, the leaf dropped and the cache
+    cleared as it goes. MLX reuses a freed buffer only near its own size,
+    so without the clear each block's four float32 sizes would stay
+    cached past ``memfit.int8_transient``. The op's scales [N, 1] become
+    the [N] that ``int8_matmul`` takes.
     Returns the count. Raises ValueError for a leaf that is no K-quant or
     float linear, has a bias or takes an input width off a multiple of
     32, before any leaf changes."""
@@ -133,6 +137,7 @@ def convert(model: nn.Module, patterns: dict) -> int:
         scales = scales.reshape(-1)
         mx.eval(codes, scales)
         del w
+        mx.clear_cache()
         _set(model, path, Int8Linear(codes, scales, group))
     del leaves
     mx.clear_cache()
