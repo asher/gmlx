@@ -427,3 +427,32 @@ def test_a_stopping_engine_fails_its_pending_jobs():
     rg._collect_pending_requests(active=True)
     err = rq.get_nowait()
     assert isinstance(err.exc, RuntimeError) and "stopped" in str(err.exc)
+
+
+def test_a_memory_error_in_a_step_drains_and_reclaims(ar_engine, monkeypatch):
+    """A step that hits a memory error drains the engine and frees the
+    allocator's cache once, as the tick guard does for a tick. The job's
+    caller still gets the error, and a step's other errors do neither."""
+    import mlx.core as mx
+
+    import gmlx.eval_guard as eg
+
+    drains, clears = [], []
+    monkeypatch.setattr(eg, "drain_for", drains.append)
+    monkeypatch.setattr(mx, "clear_cache", lambda: clears.append(1))
+
+    def failing(err):
+        def job(rg, should_stop):
+            def step():
+                yield
+                raise err
+            return step()
+        return job
+
+    with pytest.raises(RuntimeError, match="metal::malloc"):
+        _run_steps(ar_engine.rg, failing(RuntimeError(
+            "[metal::malloc] Attempting to allocate 1 bytes (test)")))
+    assert drains == ["engine-job"] and clears == [1]
+    with pytest.raises(ValueError, match="bad read"):
+        _run_steps(ar_engine.rg, failing(ValueError("bad read")))
+    assert drains == ["engine-job"] and clears == [1]
