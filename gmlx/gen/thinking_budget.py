@@ -27,6 +27,7 @@ commits the forced close sequence directly as fully-accepted verify rounds.
 
 from __future__ import annotations
 
+import copy
 import functools
 import logging
 import os
@@ -1508,11 +1509,62 @@ class MTPFinishThinking:
         self._tail: list[int] = (
             [int(t) for t in prompt_ids[-keep:]]
             if prompt_ids is not None and keep else [])
+        # For a rewind: the tokens observed, the current close and the
+        # stream position of its first id, and each decision take_forced
+        # made, as (position, ^T requested).
+        self._seen = 0
+        self._close: list[int] = []
+        self._close_at = 0
+        self._decisions: list[tuple[int, bool]] = []
+        self._replaying = False
+        self._dropped = False
+        self._start = copy.deepcopy(
+            {k: getattr(self, k) for k in self._REWOUND})
+
+    _REWOUND = ("_tail", "in_thinking", "count", "done", "_close_requested",
+                "_spent", "_answer_pending", "_strikes", "_forced_closes",
+                "_own", "_held", "_seen", "_close", "_close_at", "_decisions")
 
     def request_close(self):
         """Finish thinking now (^T). Consumed as a no-op at the next round
         boundary when the model is not thinking."""
         self._close_requested = True
+
+    def stand_down(self) -> None:
+        """A loop dropped this hook: its row goes on without it. A rewind
+        leaves it down, so a replay that runs alone is not re-armed."""
+        self._dropped = True
+        self.done = True
+        self._held, self._own, self._close = [], 0, []
+
+    def rewind(self, delivered) -> None:
+        """Rebuild the state a requeued row had after ``delivered``, the
+        tokens the client got: observe them again, with each logged
+        decision at its stream position. Decisions made on tokens the
+        client never got are dropped. The rest of the current close is
+        owed: ``take_first`` hands out its first id."""
+        if self._dropped:
+            return
+        delivered = [int(t) for t in delivered]
+        n = len(delivered)
+        decisions = self._decisions
+        self.__dict__.update(copy.deepcopy(self._start))
+        self._replaying = True
+        try:
+            k = 0
+            for p in range(n + 1):
+                while k < len(decisions) and decisions[k][0] <= p:
+                    if decisions[k][0] == p:
+                        self._close_requested = decisions[k][1]
+                        self.take_forced()
+                    k += 1
+                if p < n:
+                    self.observe(delivered[p])
+        finally:
+            self._replaying = False
+        sent = min(max(n - self._close_at, 0), len(self._close))
+        self._held = list(self._close[sent:])
+        self._own = len(self._held)
 
     def _outside_block(self) -> bool:
         """Whether an end marker now closes no block this hook saw open,
@@ -1528,6 +1580,7 @@ class MTPFinishThinking:
         """Track one emitted token. The tokens of an injected close only
         extend the tail: take_forced has already closed the block, and a
         close that ends in an answer header writes no answer token."""
+        self._seen += 1
         self._tail.append(int(tok))
         if len(self._tail) > self._tail_max:
             del self._tail[: len(self._tail) - self._tail_max]
@@ -1567,7 +1620,11 @@ class MTPFinishThinking:
     def take_first(self):
         """The id that replaces the first generated token, or None. When
         the prompt's reasoning already spends the budget, the close starts
-        there and its rest goes out at the first round boundary."""
+        there and its rest goes out at the first round boundary. After a
+        rewind, the first owed id goes out whatever the count."""
+        if self._held:
+            first, self._held = self._held[0], self._held[1:]
+            return first
         if self.budget is None or self.count < self.budget:
             return None
         seq = self.take_forced()
@@ -1596,7 +1653,9 @@ class MTPFinishThinking:
             self._strikes += 1
             if self._strikes >= 3:
                 self.done = True
-                _report_stand_down(self._forced_closes)
+                self._decisions.append((self._seen, requested))
+                if not self._replaying:
+                    _report_stand_down(self._forced_closes)
                 return None
         if self._spent:
             seq = self.reclose_ids
@@ -1609,7 +1668,27 @@ class MTPFinishThinking:
         self._forced_closes += 1
         self.in_thinking = False
         self._own = len(seq)
+        # Every sent token was observed before a boundary, so _seen is the
+        # stream position of the close's first id.
+        self._decisions.append((self._seen, requested))
+        self._close, self._close_at = list(seq), self._seen
         return list(seq)
+
+
+_CLOSE_CUT = ("thinking_budget: a resumed request joined other MTP requests "
+              "in the middle of its forced close; the close is not finished")
+
+
+def drop_mtp_hook(hook, *, warn=False) -> None:
+    """Stand down a hook a loop dropped, so a later replay of its row
+    cannot re-arm it. ``warn`` logs when it still owed a close."""
+    if hook is None:
+        return
+    if warn and getattr(hook, "closing", None) is not None and hook.closing():
+        _log.warning(_CLOSE_CUT)
+    down = getattr(hook, "stand_down", None)
+    if down is not None:
+        down()
 
 
 def make_mtp_finish_hook(

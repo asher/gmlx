@@ -237,15 +237,18 @@ def test_batch_loop_single_row_budget_close():
     assert d.draft_calls == [1] * (len(out) - 4)
 
 
-def test_batch_loop_admission_drops_hook(capsys):
+def test_batch_loop_admission_drops_hook(capsys, caplog):
     # A second request joining the batch voids the single-row contract: the
     # live hook is dropped with a note, an injected cache's stale stash is
     # popped and dropped too, and no forced ids ever reach the stream.
+    # Both stand down, so a later replay of either row cannot re-arm them.
     hook = _hook([S1, S2, END], budget=1, forced_ids=[14, 15, END])
     gen, _d, model = _drive_batch(hook, max_tokens=4)
     first, _ = next(gen)                        # capture round: row 0 -> [2]
     inj_cache = _FakeCache(width=1, offset=9)
-    inj_cache._kq_mtp_thinking_hook = _hook([S1, S2, END], budget=3)
+    inj_hook = _hook([S1, S2, END], budget=0)
+    assert inj_hook.take_forced() == [S1, S2, END]   # a close it still owes
+    inj_cache._kq_mtp_thinking_hook = inj_hook
     model._generator_injections = [{
         "uids": ["w"],
         "prompt_cache": [inj_cache],
@@ -262,6 +265,10 @@ def test_batch_loop_admission_drops_hook(capsys):
     err = capsys.readouterr().err
     assert "[thinking-budget] dropped: MTP rounds batched" in err
     assert "joined a batched MTP generation" in err
+    for h in (hook, inj_hook):
+        assert h.done and not h.closing()
+        assert h.take_first() is None
+    assert "in the middle of its forced close" in caplog.text
 
 
 class _AcceptEchoDrafter(_EchoDrafter):
@@ -390,7 +397,7 @@ def test_server_rounds_batch_drops_stash_for_multirow(monkeypatch):
 
     monkeypatch.setattr(spec, "_owned_decode_rounds_batch", fake_rounds)
     cache = _FakeCache(width=2)
-    cache._kq_mtp_thinking_hook = _hook([S1, S2, END])
+    stashed = cache._kq_mtp_thinking_hook = _hook([S1, S2, END])
     model = SimpleNamespace(language_model=_VerifyEchoLM())
     gen = spec.owned_server_rounds_batch(
         model, _ArmableDrafter(cap=0), [cache], None,
@@ -400,6 +407,7 @@ def test_server_rounds_batch_drops_stash_for_multirow(monkeypatch):
     assert list(gen) == []
     assert captured["thinking_hook"] is None    # popped, not honored at B>1
     assert not hasattr(cache, "_kq_mtp_thinking_hook")
+    assert stashed.done
 
 
 # -- presence and frequency penalties across a forced close -----------------
@@ -479,3 +487,170 @@ def test_a_batch_forced_close_keeps_the_penalties_exact():
     committed = [1, 2, 3, 14, 15, END]
     assert penalties_at(len(prompt) + len(committed)) == {
         t: 0.5 for t in committed}
+
+
+# -- a requeued row rewinds its hook from the delivered tokens ---------------
+
+CLOSE = [20, 21, 22, 23, END]
+_BLOCK, _WIDTH = 3, 2
+
+
+def _model_tok(p, script):
+    return script.get(p, 30 + p % 8)
+
+
+def _lone_row(hook, delivered, ticks, *, retire_at=None, lost_at=None,
+              script=None):
+    """One lone MTP row as the serve engine drives it: the prefill asks
+    take_first; tick 1 sends the first token; tick 2 observes it, then one
+    round per tick, each token observed before it goes out. ``retire_at``
+    stops at the start of a tick; ``lost_at`` runs a tick whose tokens
+    never reach the client. Returns the delivered tokens."""
+    script = script or {}
+    delivered = list(delivered)
+    pos = len(delivered)
+    first = hook.take_first()
+    b = first if first is not None else _model_tok(pos, script)
+    pos += 1
+    queue = []
+    for t in range(1, ticks + 1):
+        if t == retire_at:
+            return delivered
+        out = []
+        if t == 1:
+            out = [b]
+        else:
+            if t == 2:
+                hook.observe(b)
+            forced = spec._next_forced_chunk(hook, queue, _BLOCK)
+            toks = (forced if forced is not None
+                    else [_model_tok(p, script) for p in range(pos, pos + _WIDTH)])
+            pos += len(toks)
+            for tok in toks:
+                hook.observe(tok)
+                out.append(tok)
+        if t == lost_at:
+            return delivered
+        delivered += out
+    return delivered
+
+
+def _close_once(stream):
+    hits = [k for k in range(len(stream)) if stream[k:k + len(CLOSE)] == CLOSE]
+    return len(hits) == 1 and all(stream.count(c) == 1 for c in CLOSE)
+
+
+def _budget_hook(**kw):
+    return _hook([S1, S2, END], forced_ids=CLOSE, **kw)
+
+
+def test_a_rewind_after_a_delivered_chunk_owes_the_rest_of_the_close():
+    """A retire after a close chunk went out and was observed: the replay
+    starts with the next id and the close is whole once."""
+    hook = _budget_hook(budget=4)
+    delivered = _lone_row(hook, [], 40, retire_at=5)
+    assert delivered[-3:] == CLOSE[:3]
+    hook.rewind(delivered)
+    assert hook.closing()
+    stream = _lone_row(hook, delivered, 40)
+    assert stream[len(delivered):len(delivered) + 2] == CLOSE[3:]
+    assert _close_once(stream[:30]) and not hook.closing()
+
+
+def test_a_rewind_before_the_first_token_owes_the_whole_close():
+    hook = _budget_hook(budget=2, count_seed=2)
+    assert hook.take_first() == CLOSE[0]
+    hook.rewind([])
+    assert hook.take_first() == CLOSE[0]
+    assert hook._held == CLOSE[1:] and hook._own == len(CLOSE)
+
+
+def test_a_first_token_sent_and_not_observed_is_observed_by_the_rewind():
+    """The governor at the start of tick 2: the client has the first id,
+    the rounds never observed it. Revision 1 sent it twice."""
+    hook = _budget_hook(budget=2, count_seed=2)
+    assert hook.take_first() == CLOSE[0]
+    hook.rewind([CLOSE[0]])
+    assert hook.take_first() == CLOSE[1]
+    assert hook._own == len(CLOSE) - 1
+
+
+def test_a_lost_tick_owes_the_chunk_it_observed():
+    hook = _budget_hook(budget=4)
+    delivered = _lone_row(hook, [], 40, lost_at=4)
+    assert not set(CLOSE) & set(delivered)
+    hook.rewind(delivered)
+    assert hook._held == CLOSE and hook._own == len(CLOSE)
+    stream = _lone_row(hook, delivered, 40)
+    assert stream[len(delivered)] == CLOSE[0]
+    assert _close_once(stream[:30])
+
+
+def test_a_natural_end_marker_first_token_disarms_the_replay():
+    """The first token is a model END the rounds never observed. The
+    rewind observes it: the hook is done, and nothing is forced into the
+    answer."""
+    hook = _budget_hook(budget=1)
+    delivered = _lone_row(hook, [], 40, retire_at=2, script={0: END})
+    assert delivered == [END]
+    hook.rewind(delivered)
+    assert hook.done and not hook.in_thinking
+    assert hook.take_first() is None and hook.take_forced() is None
+
+
+def test_a_lost_reopen_round_is_not_kept():
+    """A lost model round after the close held the start marker. The
+    replay never saw it, so the hook asks for no reclose."""
+    hook = _budget_hook(budget=4)
+    delivered = _lone_row(hook, [], 40, lost_at=6, script={10: 16})
+    assert hook.in_thinking and hook._close_requested
+    assert 16 not in delivered
+    hook.rewind(delivered)
+    assert not hook.in_thinking and hook._close_requested is False
+    assert hook.take_forced() is None
+
+
+def test_a_reclose_after_a_reopen_goes_out_through_take_first():
+    """The tick that sent a reclose was lost. Its count is below the
+    budget after the reopen, which would refuse a first-token close, so
+    take_first hands the owed id out first."""
+    hook = _budget_hook(budget=4)
+    delivered = _lone_row(hook, [], 40, lost_at=7, script={10: 16})
+    assert delivered[-2:] == [16, 33]
+    hook.rewind(delivered)
+    assert hook.count < hook.budget
+    assert hook.take_first() == 13
+    assert hook._held == [END] and hook._own == 2
+
+
+def test_two_rewinds_on_the_same_tokens_owe_the_same_ids():
+    hook = _budget_hook(budget=4)
+    delivered = _lone_row(hook, [], 40, retire_at=5)
+    hook.rewind(delivered)
+    first = list(hook._held)
+    hook.rewind(delivered)
+    assert hook._held == first == CLOSE[3:]
+
+
+def test_a_stand_down_replayed_by_a_rewind_prints_nothing(capsys):
+    hook = _hook([S1, S2, END], budget=0)
+    stream = []
+    for _ in range(4):
+        seq = hook.take_forced() or []
+        for t in seq + [16]:
+            hook.observe(t)
+            stream.append(t)
+    assert hook.done
+    assert "stood down" in capsys.readouterr().err
+    hook.rewind(stream)
+    assert hook.done
+    assert capsys.readouterr().err == ""
+
+
+def test_a_stood_down_hook_stays_down_through_a_rewind():
+    hook = _budget_hook(budget=4)
+    delivered = _lone_row(hook, [], 40, retire_at=5)
+    hook.stand_down()
+    hook.rewind(delivered)
+    assert hook.take_first() is None and hook.take_forced() is None
+    assert not hook.closing()

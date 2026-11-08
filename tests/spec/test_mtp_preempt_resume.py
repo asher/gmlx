@@ -607,6 +607,7 @@ def test_preempt_waits_for_a_close_in_flight(monkeypatch):
     host.next()
     assert len(calls) == 2                       # rebuilt after the close
     assert calls[1]["hidden"] is None
+    assert hook.done and not hook.closing()      # the rebuilt batch has none
 
 
 def test_a_close_longer_than_a_block_lands_whole_before_a_preempt(monkeypatch):

@@ -10,6 +10,7 @@ import logging
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.gen.thinking_budget import drop_mtp_hook
 from gmlx.spec.engine import _debug_note
 from gmlx.spec.kv_quant import batch_liftable, lift_single_cache
 from gmlx.upstream.patching import link
@@ -378,6 +379,8 @@ def install_continuous_batch_admission() -> None:
         self.shared_kv_states = None
         self.prompt_tokens = None
         self.model._kq_rebuild_emitted = [int(self._num_tokens[0])]
+        # The rebuilt batch has no hook; the row goes on without it.
+        drop_mtp_hook(hook)
         _debug_note("[mtp] preempt: scalar generation rebuilt for "
                     "continuous batching")
         return True

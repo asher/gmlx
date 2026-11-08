@@ -79,6 +79,11 @@ class _HookCarrier:
     def first_forced_token_id(self, speculative=False):
         return _hook_first_token(self) if speculative else None
 
+    def rewind(self, delivered):
+        hook = self._kq_mtp_hook
+        if hook is not None:
+            hook.rewind(delivered)
+
 
 def _will_queue() -> bool:
     """Whether a row this step inserts joins a running generation batch:
@@ -107,6 +112,22 @@ def _route_first_token(crit) -> None:
         return own(False) if own is not None else None
 
     crit.first_forced_token_id = first_forced_token_id
+
+
+def _route_rewind(crit) -> None:
+    """A requeued row rewinds the criteria and its hook. The hook is read
+    at call time: a multi-row batch may have dropped it."""
+    own = getattr(crit, "rewind", None)
+    if own is None:
+        return
+
+    def rewind(delivered):
+        own(delivered)
+        hook = getattr(crit, "_kq_mtp_hook", None)
+        if hook is not None:
+            hook.rewind(delivered)
+
+    crit.rewind = rewind
 
 
 def _build_hook(rg, args, input_ids):
@@ -196,6 +217,7 @@ def _install_criteria(cls) -> None:
             crit = _HookCarrier()
         else:
             _route_first_token(crit)
+            _route_rewind(crit)
         crit._kq_mtp_hook = hook
         return crit
 
@@ -207,6 +229,8 @@ def _install_criteria(cls) -> None:
 def _lone_hook(ppb):
     """The hook of a one-row MTP prompt batch, or None. Several rows drop
     every hook before the first token, so none forces it."""
+    from gmlx.gen.thinking_budget import drop_mtp_hook
+
     if not _is_mtp(ppb):
         return None
     crits = getattr(ppb, "thinking_budget_criteria", None) or []
@@ -219,11 +243,18 @@ def _lone_hook(ppb):
     if len(crits) == 1 and n_rows == 1:
         return hooks[0]
     for c in crits:
-        if getattr(c, "_kq_mtp_hook", None) is not None:
+        hook = getattr(c, "_kq_mtp_hook", None)
+        if hook is not None:
+            drop_mtp_hook(hook, warn=True)
             c._kq_mtp_hook = None
-    _log.warning(
-        "thinking_budget dropped: not applied when MTP requests batch "
-        "together (%d rows)", n_rows)
+    if n_rows > 1:
+        _log.warning(
+            "thinking_budget dropped: not applied when MTP requests batch "
+            "together (%d rows)", n_rows)
+    else:
+        _log.warning(
+            "thinking_budget dropped: the MTP prompt batch has %d criteria "
+            "for %d row(s)", len(crits), n_rows)
     return None
 
 
