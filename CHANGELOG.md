@@ -68,6 +68,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx serve` a block leaves its fused path only in a step where a request
   has one of its adapters on.
 
+- `/v1/completions` takes token-id prompts, lists of prompts and
+  `add_special_tokens`, and returns `logprobs` in the OpenAI completions
+  shape. See [Text completions](docs/api.md#text-completions).
+- `echo` with `logprobs` on `/v1/completions` returns the logprob of every
+  prompt token, and `max_tokens: 0` scores a prompt without generating.
+- `return_token_ids` on chat returns the prompt and reply token ids, and
+  `/tokenize` and `/detokenize` serve vLLM's shapes. See
+  [Tokens](docs/api.md#tokens).
+
 ### Changed
 
 - `gmlx run`, `gmlx chat` and `gmlx train` now follow the chat template's
@@ -138,8 +147,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   schema after the reasoning, where the schema constrained the reasoning.
 - `TOP_LOGPROBS_K` defaults to 20, so `top_logprobs` returns alternatives
   without setup.
+- `max_tokens: 0` on `/v1/completions` needs `echo`; before, it generated a
+  reply of the default length.
 
 ### Fixed
+
+- The systemone reader no longer reads the rope positions of a live image or
+  video chat request, and reads a kept prefix at its own positions.
 
 - A `response_format` grammar uses the vocabulary of the loaded tokenizer,
   and an unloaded model's grammar vocabulary is freed. After a model reload,

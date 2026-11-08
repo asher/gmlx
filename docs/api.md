@@ -53,7 +53,8 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /v1/chat/completions` | OpenAI chat completions, the main route |
 | `POST /v1/responses` | OpenAI Responses |
 | `POST /v1/messages` | Anthropic Messages. `/v1/messages/count_tokens` counts a body's input tokens. |
-| `POST /v1/completions` | Plain text completion: one string prompt, one choice, no chat template |
+| `POST /v1/completions` | Text completion with no chat template: string or token-id prompts, lists of prompts, echo and logprobs, as [Text completions](#text-completions) shows |
+| `POST /tokenize`, `/detokenize` | A prompt or chat messages as token ids, and token ids as text, as [Tokens](#tokens) shows |
 | `GET /v1/models` | Configured ids and aliases, with markers and [context figures](capacity.md#context-windows-in-the-model-list) |
 | `GET /health` | Liveness, with no API key. `?ready=1` adds readiness, as [Capacity and metrics](capacity.md#readiness-checks) shows. |
 | `GET /v1/metrics` | Live snapshot, or Prometheus text with `?format=prometheus` |
@@ -97,10 +98,7 @@ a JSON body, except the two audio upload routes and image variations, which
 take a form, and image edits and `POST /v1/videos`, which take a form or a
 JSON body.
 
-`/v1/completions` honors the sampling parameters, `seed`, `stop`, `stream`,
-`stream_options` and `profile`. It refuses list prompts, `n` above 1,
-`echo`, `suffix` and `best_of` above 1. It never returns logprobs, and each
-choice carries `"logprobs": null`.
+[Text completions](#text-completions) covers `/v1/completions`.
 
 ## Request features
 
@@ -166,6 +164,7 @@ and 0 or no value counts all of them. The other fields differ by route:
 | `logprobs` | Honored | Ignored | Ignored | Token logprobs, as [Logprobs](#logprobs) shows |
 | `top_logprobs` | Honored | Ignored | Ignored | 0 to 100, capped by `TOP_LOGPROBS_K` |
 | `return_tokens_as_token_ids` | Honored | Ignored | Ignored | Names each logprob token as `token_id:<id>` |
+| `return_token_ids` | Honored | Ignored | Ignored | Returns the prompt's token ids and the reply's, as [Tokens](#tokens) shows |
 | `continue_final_message` | Honored | Ignored | Ignored | Continues the last assistant message, as [Assistant prefill](#assistant-prefill) shows |
 | `add_generation_prompt` | Honored | Ignored | Ignored | `false` renders the messages with no generation prompt |
 | `stop` | Honored | Ignored | Ignored | Anthropic clients use `stop_sequences` |
@@ -175,6 +174,18 @@ and 0 or no value counts all of them. The other fields differ by route:
 | `xtc_probability` | Honored | Honored | Honored | XTC sampling, with `xtc_threshold` |
 | `adapters` | Honored | Honored | Honored | Adapter strengths for the request, by path or file name, as [Adapters](#adapters) shows |
 | `lora` | Honored | Honored | Honored | Adapter strengths by index, in the llama-server form, as [Adapters](#adapters) shows |
+
+`/v1/completions` honors the sampling parameters, `seed`, `profile`,
+`adapters` and `lora`, and these fields:
+
+| Parameter | Notes |
+|-----------|-------|
+| `logprobs` | An integer: the alternatives at each position. Above `TOP_LOGPROBS_K`, a 400. `true` gets a 400. |
+| `echo` | Puts the prompt before the completion. With `logprobs`, also scores the prompt, as [Text completions](#text-completions) shows. |
+| `return_tokens_as_token_ids` | Names each logprob token as `token_id:<id>` |
+| `add_special_tokens` | Honored. Default true. A string prompt is tokenized with the flag; a token-id prompt ignores it. |
+| `stop` | Trims the text at the first stop string. The logprob entries keep every generated token. |
+| `stream_options` | `include_usage` adds a final usage chunk |
 
 ### Adapters
 
@@ -279,7 +290,8 @@ on a model takes about 1.5 s longer, once per process.
 `top_logprobs: N` asks for the N most likely alternatives at each position.
 The server caps the alternatives with the `TOP_LOGPROBS_K` environment
 variable, 0 to 100, which is 20 by default. Chat clamps a larger request to
-the cap. To allow more, raise the cap when you start the server:
+the cap, and `/v1/completions` answers 400. To allow more, raise the cap
+when you start the server:
 
 ```sh
 TOP_LOGPROBS_K=50 gmlx serve --config ~/.config/gmlx/gmlx.yaml
@@ -313,6 +325,118 @@ diffusion model refuses a logprob request with a 400.
 While a request with logprobs is in a batch, each step of that batch takes
 longer, because the server also computes the alternatives.
 
+`/v1/completions` also scores a prompt: with `echo` and `logprobs`, it
+returns the logprob of each prompt token given the tokens before it, as
+[Text completions](#text-completions) shows. A scored value is a prefill
+value. It is close to the logprob of the same token while the model
+generated it, but not equal: the two passes round differently in bf16.
+
+### Text completions
+
+`/v1/completions` sends a prompt to the model with no chat template. A
+prompt is a string, a list of strings, a list of token ids, or a list of
+lists of token ids. Each prompt of a list gets its own choice, with its
+`index`, and `usage` adds up the prompts. A list holds at most as many
+prompts as the queue cap, `GMLX_QUEUE_DEPTH_CAP`, or 64 when the cap is
+off.
+
+The server tokenizes a string prompt with the model's tokenizer and adds
+the model's start token when the model has one. `add_special_tokens: false`
+leaves the start token out. A token-id prompt goes to the model as sent,
+with no start token. Each id must be in the vocabulary and must not be a
+media placeholder, or the request gets a 400.
+
+`logprobs: N` returns the OpenAI completions shape: `tokens`,
+`token_logprobs`, `top_logprobs` and `text_offset`. Each `top_logprobs`
+entry holds the N most likely tokens and the chosen token, so it can hold
+N + 1 keys. Two tokens with the same text share one key, so an entry can
+also hold fewer. `return_tokens_as_token_ids: true` names each token
+`token_id:<id>`, which keeps every key apart. `text_offset` adds up the
+length of each token's name.
+
+`echo: true` puts the prompt before the completion. A string prompt comes
+back as sent, and a token-id prompt as the tokenizer decodes it, special
+tokens included.
+
+`echo` with `logprobs` scores the prompt. The entries start with the
+prompt tokens: the first has `null` in `token_logprobs` and `top_logprobs`,
+and entry i holds the logprob of prompt token i given the tokens before
+it. `max_tokens: 0` returns the prompt entries alone, with
+`finish_reason: "length"` and 0 completion tokens. `max_tokens: 0` needs
+`echo`. With `max_tokens` of 1 or more, the completion follows as usual,
+and the server reads the prompt twice: once to score it and once to
+generate.
+
+```sh
+curl localhost:8080/v1/completions -d '{
+  "model": "qwen3.8-27b-ud-q6",
+  "prompt": "The capital of France is Paris.",
+  "echo": true, "logprobs": 0, "max_tokens": 0
+}'
+```
+
+A scoring request:
+
+- Does not stream. `stream` with `echo` and `logprobs` gets a 400.
+- Holds at most 1,048,576 entries: the prompt tokens times `logprobs` + 1.
+  A larger request gets a 400.
+- Runs on a cache of its own at full precision, whatever `KV_BITS` sets.
+  It does not read or fill the [prompt cache](prompt-cache.md).
+- Runs one at a time on each model, between the steps of the chat
+  requests. The others wait in the order they came, and count toward the
+  queue cap.
+- Gets a 400 on a model that reads token ids and embeddings differently,
+  or that does not return logits for each prompt token. The message names
+  the model.
+
+The route refuses `n` and `best_of` above 1, `suffix`, a list of prompts
+with `stream`, and `logprobs: true`. vLLM's `prompt_logprobs` is ignored,
+and the server log names it.
+
+### Tokens
+
+Chat `return_token_ids: true` returns the token ids the model read and
+wrote: `prompt_token_ids` at the top level, and `token_ids` in each choice.
+With `logprobs`, each id has one logprob entry, in the same order. A stream sends `prompt_token_ids` in
+its first chunk and `token_ids` in each chunk. The prompt ids of a request
+with images, audio or video include media placeholders, which a token-id
+prompt cannot send back. A diffusion model refuses the field with a 400.
+
+`POST /tokenize` takes vLLM's body and returns
+`{"tokens", "count", "max_model_len"}`:
+
+- `prompt`, a string, tokenizes as `/v1/completions` tokenizes it, with
+  `add_special_tokens` (default true).
+- `messages` renders and tokenizes as `/v1/chat/completions` does, with
+  `add_generation_prompt`, `continue_final_message`, `chat_template_kwargs`
+  and `tools`. Messages with media get a 400.
+- `return_token_strs: true` adds `token_strs`, each token's vocabulary
+  entry.
+
+`max_model_len` is the configured context limit, or the model's trained
+context. `POST /detokenize` takes `{"tokens": [ids]}` and returns
+`{"prompt": text}`.
+
+To score a reply token by token at its exact tokens, generate it on chat
+with `return_token_ids: true`. Keep `prompt_token_ids` as P and the
+choice's `token_ids` as R. For a reply that gmlx did not generate,
+`/tokenize` with the `messages` gives P. Then score P and R in one request:
+
+```sh
+curl localhost:8080/v1/completions -d '{
+  "model": "qwen3.8-27b-ud-q6",
+  "prompt": [P..., R...],
+  "echo": true, "logprobs": 0, "max_tokens": 0,
+  "return_tokens_as_token_ids": true
+}'
+```
+
+`token_logprobs[len(P) + i]` is the logprob of `R[i]` given P and the reply
+tokens before it. The model reads the ids it generated, not a new
+tokenization of the reply's text. With `KV_BITS`, the reply was generated
+on a quantized cache and the score runs on a full-precision one, so the
+two values can differ more than bf16 rounding.
+
 ### Assistant prefill
 
 To have the model continue a reply that you started, end `messages` with
@@ -332,6 +456,11 @@ curl localhost:8080/v1/chat/completions -d '{
 The reply holds only the new text, in `content` or `reasoning_content`.
 `usage.prompt_tokens` counts the prefill, and `max_tokens`, `logprobs` and
 `stop` apply to the new tokens only.
+
+A continued message is text, and the server tokenizes it again. Its tokens
+can differ from the ones the model generated, for example at a run of
+spaces or newlines. To continue from exact tokens, send them as a token-id
+prompt, as [Tokens](#tokens) shows.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
