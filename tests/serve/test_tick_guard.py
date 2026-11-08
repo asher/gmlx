@@ -270,6 +270,7 @@ def test_a_rebuilt_row_keeps_its_row_settings(monkeypatch):
     from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
     from gmlx.models.vlm_text_only import TextOnlyModel
     from gmlx.serve.patches.sampling import _FastPositionedSampler
+    from gmlx.serve.replay_prompt import embed_text
     from gmlx.serve.row_sampling import RowSettings
 
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
@@ -295,8 +296,7 @@ def test_a_rebuilt_row_keeps_its_row_settings(monkeypatch):
     for _ in range(3):
         delivered += [r.token for r in gen.next()[1]]
     st.ledger[uid].committed = list(delivered)
-    replay = prompt + delivered
-    st.ledger[uid].kwargs = {"inputs_embeds": lm.input_embeds(mx.array([replay]))}
+    gen._kq_embed_text = lambda ids, settings: embed_text(model, ids, settings)
     tg._rebuild_row(gen, st, uid)
     assert gen._row_settings[uid] is rs
     out = []
@@ -312,7 +312,8 @@ def test_a_rebuilt_row_keeps_its_row_settings(monkeypatch):
 def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch, engine_seams):
     """In rows mode a row the guard retires and requeues keeps its uid, so
     its RowLora stays in the generator's store and each forward after the
-    rebuild publishes the row's own strengths."""
+    rebuild publishes the row's own strengths. The delivered tokens are
+    embedded at those strengths too."""
     import mlx.core as mx
     import numpy as np
 
@@ -321,6 +322,7 @@ def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch, engine_seams):
     from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
     from gmlx.models.vlm_text_only import TextOnlyModel
     from gmlx.serve.lora_request import RowLora
+    from gmlx.serve.replay_prompt import embed_text
     from gmlx.serve.row_sampling import RowSettings
 
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
@@ -357,9 +359,17 @@ def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch, engine_seams):
         for _ in range(3):
             delivered += [r.token for r in gen.next()[1]]
         st.ledger[uid].committed = list(delivered)
-        replay = prompt + delivered
-        st.ledger[uid].kwargs = {"inputs_embeds": lm.input_embeds(mx.array([replay]))}
+        embedded = []
+        outer = model.get_input_embeddings
+
+        def recording_embed(ids, pixel_values=None, **kw):
+            embedded.append(lora_rows.row_scales(0).tolist())
+            return outer(ids, pixel_values, **kw)
+
+        model.get_input_embeddings = recording_embed
+        gen._kq_embed_text = lambda ids, rs: embed_text(model, ids, rs)
         tg._rebuild_row(gen, st, uid)
+        assert embedded == [[0.75]]
         assert gen._row_settings[uid].lora is lora
         seen.clear()
         while gen.has_work:
@@ -545,3 +555,208 @@ def test_mid_close_reads_the_criteria_and_the_hook():
     assert not tg.mid_close(tg._Row([1], 4, {}, None, carrier))
     assert not tg.mid_close(tg._Row([1], 4, {}, None, None))
     assert not tg.mid_close(tg._Row([1], 4, {}, None, object()))
+
+
+# Replays through a real generator: the delivered tokens reach the KV.
+
+_PROMPTS = [[3, 9, 4, 7], [5, 1, 8, 2, 6, 11, 13]]
+
+
+def _replay_engine(monkeypatch, apc=None):
+    import mlx.core as mx
+
+    from gmlx._vendor.mlx_lm.models import llama
+    from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
+    from gmlx.models.vlm_text_only import TextOnlyModel
+    from gmlx.serve.replay_prompt import embed_text
+
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+    mx.random.seed(0)
+    model = TextOnlyModel(llama.Model(llama.ModelArgs(
+        model_type="llama", hidden_size=32, num_hidden_layers=2,
+        intermediate_size=64, num_attention_heads=4, num_key_value_heads=2,
+        rms_norm_eps=1e-5, vocab_size=64)))
+    proc = types.SimpleNamespace(tokenizer=types.SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(model.language_model, proc,
+                            sampler=lambda lp: mx.argmax(lp, axis=-1),
+                            prefill_step_size=None, apc_manager=apc)
+    gen._kq_embed_text = lambda ids, rs: embed_text(model, ids, rs)
+
+    def kwargs(ids):
+        feats = model.get_input_embeddings(mx.array([ids]), None).to_dict()
+        out = {k: v for k, v in feats.items() if v is not None}
+        if apc is not None:
+            out["_apc_semantic_hash"] = 0
+        return out
+    return gen, kwargs
+
+
+def _replay_run(monkeypatch, prompts, *, retire_at=(), stagger=False,
+                apc=None, how="rebuild"):
+    """Drive the rows to the end. At each tick in ``retire_at`` every row
+    is retired and requeued, through ``_rebuild_row`` one by one or through
+    ``_requeue`` as a group. Returns each row's tokens."""
+    gen, kwargs = _replay_engine(monkeypatch, apc)
+    first = prompts[:1] if stagger else prompts
+    uids = gen.insert([list(p) for p in first], 12,
+                      prompt_kwargs=[kwargs(p) for p in first])
+    st = tg._state(gen)
+    tg._harvest_pending(gen, st)
+    got = {u: [] for u in uids}
+    ticks = 0
+    try:
+        while gen.has_work:
+            if stagger and ticks == 1:
+                (u2,) = gen.insert([list(prompts[1])], 12,
+                                   prompt_kwargs=[kwargs(prompts[1])])
+                tg._harvest_pending(gen, st)
+                uids.append(u2)
+                got[u2] = []
+            out = gen.next()[1]
+            tg._harvest_responses(st, out)
+            for r in out:
+                got[r.uid].append(r.token)
+            ticks += 1
+            if ticks in retire_at:
+                live = [u for u in uids if u in st.ledger]
+                if how == "rebuild":
+                    for u in live:
+                        tg._rebuild_row(gen, st, u)
+                else:
+                    for u in live:
+                        gen.remove(u)
+                    assert tg._requeue(gen, st, live) == live
+    finally:
+        gen.close()
+    return got
+
+
+def test_a_rebuilt_row_resumes_where_it_stopped(monkeypatch):
+    ref = _replay_run(monkeypatch, _PROMPTS[:1])
+    assert _replay_run(monkeypatch, _PROMPTS[:1], retire_at=(4,)) == ref
+
+
+def test_rows_with_different_growth_requeue_together(monkeypatch):
+    ref = _replay_run(monkeypatch, _PROMPTS, stagger=True)
+    got = _replay_run(monkeypatch, _PROMPTS, stagger=True, retire_at=(4,),
+                      how="group")
+    assert got == ref
+
+
+def test_a_row_requeued_twice_extends_from_its_prompt(monkeypatch):
+    ref = _replay_run(monkeypatch, _PROMPTS[:1])
+    assert _replay_run(monkeypatch, _PROMPTS[:1], retire_at=(4, 8)) == ref
+
+
+def test_a_replay_that_hits_its_stored_prompt_resumes(monkeypatch):
+    """The prompt is in APC after its prefill, so the replay's lookup hits
+    it, and the suffix it prefills is the delivered tokens."""
+    from gmlx._vendor.mlx_vlm.apc import APCManager
+
+    monkeypatch.setenv("APC_EXACT_MIN_TOKENS", "1")
+    prompt = [list(range(3, 23))]
+    ref = _replay_run(monkeypatch, prompt,
+                      apc=APCManager(num_blocks=64, block_size=4))
+    apc = APCManager(num_blocks=64, block_size=4)
+    picks = []
+    orig = ar.BatchGenerator._apc_pick_for
+
+    def pick(self, seq):
+        out = orig(self, seq)
+        picks.append(out["prefix_len"] if out else 0)
+        return out
+
+    monkeypatch.setattr(ar.BatchGenerator, "_apc_pick_for", pick)
+    assert _replay_run(monkeypatch, prompt, apc=apc, retire_at=(4,)) == ref
+    assert 20 in picks
+
+
+class _Embedder:
+    def __init__(self, fail_for=()):
+        self.fail_for = set(fail_for)
+        self.calls = []
+
+    def __call__(self, ids, settings):
+        import mlx.core as mx
+
+        self.calls.append(list(ids))
+        if ids[0] in self.fail_for:
+            raise RuntimeError("embed broke")
+        return {"inputs_embeds": mx.zeros((1, len(ids), 4))}
+
+
+def _embeds_row(st, uid, prompt, committed):
+    import mlx.core as mx
+
+    row = _ledger(st, uid, prompt, committed)
+    row.kwargs = {"inputs_embeds": mx.zeros((1, len(prompt), 4))}
+    return row
+
+
+@pytest.mark.parametrize("embedder", [None, _Embedder(fail_for=[11])],
+                         ids=["no-embedder", "embedder-raises"])
+def test_a_row_that_cannot_replay_fails_alone(monkeypatch, embedder):
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append((uid, info))])
+    gen = FakeGen([], FakeGB([], []))
+    if embedder is not None:
+        gen._kq_embed_text = embedder
+    st = tg._TickState()
+    _embeds_row(st, 7, [1, 2], [11])
+    _ledger(st, 8, [3], [])                          # nothing delivered
+    _embeds_row(st, 9, [4, 5], [21, 22])
+    done = tg._requeue(gen, st, [7, 8, 9])
+    assert [f[0] for f in failed] == ([7, 9] if embedder is None else [7])
+    assert "replay unsupported" in failed[0][1]["error"]
+    assert done == [u for u in (7, 8, 9) if u not in {f[0] for f in failed}]
+    assert [e[0] for e in gen._unprocessed_sequences] == done
+    assert gen.removed == []
+    assert all(u not in st.ledger for u, _ in failed)
+    if embedder is not None:
+        e9 = gen._unprocessed_sequences[-1]
+        assert e9[0] == 9 and e9[3]["inputs_embeds"].shape == (1, 4, 4)
+
+
+def test_requeue_evaluates_nothing(monkeypatch):
+    """The replay kwargs are a graph: the requeue runs no eval."""
+    import mlx.core as mx
+
+    gen = FakeGen([], FakeGB([], []))
+
+    def lazy(ids, settings):
+        return {"inputs_embeds": mx.ones((1, len(ids), 4)) * 2}
+
+    gen._kq_embed_text = lazy
+    st = tg._TickState()
+    row = _embeds_row(st, 7, [1, 2, 3], [11, 12])
+    row.kwargs["position_ids"] = mx.arange(3)[None]
+    evals = []
+    monkeypatch.setattr(mx, "eval", lambda *a, **k: evals.append(a))
+    monkeypatch.setattr(mx, "async_eval", lambda *a, **k: evals.append(a))
+    assert tg._requeue(gen, st, [7]) == [7]
+    assert evals == []
+
+
+def test_a_requeue_that_raises_fails_the_row(monkeypatch):
+    """Whatever escapes the requeue after the remove fails the row through
+    the callbacks: the governor would drop it with no word."""
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen = FakeGen([], FakeGB([7], [1]))
+    st = tg._TickState()
+    _ledger(st, 7, [1, 2], [11])
+    orig = tg._requeue
+
+    def splice_then_raise(gen, st, uids):
+        orig(gen, st, uids)
+        raise RuntimeError("after the splice")
+
+    monkeypatch.setattr(tg, "_requeue", splice_then_raise)
+    tg._rebuild_row(gen, st, 7)
+    assert gen.removed == [7] and failed == [7]
+    assert gen._unprocessed_sequences == []
+    assert 7 not in st.ledger and 7 not in st.rebuilt

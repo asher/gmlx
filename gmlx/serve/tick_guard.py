@@ -221,9 +221,11 @@ def _pick_victim(gen, st: _TickState, spare=None):
     return rows[0][1]
 
 
-def _fail_row_permanently(gen, st: _TickState, uid, err: str) -> None:
+def _fail_row_permanently(gen, st: _TickState, uid, err: str, *,
+                          remove: bool = True) -> None:
     row = st.ledger.pop(uid, None)
-    gen.remove(uid)
+    if remove:
+        gen.remove(uid)
     info = {
         "prompt_len": len(row.prompt_ids) if row else None,
         "delivered": len(row.committed) if row else None,
@@ -269,6 +271,15 @@ def _requeue(gen, st: _TickState, uids) -> list:
                 # the row had already delivered its budget; it is done
                 st.ledger.pop(uid, None)
                 continue
+        try:
+            kwargs = _replay_kwargs(gen, uid, row)
+        except Exception as e:
+            # A wrong replay is worse than a failed row: the client gets an
+            # error, not a corrupt answer.
+            _log.error("[tick-guard] row %s cannot replay: %s", uid, e)
+            _fail_row_permanently(gen, st, uid, f"replay unsupported: {e}",
+                                  remove=False)
+            continue
         rewind = getattr(row.tc, "rewind", None)
         if rewind is not None:
             # This runs inside the memory-error handler: a failed rewind
@@ -279,7 +290,7 @@ def _requeue(gen, st: _TickState, uids) -> list:
                 _log.warning("[tick-guard] row %s: criteria rewind failed",
                              uid, exc_info=True)
         entries.append((uid, row.prompt_ids + row.committed, remaining,
-                        row.kwargs, _resumed_processors(row.lp, row.committed),
+                        kwargs, _resumed_processors(row.lp, row.committed),
                         row.tc))
         st.rebuilt.add(uid)
         done.append(uid)
@@ -292,9 +303,36 @@ def _requeue(gen, st: _TickState, uids) -> list:
     return done
 
 
+def _replay_kwargs(gen, uid, row):
+    """The row's prompt kwargs for its replay. The ledger keeps the
+    prompt's, so a later requeue extends from them again."""
+    from .replay_prompt import replay_prompt_kwargs
+
+    if not row.committed or not row.kwargs \
+            or row.kwargs.get("inputs_embeds") is None:
+        return row.kwargs
+    embed = getattr(gen, "_kq_embed_text", None)
+    if embed is None:
+        raise ValueError("no text embedder on the generator")
+    settings = (getattr(gen, "_row_settings", None) or {}).get(uid)
+    return replay_prompt_kwargs(
+        row.kwargs, len(row.prompt_ids), row.committed,
+        lambda ids: embed(ids, settings), getattr(gen, "model", None))
+
+
 def _rebuild_row(gen, st: _TickState, uid) -> None:
     gen.remove(uid)
-    _requeue(gen, st, [uid])
+    try:
+        _requeue(gen, st, [uid])
+    except Exception as e:
+        # The row is out of the engine, and the governor drops whatever
+        # escapes its tick: fail the row here, so its client hears of it.
+        _log.error("[tick-guard] row %s requeue failed", uid, exc_info=True)
+        gen._unprocessed_sequences[:] = [
+            q for q in gen._unprocessed_sequences if q[0] != uid]
+        st.rebuilt.discard(uid)
+        _fail_row_permanently(gen, st, uid, f"requeue failed: {e}",
+                              remove=False)
 
 
 def _contain_fault(st: _TickState, e: RuntimeError) -> bool:

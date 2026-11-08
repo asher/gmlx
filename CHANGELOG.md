@@ -282,6 +282,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A thinking-budget close that `gmlx serve` cuts off to free memory now
   finishes when the request resumes, where the model could think on past
   its budget.
+- When `gmlx serve` retires a request to free memory and resumes it, the
+  reply now goes on from where it stopped. Before, it could repeat or skip
+  text, or end every running request with an error.
 
 ## [0.5.4] - 2026-10-29
 

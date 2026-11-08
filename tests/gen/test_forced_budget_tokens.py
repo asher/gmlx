@@ -232,6 +232,7 @@ def _requeue_run(model, prompt, crit, n, cut, *, lost=0):
     reach the ledger, then retire and requeue the row as the tick guard
     does. Returns the delivered tokens and the replay's responses."""
     import gmlx.serve.tick_guard as tg
+    from gmlx.serve.replay_prompt import embed_text
 
     lm = model.language_model
     proc = SimpleNamespace(tokenizer=SimpleNamespace(
@@ -252,8 +253,7 @@ def _requeue_run(model, prompt, crit, n, cut, *, lost=0):
     for _ in range(lost):
         gen.next()
     st.ledger[uid].committed = list(delivered)
-    st.ledger[uid].kwargs = {
-        "inputs_embeds": lm.input_embeds(mx.array([prompt + delivered]))}
+    gen._kq_embed_text = lambda ids, rs: embed_text(model, ids, rs)
     tg._rebuild_row(gen, st, uid)
     rest = []
     while gen.has_work:
