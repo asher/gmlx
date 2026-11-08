@@ -1091,15 +1091,13 @@ hold newlines. Blank lines are skipped. All the sets run in one model
 load. Each prompt renders as an optional system message and one user
 message, with a generation prompt, through the same chat template and
 tokenizer path as `gmlx serve`. Each prompt runs alone, with no KV cache
-kept between prompts. A prompt longer than 2048 tokens runs in chunks of
-2048 tokens, as a prefill does.
+kept between prompts.
 
 The positional argument is a path, or a model id or alias from your server
 config. A config id brings its path, chat template, streaming settings,
 system message, thinking controls, `chat_template_kwargs` and adapters,
-and flags you pass still win. Capture names the entry settings it does not
-apply: the KV cache settings and the `moe_*` settings. A MoE that does not
-fit in memory streams its experts, as in `gmlx run`.
+and flags you pass still win. A MoE that does not fit in memory streams its
+experts, as in `gmlx run`.
 
 `--adapter PATH[:STRENGTH]` captures the model with that GGUF LoRA adapter
 applied, at strength 1 when left out.
@@ -1205,8 +1203,8 @@ With `--reference`, the reference loads first, alone, and scores the text
 into a temporary file. Then it unloads and MODEL loads with the adapters,
 so the two models never share memory. Without it, MODEL scores the
 reference and the points in one load. The temporary file needs about
-127 MB per chunk at a vocabulary of 248,320 and `--ctx 512`. It goes in
-the temporary folder, which `TMPDIR` sets, and gmlx checks the free space
+127 MB per chunk for a 248k vocabulary at `--ctx 512`. It goes in the
+temporary folder, which `TMPDIR` sets, and gmlx checks the free space
 before the reference loads.
 
 The text is cut into chunks of `--ctx` tokens, and each chunk is scored

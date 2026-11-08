@@ -21,6 +21,7 @@ This page covers chat models. Image models take LoRAs too, as
 - [Serving one base with many adapters](#serving-one-base-with-many-adapters)
 - [Mixing adapters per request](#mixing-adapters-per-request)
 - [Adapter format and interop](#adapter-format-and-interop)
+- [Adapters on MoE models](#adapters-on-moe-models)
 - [Limitations](#limitations)
 
 ## Training data
@@ -192,6 +193,12 @@ the model, when the server checks whether the model fits.
 
 ## Mixing adapters per request
 
+Give each adapter its own id, as in
+[Serving one base with many adapters](#serving-one-base-with-many-adapters),
+when clients pick an adapter by model name. Use one id whose requests set
+the strengths, as below, to compare or blend adapters without a new id for
+each mix.
+
 An entry can load several adapters, each at a default strength. List them
 in [`adapters`](config.md#modelsadapters). A bare path runs at strength 1:
 
@@ -262,39 +269,43 @@ A PEFT adapter that trains `embed_tokens` holds a `token_embd.weight`
 pair. gmlx adds its delta to each looked-up row before the model scales the
 rows, where llama.cpp adds it. `gmlx train` writes no such pair.
 
+## Adapters on MoE models
+
+An adapter can change the down projections of MoE experts, but not their
+gate or up projections.
+
+On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE, a
+block takes its slower unfused path only in a step where a request has one
+of the block's adapters on. In `gmlx serve` the other steps keep the fused
+speed. `gmlx run`, `--bench` included, and `gmlx chat` run every step of
+an adapted block unfused.
+
+An expert adapter on such a model needs the experts in memory. A load that
+streams the experts, such as one with `--stream-experts` or a model too
+large for memory, refuses it. To stream them anyway, set
+`GMLX_FUSED_MOE_BLOCK=0`, which loads the blocks unfused:
+
+```sh
+GMLX_FUSED_MOE_BLOCK=0 gmlx serve --config ~/.config/gmlx/gmlx.yaml
+```
+
+On gpt-oss and on native-FP expert stacks, an expert adapter needs
+`GMLX_FUSED_MOE=0`, which loads every MoE block unfused.
+
 ## Limitations
 
 - Only LoRA adapters work. DoRA on a quantized model is not supported.
-- An adapter can change the dense linear layers, the down projections of
-  MoE experts and the token embedding. Loading refuses an adapter that
-  changes the gate or up projections of experts. It also refuses expert
-  weights on gpt-oss and on native-FP expert stacks, which
-  `GMLX_FUSED_MOE=0` loads unfused.
-- Loading refuses a token embedding pair before the model loads on a model
-  that uses its token embedding as the output head, such as Gemma 4, on a
-  Hadamard-rotated embedding and on Granite Switch. llama.cpp cannot apply
-  the pair on these models either. It also refuses a
-  `per_layer_token_embd.weight` pair, which llama.cpp loads but never
-  applies.
-- On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE, a
-  block runs its slower unfused path only in a step where a request has one
-  of the block's adapters on. In `gmlx serve` the other steps keep the
-  fused speed. `gmlx run`, its `--bench` included, and `gmlx chat` run
-  every step of an adapted block unfused.
-- An adapter that changes expert weights on such a model needs the experts
-  in memory. A load that streams the experts refuses it, with
-  `stream: experts`, `--stream-experts`, `--stream-cpu`, or a model too
-  large for memory. Set `GMLX_FUSED_MOE_BLOCK=0` to load the blocks unfused
-  and stream them.
+- An adapter can change the dense linear layers, the token embedding and
+  the [expert down projections](#adapters-on-moe-models).
+- A token embedding pair needs a model with its own output head, so Gemma 4
+  and a few other models refuse it before they load.
 - Adapters work on text models only, so `--adapter` does not combine with
   `--mmproj`.
 - `gmlx run` and `gmlx chat` apply an entry's adapters at the entry's
   strengths. In `gmlx chat`, `/adapter S` sets every adapter to S.
-- A drafter for speculative decoding uses the model's output head and
-  token embedding without an adapter on them, as llama.cpp's drafters do.
-  Only the draft ignores an `output.weight` or `token_embd.weight` pair,
-  which can lower the share of accepted drafts. The verify step uses the
-  adapters, so the output is the same.
+- A speculative drafter runs without the adapters' output head and token
+  embedding pairs, which can lower the share of accepted drafts. The output
+  stays the same.
 - An image model that borrows a chat model as its text encoder runs the
   encoder with every adapter off.
 - `--grad-checkpoint` is refused on Kimi K3 and DeepSeek-V4.1.

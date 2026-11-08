@@ -22,6 +22,8 @@ sets up the server is in [Configuration](config.md).
   - [Thinking budget](#thinking-budget)
   - [Structured output](#structured-output)
   - [Logprobs](#logprobs)
+  - [Text completions](#text-completions)
+  - [Tokens](#tokens)
   - [Assistant prefill](#assistant-prefill)
   - [Media in requests](#media-in-requests)
   - [Word timestamps in chat](#word-timestamps-in-chat)
@@ -243,10 +245,10 @@ too. `-1` takes the budget of the model's profile or overrides, of
 `gmlx serve --thinking-budget`, or of `MLX_VLM_THINKING_BUDGET`, in that
 order.
 
-The server tokenizes the message alone, with special tokens read as tokens,
-as llama-server does. Without a message, the server writes a newline before
-the end marker, and on a model with a built-in drafter a budget above 0
-writes a short sentence that says the budget ran out. The message and the end marker are part of
+Special tokens in the message are read as tokens. Without a message, the
+server writes a newline before the end marker, and on a model with a
+built-in drafter a budget above 0 writes a short sentence that says the
+budget ran out. The message and the end marker are part of
 `reasoning_content`, and they count against `max_tokens`.
 
 The built-in drafters, the MTP heads, DFlash, DFlash2, DSpark and
@@ -298,12 +300,11 @@ TOP_LOGPROBS_K=50 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ```
 
 The values are the model's own distribution: the log-softmax of its raw
-logits. The model writes its logits in 16-bit floats, and the server takes
-the log-softmax in 32-bit floats. Logit bias, penalties, XTC, structured
-output and the profile's sampling values change which token the server
-samples, but not the logprobs. A token that the thinking budget forces in
-reports the logprob that the model gave it. The token that ends the reply
-gets its entry too. A logprob below -9999 comes back as -9999.0.
+logits. Logit bias, penalties, XTC, structured output and the profile's
+sampling values change which token the server samples, but not the
+logprobs. A token that the thinking budget forces in reports the logprob
+that the model gave it. The token that ends the reply gets its entry too.
+A logprob below -9999 comes back as -9999.0.
 
 `bytes` holds the token's raw bytes from the vocabulary. A multi-byte
 character can split across tokens, and each of those tokens returns only
@@ -397,10 +398,11 @@ and the server log names it.
 
 Chat `return_token_ids: true` returns the token ids the model read and
 wrote: `prompt_token_ids` at the top level, and `token_ids` in each choice.
-With `logprobs`, each id has one logprob entry, in the same order. A stream sends `prompt_token_ids` in
-its first chunk and `token_ids` in each chunk. The prompt ids of a request
-with images, audio or video include media placeholders, which a token-id
-prompt cannot send back. A diffusion model refuses the field with a 400.
+With `logprobs`, each id has one logprob entry, in the same order. A
+stream sends `prompt_token_ids` in its first chunk and `token_ids` in each
+chunk. The prompt ids of a request with images, audio or video include
+media placeholders, which a token-id prompt cannot send back. A diffusion
+model refuses the field with a 400.
 
 `POST /tokenize` takes vLLM's body and returns
 `{"tokens", "count", "max_model_len"}`:
@@ -485,23 +487,8 @@ A request to any other model gets a 400. So does a last message with
 [assistant](assistant.md#served-assistants) without `tools` refuses both
 fields, because its turns build their own prompt.
 
-gmlx differs from llama-server in these ways:
-
-- Prefill is opt-in. llama-server continues a last assistant message by
-  default, and gmlx continues it only when the request sets
-  `continue_final_message`. With that field, llama-server continues a last
-  message of any role, and gmlx needs an assistant message.
-- gmlx merges all system messages into one system message at the start.
-  llama-server keeps each one where the client sent it.
-- gmlx gives the template a system message as one string, also when the
-  client sends it as text parts. llama-server can give the template the
-  parts, and a Gemma 4 template renders parts with a space before the end of
-  the turn.
-- The reply holds only the new text. A llama-server reply that is not
-  streamed also holds the prefill.
-- llama-server turns thinking on when the template has a switch, and gmlx
-  keeps the template's default. Send `chat_template_kwargs` with
-  `enable_thinking` to get the same prompt from both servers.
+[Assistant prefill](migrating.md#assistant-prefill) in the migration guide
+lists how gmlx differs from llama-server here.
 
 ### Media in requests
 

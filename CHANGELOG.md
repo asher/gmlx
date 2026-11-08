@@ -70,7 +70,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run fused, such as Qwen3.5 and Qwen3.6 MoE, when they run in memory. In
   `gmlx serve` a block leaves its fused path only in a step where a request
   has one of its adapters on.
-
 - `/v1/completions` takes token-id prompts, lists of prompts and
   `add_special_tokens`, and returns `logprobs` in the OpenAI completions
   shape. See [Text completions](docs/api.md#text-completions).
@@ -129,7 +128,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Logprobs are the log-softmax of the raw logits, before logit bias,
   penalties and the other processors, as in llama.cpp and vLLM. A profile's
   sampling values and the GGUF's sampling keys no longer change them.
-- `TOP_LOGPROBS_K` allows up to 100 alternatives, where it stopped at 20.
+- `TOP_LOGPROBS_K` defaults to 20 and allows up to 100, so `top_logprobs`
+  returns alternatives without setup. Before, it defaulted to 0 and stopped
+  at 20.
 - A thinking budget of N lets N reasoning tokens through, as llama-server
   does, where it let N+1 through, and the prompt's reasoning after its last
   start marker counts against it.
@@ -148,8 +149,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   false` that the template does not turn off (GLM-5, K2 Horizon, Kimi K2.5 and
   K3, and gpt-oss, Beam and Muse with `family_defaults: false`) gets the
   schema after the reasoning, where the schema constrained the reasoning.
-- `TOP_LOGPROBS_K` defaults to 20, so `top_logprobs` returns alternatives
-  without setup.
 - `max_tokens: 0` on `/v1/completions` needs `echo`; before, it generated a
   reply of the default length.
 - Requires mlx-kquant 0.5.10.
