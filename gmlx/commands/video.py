@@ -259,8 +259,9 @@ def _attention_flag(p: argparse.ArgumentParser) -> None:
     from gmlx.video.registry import ATTENTION
 
     p.add_argument("--attention", choices=ATTENTION, default=None,
-                   help="The DiT's attention. int8 is lossy and needs an "
-                        "M5 or newer (default: the entry's, else dense).")
+                   help="The DiT's attention. int8 runs on an M5 or newer, "
+                        "faster at full size and lossy (default: the "
+                        "entry's, else dense).")
 
 
 def _attention(a) -> str:

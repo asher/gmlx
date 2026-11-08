@@ -174,7 +174,8 @@ gmlx video generate h3 --attention int8 --prompt "..."
 products. It is opt-in and lossy: the clip differs from the one that the
 default dense attention makes from the same seed. The text encoder and
 the VAEs run as before. It needs an M5 or newer, and it does not run
-with `fasth3`.
+with `fasth3`. At the full 1344x768 size a step takes less time than with
+dense attention. On smaller clips the gain is small.
 
 To run every clip of an entry this way, set `attention: int8` in its
 [`defaults`](config.md#video_modelsdefaults). A job of `gmlx serve`

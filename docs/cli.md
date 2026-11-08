@@ -1430,7 +1430,7 @@ time.
 | `MODEL`, positional | Required | Generate with the `video_models` entry of this id, or this DiT GGUF. |
 | `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
 | `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant, such as `fl2va-turbo4` for a merged Turbo file gmlx does not know. |
-| `--attention {dense,int8}` | The entry's, else `dense` | Run the DiT's attention as this kind. `int8` is lossy and needs an M5 or newer, as [Int8 attention](video.md#int8-attention) says. |
+| `--attention {dense,int8}` | The entry's, else `dense` | Run the DiT's attention as this kind. `int8` needs an M5 or newer, is faster at full size and is lossy, as [Int8 attention](video.md#int8-attention) says. |
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--seconds S` | The entry's, else `5` | Make a clip this long, rounded up to whole frames as above. |
