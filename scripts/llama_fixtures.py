@@ -19,6 +19,8 @@ the old fixture names against its recorded sha256.
   GMLX_LLAMA_SERVER=.../llama-server python scripts/llama_fixtures.py \\
       continuation Qwen3.5-9B-Q4_K_M.gguf gemma-4-12B-it-Q6_K.gguf \\
       SmolLM2-135M-Instruct-Q8_0.gguf
+  GMLX_LLAMA_SERVER=.../llama-server python scripts/llama_fixtures.py \\
+      completion-ids SmolLM2-135M-Instruct-Q8_0.gguf Qwen3.5-9B-Q4_K_M.gguf
 """
 
 from __future__ import annotations
@@ -816,6 +818,97 @@ def cmd_embedding_lora(args) -> int:
     return 0
 
 
+# completion-ids: llama-server greedy ids of an id prompt, and the score of
+# each reply token read from a prefill of its prefix.
+COMPLETION_IDS_FIXTURE = FIXTURES / "llama_completion_ids.json"
+COMPLETION_IDS_GGUFS = {"SmolLM2-135M-Instruct-Q8_0.gguf": "smollm2",
+                        "Qwen3.5-9B-Q4_K_M.gguf": "qwen35_9b"}
+COMPLETION_IDS_PROMPT = "The three largest rivers in Europe are"
+# The greedy choice at each step must lead the runner-up by this much, so
+# that a backend's rounding cannot change the ids a test compares.
+COMPLETION_IDS_LEAD = 0.1
+
+
+def cmd_completion_ids(args) -> int:
+    """For each GGUF: the prompt tokenized by llama-server with its special
+    tokens, the greedy reply of ``/completion`` on those ids (``n_predict``
+    8, ``n_probs`` 5), and the logprob of each reply token from a
+    ``/completion`` on the ids before it (``n_predict`` 1, ``n_probs`` 1).
+    llama-server has no echo; the second read is the prefill score that
+    gmlx's echo gives. The recorded run is the CPU backend."""
+    n_predict, top_k = 8, 5
+    tool = binary("llama-server")
+    ggufs = [Path(p).expanduser().resolve() for p in args.gguf]
+    for p in ggufs:
+        if not p.is_file():
+            raise SystemExit(f"error: no such file: {p}")
+        if p.name not in COMPLETION_IDS_GGUFS:
+            raise SystemExit(
+                f"error: {p.name} is not a completion-ids GGUF; the script "
+                f"knows {', '.join(sorted(COMPLETION_IDS_GGUFS))}")
+    out = Path(args.out)
+    check_recorded_files(out, ggufs)
+    commit = llama_commit(tool)
+    ident = _image_fixtures().file_identity
+    portable = _image_fixtures().portable_argv
+    argvs, files, rows = {}, {}, []
+    for gguf in ggufs:
+        label = COMPLETION_IDS_GGUFS[gguf.name]
+        run = f"llama-server/{label}"
+        port = str(free_port())
+        argv = [tool, "-m", str(gguf), "--device", "none", "-ngl", "0",
+                "--host", "127.0.0.1", "--port", port, "-c", "512", "-np", "1",
+                "--no-warmup", "--seed", "0"]
+        server = LlamaServer(argv, Path(args.log_dir) / f"completion-ids-{label}.log")
+
+        def complete(ids, n, k):
+            status, reply = post_json(f"http://127.0.0.1:{port}/completion", {
+                "prompt": ids, "n_predict": n, "temperature": 0.0,
+                "n_probs": k, "cache_prompt": False})
+            if status != 200:
+                raise SystemExit(f"error: {label}: HTTP {status}: {reply}")
+            got = reply["completion_probabilities"]
+            if len(got) != n:
+                raise SystemExit(f"error: {label} stopped after {len(got)} of "
+                                 f"{n} tokens; pick a longer prompt")
+            return got
+
+        try:
+            server.wait_ready(args.start_timeout)
+            status, reply = post_json(f"http://127.0.0.1:{port}/tokenize", {
+                "content": args.prompt, "add_special": True})
+            if status != 200:
+                raise SystemExit(f"error: {label} tokenize: HTTP {status}")
+            prompt_ids = [int(t) for t in reply["tokens"]]
+            gen = complete(prompt_ids, n_predict, top_k)
+            ids = [int(e["id"]) for e in gen]
+            top = [[[int(t["id"]), float(t["logprob"])] for t in e["top_logprobs"]]
+                   for e in gen]
+            for k, t in enumerate(top):
+                if t[0][0] != ids[k] or t[0][1] - t[1][1] < COMPLETION_IDS_LEAD:
+                    raise SystemExit(
+                        f"error: {label} step {k}: the greedy token leads by "
+                        f"{t[0][1] - t[1][1]:.3g}; pick another prompt")
+            scores = []
+            for k in range(n_predict):
+                (e,) = complete(prompt_ids + ids[:k], 1, 1)
+                if int(e["id"]) != ids[k]:
+                    raise SystemExit(f"error: {label} step {k}: the prefill "
+                                     "read chose another token than decode")
+                scores.append(float(e["logprob"]))
+        finally:
+            server.stop()
+        argvs[run] = portable([a if a != port else "PORT" for a in argv])
+        files[gguf.name] = ident(gguf)
+        rows.append({"run": run, "gguf": gguf.name, "prompt": args.prompt,
+                     "prompt_ids": prompt_ids, "ids": ids,
+                     "logprobs": [float(e["logprob"]) for e in gen],
+                     "top": top, "prefill_logprobs": scores})
+    write_fixture(out, {"llama_cpp": commit, "created": now(), "argv": argvs,
+                        "files": files, "backend": "cpu", "rows": rows})
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -891,6 +984,19 @@ def main(argv: list[str] | None = None) -> int:
     el.add_argument("--log-dir", default=".",
                     help="where each run's output log goes")
     el.set_defaults(fn=cmd_embedding_lora)
+    ci = sub.add_parser(
+        "completion-ids",
+        help="llama-server greedy ids and top-k of an id prompt, and the "
+        "prefill score of each reply token")
+    ci.add_argument("gguf", nargs="+",
+                    help="the GGUFs to read: " + ", ".join(sorted(COMPLETION_IDS_GGUFS)))
+    ci.add_argument("--prompt", default=COMPLETION_IDS_PROMPT)
+    ci.add_argument("--out", default=str(COMPLETION_IDS_FIXTURE))
+    ci.add_argument("--start-timeout", type=float, default=600.0,
+                    help="seconds to wait for llama-server to load a GGUF")
+    ci.add_argument("--log-dir", default=".",
+                    help="where each server's output log goes")
+    ci.set_defaults(fn=cmd_completion_ids)
     args = ap.parse_args(argv)
     return args.fn(args)
 
