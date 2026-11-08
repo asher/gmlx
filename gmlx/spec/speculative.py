@@ -36,6 +36,7 @@ from gmlx.cache.kv_append import release as _release_kv
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
 from gmlx.gen.logprobs import RoundLogprobs
+from gmlx.gen.thinking_budget import drop_mtp_hook
 from gmlx.serve.row_sampling import RowSampler
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
@@ -3373,6 +3374,7 @@ def _owned_decode_rounds_batch(
         if getattr(thinking_hook, "budget", None) is not None:
             print(f"[thinking-budget] dropped: {reason}",
                   file=sys.stderr, flush=True)
+        drop_mtp_hook(thinking_hook)
         thinking_hook = None
         forced_queue.clear()
 
@@ -3537,6 +3539,7 @@ def _owned_decode_rounds_batch(
                     print("[thinking-budget] dropped: request joined a "
                           "batched MTP generation", file=sys.stderr,
                           flush=True)
+                drop_mtp_hook(inj_hook, warn=True)
 
                 inj_offset = _mtp_cache_offset_max(inj["prompt_cache"])
                 # Entries without per-row budgets (older producers, test
@@ -4212,6 +4215,7 @@ def owned_server_rounds_batch(
     # its request.
     _pop_copy_prompt(prompt_cache)
     if thinking_hook is not None and B != 1:
+        drop_mtp_hook(thinking_hook)
         thinking_hook = None
     elif thinking_hook is not None:
         thinking_hook.observe(b[0])  # the already-emitted first bonus

@@ -222,3 +222,268 @@ def test_single_stream_thinking_off_keeps_the_model_first_token(model):
     out = _stream(model, SPENT, crit, 1, processors=_ban())
     assert out[0][0] == plain[0][0]
     assert out[0][0] not in MESSAGE + [NL, END]
+
+
+# --- A row requeued in the middle of its forced close ---------------------
+
+
+def _requeue_run(model, prompt, crit, n, cut, *, lost=0):
+    """Deliver ``cut`` tokens, run ``lost`` more ticks whose tokens never
+    reach the ledger, then retire and requeue the row as the tick guard
+    does. Returns the delivered tokens and the replay's responses."""
+    import gmlx.serve.tick_guard as tg
+    from gmlx.serve.replay_prompt import embed_text
+
+    lm = model.language_model
+    proc = SimpleNamespace(tokenizer=SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(lm, proc, prefill_step_size=None, logprobs_cap=_K)
+    (uid,) = gen.insert(
+        [prompt], n, thinking_budget_criteria=[crit],
+        logits_processors=[_ban()],
+        row_settings=[RowSettings(logprobs=True, top_k=_K)],
+        prompt_kwargs=[{"inputs_embeds": lm.input_embeds(mx.array([prompt]))}])
+    st = tg._state(gen)
+    tg._harvest_pending(gen, st)
+    delivered = []
+    if cut == 0:
+        assert gen.next()[1] == []      # the prefill: no token out yet
+    while len(delivered) < cut:
+        delivered += [r.token for r in gen.next()[1]]
+    for _ in range(lost):
+        gen.next()
+    st.ledger[uid].committed = list(delivered)
+    gen._kq_embed_text = lambda ids, rs: embed_text(model, ids, rs)
+    tg._rebuild_row(gen, st, uid)
+    rest = []
+    while gen.has_work:
+        rest += gen.next()[1]
+    gen.close()
+    return delivered, rest
+
+
+@pytest.mark.parametrize("cut", [2, 3, 4, 5],
+                         ids=["MESSAGE0", "MESSAGE1", "MESSAGE2", "END"])
+def test_a_requeue_mid_close_keeps_the_forced_end_marker(model, cut):
+    """The cut leaves one forced id outstanding. The rewound criteria owes
+    it, the replay's first token is it, and the close lands once."""
+    uncut = [r.token for r in _decode(model, _criteria("Go now"), 10)]
+    crit = _criteria("Go now")
+    delivered, rest = _requeue_run(model, PROMPT, crit, 10, cut)
+    whole = delivered + [r.token for r in rest]
+    assert whole[:2] == uncut[:2]
+    assert whole[2:6] == MESSAGE + [END]
+    assert whole.count(END) == 1
+    assert crit._forced_closes == 1
+    # The replayed id reports the model's raw logprob at the replay's last
+    # position, and the top-k is the model's distribution there.
+    first = rest[0]
+    assert first.token == whole[cut]
+    ref = _raw_logprobs(model, PROMPT + delivered)[-1]
+    assert first.token_logprob == pytest.approx(ref[first.token], abs=3e-2)
+    want = np.argsort(-ref)[:_K].tolist()
+    assert sorted(t for t, _ in first.top_logprobs) == sorted(want)
+
+
+def test_a_spent_row_retired_before_its_first_token_replays_the_close(model):
+    crit = _criteria("Go now", prompt=SPENT)
+    delivered, rest = _requeue_run(model, SPENT, crit, 6, 0)
+    assert delivered == []
+    assert [r.token for r in rest][:4] == MESSAGE + [END]
+    assert crit._forced_closes == 1
+
+
+def test_a_lost_tick_replays_the_dropped_id(model):
+    """A tick fed the criteria and never reached the client. The replay
+    sends that id again, and the close is whole once."""
+    crit = _criteria("Go now")
+    delivered, rest = _requeue_run(model, PROMPT, crit, 10, 3, lost=1)
+    whole = delivered + [r.token for r in rest]
+    assert rest[0].token == MESSAGE[1]
+    assert whole[2:6] == MESSAGE + [END] and whole.count(END) == 1
+
+
+_STATE = ("in_thinking", "thinking_token_count", "_force_left",
+          "_forced_index", "_steering", "_steer_left", "_spent", "_strikes",
+          "_forced_closes", "budget_exceeded", "_tail", "done")
+
+
+def _snap(c):
+    return {k: (list(v) if isinstance(v, list) else v)
+            for k, v in ((k, getattr(c, k)) for k in _STATE)}
+
+
+def _feed(c, model_tokens, n):
+    """The batch loop: the first token (maybe forced), then each emitted
+    token fed back with the forced id swapped in. The emitted tokens and
+    the id outstanding after them."""
+    src = iter(model_tokens)
+    first = c.first_forced_token_id()
+    nxt = first if first is not None else next(src)
+    out, f = [], first
+    while len(out) < n:
+        out.append(nxt)
+        c(nxt)
+        f = c.pop_forced_token_id()
+        nxt = f if f is not None else next(src)
+    return out, f
+
+
+_MODEL = [30 + (i % 8) for i in range(400)]
+
+
+@pytest.mark.parametrize("prompt", [PROMPT, SPENT])
+def test_a_rewound_criteria_matches_the_live_one_at_every_cut(prompt):
+    for n in range(1, 12):
+        live = _criteria("Go now", prompt=prompt)
+        out, owed = _feed(live, _MODEL, n)
+        ref = _snap(live)
+        assert live.closing() == (owed is not None), n
+        live.rewind(out)
+        assert _snap(live) == ref, n
+        assert live.first_forced_token_id() == owed, n
+        assert live.first_forced_token_id() is None   # asked once
+
+
+def test_a_stand_down_during_a_rewind_prints_nothing(capsys):
+    """A model that reopens its block after every close stands the
+    budget down. Replaying that prints the line once, live, not again."""
+    reopen = [START] * 40
+    live = _criteria(None)
+    out, _ = _feed(live, [30, 31] + reopen, 40)
+    assert live.done
+    assert "stood down" in capsys.readouterr().err
+    ref = _snap(live)
+    live.rewind(out)
+    assert _snap(live) == ref
+    assert capsys.readouterr().err == ""
+
+
+def test_the_resume_slot_owes_none_once_without_the_budget_test():
+    """A spent-budget row rewound after its close landed owes nothing: its
+    replay's first token is the model's. A criteria never rewound still
+    runs the spent-budget test."""
+    landed = _criteria("Go now", prompt=SPENT)
+    out, owed = _feed(landed, _MODEL, 6)
+    assert out[:4] == MESSAGE + [END] and owed is None
+    landed.rewind(out)
+    assert landed.first_forced_token_id() is None
+    fresh = _criteria("Go now", prompt=SPENT)
+    assert fresh.first_forced_token_id() == MESSAGE[0]
+
+
+def test_closing_is_true_while_a_forced_id_is_out():
+    for n in range(1, 9):
+        c = _criteria("Go now")
+        out, owed = _feed(c, _MODEL, n)
+        assert c.closing() == (2 <= n <= 5), (n, out)
+
+
+# A contained memory error during a forced close: the close lands once.
+
+_MEM = "[metal::malloc] Attempting to allocate 1 bytes (test)"
+
+
+class _Shot:
+    def __init__(self):
+        self.armed = False
+        self.fired = 0
+
+
+class _Mx:
+    """ar's mx, with one throw at an eval called from a named function."""
+
+    def __init__(self, real, shot, *where, name="async_eval"):
+        self._real, self._shot, self._where, self._name = real, shot, where, name
+
+    def __getattr__(self, n):
+        import sys
+
+        fn = getattr(self._real, n)
+        if n != self._name:
+            return fn
+
+        def call(*a, **k):
+            shot = self._shot
+            if (shot.armed and not shot.fired
+                    and sys._getframe(1).f_code.co_name in self._where):
+                shot.fired += 1
+                raise RuntimeError(_MEM)
+            return fn(*a, **k)
+        return call
+
+
+def _guarded_close(model, monkeypatch, prompt, n, shot=None, arm=None,
+                   eval_every=0):
+    """The row through a guarded generator. ``arm(delivered)`` says when to
+    arm ``shot``. Returns the tokens and the criteria."""
+    import gmlx.eval_guard as eg
+    import gmlx.serve.tick_guard as tg
+    from gmlx.serve.replay_prompt import embed_text
+    from gmlx.upstream.patching import root
+
+    monkeypatch.delenv("GMLX_TICK_GUARD", raising=False)
+    monkeypatch.delenv("GMLX_OOM_INJECT", raising=False)
+    monkeypatch.setattr(eg, "drain_for", lambda site: None)
+    monkeypatch.setattr(ar.BatchGenerator, "_next",
+                        root(ar.BatchGenerator._next))
+    assert tg.install_tick_guard()
+    crit = _criteria("Go now", prompt=prompt)
+    lm = model.language_model
+    proc = SimpleNamespace(tokenizer=SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(lm, proc, prefill_step_size=None, logprobs_cap=_K)
+    gen._kq_embed_text = lambda ids, rs: embed_text(model, ids, rs)
+    if eval_every:
+        gen._cache_eval_interval = eval_every
+    gen.insert([prompt], n, thinking_budget_criteria=[crit],
+               logits_processors=[_ban()],
+               row_settings=[RowSettings(logprobs=True, top_k=_K)],
+               prompt_kwargs=[{"inputs_embeds": lm.input_embeds(
+                   mx.array([prompt]))}])
+    out = []
+    try:
+        for _ in range(8 * n):
+            if not gen.has_work:
+                break
+            if shot is not None and arm(out):
+                shot.armed = True
+            out += [r.token for r in gen.next()[1]]
+    finally:
+        gen.close()
+    return out, crit
+
+
+def _before_end(out):
+    return out[-len(MESSAGE):] == MESSAGE
+
+
+@pytest.mark.parametrize("case", ["C", "E"])
+def test_a_contained_error_on_the_end_marker_tick_closes_once(
+        model, monkeypatch, case):
+    """C: the decode step throws after its sample. E: the cache eval after
+    it throws. Either way on the tick that delivers the end marker."""
+    ref, _ = _guarded_close(model, monkeypatch, PROMPT, 10)
+    shot = _Shot()
+    where = ("_step",) if case == "C" else ("_next", "_next_after_decode")
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, *where))
+    got, crit = _guarded_close(model, monkeypatch, PROMPT, 10, shot=shot,
+                               arm=_before_end,
+                               eval_every=1 if case == "E" else 0)
+    assert shot.fired == 1
+    assert got == ref
+    assert got.count(END) == 1 and crit._forced_closes == 1
+
+
+def test_a_spent_row_whose_prefill_throws_closes_once(model, monkeypatch):
+    """P: the prompt batch's first eval throws after its first-token force
+    asked the criteria. The row is rebuilt and the close lands once."""
+    ref, _ = _guarded_close(model, monkeypatch, SPENT, 6)
+    assert ref[:4] == MESSAGE + [END]
+    shot = _Shot()
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "generate"))
+    got, crit = _guarded_close(model, monkeypatch, SPENT, 6, shot=shot,
+                               arm=lambda out: True)
+    assert shot.fired == 1
+    assert got == ref
+    assert got.count(END) == 1 and crit._forced_closes == 1

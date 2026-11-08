@@ -1030,3 +1030,53 @@ def test_budget_route_marks_generation_routes_only():
     asyncio.run(count.endpoint(request=None))
     assert seen["route"] is False
     assert sp_sampling._generation_route.get() is False
+
+
+def test_a_rewind_reaches_the_mtp_hook(_first_token):
+    """A requeued MTP row rewinds its criteria and the hook it carries.
+    The first id went out and was never observed, so the replay owes the
+    second."""
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    close = list(hook.forced_ids)
+    ar.PromptProcessingBatch.generate(_prompt_batch([crit]), None)
+    assert record == [close[0]]
+    crit.rewind([close[0]])
+    assert hook._own == len(close) - 1
+    assert hook.take_first() == close[1]
+    crit._kq_mtp_hook = None          # dropped since: read at call time
+    crit.rewind([])
+
+
+def test_a_hook_carrier_forwards_rewind():
+    seen = []
+    carrier = sp_mtp._HookCarrier()
+    carrier.rewind([1])               # no hook: nothing to do
+    carrier._kq_mtp_hook = types.SimpleNamespace(rewind=seen.append)
+    carrier.rewind([1, 2])
+    assert seen == [[1, 2]]
+
+
+def test_a_criteria_row_mismatch_names_itself(_first_token, caplog):
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    ppb = _prompt_batch([crit, crit])
+    ppb.uids = ["u0"]
+    with caplog.at_level("WARNING", logger=sp_mtp.__name__):
+        ar.PromptProcessingBatch.generate(ppb, None)
+    assert "the MTP prompt batch has 2 criteria for 1 row(s)" in caplog.text
+    assert "batch together" not in caplog.text
+    assert hook.done
+
+
+def test_a_dropped_hook_that_owes_a_close_says_so(_first_token, caplog):
+    cls, ar, record = _first_token
+    crits = [_chain_criteria(cls), _chain_criteria(cls)]
+    hooks = [c._kq_mtp_hook for c in crits]
+    assert hooks[0].take_forced()          # its close is in flight
+    with caplog.at_level("WARNING"):
+        ar.PromptProcessingBatch.generate(_prompt_batch(crits), None)
+    assert caplog.text.count("in the middle of its forced close") == 1
+    assert all(h.done and not h.closing() for h in hooks)

@@ -262,8 +262,26 @@ def _advance(rg, run: _StepJob) -> bool:
         run.rqueue.put(_JobError(e if isinstance(e, JobCancelled)
                                  else JobCancelled(str(e))))
     except Exception as e:  # noqa: BLE001 - forwarded to the waiting caller
+        _reclaim_after(e)
         run.rqueue.put(_JobError(e))
     return True
+
+
+def _reclaim_after(e: BaseException) -> None:
+    """A step hit a memory error: drain the engine and free the
+    allocator's cache, as the tick guard does after a failed tick, so the
+    next tick does not meet the same pressure."""
+    from gmlx.eval_guard import drain_for
+    from gmlx.serve.tick_guard import is_memory_error
+
+    if not is_memory_error(e):
+        return
+    try:
+        drain_for("engine-job")
+        mx.clear_cache()
+    except Exception:  # noqa: BLE001 - the caller still gets the first error
+        _log.warning("engine job: reclaim after a memory error failed",
+                     exc_info=True)
 
 
 def _install_step_jobs() -> None:

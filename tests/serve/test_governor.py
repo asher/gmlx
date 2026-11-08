@@ -294,6 +294,89 @@ def test_orange_retire_when_caches_dry(rig, monkeypatch):
     assert gov._STATS["orange_retires"] == 1
 
 
+class _Closing:
+    """A criteria with a forced close in flight while ``on`` is True."""
+
+    def __init__(self, on=True):
+        self.on = on
+
+    def closing(self):
+        return self.on
+
+
+def _dry_orange(rig, monkeypatch, tc0, tc1):
+    """test_orange_retire_when_caches_dry's setup with the rows' criteria
+    given: row 0 is the larger."""
+    monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
+    gov.register_cache("dry", lambda: 0, lambda f: 0)
+    gen = FakeGen(rows=2, rate=2e9, live=30e9)
+    st = gov._state(gen)
+    st.obs_delta_ema = 1e9
+    st.evict_fraction = 1.0
+    tg_st = tg._state(gen)
+    tg_st.ledger[0] = tg._Row([1] * 8, 64, {}, None, tc0)
+    tg_st.ledger[1] = tg._Row([1] * 4, 64, {}, None, tc1)
+    gen.apc_manager = types.SimpleNamespace(disk=object())
+    rig["head"] = 44e9
+    return gen, st
+
+
+def test_orange_retire_passes_over_a_row_in_a_plain_close(rig, monkeypatch):
+    gen, st = _dry_orange(rig, monkeypatch, _Closing(), None)
+    gov._governor_tick(gen)
+    assert st.band == gov.ORANGE
+    assert gen.removed == [1]
+    assert gov._STATS["orange_retires"] == 1
+
+
+def test_orange_retire_passes_over_an_mtp_row_in_a_close(rig, monkeypatch):
+    hook = types.SimpleNamespace(closing=lambda: True)
+    gen, st = _dry_orange(rig, monkeypatch,
+                          types.SimpleNamespace(_kq_mtp_hook=hook), None)
+    gov._governor_tick(gen)
+    assert gen.removed == [1]
+    assert gov._STATS["orange_retires"] == 1
+
+
+def test_orange_defers_its_retire_while_every_row_closes(rig, monkeypatch):
+    """No victim: the retire waits, the dry evict is not a shed, and the
+    band does not fall to red on its own."""
+    a, b = _Closing(), _Closing()
+    gen, st = _dry_orange(rig, monkeypatch, a, b)
+    for n in range(1, 6):
+        gov._governor_tick(gen)
+        assert st.band == gov.ORANGE
+        assert gen.removed == []
+        assert st.shed_times == []
+        assert not st.orange_failed
+        assert gov._STATS["retires_deferred"] == n
+    assert gov._STATS["orange_retires"] == 0
+    assert gov._STATS["sheds_suppressed"] == 0
+    assert gov._STATS["red_failures"] == 0
+    assert gov._STATS["last_action"] == (
+        "retire deferred: every row is in a forced close")
+    b.on = False
+    gov._governor_tick(gen)
+    assert gen.removed == [1]
+    assert gov._STATS["orange_retires"] == 1
+    assert len(st.shed_times) == 2
+
+
+def test_red_and_the_tick_guard_take_a_row_in_a_close(rig, monkeypatch):
+    monkeypatch.setattr(tg, "_row_failed_callbacks", [])
+    gen, st = _dry_orange(rig, monkeypatch, _Closing(), _Closing())
+    assert gov._fail_largest(gen, st, "test")
+    assert gen.removed == [0]
+
+    gen, st = _dry_orange(rig, monkeypatch, _Closing(), _Closing())
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    monkeypatch.setattr("gmlx.eval_guard.drain_for", lambda site: None)
+    tg_st = tg._state(gen)
+    tg_st.fail_streak = 1
+    tg._contain(gen, tg_st, RuntimeError("[metal::malloc] test"))
+    assert gen.removed == [0]
+
+
 def test_orange_without_apc_falls_to_red(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
     gov.register_cache("dry", lambda: 0, lambda f: 0)

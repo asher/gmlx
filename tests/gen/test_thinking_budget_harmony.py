@@ -348,3 +348,54 @@ def test_response_format_gate_opens_at_the_final_header():
         assert hit == len(stream) - 1, header
         assert gate.restart(tok.encode(_PROMPT)[-8:]).find(
             tok.encode(_REASON)) is None
+
+
+def _drive(crit, model, after, n, *, first="ask"):
+    """The batch loop over a script: the first token (forced or the
+    model's), then each forced id while one is handed out, and the
+    ``after`` text once a forced run ends. The emitted tokens and the id
+    outstanding after them."""
+    src, afters = iter(model), iter(after)
+    f = crit.first_forced_token_id() if first == "ask" else first
+    forcing = f is not None
+    nxt = f if forcing else next(src)
+    out = []
+    while len(out) < n:
+        out.append(nxt)
+        crit(nxt)
+        f = crit.pop_forced_token_id()
+        if f is not None:
+            nxt, forcing = f, True
+            continue
+        if forcing:
+            src, forcing = afters, False
+        nxt = next(src, None)
+        if nxt is None:
+            break
+    return out, f
+
+
+def test_a_rewind_mid_steer_owes_the_steer_id():
+    """A row requeued while the answer header is being steered owes the
+    next header id, and the stream holds the header once."""
+    tok = _tok()
+    model = tok.encode("<|channel|>analysis<|message|>Thinking hard about "
+                       "it now and more and more")
+    answer = tok.encode(_ANSWER)
+    steer = tok.encode(_STEER)
+    cuts = 0
+    for n in range(1, 40):
+        crit = _serve_criteria(tok, 3)
+        out, owed = _drive(crit, model, answer, n)
+        if not crit._steering:
+            continue
+        cuts += 1
+        assert crit.closing() and owed is not None
+        crit.rewind(out)
+        first = crit.first_forced_token_id()
+        assert first == owed
+        rest, _ = _drive(crit, [], answer, 60, first=first)
+        text = tok.decode(out + rest)
+        assert text.count(_STEER) == 1, n
+        assert text.endswith(_STEER + _ANSWER), n
+    assert cuts == len(steer)

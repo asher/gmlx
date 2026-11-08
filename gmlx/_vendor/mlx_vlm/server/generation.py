@@ -1732,6 +1732,13 @@ class ResponseGenerator:
             prompt_preopens_thinking=prompt_preopens_thinking,
         )
 
+    def _embed_text(self, ids, row_settings=None) -> dict:
+        """gmlx: text embedding fields of ``ids`` under the row's adapter
+        scales, for a requeued row's delivered tokens."""
+        from gmlx.serve.replay_prompt import embed_text
+
+        return embed_text(self.model, ids, row_settings)
+
     def _gpu_embed(
         self,
         raw_inputs: dict,
@@ -1957,6 +1964,9 @@ class ResponseGenerator:
                             greedy_sampling=args.temperature == 0,
                             prefill_step_size=self._effective_prefill_step_size(),
                         )
+                        # gmlx: a requeued row replays its delivered tokens,
+                        # embedded here as the prompt was.
+                        batch_gen._kq_embed_text = self._embed_text
 
                     # gmlx: one RowSettings per request, read by the prompt
                     # embedding and handed to the insert.

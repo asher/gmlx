@@ -294,6 +294,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   apply NFC, and an unknown or empty pre-tokenizer name prints a warning.
 - `/v1/completions` adds BOS to a raw prompt on Gemma 3 and 4, as
   llama-server does.
+- A `response_format` request that `gmlx serve` cuts off to free memory now
+  resumes on its schema, where it could fail every running request.
+- A thinking-budget close that `gmlx serve` cuts off to free memory now
+  finishes when the request resumes, where the model could think on past
+  its budget.
+- When `gmlx serve` retires a request to free memory and resumes it, the
+  reply now goes on from where it stopped. Before, it could repeat or skip
+  text, or end every running request with an error.
+- When `gmlx serve` recovers from a memory error, replies no longer lose a
+  token, answer from a prompt the model read twice, run past their stop,
+  or stay open until the queue timeout. MTP replies resume instead of
+  ending early with "length".
 
 ## [0.5.4] - 2026-10-29
 
