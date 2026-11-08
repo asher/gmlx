@@ -92,13 +92,28 @@ def test_the_float32_rows_path_is_chosen_and_matches_the_logits(tie, quantized):
 def test_a_logit_transform_falls_back_to_full_logits():
     model = _model()
 
+    class ScaledText(nn.Module):
+        """A language model that scales its head's logits."""
+
+        def __init__(self, inner):
+            super().__init__()
+            self.model = inner.model
+            self.lm_head = inner.lm_head
+            self.inner = inner
+
+        def __call__(self, x, cache=None):
+            return self.inner(x, cache=cache) * 0.5
+
+        def make_cache(self):
+            return self.inner.make_cache()
+
     class Scaled(nn.Module):
         def __init__(self, inner):
             super().__init__()
-            self.language_model = inner.language_model
+            self.language_model = ScaledText(inner.language_model)
 
         def __call__(self, x, cache=None):
-            return self.language_model(x, cache=cache) * 0.5
+            return self.language_model(x, cache=cache)
 
         def make_cache(self):
             return self.language_model.make_cache()
@@ -110,6 +125,34 @@ def test_a_logit_transform_falls_back_to_full_logits():
     cache = run_to_end(reader.prefill(prefix))
     (got,) = run_to_end(reader.tails(cache, prefix, [_ids(9, 2)]))
     want = _reference(scaled, prefix + _ids(9, 2))
+    assert mx.max(mx.abs(mx.array(got) - want)).item() < TOL
+
+
+@_NEEDS_GPU
+def test_the_check_and_the_full_reads_call_the_language_model():
+    """Chat calls the language model, never the outer class, so the reader
+    checks and reads that object. An outer-only transform is not read."""
+    model = _model()
+
+    class Outer(nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.language_model = inner.language_model
+
+        def __call__(self, x, cache=None):
+            raise AssertionError("the outer class was called")
+
+        def make_cache(self):
+            return self.language_model.make_cache()
+
+    outer = Outer(model)
+    reader = LetterReader(outer, LETTER_IDS)
+    assert reader.check() == "rows"
+    reader.path = "logits"
+    prefix = _ids(20, 1)
+    cache = run_to_end(reader.prefill(prefix))
+    (got,) = run_to_end(reader.tails(cache, prefix, [_ids(9, 2)]))
+    want = _reference(model, prefix + _ids(9, 2))
     assert mx.max(mx.abs(mx.array(got) - want)).item() < TOL
 
 
