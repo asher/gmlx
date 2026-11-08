@@ -16,8 +16,9 @@ import sys
 import tempfile
 import time
 
-from .video import (_adapter, _family, _from_config, _positive, _release,
-                    _schedules, _seed, _shift, _size, _Usage)
+from .video import (_adapter, _attention, _attention_flag, _family,
+                    _from_config, _positive, _release, _schedules, _seed,
+                    _shift, _size, _Usage)
 
 BENCH_SCHEMA = "gmlx.video.bench/1"
 DEFAULT_SHAPES = "512x512x22,768x768x124,1344x768x124"
@@ -57,6 +58,7 @@ def _parser(prog: str) -> argparse.ArgumentParser:
                    help="The config whose video_models MODEL names.")
     p.add_argument("--variant", default=None, metavar="NAME",
                    help="Run the DiT as this variant.")
+    _attention_flag(p)
     p.add_argument("--shapes", type=_shapes, default=None, metavar="LIST",
                    help="Comma-separated WxHxF shapes (default "
                         f"{DEFAULT_SHAPES}).")
@@ -172,7 +174,8 @@ def _files(a, adapters) -> dict:
     return out
 
 
-def _plan(fam, variant: str, files, shape, text: int, decode: bool):
+def _plan(fam, variant: str, files, shape, text: int, decode: bool,
+          attention: str = "dense"):
     from gmlx.video import memfit
 
     w, h, frames = shape
@@ -186,7 +189,8 @@ def _plan(fam, variant: str, files, shape, text: int, decode: bool):
         loras=[f["bytes"] for f in files["adapters"]],
         lora_dtypes=[f["dtype"] for f in files["adapters"]], rows=rows,
         text=text,
-        audio_latents=audio, pixels=w * h, decode=decode, variant=variant)
+        audio_latents=audio, pixels=w * h, decode=decode, variant=variant,
+        attention=attention)
 
 
 def _emit(a, records: list) -> None:
@@ -232,7 +236,8 @@ def _bench(a) -> int:
                 "encoders: the mux is not timed")
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
-    why = run_refusal(fam, vid.variant)
+    attention = _attention(a)
+    why = run_refusal(fam, vid.variant, attention)
     if why:
         raise RuntimeError(why)
     adapters = list(a.entry_adapters) + list(a.adapter or ())
@@ -256,7 +261,7 @@ def _bench(a) -> int:
     text = memfit.prompt_rows(fam, a.prompt,
                               video_encoder.header_tokenizer(fam, a.encoder))
     plan, (w, h, f) = max(
-        ((_plan(fam, vid.variant, files, s, text, decode), s)
+        ((_plan(fam, vid.variant, files, s, text, decode, attention), s)
          for s in shapes),
         key=lambda x: sorted(x[0].phases.values(), reverse=True))
     memfit.check(plan, what="this bench" if plan.over == ["encode"]
@@ -270,7 +275,7 @@ def _bench(a) -> int:
         # Priced at the prompt's tokens, as the cells are measured.
         predicted = {k: v for k, v in _plan(fam, vid.variant, files,
                                             r["shape"], done["text"],
-                                            decode)
+                                            decode, attention)
                      .phases.items() if k in r["peak"]}
         rec = {"schema": BENCH_SCHEMA, "gmlx_version": __version__,
                "mlx_version": mx.__version__, "label": a.label,
@@ -278,7 +283,8 @@ def _bench(a) -> int:
                    "family": fam.name, "variant": vid.variant, **files},
                "settings": {"width": w, "height": h, "frames": frames,
                             "steps": a.steps, "shifts": shifts,
-                            "seed": a.seed, "prompt": a.prompt,
+                            "seed": a.seed, "attention": attention,
+                            "prompt": a.prompt,
                             "adapters": [[p, st] for p, st in adapters]},
                "load_s": {**load_s, "total": sum(load_s.values())},
                "encode_s": done["encode_s"],
@@ -301,8 +307,8 @@ def _bench(a) -> int:
         return rec
 
     try:
-        _run(a, fam, shapes, shifts, adapters, ffmpeg, load_s, runs, done,
-             log)
+        _run(a, fam, shapes, shifts, adapters, attention, ffmpeg, load_s,
+             runs, done, log)
     except BaseException as e:
         # The shapes that ran keep their records, with what they measured.
         if runs:
@@ -324,8 +330,8 @@ def _bench(a) -> int:
     return 0
 
 
-def _run(a, fam, shapes, shifts, adapters, ffmpeg, load_s, runs, done,
-         log) -> None:
+def _run(a, fam, shapes, shifts, adapters, attention, ffmpeg, load_s, runs,
+         done, log) -> None:
     """Run every phase of every shape, appending to ``runs`` as each
     shape's denoise ends."""
     import mlx.core as mx
@@ -357,7 +363,8 @@ def _run(a, fam, shapes, shifts, adapters, ffmpeg, load_s, runs, done,
         t0 = time.perf_counter()
         with _Peak() as load_peak:
             pipe = pipeline.load(os.path.expanduser(a.model),
-                                 variant=a.variant, log=log)
+                                 variant=a.variant, attention=attention,
+                                 log=log)
             load_s["dit"] = time.perf_counter() - t0
             t0 = time.perf_counter()
             table = pipeline.adapter_table(

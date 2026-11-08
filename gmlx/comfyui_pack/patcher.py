@@ -49,6 +49,8 @@ class GmlxBinding:
     model_id: str
     status: dict
     manifest_count: int = 0
+    # The attention of a MiniMax-H3 model's steps, from the model loader.
+    attention: str = "dense"
     events: list = field(default_factory=list)
 
     @property

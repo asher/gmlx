@@ -823,6 +823,32 @@ def test_a_video_model_loads_and_releases_through_its_own_kind(monkeypatch,
     assert calls == [("load", "h3"), ("release", "VID")]
 
 
+def test_two_video_entries_apart_only_in_attention_load_apart(monkeypatch,
+                                                                request):
+    """h3 and h3-int8 on the same files, asked for in turn, each load
+    with their own attention: the pool does not hand one the other's."""
+    from gmlx.config import build_config
+    from gmlx.serve import capacity as cap
+
+    h3 = _VIDEO["video_models"]["h3"]
+    serving.register_resolved_models(build_config({**_VIDEO, "video_models": {
+        "h3": {**h3, "defaults": {"attention": "dense"}},
+        "h3-int8": {**h3, "defaults": {"attention": "int8"}}}}))
+    request.addfinalizer(serving.clear_resolved_models)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, seen_env, _td = make_pool()
+    loads = []
+    pool._video_fns = (lambda spec: 30 * GB,
+                       lambda spec: loads.append(
+                           (spec.id, spec.defaults["attention"])) or spec.id,
+                       lambda box: box.clear())
+    for name in ("h3", "h3-int8"):
+        hold = residency.acquire_video_model(name, pool=pool)
+        assert hold._entry.pipeline == name
+        hold.release()
+    assert loads == [("h3", "dense"), ("h3-int8", "int8")]
+
+
 # The published files of the h3 recipes, in bytes: the DiT, the text
 # encoder, the video and audio VAEs, the 8-step LoRA and FastH3's DiT.
 _H3_FILES = {"dit": 11_420_663_904, "enc": 19_762_151_200,
@@ -852,7 +878,8 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
                             config={"text_dim": 5120,
                                     "hidden_size": 5376}))
     if fast:
-        monkeypatch.setattr(registry, "run_refusal", lambda fam, v: None)
+        monkeypatch.setattr(registry, "run_refusal",
+                            lambda fam, v, attention="dense": None)
     files = {**_H3_FILES, "extra": extra}
     monkeypatch.setattr(memfit, "file_bytes", lambda p: files[p])
     monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
@@ -930,6 +957,37 @@ def test_a_video_entrys_own_lora_term_is_its_file_once_alone(monkeypatch,
     want = lora if extra is None else int(
         memfit.PEAKS["h3"].lora_k * (lora + extra))
     assert own == got.lora_term == want
+
+
+def test_an_int8_entry_checks_the_kernel_and_books_its_step(monkeypatch):
+    """An entry whose defaults hold attention: int8 is refused on an
+    mlx-kquant without sdpa_qk8 before it is priced, and its step books
+    the int8 copies of q and k by packed row."""
+    import mlx_kquant as kq
+
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+    from gmlx.video.fingerprint import VideoModelError
+
+    dense = vs.entry_plan(_h3_entry(monkeypatch, "h3-base", "768x768", 5))
+    spec = _h3_entry(monkeypatch, "h3-base", "768x768", 5)
+    spec.defaults["attention"] = "int8"
+    monkeypatch.delattr(kq, "sdpa_qk8", raising=False)
+    with pytest.raises(VideoModelError) as e:
+        vs.entry_plan(spec)
+    assert str(e.value).startswith(
+        "video model 'h3-base': MiniMax-H3 fl2va runs with int8 attention, "
+        "and the installed mlx-kquant")
+    monkeypatch.setattr(kq, "sdpa_qk8", lambda *a: None, raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: True)
+    got = vs.entry_plan(spec)
+    assert (dense.attention, got.attention) == ("dense", "int8")
+    plans = [vs.plan_clip(p, frames=p.frames, width=p.size[0],
+                          height=p.size[1], text=vs.PRICED_TEXT_ROWS)
+             for p in (dense, got)]
+    step = [p.terms["denoise"]["step"] for p in plans]
+    assert step[1] - step[0] == (memfit.PEAKS["h3"].int8_attention
+                                 * plans[1].rows)
 
 
 def test_the_caches_of_a_tight_video_entry_take_the_room_its_clip_leaves(

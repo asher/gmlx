@@ -12,7 +12,8 @@ import struct
 
 import numpy as np
 import pytest
-from video_fixtures import H3_HEADER, fixture_view, gguf_tokenizer, vsa_kernel
+from video_fixtures import (H3_HEADER, fixture_view, gguf_tokenizer,
+                            qk8_kernel, vsa_kernel)
 
 from gmlx.commands import video as cmd
 from gmlx.commands import video_bench as vb
@@ -474,6 +475,45 @@ def test_fasth3_runs_on_its_own_shifts_and_steps_fit(bench, monkeypatch,
                                       (64, 64, 5), TEXT, False).phases
     assert r["predicted"] != vb._plan(hf.FAMILY, "fl2va", r["model"],
                                       (64, 64, 5), TEXT, False).phases
+
+
+def test_the_attention_flag_reaches_the_plan_the_load_and_the_record(
+        bench, monkeypatch, capsys):
+    from gmlx.video import pipeline
+
+    qk8_kernel(monkeypatch)
+    loads, load = [], pipeline.load
+    monkeypatch.setattr(pipeline, "load", lambda path, **kw: (
+        loads.append(kw["attention"]) or load(path, **kw)))
+    checked, check = [], memfit.check
+    monkeypatch.setattr(memfit, "check", lambda plan, **kw: (
+        checked.append(plan) or check(plan, **kw)))
+    assert bench("--attention", "int8", "--steps", "1", "--shapes",
+                 "64x64x5", "--no-decode", "--json") == 0
+    r, = _records(capsys.readouterr().out)
+    assert loads == ["int8"] and r["settings"]["attention"] == "int8"
+    # The check before any load prices the int8 step too.
+    peaks = memfit.PEAKS["h3"]
+    assert [p.terms["denoise"]["step"] for p in checked] == [
+        peaks.plain_step.bytes(p.rows) + peaks.int8_attention * p.rows
+        for p in checked]
+    assert r["predicted"] == vb._plan(hf.FAMILY, "fl2va", r["model"],
+                                      (64, 64, 5), TEXT, False,
+                                      "int8").phases
+    assert r["predicted"] != vb._plan(hf.FAMILY, "fl2va", r["model"],
+                                      (64, 64, 5), TEXT, False).phases
+
+
+def test_int8_without_nax_is_refused_before_any_load(bench, monkeypatch,
+                                                    capsys):
+    qk8_kernel(monkeypatch, nax=False)
+    assert bench("--attention", "int8", "--variant", "fl2va",
+                 "--steps", "1") == 1
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        "error: MiniMax-H3 fl2va runs with int8 attention, whose kernel "
+        "needs a GPU with NAX units (M5 or newer), and this Mac's GPU has "
+        "none")
+    assert _kinds(bench.ev, "identify") and len(bench.ev) == 1
 
 
 def test_fasth3_without_nax_is_refused_before_any_load(bench, monkeypatch,

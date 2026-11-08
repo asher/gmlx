@@ -145,6 +145,14 @@ empty list on any other model. A skip on a DiT that skips no blocks, a
 skip that names a block the DiT lacks, and a skip with `ref_cache` get
 400.
 
+An AV step with `attention`, `dense` or `int8`, on a server whose
+features list `int8_attention`, runs at that attention over its entry's
+`defaults.attention`, and one without it runs at the entry's. The
+attention is a setting of the loaded DiT, so a change loads nothing. The
+step is priced at its attention. Another value gets 400, and so does
+`int8` on a variant with sparse attention, an mlx-kquant without
+`sdpa_qk8` or a GPU without NAX units, each with `param` `attention`.
+
 A run that sits idle for 120 seconds ends within a few seconds after, and
 lets the model go. The server holds at most 32 runs, and a begin past that
 gets 429. An interrupt names its run and takes effect at the next step:

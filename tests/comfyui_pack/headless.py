@@ -619,6 +619,9 @@ class Cases:
         self.check("the clip's latents", {(tuple(e["video_shape"]), tuple(e["audio_shape"]))
                                           for e in steps} == {((1, 24, 7, 4, 4), (1, 32, 2, 37))},
                    [(e["video_shape"], e["audio_shape"]) for e in steps][:1])
+        self.check("each step at the loader's default dense attention",
+                   [e["attention"] for e in steps] == ["dense"] * 2,
+                   [e["attention"] for e in steps])
         got = [e["timestep"] for e in steps]
         want = [1000.0, 6 * 0.5 / (1 + 5 * 0.5) * 1000]
         self.check("timesteps of the simple schedule at shift 6", np.allclose(got, want, atol=1e-2),
@@ -630,6 +633,42 @@ class Cases:
         saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
         self.check("video saved", any(f.startswith("h3_") and f.endswith(".mp4") for f in saved),
                    saved)
+
+    async def h3_int8(self):
+        """The MiniMax-H3 example workflow with int8 in the model loader's
+        attention: every step names int8 attention, and the clip is saved."""
+        wf = workflow("minimax-h3-t2v.json")
+        wf["1"]["inputs"]["attention"] = "int8"
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["7"]["inputs"]["steps"] = 2
+        wf["15"]["inputs"]["filename_prefix"] = "video/h3-int8"
+        r = await self.s.run(wf)
+        steps = kinds(self.stub.log(), "av_step")
+        self.check("success", r["status"] == "success", r.get("error"))
+        self.check("each step at int8 attention", [e["attention"] for e in steps] == ["int8"] * 2,
+                   [e["attention"] for e in steps])
+        d = os.path.join(self.work, "output", "video")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("video saved",
+                   any(f.startswith("h3-int8_") and f.endswith(".mp4") for f in saved), saved)
+
+    async def fasth3_int8(self):
+        """The FastH3 example workflow with int8 in the model loader's
+        attention: the server refuses the first step, and the run stops on
+        the sampler with the server's text."""
+        wf = workflow("fasth3-t2v.json")
+        wf["1"]["inputs"]["attention"] = "int8"
+        wf["6"]["inputs"].update(width=64, height=64, length=22)
+        wf["15"]["inputs"]["filename_prefix"] = "video/fasth3-int8"
+        r = await self.s.run(wf)
+        err = r.get("error") or {}
+        self.check("error", r["status"] == "error", r["status"])
+        self.check("on the sampler", str(err.get("node_id")) == "11", err.get("node_id"))
+        msg = str(err.get("exception_message"))
+        self.check("the server's text", "MiniMax-H3 fasth3 runs video sparse attention, and int8 "
+                   "attention applies to dense attention only" in msg, msg)
+        n = len(kinds(self.stub.log(), "av_step"))
+        self.check("no step served", n == 0, n)
 
     async def h3_long_guide(self):
         """A 15 s clip guided from frame 0 by a 362-frame clip, the longest
@@ -809,6 +848,8 @@ async def amain(a) -> dict:
             await c.case("minimax-h3 i2v from a Load Image first frame", c.h3_i2v)
             await c.case("minimax-h3 with a 362-frame guide clip", c.h3_long_guide)
             await c.case("fasth3 t2v on its trained sigmas", c.fasth3_t2v)
+            await c.case("minimax-h3 t2v with int8 attention", c.h3_int8)
+            await c.case("fasth3 with int8 attention refused at the sampler", c.fasth3_int8)
             if comfy_version(a.comfy) >= (0, 41, 0):
                 await c.case("flux-3-klein t2i", c.flux3_t2i)
                 await c.case("flux-3-klein edit with two references", c.flux3_edit)

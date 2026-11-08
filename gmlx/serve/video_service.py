@@ -32,6 +32,12 @@ before the DiT and returns the velocity of the carried variable. A step
 with anchors names each one's frame and the hashes of its latents and of
 the noise of its video rows, the draw of ComfyUI's generator at the
 payload's seed, and the vision spans of its prompt.
+
+A job or a step may name the DiT's attention, dense or int8, over the
+entry's ``defaults.attention``. The choice is a setting of the loaded
+DiT, so it loads nothing: the worker sets it before each denoise and
+each step (``set_attention``), after the load that follows an encode,
+and prices the step at that attention.
 """
 
 from __future__ import annotations
@@ -82,6 +88,7 @@ class VideoEntryPlan:
     mmproj_bytes: int = 0           # the encoder's mmproj file, for keyframes
     tower_bytes: int = 0            # its vision tower once attached
     text_rows: int = PRICED_TEXT_ROWS  # the rows its encode is priced at
+    attention: str = "dense"        # the DiT's, from the entry's defaults
 
 
 @dataclass(eq=False)
@@ -135,12 +142,13 @@ def clip_defaults(spec, fam, variant: str) -> dict:
 def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
               text: int, budget=None, decode: bool = True,
               audio: int | None = None, live_lora: bool = False,
-              blocks=(), anchors=()):
+              blocks=(), anchors=(), attention: str | None = None):
     """The memory plan of one clip on the entry's files. ``audio`` is the
     audio stream's latents when they are not the clip's, and
     ``live_lora`` prices the step with a LoRA the server was sent.
     ``blocks`` are the vision tokens of the prompt's keyframes, which
-    ``text`` counts, and ``anchors`` the placed ``layout.AnchorRows``."""
+    ``text`` counts, and ``anchors`` the placed ``layout.AnchorRows``.
+    ``attention`` is the request's, else the entry's."""
     from gmlx.video import memfit
     from gmlx.video.registry import get_family
 
@@ -158,7 +166,24 @@ def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
         tower=plan.tower_bytes, blocks=blocks,
         anchor_frames=memfit.anchor_frames(fam, anchors),
         anchor_audio=[a.audio_t for a in anchors if a.audio_t],
-        budget=budget)
+        attention=attention or plan.attention, budget=budget)
+
+
+def parse_attention(value) -> str | None:
+    """A request's ``attention`` field: None when it is not sent, else
+    dense or int8. Raises ValueError for any other value."""
+    from gmlx.video.registry import ATTENTION
+
+    if value is None or value in ATTENTION:
+        return value
+    raise ValueError(f"attention is {' or '.join(ATTENTION)}, not {value!r}")
+
+
+def set_attention(served: ServedVideo, attention: str | None) -> None:
+    """Set the loaded DiT's attention for one job or step: ``attention``,
+    else the entry's. Each job and step sets it, so none runs at the
+    attention the last one left."""
+    served.pipe.dit.attention = attention or served.plan.attention
 
 
 def caption_bytes(hidden: int, rows: int = PRICED_TEXT_ROWS) -> int:
@@ -224,7 +249,8 @@ def entry_plan(spec) -> VideoEntryPlan:
     except VideoModelError as e:
         raise VideoModelError(f"video model {spec.id!r}: {e}") from None
     fam = ident.family
-    why = run_refusal(fam, ident.variant)
+    attention = (spec.defaults or {}).get("attention", "dense")
+    why = run_refusal(fam, ident.variant, attention)
     if why:
         raise VideoModelError(f"video model {spec.id!r}: {why}")
     for path, _st in spec.adapters:
@@ -244,7 +270,8 @@ def entry_plan(spec) -> VideoEntryPlan:
         audio_vae_bytes=memfit.file_bytes(spec.audio_vae), loras=loras,
         lora_dtypes=tuple(memfit.lora_dtype(p) for p, _ in spec.adapters),
         mmproj_bytes=memfit.file_bytes(mmproj) if mmproj else 0,
-        tower_bytes=memfit.tower_bytes(mmproj) if mmproj else 0)
+        tower_bytes=memfit.tower_bytes(mmproj) if mmproj else 0,
+        attention=attention)
     width, height = d["size"]
     budget = working_budget_bytes()
     rows = priced_rows(spec, fam)
@@ -303,7 +330,8 @@ def _load(spec) -> ServedVideo:
     from .image_service import bound_caches, set_share
 
     plan = entry_plan(spec)
-    pipe = pipeline.load(spec.path, variant=spec.variant, log=_log_line)
+    pipe = pipeline.load(spec.path, variant=spec.variant,
+                         attention=plan.attention, log=_log_line)
     served = ServedVideo(pipe=pipe, spec=spec, plan=plan)
     try:
         for path, _st in spec.adapters:
@@ -439,7 +467,7 @@ def ensure_dit(served: ServedVideo) -> None:
     from gmlx.video.loader import load_dit
 
     pipe.dit, _ = load_dit(str(served.spec.path), variant=served.spec.variant,
-                           log=_log_line)
+                           attention=served.plan.attention, log=_log_line)
     try:
         install.rewrap(pipe)
         _load_adapters(served)
@@ -714,13 +742,15 @@ def anchor_cond(served: ServedVideo, refs, rows, held: dict) -> tuple:
 
 def av_step(served: ServedVideo, video, audio, timestep: float,
             shifts: dict, scale: float, feats, key: str, table: str | None,
-            *, anchors=(), cond=((), ()), spans=()):
+            *, anchors=(), cond=((), ()), spans=(),
+            attention: str | None = None):
     """One step of the pack's MiniMax-H3 model: the video and audio
     velocity f32 of the latents as ComfyUI's sampler carries them, at its
     ``timestep``, with the audio carried at ``scale`` (the payload's
     audio_scale). ``anchors`` are the placed ``layout.AnchorRows`` of the
     anchor rows ``cond`` (``anchor_cond``) and ``spans`` the vision spans
-    of ``feats``. Returns (video, audio, caption cache hit)."""
+    of ``feats``. ``attention`` is the step's, else the entry's. Returns
+    (video, audio, caption cache hit)."""
     import mlx.core as mx
 
     from gmlx.image.lora import install
@@ -728,6 +758,7 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
 
     pipe = served.pipe
     ensure_dit(served)
+    set_attention(served, attention)
     fam = pipe.video_family
     sv, sa = stream_sigmas(timestep, shifts)
     xv = video.astype(mx.float32)

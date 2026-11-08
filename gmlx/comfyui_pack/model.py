@@ -32,7 +32,8 @@ import comfy.supported_models
 import comfy.utils
 
 from . import compat
-from .client import (GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
+from .client import (INT8_ATTENTION, GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal,
+                     StepClient,
                      set_interrupt_check, tensor_hash)
 from .clip import TYPED, TypedPrompt
 from .compat import comfyui_version
@@ -596,6 +597,18 @@ class RemoteForward:
             anchors.append(a)
         return anchors, spans
 
+    def _attention(self, fields: dict) -> None:
+        """The model loader's attention on each AV step, which the server runs
+        over its entry's. A server from before int8 attention runs dense, with
+        one warning a model when the loader asks for int8."""
+        caps = getattr(self.b.client, "capabilities", None) or {}
+        if INT8_ATTENTION in (caps.get("features") or ()):
+            fields["attention"] = self.b.attention
+        elif self.b.attention != "dense" and "attention" not in self.warned:
+            self.warned.add("attention")
+            log.warning("gmlx: this gmlx server runs no int8 attention, so %r runs dense "
+                        "attention; update it", self.b.model_id)
+
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries
         them, the audio scale and the shifts, which the server's step reads
@@ -638,6 +651,7 @@ class RemoteForward:
             fields["anchors"] = anchors
         if spans:
             fields["spans"] = spans
+        self._attention(fields)
         vs, au = video.float(), audio.float()
         ts = timesteps.float().reshape(-1)
 
@@ -723,15 +737,20 @@ class RemoteForward:
         return out.unsqueeze(2) if framed else out
 
 
-def load_model(client: StepClient, model_id: str) -> GmlxModelPatcher:
-    """The gmlx MODEL of ``model_id`` on ``client``'s server."""
+def load_model(client: StepClient, model_id: str, attention: str = "dense") -> GmlxModelPatcher:
+    """The gmlx MODEL of ``model_id`` on ``client``'s server, whose MiniMax-H3
+    steps run at ``attention``, dense or int8."""
     status = client.status(model_id)
     facts = status.get("comfy") or {}
     if not facts.get("model_class"):
         raise GmlxError(f"gmlx: the server gives no ComfyUI model class for {model_id!r}")
+    if attention != "dense" and not status.get("audio"):
+        raise GmlxRefusal(f"gmlx: {attention} attention runs on MiniMax-H3, and {model_id!r} "
+                          "is an image model; set attention to dense")
     manifest = client.manifest(model_id)
     model, _cfg = build_weightless(manifest, facts["model_class"])
-    binding = GmlxBinding(client, model_id, status, int(manifest.get("count") or 0))
+    binding = GmlxBinding(client, model_id, status, int(manifest.get("count") or 0),
+                          attention=attention)
     model.diffusion_model.forward = RemoteForward(model, binding)
     patcher = GmlxModelPatcher(model, load_device=CPU, offload_device=CPU)
     patcher.gmlx = binding

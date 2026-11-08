@@ -948,11 +948,14 @@ def _clip_part(job: Job, store: VideoJobs, hold, out: str) -> None:
     served = hold._entry.pipeline
     s = job.params["settings"]
     k = job.kept
+    # The job's attention, else the entry's; a job its POST recorded
+    # before the field has none.
+    attention = job.params.get("attention")
     feats = mx.array(k["feats"])
     _check_clip(hold, served, frames=s["frames"], width=s["width"],
                 height=s["height"], text=int(feats.shape[1]),
                 phase="denoise", decodes=True, what="a clip",
-                anchors=k["rows"])
+                anchors=k["rows"], attention=attention)
     pool = _lora_pool()
     xv = xa = None
     try:
@@ -964,6 +967,7 @@ def _clip_part(job: Job, store: VideoJobs, hold, out: str) -> None:
                                   None if a is None else mx.array(a))
                        for f, v, a in k["anchors"])
         pace = job_pacer(job)
+        vs.set_attention(served, attention)
         store.progress(job, phase="denoising", step=(0, s["steps"]))
 
         def on_step(i, n):

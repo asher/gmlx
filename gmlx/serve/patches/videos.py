@@ -50,7 +50,7 @@ _log = logging.getLogger(__name__)
 PATH = "/v1/videos"
 FIELDS = ("prompt", "model", "seconds", "size", "seed", "prompt_upsampling",
           "first_frame", "last_frame", "input_reference", "guides",
-          "guide_no_audio", "references")
+          "guide_no_audio", "references", "attention")
 KEYFRAMES = ("first_frame", "last_frame")
 _KINDS = {"video": "--guide", "audio": "--guide-audio"}
 # The entry plans and encoder tokenizers the estimate reads, by entry.
@@ -280,12 +280,12 @@ def _tokenizer(fam, spec):
 
 
 def estimate(spec, fam, plan, s: dict, prompt: str, sizes, rewrites: bool,
-             path: str) -> None:
-    """The POST's one estimate: the clip at the job's shape on the entry's
-    plan, at the typed prompt's rows, or the keyframes' alone when the
-    upsampler rewrites it, a lower bound, against the budget less the
-    pinned models beside the entry, from the pool's figures with no
-    lock. Over it, 413."""
+             path: str, attention: str | None = None) -> None:
+    """The POST's one estimate: the clip at the job's shape and attention
+    on the entry's plan, at the typed prompt's rows, or the keyframes'
+    alone when the upsampler rewrites it, a lower bound, against the
+    budget less the pinned models beside the entry, from the pool's
+    figures with no lock. Over it, 413."""
     from gmlx.video import memfit
 
     from ..capacity import overcommit
@@ -305,7 +305,7 @@ def estimate(spec, fam, plan, s: dict, prompt: str, sizes, rewrites: bool,
     blocks = memfit.keyframe_blocks(fam, sizes) if sizes else ()
     got = plan_clip(plan, frames=s["frames"], width=s["width"],
                     height=s["height"], text=rows, blocks=blocks,
-                    budget=f.budget - pinned)
+                    budget=f.budget - pinned, attention=attention)
     if got.over:
         raise Refused(413, f"a {s['width']}x{s['height']} clip of "
                       f"{s['frames']} frames on {spec.id!r} does not fit in "
@@ -343,11 +343,31 @@ def _inline(sent: dict) -> bool:
                for file, value in sent.values())
 
 
+def _attention(fields: dict, spec, fam, variant: str) -> str:
+    """The job's attention: the field, else the entry's
+    ``defaults.attention``, else dense. A value off the list, and int8
+    that this install, Mac or variant does not run, are refused naming
+    the field."""
+    from gmlx.video.registry import attention_refusal
+
+    from ..video_service import parse_attention
+
+    try:
+        sent = parse_attention(fields.get("attention"))
+    except ValueError as e:
+        raise Refused(400, str(e), "attention") from None
+    attention = sent or (spec.defaults or {}).get("attention") or "dense"
+    why = attention_refusal(fam, variant, attention)
+    if why:
+        raise Refused(400, why, "attention")
+    return attention
+
+
 def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
     """The checks of a job's fields before its keyframes, or Refused: the
-    entry, its plan and settings, and ``sent``, each keyframe field's
-    (file, value). Runs in a worker thread; the keyframes come next
-    (:func:`_keyframes`), then :func:`prepare_tail`."""
+    entry, its plan, settings and attention, and ``sent``, each keyframe
+    field's (file, value). Runs in a worker thread; the keyframes come
+    next (:func:`_keyframes`), then :func:`prepare_tail`."""
     from gmlx.commands import video as cmd
     from gmlx.video.registry import get_family
 
@@ -388,6 +408,7 @@ def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
         raise Refused(400, str(e), "model", code="video_model_mismatch") \
             from None
     fam = get_family(plan.family)
+    attention = _attention(fields, spec, fam, plan.variant)
     try:
         seconds = (None if fields.get("seconds") is None
                    else cmd._seconds(str(fields["seconds"])))
@@ -417,7 +438,8 @@ def prepare_head(fields: dict, files: dict) -> SimpleNamespace:
         raise Refused(400, "first_frame and input_reference both name the "
                       "first frame; send one", "input_reference")
     return SimpleNamespace(prompt=prompt, path=path, spec=spec, plan=plan,
-                           fam=fam, settings=s, sent=sent)
+                           fam=fam, settings=s, sent=sent,
+                           attention=attention)
 
 
 def prepare_tail(head: SimpleNamespace, keys: dict, fields: dict,
@@ -452,7 +474,8 @@ def prepare_tail(head: SimpleNamespace, keys: dict, fields: dict,
         raise Refused(e.status, str(e), e.param) from None
     sizes = [(s["width"], s["height"])] * sum(v is not None
                                               for v in keys.values())
-    estimate(spec, fam, plan, s, prompt, sizes, rewrites, path)
+    estimate(spec, fam, plan, s, prompt, sizes, rewrites, path,
+             head.attention)
     from .api_contract import warn_ignored_fields
 
     used = set(KEYFRAMES) | {"input_reference"} | {
@@ -465,14 +488,15 @@ def prepare_tail(head: SimpleNamespace, keys: dict, fields: dict,
               "seconds": f"{s['frames'] / hf.FPS:.2f}",
               "size": f"{s['width']}x{s['height']}",
               "gmlx": {"frames": s["frames"], "seed": s["seed"],
-                       "steps": s["steps"], "phase": "queued", "step": 0,
+                       "steps": s["steps"], "attention": head.attention,
+                       "phase": "queued", "step": 0,
                        "revised_prompt": None}}
     params = {"model": spec.id, "prompt": prompt, "settings": s,
               "first_frame": keys["first_frame"],
               "last_frame": keys["last_frame"], "guides": guides,
               "guide_no_audio": bool(_bool(fields, "guide_no_audio")),
               "upsampling": requested, "rewrites": rewrites,
-              "ffmpeg": ffmpeg}
+              "attention": head.attention, "ffmpeg": ffmpeg}
     return record, params
 
 

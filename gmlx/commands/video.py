@@ -256,6 +256,20 @@ def _size_hint(frames: int, width: int, height: int, plan_at,
             f"of it")
 
 
+def _attention_flag(p: argparse.ArgumentParser) -> None:
+    from gmlx.video.registry import ATTENTION
+
+    p.add_argument("--attention", choices=ATTENTION, default=None,
+                   help="The DiT's attention. int8 runs on an M5 or newer, "
+                        "faster on large or long clips and lossy (default: "
+                        "the entry's, else dense).")
+
+
+def _attention(a) -> str:
+    """The DiT's attention: the flag, then the entry's, then dense."""
+    return a.attention or a.entry_defaults.get("attention") or "dense"
+
+
 def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=prog,
@@ -272,6 +286,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--variant", default=None, metavar="NAME",
                    help="Run the DiT as this variant, such as fl2va-turbo4 "
                         "for a merged Turbo file gmlx does not know.")
+    _attention_flag(p)
     src = p.add_mutually_exclusive_group()
     src.add_argument("--prompt", default=None, help="The prompt.")
     src.add_argument("--prompt-file", default=None, metavar="FILE",
@@ -659,7 +674,8 @@ def _generate(a) -> int:
         ffmpeg = io.probe()
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
-    why = run_refusal(fam, vid.variant)
+    attention = _attention(a)
+    why = run_refusal(fam, vid.variant, attention)
     if why:
         raise RuntimeError(why)
     row = fam.variant_row(vid.variant)
@@ -711,7 +727,7 @@ def _generate(a) -> int:
             text=text_at(width, height),
             mmproj=a.mmproj if keyframes else None,
             blocks=memfit.keyframe_blocks(fam, sizes) if sizes else (),
-            anchors=rows, anchor_vae=anchor_vae)
+            anchors=rows, anchor_vae=anchor_vae, attention=attention)
     # BASE_RECIPE is new to a run of another DiT or with an entry LoRA.
     base = (vid.variant != catalog.RECIPES[BASE_RECIPE].variant
             or bool(a.entry_adapters))
@@ -760,7 +776,7 @@ def _generate(a) -> int:
 
     t0 = time.perf_counter()
     pipe = pipeline.load(os.path.expanduser(a.model), variant=a.variant,
-                         log=log)
+                         attention=attention, log=log)
     table = pipeline.adapter_table(
         pipe, [(os.path.expanduser(p), st) for p, st in adapters])
     xv, xa = pipeline.generate(
@@ -788,7 +804,8 @@ def _generate(a) -> int:
                                    dtype=mx.float16)))
     rec = {"output": out, "frames_dir": a.frames_dir, "prompt": typed,
            "revised_prompt": caption,
-           "variant": vid.variant, **s, "times": times,
+           "variant": vid.variant, "attention": attention, **s,
+           "times": times,
            "adapters": [[p, st] for p, st in adapters],
            "anchors": [{"flag": t.flag, "path": t.path,
                         "frame": t.placed.frame,

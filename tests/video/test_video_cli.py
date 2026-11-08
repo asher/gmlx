@@ -21,7 +21,7 @@ import wave
 import numpy as np
 import pytest
 from video_fixtures import (H3_HEADER, fixture_view, gguf_tokenizer,
-                            vsa_kernel, wait_for)
+                            qk8_kernel, vsa_kernel, wait_for)
 
 from gmlx.commands import video as cmd
 from gmlx.video import catalog
@@ -123,6 +123,24 @@ def test_flags_win_over_the_entry_and_the_entry_over_the_variant():
                       hf.FAMILY, "fl2va")
     assert (s["steps"], s["shifts"], s["frames"], s["width"]) == (
         4, {"video": 5.0, "audio": 3.0}, 22, 512)
+
+
+@pytest.mark.parametrize("flags,entry,want", [
+    ([], {}, "dense"),
+    ([], {"attention": "int8"}, "int8"),
+    (["--attention", "int8"], {"attention": "dense"}, "int8"),
+    (["--attention", "dense"], {"attention": "int8"}, "dense"),
+])
+def test_the_attention_flag_beats_the_entry_and_the_entry_dense(flags,
+                                                                entry, want):
+    assert cmd._attention(_args(*flags, defaults=entry)) == want
+
+
+def test_an_attention_of_no_kind_is_refused_at_parse(capsys):
+    with pytest.raises(SystemExit) as ei:
+        _args("--attention", "int4")
+    assert ei.value.code == 2
+    assert "invalid choice: 'int4'" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("seconds", [20.0, 1e308])
@@ -455,11 +473,35 @@ def test_a_run_writes_the_mp4_and_the_frames(stubbed, tmp_path, capsys):
     assert sorted(np.load(lat).files) == ["audio", "seed", "steps", "video"]
     assert sorted(p.name for p in frames.iterdir()) == [
         "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))]
-    assert stubbed.loads == [{"variant": "fl2va", "log": stubbed.loads[0][
-        "log"]}]
+    assert stubbed.loads == [{"variant": "fl2va", "attention": "dense",
+                              "log": stubbed.loads[0]["log"]}]
     rec = json.loads(capsys.readouterr().out)
-    assert (rec["output"], rec["variant"], rec["frames"]) == (
-        str(out), "fl2va", 5)
+    assert (rec["output"], rec["variant"], rec["frames"],
+            rec["attention"]) == (str(out), "fl2va", 5, "dense")
+
+
+def test_the_attention_reaches_the_refusal_the_plan_and_the_load(
+        stubbed, monkeypatch, tmp_path, capsys):
+    """--attention int8 is what the refusal checks, the memory plan
+    prices, the DiT loads with and the record holds."""
+    from gmlx.video import memfit, registry
+
+    qk8_kernel(monkeypatch)
+    refused, planned = [], []
+    refusal, plan_run = registry.run_refusal, memfit.plan_run
+
+    def run_refusal(fam, variant, attention="dense"):
+        refused.append(attention)
+        return refusal(fam, variant, attention)
+
+    monkeypatch.setattr(registry, "run_refusal", run_refusal)
+    monkeypatch.setattr(memfit, "plan_run", lambda fam, **kw: (
+        planned.append(kw["attention"]) or plan_run(fam, **kw)))
+    assert stubbed("--attention", "int8", "--frames-dir",
+                   str(tmp_path / "frames"), "--json") == 0
+    assert refused == ["int8"] and set(planned) == {"int8"}
+    assert [kw["attention"] for kw in stubbed.loads] == ["int8"]
+    assert json.loads(capsys.readouterr().out)["attention"] == "int8"
 
 
 def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,

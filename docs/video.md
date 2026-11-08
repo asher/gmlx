@@ -23,6 +23,7 @@ newer.
 - [Make your first clip](#make-your-first-clip)
 - [Choose a recipe](#choose-a-recipe)
 - [FastH3](#fasth3)
+- [Int8 attention](#int8-attention)
 - [Clip length, size and memory](#clip-length-size-and-memory)
 - [Dialogue](#dialogue)
 - [Keyframes and guides](#keyframes-and-guides)
@@ -162,6 +163,28 @@ error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel needs a GPU w
 
 In ComfyUI, the gmlx nodes run FastH3 through the `fasth3-t2v` workflow,
 as [FastH3 in ComfyUI](comfyui.md#fasth3) shows.
+
+## Int8 attention
+
+```sh
+gmlx video generate h3 --attention int8 --prompt "..."
+```
+
+`--attention int8` runs the attention of MiniMax-H3's DiT with int8
+products. It is opt-in and lossy: the clip differs from the one that the
+default dense attention makes from the same seed. The text encoder and
+the VAEs run as before. It needs an M5 or newer, and it does not run
+with `fasth3`. On a large or long clip, such as 1344x768 for 5 s or
+672x384 for 12 s, a step takes less time than with dense attention. On a
+short, small clip, such as 672x384 for 5 s, the gain is small.
+
+To run every clip of an entry this way, set `attention: int8` in its
+[`defaults`](config.md#video_modelsdefaults). A job of `gmlx serve`
+runs the entry's attention unless its
+[`attention`](video-api.md#request-fields) field names the other, and in
+ComfyUI the `attention` input of
+[`gmlx Model Loader`](comfyui-reference.md#the-model-loaders-attention)
+sets it for each step.
 
 ## Clip length, size and memory
 
