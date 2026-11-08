@@ -732,7 +732,7 @@ def test_a_letter_decision_past_its_deadline_is_a_504(app, monkeypatch):
 
 
 def test_the_rows_scope_publishes_the_request_scales():
-    scope = route._rows_scope((1.0,))
+    scope = lora_rows.rows_scope((1.0,))
     with scope(3):
         assert lora_rows.row_scales() is None
     lora_rows.configure("rows", 2)

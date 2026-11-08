@@ -337,6 +337,23 @@ def tuple_scope(scales, rows: int):
         clear_rows()
 
 
+def rows_scope(scales):
+    """A scope factory for a job that runs its own forwards: ``scope(rows)``
+    publishes ``scales`` for ``rows`` rows around one forward while the
+    server runs adapters per row. Slots at 0 do no work."""
+    @contextlib.contextmanager
+    def scope(rows: int):
+        if _mode != "rows":
+            yield
+            return
+        publish_tuple(scales, rows)
+        try:
+            yield
+        finally:
+            clear_rows()
+    return scope
+
+
 def row_tuple(settings) -> tuple:
     """The scale tuple of a row's settings (its ``RowLora.scales``). In
     ``rows`` mode settings with no ``RowLora`` raise; in ``static`` mode

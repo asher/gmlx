@@ -11,7 +11,6 @@ reads live in ``gmlx.systemone``."""
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import importlib
 import inspect
 import json
@@ -26,6 +25,9 @@ from fastapi.responses import JSONResponse, Response
 
 import gmlx.serve.bridge_vlm as serving
 from gmlx import lora_rows
+from gmlx.serve import job_route
+from gmlx.serve.job_route import request_lora as _request_lora
+from gmlx.serve.job_route import salted as _salted
 from gmlx.systemone import ar_reader, letters, model_template
 from gmlx.systemone import (
     Limits,
@@ -170,44 +172,6 @@ def _tenant(http_request: Request) -> str | None:
     return importlib.import_module("gmlx._vendor.mlx_vlm.server.app")._read_tenant_id(http_request)
 
 
-def _rows_scope(scales):
-    """Publishes the request's adapter scales around each reader forward
-    while the server runs adapters per row. Slots at 0 do no work."""
-    @contextlib.contextmanager
-    def scope(rows: int):
-        if lora_rows.mode() != "rows":
-            yield
-            return
-        lora_rows.publish_tuple(scales, rows)
-        try:
-            yield
-        finally:
-            lora_rows.clear_rows()
-    return scope
-
-
-def _request_lora(spec, body):
-    """The request's adapter scales, or a 400 for a malformed field."""
-    from gmlx.serve.lora_request import AdapterRequestError, request_lora
-
-    try:
-        return request_lora(spec, body)
-    except AdapterRequestError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from None
-
-
-def _salted(lora, rg):
-    """``lora`` salted from the adapters ``rg``'s copy loaded; a missing
-    identity is a server defect, a 500."""
-    from gmlx.serve.bridge_vlm import loaded_adapters_of
-    from gmlx.serve.lora_request import AdapterIdentityMissing, salted
-
-    try:
-        return salted(lora, loaded_adapters_of(rg))
-    except AdapterIdentityMissing as e:
-        raise HTTPException(status_code=500, detail=str(e)) from None
-
-
 def _settings(installed):
     """``server.systemone`` from the live config, so a reload applies it,
     else the settings the route was installed with."""
@@ -293,31 +257,8 @@ def _admit_letters(rg, tokens, texts: list[str], extra: int) -> int:
 def _resolve_engine(field, profile, cfg, runtime):
     """Load the model a request names and return ``(rg, hold, spec,
     model_str)``. The caller releases ``hold``."""
-    from gmlx.serve.residency import _http_from_resolver_error
-
-    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
-    # The residency seam resolves the model string with the body profile
-    # from this context variable.
-    token = serving.set_request_profile(profile)
-    try:
-        try:
-            model_str = _pick_model(field, profile, cfg)
-        except (serving.ModelNotFound, serving.ModelFileMissing,
-                serving.UnknownProfile, serving.NoModelSpecified) as e:
-            raise _http_from_resolver_error(e) from e
-        app_mod.get_cached_model(model_str)
-        spec = serving.get_active_spec()
-    finally:
-        serving.reset_request_profile(token)
-    guard = runtime.response_generator
-    rg = getattr(guard, "_rg", guard)
-    hold = getattr(guard, "_hold", None)
-    if rg is None:
-        if hold is not None:
-            hold.release()
-        raise HTTPException(status_code=500, detail=(
-            "the model engine is unavailable; restart the server"))
-    return rg, hold, spec, model_str
+    return job_route.resolve_engine(
+        lambda: _pick_model(field, profile, cfg), profile, runtime)
 
 
 def _record_failure(runtime, model, error: str) -> None:
@@ -434,7 +375,7 @@ def make_systemone_endpoint(installed):
                 return ar_reader.decide_letters(
                     reader, tokens, schema, state,
                     prefixes=_prefixes(engine_rg, reader, lora.salt, tenant),
-                    should_stop=should_stop, rows_scope=_rows_scope(lora.scales),
+                    should_stop=should_stop, rows_scope=lora_rows.rows_scope(lora.scales),
                     style=style)
 
             return schema, job, admitted
@@ -581,7 +522,7 @@ def make_prewarm_endpoint(installed):
                     return ar_reader.prewarm(
                         reader, tokens, state,
                         prefixes=_prefixes(engine_rg, reader, lora.salt, tenant),
-                        rows_scope=_rows_scope(lora.scales), style=style)
+                        rows_scope=lora_rows.rows_scope(lora.scales), style=style)
 
                 prefix = run_on_engine(
                     rg, job, request_id=f"pw-{uuid.uuid4().hex[:12]}",
