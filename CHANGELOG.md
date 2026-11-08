@@ -285,6 +285,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - When `gmlx serve` retires a request to free memory and resumes it, the
   reply now goes on from where it stopped. Before, it could repeat or skip
   text, or end every running request with an error.
+- When `gmlx serve` recovers from a memory error, replies no longer lose a
+  token, answer from a prompt the model read twice, run past their stop,
+  or stay open until the queue timeout. MTP replies resume instead of
+  ending early with "length".
 
 ## [0.5.4] - 2026-10-29
 

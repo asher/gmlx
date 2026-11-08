@@ -95,6 +95,31 @@ def salvage(exc: BaseException, responses, *, ahead: bool = False) -> None:
         got.extend(responses)
 
 
+def mark_broken(exc: BaseException, uids) -> None:
+    """Decode rows whose engine state a retry cannot reuse. The guard
+    removes them and rebuilds them as a group."""
+    got = getattr(exc, "_kq_broken", None)
+    if got is None:
+        got = []
+        exc._kq_broken = got
+    got.extend(u for u in uids if u not in got)
+
+
+def mark_prefill_broken(exc: BaseException, uids, apc_meta=None) -> None:
+    """Rows of a prompt batch, or rows taken from the queue for one, that a
+    retry cannot reuse. ``apc_meta`` is the prefix-block metadata of rows
+    whose prompt batch was never built. The guard drops the prompt batch
+    and rebuilds the rows as a group."""
+    got = getattr(exc, "_kq_prefill_broken", None)
+    if got is None:
+        got = []
+        exc._kq_prefill_broken = got
+        exc._kq_prefill_meta = []
+    got.extend(u for u in uids if u not in got)
+    if apc_meta:
+        exc._kq_prefill_meta.extend(apc_meta)
+
+
 def on_row_failed(fn) -> None:
     """Register ``fn(uid, info: dict)`` for permanently failed rows.
     info carries prompt_len, delivered, and the triggering error text;
@@ -335,6 +360,85 @@ def _rebuild_row(gen, st: _TickState, uid) -> None:
                               remove=False)
 
 
+def _largest(st: _TickState, uids):
+    """The largest of ``uids`` by prompt plus delivered tokens, ranked as
+    ``_pick_victim`` ranks."""
+    rows = []
+    for uid in uids:
+        row = st.ledger.get(uid)
+        size = len(row.prompt_ids) + len(row.committed) if row else 0
+        rows.append((size, uid))
+    rows.sort(reverse=True)
+    if len(rows) > 1 and rows[0][1] == st.last_victim \
+            and rows[1][0] == rows[0][0]:
+        return rows[1][1]
+    return rows[0][1]
+
+
+def _rebuild_group(gen, st: _TickState, uids, err: str) -> list:
+    """Requeue rows the caller took out of the engine together. When some
+    were rebuilt before, the largest of those fails for good and the rest
+    requeue, so each repeat failure sheds one row. Returns the uids
+    requeued."""
+    uids = list(dict.fromkeys(uids))
+    again = [u for u in uids if u in st.rebuilt]
+    if again:
+        victim = _largest(st, again)
+        st.last_victim = victim
+        _fail_row_permanently(gen, st, victim, err, remove=False)
+        uids.remove(victim)
+    return _requeue(gen, st, uids)
+
+
+def _drop_prompt_batch(gen, e: BaseException) -> None:
+    """Take the prompt batch out of the engine and give back the prefix
+    blocks it held, as its own error path does."""
+    pb = getattr(gen, "_prompt_batch", None)
+    if pb is not None:
+        pb._apc_harvest_enabled = False
+        try:
+            pb._release_apc_meta_blocks()
+        except Exception:
+            _log.warning("[tick-guard] prompt batch APC release failed",
+                         exc_info=True)
+        pb._apc_meta = []
+        gen._prompt_batch = None
+    meta = getattr(e, "_kq_prefill_meta", None) or []
+    apc = getattr(gen, "apc_manager", None)
+    if apc is not None:
+        for m in meta:
+            if m is not None:
+                try:
+                    apc.release(m.get("apc_blocks", []))
+                except Exception:
+                    _log.warning("[tick-guard] APC release failed",
+                                 exc_info=True)
+
+
+def _rebuild_broken(gen, st: _TickState, e: BaseException) -> bool:
+    """Rebuild the rows the failed tick marked broken: decode rows whose
+    state a retry would reuse wrongly, and the rows of the prefill arm.
+    Returns True when the tick marked any."""
+    decode = list(getattr(e, "_kq_broken", ()))
+    prefill = getattr(e, "_kq_prefill_broken", None)
+    if not decode and prefill is None:
+        return False
+    gb = gen._generation_batch
+    if getattr(gb, "_kq_extending", False):
+        # extend threw half way: the batch's fields disagree, so no filter
+        # can run on it. Every row in it is marked; drop it whole.
+        gen._kq_empty_generation_batch()
+    else:
+        for uid in decode:
+            gen.remove(uid)
+    if prefill is not None:
+        _drop_prompt_batch(gen, e)
+    done = _rebuild_group(gen, st, decode + list(prefill or ()), str(e))
+    _log.warning("[tick-guard] rebuilt %d row(s) whose engine state cannot "
+                 "resume", len(done))
+    return True
+
+
 def _contain_fault(st: _TickState, e: RuntimeError) -> bool:
     """A non-memory command buffer failure. Contain the first one, since a
     driver hiccup should not take the server down, and let a second one
@@ -364,6 +468,8 @@ def _contain(gen, st: _TickState, e: RuntimeError) -> None:
                  st.fail_streak, str(e).splitlines()[0][:200])
     drain_for("engine-tick")
     mx.clear_cache()
+    if _rebuild_broken(gen, st, e):
+        return  # those rows' memory is freed; no victim on this strike
     if st.fail_streak < 2:
         return  # pool reclaimed; the serve loop retries the tick
     victim = _pick_victim(gen, st)

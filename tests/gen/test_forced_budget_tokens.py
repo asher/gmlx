@@ -377,3 +377,113 @@ def test_closing_is_true_while_a_forced_id_is_out():
         c = _criteria("Go now")
         out, owed = _feed(c, _MODEL, n)
         assert c.closing() == (2 <= n <= 5), (n, out)
+
+
+# A contained memory error during a forced close: the close lands once.
+
+_MEM = "[metal::malloc] Attempting to allocate 1 bytes (test)"
+
+
+class _Shot:
+    def __init__(self):
+        self.armed = False
+        self.fired = 0
+
+
+class _Mx:
+    """ar's mx, with one throw at an eval called from a named function."""
+
+    def __init__(self, real, shot, *where, name="async_eval"):
+        self._real, self._shot, self._where, self._name = real, shot, where, name
+
+    def __getattr__(self, n):
+        import sys
+
+        fn = getattr(self._real, n)
+        if n != self._name:
+            return fn
+
+        def call(*a, **k):
+            shot = self._shot
+            if (shot.armed and not shot.fired
+                    and sys._getframe(1).f_code.co_name in self._where):
+                shot.fired += 1
+                raise RuntimeError(_MEM)
+            return fn(*a, **k)
+        return call
+
+
+def _guarded_close(model, monkeypatch, prompt, n, shot=None, arm=None,
+                   eval_every=0):
+    """The row through a guarded generator. ``arm(delivered)`` says when to
+    arm ``shot``. Returns the tokens and the criteria."""
+    import gmlx.eval_guard as eg
+    import gmlx.serve.tick_guard as tg
+    from gmlx.serve.replay_prompt import embed_text
+    from gmlx.upstream.patching import root
+
+    monkeypatch.delenv("GMLX_TICK_GUARD", raising=False)
+    monkeypatch.delenv("GMLX_OOM_INJECT", raising=False)
+    monkeypatch.setattr(eg, "drain_for", lambda site: None)
+    monkeypatch.setattr(ar.BatchGenerator, "_next",
+                        root(ar.BatchGenerator._next))
+    assert tg.install_tick_guard()
+    crit = _criteria("Go now", prompt=prompt)
+    lm = model.language_model
+    proc = SimpleNamespace(tokenizer=SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(lm, proc, prefill_step_size=None, logprobs_cap=_K)
+    gen._kq_embed_text = lambda ids, rs: embed_text(model, ids, rs)
+    if eval_every:
+        gen._cache_eval_interval = eval_every
+    gen.insert([prompt], n, thinking_budget_criteria=[crit],
+               logits_processors=[_ban()],
+               row_settings=[RowSettings(logprobs=True, top_k=_K)],
+               prompt_kwargs=[{"inputs_embeds": lm.input_embeds(
+                   mx.array([prompt]))}])
+    out = []
+    try:
+        for _ in range(8 * n):
+            if not gen.has_work:
+                break
+            if shot is not None and arm(out):
+                shot.armed = True
+            out += [r.token for r in gen.next()[1]]
+    finally:
+        gen.close()
+    return out, crit
+
+
+def _before_end(out):
+    return out[-len(MESSAGE):] == MESSAGE
+
+
+@pytest.mark.parametrize("case", ["C", "E"])
+def test_a_contained_error_on_the_end_marker_tick_closes_once(
+        model, monkeypatch, case):
+    """C: the decode step throws after its sample. E: the cache eval after
+    it throws. Either way on the tick that delivers the end marker."""
+    ref, _ = _guarded_close(model, monkeypatch, PROMPT, 10)
+    shot = _Shot()
+    where = ("_step",) if case == "C" else ("_next", "_next_after_decode")
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, *where))
+    got, crit = _guarded_close(model, monkeypatch, PROMPT, 10, shot=shot,
+                               arm=_before_end,
+                               eval_every=1 if case == "E" else 0)
+    assert shot.fired == 1
+    assert got == ref
+    assert got.count(END) == 1 and crit._forced_closes == 1
+
+
+def test_a_spent_row_whose_prefill_throws_closes_once(model, monkeypatch):
+    """P: the prompt batch's first eval throws after its first-token force
+    asked the criteria. The row is rebuilt and the close lands once."""
+    ref, _ = _guarded_close(model, monkeypatch, SPENT, 6)
+    assert ref[:4] == MESSAGE + [END]
+    shot = _Shot()
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "generate"))
+    got, crit = _guarded_close(model, monkeypatch, SPENT, 6, shot=shot,
+                               arm=lambda out: True)
+    assert shot.fired == 1
+    assert got == ref
+    assert got.count(END) == 1 and crit._forced_closes == 1

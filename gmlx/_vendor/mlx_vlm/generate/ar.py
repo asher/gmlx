@@ -58,6 +58,8 @@ from .types import GenerateKwargs, ProcessorLike, Unpack
 
 # gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
 from gmlx.gen.logprobs import raw_logprobs, top_logprobs
+from gmlx.serve.tick_guard import mark_broken as _mark_broken
+from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
@@ -1347,8 +1349,22 @@ class GenerationBatch:
         k = _logprobs_cap(self) if any(r.top_k > 0 for r in rows) else 0
         self._next_raw = None
 
-        sampled = self._fused_greedy_step(inputs, fwd_kwargs, rows)
-        if sampled is not None:
+        # gmlx: from the forward to the sample, a failure leaves the KV and
+        # a grammar holding ``inputs``; a retry would feed it again.
+        try:
+            sampled = self._fused_greedy_step(inputs, fwd_kwargs, rows)
+            raw = None
+            if sampled is None:
+                sampled, raw = self._forward_and_sample(
+                    inputs, fwd_kwargs, wants_lp, k
+                )
+                fused = False
+            else:
+                fused = True
+        except BaseException as e:
+            _mark_broken(e, self.uids)
+            raise
+        if fused:
             self._next_tokens = sampled
             self._next_lps = None
             self._next_top_idx = None
@@ -1359,6 +1375,38 @@ class GenerationBatch:
             self._kq_owed = None
             return out
 
+        self._next_tokens = sampled
+        prev_top_idx = self._next_top_idx
+        prev_top_lp = self._next_top_lp
+
+        eval_targets = [self._next_tokens]
+        if wants_lp:
+            self._next_lps = raw[mx.arange(sampled.shape[0]), sampled]
+            eval_targets.append(self._next_lps)
+            if any(c is not None for c in self.thinking_budget_criteria):
+                # Read and cleared by next() within the same call.
+                self._next_raw = raw
+        else:
+            self._next_lps = None
+
+        if k > 0:
+            top_idx, top_lp = top_logprobs(raw, k)
+            self._next_top_idx = top_idx
+            self._next_top_lp = top_lp
+            eval_targets.extend([top_idx, top_lp])
+        else:
+            self._next_top_idx = None
+            self._next_top_lp = None
+
+        # gmlx: the new sample is in place. A failure from here on owes
+        # ``inputs``, which the next call returns without a forward.
+        self._kq_owed = (inputs, self._current_lps, prev_top_idx, prev_top_lp)
+        mx.async_eval(*eval_targets)
+        out = self._emit(inputs, self._current_lps, prev_top_idx, prev_top_lp)
+        self._kq_owed = None
+        return out
+
+    def _forward_and_sample(self, inputs, fwd_kwargs, wants_lp, k):
         output = self._language_model(
             inputs[:, None], cache=self.prompt_cache, **fwd_kwargs
         )
@@ -1396,37 +1444,7 @@ class GenerationBatch:
                 row_ids=[0] * len(self.uids),
                 positions=[n + 1 for n in self._num_tokens],
             )
-
-        self._next_tokens = sampled
-        prev_top_idx = self._next_top_idx
-        prev_top_lp = self._next_top_lp
-
-        eval_targets = [self._next_tokens]
-        if wants_lp:
-            self._next_lps = raw[mx.arange(sampled.shape[0]), sampled]
-            eval_targets.append(self._next_lps)
-            if any(c is not None for c in self.thinking_budget_criteria):
-                # Read and cleared by next() within the same call.
-                self._next_raw = raw
-        else:
-            self._next_lps = None
-
-        if k > 0:
-            top_idx, top_lp = top_logprobs(raw, k)
-            self._next_top_idx = top_idx
-            self._next_top_lp = top_lp
-            eval_targets.extend([top_idx, top_lp])
-        else:
-            self._next_top_idx = None
-            self._next_top_lp = None
-
-        # gmlx: the new sample is in place. A failure from here on owes
-        # ``inputs``, which the next call returns without a forward.
-        self._kq_owed = (inputs, self._current_lps, prev_top_idx, prev_top_lp)
-        mx.async_eval(*eval_targets)
-        out = self._emit(inputs, self._current_lps, prev_top_idx, prev_top_lp)
-        self._kq_owed = None
-        return out
+        return sampled, raw
 
     def _emit(self, inputs, current_lps, prev_top_idx, prev_top_lp):
         if current_lps is not None:
@@ -1499,6 +1517,8 @@ class GenerationBatch:
             self.logits_processors = []
             other.logits_processors = []
 
+        # gmlx: from here a failure leaves the batch half extended.
+        self._kq_extending = True
         self.uids.extend(other.uids)
         self.prompt_cache = _extend_cache(self.prompt_cache, other.prompt_cache)
         self.max_tokens.extend(other.max_tokens)
@@ -1564,6 +1584,7 @@ class GenerationBatch:
             )
         elif self._rope_deltas is not None:
             self._rope_deltas = mx.concatenate([self._rope_deltas, other._rope_deltas])
+        self._kq_extending = False
 
     def filter(self, keep: List[int]):
         """Filter the batch to keep only the specified indices."""
@@ -1984,9 +2005,34 @@ class SpeculativeGenerationBatch:
             self._refresh_uids()
             raise
 
+    def _advance(self):
+        try:
+            return next(self._rounds_iter)
+        except StopIteration:
+            if getattr(self, "_kq_rounds_dead", False):
+                logger.error(
+                    "rounds generator ended after a failed round; rows %s end "
+                    "with length",
+                    self.uids,
+                )
+            raise
+        except Exception as e:
+            # gmlx: the failed round took the generator with it, and its
+            # queued injections, whose rows are in _all_uids. Every
+            # unfinished row is rebuilt.
+            _mark_broken(
+                e,
+                [u for u, done in zip(self._all_uids, self._finished) if not done],
+            )
+            self._kq_rounds_dead = True
+            injections = getattr(self.model, "_generator_injections", None)
+            if injections:
+                injections.clear()
+            raise
+
     def _next_round(self, responses) -> List[GenerationBatch.Response]:
         try:
-            tok_list, round_meta = next(self._rounds_iter)
+            tok_list, round_meta = self._advance()
         except StopIteration:
             for row, done in enumerate(self._finished):
                 if not done:
@@ -2007,7 +2053,7 @@ class SpeculativeGenerationBatch:
             round_meta.get("round_pos", 0)
         ) + 1 < int(round_meta.get("round_len", 1)):
             try:
-                tok_list, round_meta = next(self._rounds_iter)
+                tok_list, round_meta = self._advance()
             except StopIteration:
                 break
             self._append_token_responses(responses, tok_list, round_meta)
@@ -3359,11 +3405,27 @@ class BatchGenerator:
             return progress()
         return []
 
+    def _kq_empty_generation_batch(self) -> None:
+        """Replace the decode batch with an empty one, without evaluating or
+        filtering it."""
+        self._generation_batch = _bind_rows(
+            GenerationBatch.empty(
+                self.model,
+                self.sampler,
+                self.tokenizer.stopping_criteria,
+                compute_logprobs=self.compute_logprobs,
+                top_logprobs_k=self.top_logprobs_k,
+                greedy_sampling=self.greedy_sampling,
+            ),
+            self._rows(),
+        )
+
     def _extend_generation_batch(self, gen_batch) -> None:
         if len(self._generation_batch) == 0:
             self._generation_batch = gen_batch
         else:
             self._generation_batch.extend(gen_batch)
+        self._kq_joining = None
 
     def _next(self, **kwargs):
         generation_responses = []
@@ -3419,6 +3481,34 @@ class BatchGenerator:
         if len(self._generation_batch) >= self.completion_batch_size:
             return prompt_responses, generation_responses
 
+        try:
+            return self._prefill_arm(prompt_responses, generation_responses)
+        except BaseException as e:
+            self._mark_prefill_arm(e)
+            raise
+        finally:
+            self._kq_admit = self._kq_joining = None
+
+    def _mark_prefill_arm(self, e) -> None:
+        """gmlx: a prefill arm that failed has moved state a retry cannot
+        reuse: a prompt batch's cache, rows taken from the queue, or a new
+        decode batch on its way in. Mark those rows for a rebuild."""
+        joining = getattr(self, "_kq_joining", None)
+        admit = getattr(self, "_kq_admit", None)
+        if joining is not None:
+            _mark_prefill_broken(e, joining)
+            gb = self._generation_batch
+            if getattr(gb, "_kq_extending", False):
+                _mark_broken(e, [u for u in gb.uids if u not in joining])
+        elif self._prompt_batch is not None:
+            _mark_prefill_broken(e, list(self._prompt_batch.uids))
+        elif admit is not None:
+            _mark_prefill_broken(e, admit[0], apc_meta=admit[1])
+
+    def _joining(self, gen_batch) -> None:
+        self._kq_joining = list(getattr(gen_batch, "_all_uids", gen_batch.uids))
+
+    def _prefill_arm(self, prompt_responses, generation_responses):
         if self._prompt_batch is not None:
             if self._prompt_batch.needs_processing():
                 tic = time.perf_counter()
@@ -3436,6 +3526,7 @@ class BatchGenerator:
                 top_logprobs_k=self.top_logprobs_k,
                 rows=self._rows(),
             )
+            self._joining(gen_batch)
             elapsed = time.perf_counter() - tic
             self._prompt_time_counter += elapsed
             self._record_prompt_batch_time(self._prompt_batch, elapsed)
@@ -3486,6 +3577,7 @@ class BatchGenerator:
                         top_logprobs_k=self.top_logprobs_k,
                         rows=self._rows(),
                     )
+                    self._joining(gen_batch)
                     elapsed = time.perf_counter() - tic
                     self._prompt_time_counter += elapsed
                     self._record_prompt_batch_time(self._prompt_batch, elapsed)
@@ -3498,6 +3590,7 @@ class BatchGenerator:
             self._unprocessed_sequences = self._unprocessed_sequences[n:]
 
             uids = [s[0] for s in sequences]
+            self._kq_admit = (uids, None)
             input_ids = [s[1] for s in sequences]
             max_tokens_list = [s[2] for s in sequences]
             prompt_kwargs_list = [s[3] for s in sequences]
@@ -3510,6 +3603,7 @@ class BatchGenerator:
 
             # APC: also harvest cold-prefill prefixes so future requests hit.
             apc_meta = self._build_apc_meta_for_cold(input_ids, prompt_kwargs_list)
+            self._kq_admit = (uids, apc_meta)
 
             prompt_batch_cls = _generate_module_override(
                 "PromptProcessingBatch", PromptProcessingBatch
@@ -3560,6 +3654,7 @@ class BatchGenerator:
                     top_logprobs_k=self.top_logprobs_k,
                     rows=self._rows(),
                 )
+                self._joining(gen_batch)
                 elapsed = time.perf_counter() - tic
                 self._prompt_time_counter += elapsed
                 self._record_prompt_batch_time(self._prompt_batch, elapsed)

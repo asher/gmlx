@@ -413,8 +413,10 @@ if __name__ == "__main__":
 _MEM = "[metal::malloc] Attempting to allocate 1 bytes (test)"
 
 
-def _guarded(monkeypatch, batch, ledger):
-    """The tick guard over a _next that steps ``batch``."""
+def _guarded(monkeypatch, batch, ledger, *, filtering=False):
+    """The tick guard over a _next that steps ``batch``. With
+    ``filtering`` a remove filters the row out of the batch, as
+    BatchGenerator.remove does."""
     import types
 
     import gmlx.eval_guard as eg
@@ -429,7 +431,13 @@ def _guarded(monkeypatch, batch, ledger):
     assert tg.install_tick_guard()
     gen = types.SimpleNamespace(_unprocessed_sequences=[],
                                 _generation_batch=batch, removed=[])
-    gen.remove = lambda uid: gen.removed.append(uid)
+    def remove(uid):
+        gen.removed.append(uid)
+        gb = gen._generation_batch
+        if filtering and uid in gb.uids:
+            gb.filter([i for i, u in enumerate(gb.uids) if u != uid])
+
+    gen.remove = remove
     st = gen._kq_tick_guard = tg._TickState()
     for uid, prompt in ledger.items():
         st.ledger[uid] = tg._Row(prompt, 64, {}, None, None)
@@ -501,5 +509,73 @@ def test_injected_first_tokens_go_out_on_a_failed_round(monkeypatch):
     assert [(r.uid, r.token) for r in tick()] == [(2, 7)]
     assert host._all_uids == [0, 1, 2]
     assert host._pending_injections == []
-    assert len(host.model._generator_injections) == 1
-    assert gen._kq_tick_guard.ledger[2].committed == [7]
+    # The failed round took the generator and its queued injection with
+    # it: every unfinished row is rebuilt from what it delivered.
+    assert host.model._generator_injections == []
+    assert gen.removed == [0, 1, 2]
+    assert [(e[0], e[1]) for e in gen._unprocessed_sequences] == [
+        (0, [1, 5, 21]), (1, [2, 5, 31]), (2, [3, 7])]
+
+
+def _queue(gen):
+    return [(e[0], e[1]) for e in gen._unprocessed_sequences]
+
+
+def test_a_failed_round_requeues_every_unfinished_row(monkeypatch):
+    """Q3: the round generator dies in its second round. No row ends with
+    "length"; every unfinished row is requeued with what it delivered."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        yield [21, 31], None
+        raise RuntimeError(_MEM)
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    batch = _make_batch(ar, max_tokens=8, uids=(0, 1))
+    batch.model = type("M", (), {})()
+    batch.model._generator_injections = []
+    gen, tick = _guarded(monkeypatch, batch, {0: [1], 1: [2]}, filtering=True)
+    seen = tick() + tick()
+    assert [(r.uid, r.token) for r in seen] == [(0, 5), (1, 5), (0, 21), (1, 31)]
+    assert tick() == []
+    assert batch._kq_rounds_dead
+    assert gen.removed == [0, 1]
+    assert _queue(gen) == [(0, [1, 5, 21]), (1, [2, 5, 31])]
+    assert tick() == []
+    assert not any(r.finish_reason for r in seen)
+
+
+def test_a_failure_on_a_second_injected_batch_keeps_the_first_live(
+        monkeypatch):
+    """Each injected batch's rows are live once it joins, so a failure on
+    the next one leaves them where the guard can see them."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        while True:
+            yield [21, 31], None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    host = _make_batch(ar, max_tokens=8, uids=(0, 1))
+    host.model = type("M", (), {})()
+    first = _make_batch(ar, max_tokens=8, uids=(2,))
+    second = _make_batch(ar, max_tokens=8, uids=(3,))
+    gen, tick = _guarded(monkeypatch, host,
+                         {0: [1], 1: [2], 2: [3], 3: [4]})
+    tick()
+    tick()
+    host.extend(first)
+    host.extend(second)
+
+    def broken():
+        raise RuntimeError(_MEM)
+
+    second._first_entries = broken
+    out = tick()
+    assert [(r.uid, r.token) for r in out] == [(2, 5)]
+    assert host.uids == [0, 1, 2]
+    assert host._pending_injections == [second]

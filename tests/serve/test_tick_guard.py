@@ -760,3 +760,158 @@ def test_a_requeue_that_raises_fails_the_row(monkeypatch):
     assert gen.removed == [7] and failed == [7]
     assert gen._unprocessed_sequences == []
     assert 7 not in st.ledger and 7 not in st.rebuilt
+
+
+def _broken(err, *, decode=(), prefill=None, meta=None):
+    e = RuntimeError(str(err))
+    if decode:
+        tg.mark_broken(e, decode)
+    if prefill is not None:
+        tg.mark_prefill_broken(e, prefill, apc_meta=meta)
+    return e
+
+
+def _admitted(gen, script, *responses):
+    """One good tick that harvests the queue into the ledger, then the
+    queue empties as an admission would."""
+    script.append(([], list(responses)))
+    tick(gen)
+    gen._unprocessed_sequences = []
+
+
+def _queue(gen):
+    return [(e[0], e[1], e[2]) for e in gen._unprocessed_sequences]
+
+
+def test_broken_decode_rows_are_rebuilt_on_the_first_strike(
+        wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    gen._generation_batch = FakeGB([7, 8], [1, 1])
+    tc = _Rewinding()
+    _admitted(gen, script, resp(7, 11), resp(8, 21))
+    gen._kq_tick_guard.ledger[8].tc = tc
+    script.append(_broken(MEM_ERR, decode=[7, 8]))
+    assert tick(gen) == ([], [])
+    st = gen._kq_tick_guard
+    assert gen.removed == [7, 8]
+    assert _queue(gen) == [(7, [1, 2, 3, 11], 15),
+                           (8, [4, 5, 6, 9, 9, 9, 21], 15)]
+    assert tc.calls == [[21]]
+    assert st.rebuilt == {7, 8} and st.fail_streak == 1
+
+
+def test_a_strike_that_rebuilt_rows_picks_no_victim(wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    gen._generation_batch = FakeGB([7, 8], [1, 5])
+    _admitted(gen, script, resp(7, 11), resp(8, 21))
+    script.append(MEM_ERR)
+    tick(gen)
+    script.append(_broken(MEM_ERR, decode=[7]))
+    tick(gen)
+    st = gen._kq_tick_guard
+    assert gen.removed == [7]           # row 8 is larger, and kept
+    assert st.fail_streak == 2
+    assert [e[0] for e in gen._unprocessed_sequences] == [7]
+
+
+def test_the_group_rule_fails_one_row_per_repeat(wrapped, monkeypatch):
+    """Rows 7 and 8 were rebuilt before: only the larger fails, by prompt
+    plus delivered. A one-row group rebuilt before fails that row."""
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen._unprocessed_sequences.append((9, [7] * 20, 16, {}, None, None))
+    gen._generation_batch = FakeGB([7, 8, 9], [1, 1, 1])
+    _admitted(gen, script, resp(7, 11), resp(8, 21), resp(9, 31))
+    st = gen._kq_tick_guard
+    st.ledger[7].committed += [12] * 4      # 3 + 5 = 8 against 6 + 1 = 7
+    st.rebuilt |= {7, 8}
+    script.append(_broken(MEM_ERR, decode=[7, 8, 9]))
+    tick(gen)
+    assert failed == [7]
+    assert gen.removed == [7, 8, 9]         # the failed row is not removed twice
+    assert [e[0] for e in gen._unprocessed_sequences] == [8, 9]
+    assert 7 not in st.ledger
+
+    gen._unprocessed_sequences = []
+    gen._generation_batch = FakeGB([8], [1])
+    script.append(_broken(MEM_ERR, decode=[8]))
+    tick(gen)
+    assert failed == [7, 8] and gen._unprocessed_sequences == []
+
+
+class _PromptBatch:
+    def __init__(self, uids):
+        self.uids = list(uids)
+        self._apc_harvest_enabled = True
+        self._apc_meta = [{"apc_blocks": [1]}]
+        self.released = 0
+
+    def _release_apc_meta_blocks(self):
+        self.released += 1
+
+
+class _Apc:
+    def __init__(self):
+        self.released = []
+
+    def release(self, blocks):
+        self.released.append(list(blocks))
+
+
+def test_broken_prompt_batch_rows_drop_the_batch_and_requeue(
+        wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    _admitted(gen, script)
+    tcs = {u: _Rewinding() for u in (7, 8)}
+    for u, tc in tcs.items():
+        gen._kq_tick_guard.ledger[u].tc = tc
+    pb = gen._prompt_batch = _PromptBatch([8, 7])
+    script.append(_broken(MEM_ERR, prefill=[8, 7]))
+    tick(gen)
+    assert gen._prompt_batch is None
+    assert pb.released == 1 and pb._apc_meta == []
+    assert not pb._apc_harvest_enabled
+    assert _queue(gen) == [(8, [4, 5, 6, 9, 9, 9], 16), (7, [1, 2, 3], 16)]
+    assert tcs[7].calls == [[]] and tcs[8].calls == [[]]
+    assert gen.removed == []
+
+
+def test_rows_taken_for_an_unbuilt_prompt_batch_release_their_blocks(
+        wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    _admitted(gen, script)
+    gen._prompt_batch = None
+    gen.apc_manager = _Apc()
+    meta = [{"apc_blocks": [3, 4]}, None]
+    script.append(_broken(MEM_ERR, prefill=[7, 8], meta=meta))
+    tick(gen)
+    assert gen.apc_manager.released == [[3, 4]]
+    assert [e[0] for e in gen._unprocessed_sequences] == [7, 8]
+
+
+def test_a_half_extended_decode_batch_is_dropped_whole(wrapped, monkeypatch):
+    """extend threw after it began to change the batch: no filter can run
+    on it, so it is swapped for an empty one and every row requeues."""
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    gb = gen._generation_batch = FakeGB([7], [1])
+    _admitted(gen, script, resp(7, 11))
+    gb.uids.append(8)
+    gb._kq_extending = True
+    empty = FakeGB([], [])
+    gen._kq_empty_generation_batch = (
+        lambda: setattr(gen, "_generation_batch", empty))
+    gen._prompt_batch = _PromptBatch([])
+    script.append(_broken(MEM_ERR, decode=[7], prefill=[8]))
+    tick(gen)
+    assert gen._generation_batch is empty and gen.removed == []
+    assert gen._prompt_batch is None
+    assert _queue(gen) == [(7, [1, 2, 3, 11], 15),
+                           (8, [4, 5, 6, 9, 9, 9], 16)]

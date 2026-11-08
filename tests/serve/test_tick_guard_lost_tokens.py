@@ -86,6 +86,7 @@ def engine(monkeypatch):
     from gmlx._vendor.mlx_lm.models import llama
     from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
     from gmlx.models.vlm_text_only import TextOnlyModel
+    from gmlx.serve.replay_prompt import embed_text
 
     monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
     monkeypatch.setenv("GMLX_CB_PHASE", "0")
@@ -122,7 +123,9 @@ def engine(monkeypatch):
 
     def make(**kw):
         kw.setdefault("prefill_step_size", None)
-        return ar.BatchGenerator(lm, proc, logprobs_cap=3, **kw), lm
+        gen = ar.BatchGenerator(lm, proc, logprobs_cap=3, **kw)
+        gen._kq_embed_text = lambda ids, rs: embed_text(model, ids, rs)
+        return gen, lm
 
     return make
 
@@ -147,7 +150,7 @@ def _offsets(gen):
 
 
 def run(make, *, plan=None, b_max=6, c_at=None, forcing=False,
-        chunked=False, eval_every=0):
+        chunked=False, eval_every=0, processors=None):
     """Drive two or three rows to the end. ``plan(tick, gen, out)`` arms
     an injection. Returns the streams, the finishes and the gaps."""
     from gmlx.serve.row_sampling import RowSettings
@@ -159,6 +162,7 @@ def run(make, *, plan=None, b_max=6, c_at=None, forcing=False,
     crit = [_Forcing()] if forcing else None
     (ua,) = gen.insert([A_PROMPT], 12, prompt_kwargs=[_kw(lm, A_PROMPT)],
                        thinking_budget_criteria=crit,
+                       logits_processors=[processors] if processors else None,
                        row_settings=[RowSettings(logprobs=True, top_k=3)])
     prompts[ua] = A_PROMPT
     out, finishes, gaps = {}, {}, {}
@@ -319,3 +323,78 @@ def test_a_forced_id_on_the_resume_tick_keeps_its_logprob(engine, monkeypatch):
     assert len(have) == len(want) == 1
     assert have[0].token_logprob == pytest.approx(want[0].token_logprob)
     assert have[0].token_logprob < -10
+
+
+class _Proc:
+    """A logits processor that leaves the logits as they are."""
+
+    def __init__(self, shot):
+        self.shot = shot
+
+    def __call__(self, tokens, logits):
+        self.shot.fire()
+        return logits
+
+
+def test_b_in_a_logits_processor(engine):
+    """B: the step throws between its forward and its sample. Every row of
+    the batch is rebuilt, so no KV holds a token twice."""
+    shot = Shot()
+    got = check(engine, shot, plan=_arm_at(shot, 6), processors=[_Proc(shot)])
+    assert len(got) == 2
+
+
+def test_p_in_generate(engine, monkeypatch):
+    """P: the first eval of the prompt batch's generate throws after its
+    forward moved the new row's cache."""
+    shot = Shot()
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "generate"))
+    check(engine, shot, plan=_arm_at(shot, 4))
+
+
+def test_p_in_prompt_step(engine, monkeypatch):
+    """P: a chunk of a chunked prefill throws after its forward."""
+    shot = Shot()
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "prompt_step"))
+    check(engine, shot, plan=_arm_at(shot, 4), chunked=True)
+
+
+def test_p0_at_the_prompt_batch_constructor(engine, monkeypatch):
+    """P0: the rows have left the queue and no prompt batch holds them."""
+    shot = Shot()
+    orig = ar.PromptProcessingBatch.__init__
+
+    def init(self, *a, **k):
+        shot.fire()
+        orig(self, *a, **k)
+
+    monkeypatch.setattr(ar.PromptProcessingBatch, "__init__", init)
+    check(engine, shot, plan=_arm_at(shot, 4))
+
+
+def test_x_before_extend_changes_the_batch(engine, monkeypatch):
+    """X: the new batch is lost before it joins; the decode batch is
+    whole."""
+    shot = Shot()
+    orig = ar.GenerationBatch.extend
+
+    def extend(self, other):
+        shot.fire()
+        return orig(self, other)
+
+    monkeypatch.setattr(ar.GenerationBatch, "extend", extend)
+    check(engine, shot, plan=_arm_at(shot, 4))
+
+
+def test_x_after_extend_changes_the_batch(engine, monkeypatch):
+    """X: extend throws half way, so the decode batch is dropped whole and
+    every row is rebuilt."""
+    shot = Shot()
+    orig = ar._extend_cache
+
+    def extend_cache(*a, **k):
+        shot.fire()
+        return orig(*a, **k)
+
+    monkeypatch.setattr(ar, "_extend_cache", extend_cache)
+    check(engine, shot, plan=_arm_at(shot, 4))

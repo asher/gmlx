@@ -336,6 +336,13 @@ def install_continuous_batch_admission() -> None:
             self.model._kq_preempt_handoff = handoff
             try:
                 it.close()
+            except BaseException as e:
+                # The close ran the round's tail on a generator the batch
+                # has let go of; the row is rebuilt from what it delivered.
+                from gmlx.serve.tick_guard import mark_broken
+
+                mark_broken(e, [self._all_uids[0]])
+                raise
             finally:
                 for name in ("_kq_preempt_capture", "_kq_preempt_capture_lp"):
                     try:
@@ -478,8 +485,9 @@ def install_continuous_batch_admission() -> None:
                     }
                 )
                 pending.pop(0)
-
-            self._refresh_uids()
+                # The joined rows are live now: a failure on a later batch
+                # must find them in uids.
+                self._refresh_uids()
 
         responses.extend(_orig_next(self))
         _note_last_tokens(self, responses)
