@@ -21,7 +21,13 @@ rounds, the same seam the CLI ^T/budget path uses), so the server route is:
 * transport - ``PromptProcessingBatch.generate`` moves the hook from the
   criteria row onto the request's prompt cache (request-scoped, the same
   discipline as the APC retirement context) for a single-row batch; the
-  owned rounds pop it from there.
+  owned rounds pop it from there. The batch keeps it as ``_kq_close_hook``,
+  so a preempt waits for a close in flight.
+* first token - when the prompt's reasoning already spends the budget, the
+  close starts on the first token. On the MTP route the hook gives it, and
+  only for a row that will not queue behind a running batch: a
+  ``BatchGenerator._next`` wrap lets the site read the batch the extend
+  will test.
 
 Batched MTP rounds cannot honor a per-request budget: the hook is dropped
 with a note, at formation here or at admission in the round loop. The
@@ -30,6 +36,7 @@ user-facing rule is under Sampling in docs/config.md.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Any
 
@@ -42,7 +49,12 @@ _log = logging.getLogger(__name__)
 _DEFER_FLAG = "_kq_mtp_tb_defer"
 _CRITERIA_FLAG = "_kq_mtp_tb_criteria"
 _TRANSPORT_FLAG = "_kq_mtp_tb_transport"
+_QUEUE_PROBE_FLAG = "_kq_mtp_tb_queue_probe"
 _DEFERRED_ATTR = "_kq_deferred_thinking_budget"
+
+# The BatchGenerator whose step is running, for the first-token site.
+_step_generator: contextvars.ContextVar = contextvars.ContextVar(
+    "_kq_mtp_tb_step_generator", default=None)
 
 
 def _is_mtp(obj) -> bool:
@@ -63,6 +75,38 @@ class _HookCarrier:
 
     def pop_forced_token_id(self):
         return None
+
+    def first_forced_token_id(self, speculative=False):
+        return _hook_first_token(self) if speculative else None
+
+
+def _will_queue() -> bool:
+    """Whether a row this step inserts joins a running generation batch:
+    the test ``BatchGenerator._extend_generation_batch`` makes. On an MTP
+    batch ``len()`` may promote a waiting batch, as the extend's would."""
+    gen = _step_generator.get()
+    batch = getattr(gen, "_generation_batch", None) if gen is not None else None
+    return batch is not None and len(batch) > 0
+
+
+def _hook_first_token(crit):
+    hook = getattr(crit, "_kq_mtp_hook", None)
+    if hook is None or _will_queue():
+        return None
+    return hook.take_first()
+
+
+def _route_first_token(crit) -> None:
+    """A plain batch asks the criteria for its forced first id; a
+    speculative one asks the hook."""
+    own = getattr(crit, "first_forced_token_id", None)
+
+    def first_forced_token_id(speculative=False):
+        if speculative:
+            return _hook_first_token(crit)
+        return own(False) if own is not None else None
+
+    crit.first_forced_token_id = first_forced_token_id
 
 
 def _build_hook(rg, args, input_ids):
@@ -150,6 +194,8 @@ def _install_criteria(cls) -> None:
             return crit
         if crit is None:
             crit = _HookCarrier()
+        else:
+            _route_first_token(crit)
         crit._kq_mtp_hook = hook
         return crit
 
@@ -158,23 +204,39 @@ def _install_criteria(cls) -> None:
     cls._make_thinking_budget_criteria = link(_make, _orig)
 
 
-def _stash_hook(ppb, gen_batch) -> None:
+def _lone_hook(ppb):
+    """The hook of a one-row MTP prompt batch, or None. Several rows drop
+    every hook before the first token, so none forces it."""
     if not _is_mtp(ppb):
-        return
+        return None
     crits = getattr(ppb, "thinking_budget_criteria", None) or []
     hooks = [h for h in (getattr(c, "_kq_mtp_hook", None) for c in crits)
              if h is not None]
     if not hooks:
-        return
-    cache = getattr(gen_batch, "prompt_cache", None)
-    uids = getattr(gen_batch, "uids", None)
+        return None
+    uids = getattr(ppb, "uids", None)
     n_rows = len(uids) if uids is not None else len(crits)
-    if len(crits) == 1 and n_rows == 1 and cache:
-        cache[0]._kq_mtp_thinking_hook = hooks[0]
-        return
+    if len(crits) == 1 and n_rows == 1:
+        return hooks[0]
+    for c in crits:
+        if getattr(c, "_kq_mtp_hook", None) is not None:
+            c._kq_mtp_hook = None
     _log.warning(
         "thinking_budget dropped: not applied when MTP requests batch "
-        "together")
+        "together (%d rows)", n_rows)
+    return None
+
+
+def _stash_hook(ppb, gen_batch, hook) -> None:
+    if not _is_mtp(ppb):
+        return
+    cache = getattr(gen_batch, "prompt_cache", None)
+    if hook is not None and not cache:
+        hook = None
+    if hook is not None:
+        cache[0]._kq_mtp_thinking_hook = hook
+    # Always set, so a batch merged in by __dict__ never keeps a stale one.
+    gen_batch._kq_close_hook = hook
 
 
 def _install_transport(ppb_cls) -> None:
@@ -183,9 +245,14 @@ def _install_transport(ppb_cls) -> None:
     _orig = ppb_cls.generate
 
     def _generate(self, *args, **kwargs):
+        hook = None
+        try:
+            hook = _lone_hook(self)
+        except Exception:  # noqa: BLE001
+            _log.exception("mtp thinking-budget drop failed")
         gen_batch = _orig(self, *args, **kwargs)
         try:
-            _stash_hook(self, gen_batch)
+            _stash_hook(self, gen_batch, hook)
         except Exception:  # noqa: BLE001
             _log.exception("mtp thinking-budget stash failed")
         return gen_batch
@@ -195,8 +262,26 @@ def _install_transport(ppb_cls) -> None:
     ppb_cls.generate = link(_generate, _orig)
 
 
+def _install_queue_probe(gen_cls) -> None:
+    if wrapped_with(gen_cls._next, _QUEUE_PROBE_FLAG):
+        return
+    _orig = gen_cls._next
+
+    def _next(self, **kwargs):
+        token = _step_generator.set(self)
+        try:
+            return _orig(self, **kwargs)
+        finally:
+            _step_generator.reset(token)
+
+    _next.__dict__.update(getattr(_orig, "__dict__", {}))
+    _next.__dict__[_QUEUE_PROBE_FLAG] = True
+    gen_cls._next = link(_next, _orig)
+
+
 def install_mtp_thinking_budget() -> None:
-    """Install the defer / restore+build / transport wraps. Idempotent.
+    """Install the defer / restore+build / transport / queue-probe wraps.
+    Idempotent.
 
     Must run after ``install_full_prompt_mtp_prefill`` (the transport wrap
     has to land outside ``_mtp_generate`` so the hook stash happens after
@@ -216,4 +301,5 @@ def install_mtp_thinking_budget() -> None:
     _install_defer(ResponseGenerator)
     _install_criteria(ResponseGenerator)
     _install_transport(_ar.PromptProcessingBatch)
+    _install_queue_probe(_ar.BatchGenerator)
     _log.info("mtp thinking-budget installed")

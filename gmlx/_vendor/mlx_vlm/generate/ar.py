@@ -576,6 +576,13 @@ def generate_step(
         )
         return
 
+    # gmlx: a prompt that already spent the thinking budget starts the
+    # forced close on the first token. logprobs keeps the model's values.
+    first_forced = getattr(thinking_budget_criteria, "first_forced_token_id", None)
+    forced_id = first_forced() if first_forced is not None else None
+    if forced_id is not None:
+        y = mx.array([forced_id], dtype=y.dtype)
+
     n = 0
     while True:
         if n != max_tokens:
@@ -2457,6 +2464,23 @@ class PromptProcessingBatch:
                 row_ids=[0] * len(self.uids),
                 positions=[0] * len(self.uids),
             )
+        speculative = self.draft_model is not None and self.draft_kind is not None
+        # gmlx: a row whose prompt already spent its thinking budget starts
+        # the forced close on its first token, as the decode step forces.
+        forced_first = [None] * len(self.uids)
+        for i, criteria in enumerate(self.thinking_budget_criteria[: len(self.uids)]):
+            ask = getattr(criteria, "first_forced_token_id", None)
+            if ask is not None:
+                forced_first[i] = ask(speculative)
+        if any(token is not None for token in forced_first):
+            force_mask = mx.array(
+                [token is not None for token in forced_first], dtype=mx.bool_
+            )
+            replacements = mx.array(
+                [token if token is not None else 0 for token in forced_first],
+                dtype=first_tokens.dtype,
+            )
+            first_tokens = mx.where(force_mask, replacements, first_tokens)
         first_lps = top_idx = top_lp = None
         if wants_lp:
             first_lps = raw[mx.arange(first_tokens.shape[0]), first_tokens]
@@ -2491,7 +2515,7 @@ class PromptProcessingBatch:
                     self._suffix_lens,
                 )
 
-        if self.draft_model is not None and self.draft_kind is not None:
+        if speculative:
             gen_batch = SpeculativeGenerationBatch(
                 model=self.model,
                 draft_model=self.draft_model,

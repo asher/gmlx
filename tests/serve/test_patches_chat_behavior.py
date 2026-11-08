@@ -750,6 +750,22 @@ def test_request_thinking_off_without_a_switch_sets_a_budget_of_zero(name):
     assert out.thinking_budget is None
 
 
+def test_thinking_off_on_a_preopened_block_closes_before_the_first_token():
+    """Thinking off on a template with no switch that opens the block in the
+    generation prompt: the reply's reasoning is the bare close alone."""
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    proc = types.SimpleNamespace(
+        chat_template="{{ '<|im_start|>assistant\\n<think>\\n' }}")
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="off")
+    args = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert args.thinking_budget == 0
+    crit = _built_criteria(args, mx.array([[1, 99, 10]]))
+    assert crit.in_thinking
+    assert crit.first_forced_token_id(False) == 10
+    assert _drive(crit, [10, 100, 5]) == [100, None, None]
+
+
 @pytest.mark.parametrize("tools, steered", [(None, True), ([], True),
                                              ([{"type": "function"}], False)])
 def test_request_tools_decide_whether_a_forced_close_opens_the_answer(

@@ -146,6 +146,67 @@ def test_generator_close_mid_forced_round():
     assert out == [6, 7, 8]
 
 
+# -- a budget the prompt spent: the close starts on the first token --------
+
+
+def test_take_first_counts_the_whole_close_once():
+    hook = _hook([S1, S2, END], budget=2, count_seed=2)
+    assert hook.take_first() == S1
+    assert hook._own == 3 and hook.closing()
+    hook.observe(S1)
+    assert hook.count == 2 and hook._own == 2
+    assert hook.take_forced() == [S2, END]
+    assert hook._own == 2 and hook._forced_closes == 1
+    for t in (S2, END):
+        hook.observe(t)
+    assert hook._own == 0 and not hook.closing()
+    assert hook.count == 2
+    assert hook.take_forced() is None
+
+
+def test_take_first_with_a_one_id_close_holds_nothing():
+    hook = _hook([S1, S2, END], budget=0, forced_ids=[END])
+    assert hook.take_first() == END
+    assert hook._held == []
+    hook.observe(END)
+    assert hook.take_forced() is None
+
+
+def test_take_first_under_the_budget_forces_nothing():
+    hook = _hook([S1, S2, END], budget=3, count_seed=2)
+    assert hook.take_first() is None
+    assert not hook._spent and not hook.closing()
+
+
+def test_scalar_loop_sends_the_held_rest_at_its_first_boundary():
+    hook = _hook([S1, S2, END], budget=2, count_seed=2)
+    b = hook.take_first()
+    hook.observe(b)  # as owned_server_rounds observes the first bonus
+    gen, _d = _make_gen(hook, max_tokens=6, b=b)
+    out = [int(t) for t in gen]
+    assert out[:2] == [S2, END]
+    assert out[2:] == [(END + 1) % VOCAB, (END + 2) % VOCAB, (END + 3) % VOCAB]
+    assert not hook.closing() and hook.count == 2
+
+
+class _RollbackEchoLM(_VerifyEchoLM):
+    def rollback_speculative_cache(self, *a, **k):
+        pass
+
+
+def test_cli_stream_forces_the_first_token():
+    hook = _hook([S1, S2, END], budget=0)
+    gen = spec.stream_speculative(
+        SimpleNamespace(language_model=_RollbackEchoLM()), _EchoDrafter(cap=0),
+        mx.array([[1, 2, 3]], dtype=mx.int32),
+        prompt_cache=[_FakeCache(width=1)], max_tokens=5,
+        thinking_hook=hook)
+    out = [int(t) for t in gen]
+    assert out[:3] == [S1, S2, END]
+    assert out[3:] == [(END + 1) % VOCAB, (END + 2) % VOCAB]
+    assert hook.count == 0 and not hook.closing()
+
+
 # -- batch loop (serve): B==1 rows honor the hook, widening drops it -------
 
 

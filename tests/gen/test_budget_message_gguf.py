@@ -1,7 +1,8 @@
 """The thinking-budget message on real weights, on the serve plain path: the
-criteria the server builds for a request with a budget of 8 and a message
-forces the message's ids, then the end marker, after the budget's thinking
-tokens, and the reply's reasoning ends with the message.
+criteria the server builds for a request with a budget and a message forces
+the message's ids, then the end marker, after the budget's thinking tokens,
+and the reply's reasoning ends with the message. A budget of 0 on a prompt
+that opens the block lets no thinking token through.
 
 ``integration``; picks the smallest ``qwen35`` GGUF under
 ``KQUANT_TEST_GGUF_DIR``, else a ``qwen3`` one, and skips without either.
@@ -22,7 +23,6 @@ pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 pytestmark = pytest.mark.integration
 
-BUDGET = 8
 MESSAGE = "\n\nI am out of time, so I will answer now."
 N_TOKENS = 40
 
@@ -36,7 +36,7 @@ def _pick(gguf_index):
                 f"(have: {sorted(gguf_index)})")
 
 
-def _criteria(tok, ids):
+def _criteria(tok, ids, budget):
     from gmlx.serve.patches import chat_behavior
 
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
@@ -45,7 +45,7 @@ def _criteria(tok, ids):
     try:
         chat_behavior.install_thinking_budget_fix()
         args = gen.GenerationArguments(
-            max_tokens=N_TOKENS, thinking_budget=BUDGET,
+            max_tokens=N_TOKENS, thinking_budget=budget,
             thinking_budget_message=MESSAGE)
         return cls._make_thinking_budget_criteria(
             SimpleNamespace(tokenizer=tok), args, mx.array([ids]))
@@ -53,8 +53,9 @@ def _criteria(tok, ids):
         cls._make_thinking_budget_criteria = original
 
 
+@pytest.mark.parametrize("budget", [8, 0])
 def test_budget_message_then_end_marker_on_the_plain_path(gguf_index,
-                                                          monkeypatch):
+                                                          monkeypatch, budget):
     from gmlx import load_model
     from gmlx._vendor.mlx_vlm.utils import StoppingCriteria
     from gmlx.gen.thinking_budget import (
@@ -78,7 +79,7 @@ def test_budget_message_then_end_marker_on_the_plain_path(gguf_index,
     ids = list(tok.encode(prompt, add_special_tokens=False))
     start, end = marker_ids(tok, "<think>"), marker_ids(tok, "</think>")
     seed = prompt_reasoning_tokens(ids, start, (end,))
-    crit = _criteria(tok, ids)
+    crit = _criteria(tok, ids, budget)
     assert crit.thinking_token_count == seed
 
     proc = SimpleNamespace(tokenizer=SimpleNamespace(
@@ -98,9 +99,9 @@ def test_budget_message_then_end_marker_on_the_plain_path(gguf_index,
     forced = list(budget_message_ids(tok, MESSAGE)) + list(end)
     # The plain path forces right after the budget's last thinking token.
     if crit._prompt_open:
-        cut = BUDGET - seed
+        cut = max(budget - seed, 0)
     elif start[0] in out:
-        cut = out.index(start[0]) + 1 + BUDGET
+        cut = out.index(start[0]) + 1 + budget
     else:
         pytest.skip("the model wrote no thinking block")
     if end[0] in out[:cut]:

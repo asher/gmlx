@@ -14,6 +14,7 @@ import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import sampling as sp_sampling  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
+import mlx.core as mx  # noqa: E402
 
 _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
@@ -106,10 +107,10 @@ def _mtp_seams():
     had_flag = getattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, False)
     setattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, True)
     saved = (cls.generate, cls._make_thinking_budget_criteria,
-             ar.PromptProcessingBatch.generate)
+             ar.PromptProcessingBatch.generate, ar.BatchGenerator._next)
     yield gen, ar
     (cls.generate, cls._make_thinking_budget_criteria,
-     ar.PromptProcessingBatch.generate) = saved
+     ar.PromptProcessingBatch.generate, ar.BatchGenerator._next) = saved
     if not had_flag:
         delattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG)
 
@@ -265,34 +266,170 @@ def test_mtp_thinking_transport_stash_and_batch_drop(_mtp_seams):
     cache_entry = types.SimpleNamespace()
     batch = types.SimpleNamespace(prompt_cache=[cache_entry], uids=["u"])
     me = types.SimpleNamespace(
-        draft_model=object(), draft_kind="mtp",
+        draft_model=object(), draft_kind="mtp", uids=["u"],
         thinking_budget_criteria=[crit], _out=batch)
     assert wrapper(me, None) is batch
     assert cache_entry._kq_mtp_thinking_hook is hook     # B==1 stash
+    assert batch._kq_close_hook is hook
     # B>1: dropped, nothing stashed.
     c2 = types.SimpleNamespace()
     batch2 = types.SimpleNamespace(prompt_cache=[c2], uids=["u", "v"])
     me2 = types.SimpleNamespace(
-        draft_model=object(), draft_kind="mtp",
+        draft_model=object(), draft_kind="mtp", uids=["u", "v"],
         thinking_budget_criteria=[crit, crit], _out=batch2)
     wrapper(me2, None)
     assert not hasattr(c2, "_kq_mtp_thinking_hook")
+    assert batch2._kq_close_hook is None
+    assert crit._kq_mtp_hook is None                     # detached
     # Criteria/rows mismatch: dropped, not indexed blindly.
+    crit = types.SimpleNamespace(_kq_mtp_hook=hook)
     c3 = types.SimpleNamespace()
     batch3 = types.SimpleNamespace(prompt_cache=[c3], uids=["u"])
     me3 = types.SimpleNamespace(
-        draft_model=object(), draft_kind="mtp",
+        draft_model=object(), draft_kind="mtp", uids=["u"],
         thinking_budget_criteria=[crit, crit], _out=batch3)
     wrapper(me3, None)
     assert not hasattr(c3, "_kq_mtp_thinking_hook")
     # Non-MTP batch: untouched.
+    crit = types.SimpleNamespace(_kq_mtp_hook=hook)
     c4 = types.SimpleNamespace()
     batch4 = types.SimpleNamespace(prompt_cache=[c4], uids=["u"])
     me4 = types.SimpleNamespace(
-        draft_model=None, draft_kind=None,
+        draft_model=None, draft_kind=None, uids=["u"],
         thinking_budget_criteria=[crit], _out=batch4)
     wrapper(me4, None)
     assert not hasattr(c4, "_kq_mtp_thinking_hook")
+    assert not hasattr(batch4, "_kq_close_hook")
+    assert crit._kq_mtp_hook is hook
+
+
+def _first_token_site(record):
+    """PromptProcessingBatch.generate up to its first token: each row's
+    criteria is asked for a forced first id, as ar.py asks it."""
+
+    def generate(self, sampler, *a, **k):
+        spec = self.draft_model is not None and self.draft_kind is not None
+        for c in self.thinking_budget_criteria:
+            ask = getattr(c, "first_forced_token_id", None)
+            record.append(ask(spec) if ask is not None else None)
+        return self._out
+
+    return generate
+
+
+def _chain_criteria(cls, ids=(1, 99), budget=0):
+    """The criteria the installed chain builds for an MTP request whose
+    prompt opens the block, with the budget already spent."""
+    args = _budget_args(thinking_budget=None)
+    setattr(args, sp_mtp._DEFERRED_ATTR, budget)
+    return cls._make_thinking_budget_criteria(_mtp_self(), args,
+                                              mx.array([list(ids)]))
+
+
+def _prompt_batch(crits, *, mtp=True):
+    out = types.SimpleNamespace(prompt_cache=[types.SimpleNamespace()],
+                                uids=[f"u{i}" for i in range(len(crits))])
+    return types.SimpleNamespace(
+        draft_model=object() if mtp else None, draft_kind="mtp" if mtp else None,
+        uids=list(out.uids), thinking_budget_criteria=list(crits), _out=out)
+
+
+@pytest.fixture
+def _first_token(_mtp_seams):
+    gen, ar = _mtp_seams
+    sp.install_thinking_budget_fix()
+    record = []
+    ar.PromptProcessingBatch.generate = _first_token_site(record)
+    sp_mtp.install_mtp_thinking_budget()
+    return gen.ResponseGenerator, ar, record
+
+
+def test_mtp_one_row_takes_the_first_token_from_the_hook(_first_token):
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    close = list(hook.forced_ids)
+    ppb = _prompt_batch([crit])
+    batch = ar.PromptProcessingBatch.generate(ppb, None)
+    assert record == [close[0]]
+    assert hook._held == close[1:] and hook.closing()
+    assert batch.prompt_cache[0]._kq_mtp_thinking_hook is hook
+    assert batch._kq_close_hook is hook
+
+
+def test_plain_batch_takes_the_first_token_from_the_criteria(_first_token):
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    ar.PromptProcessingBatch.generate(_prompt_batch([crit], mtp=False), None)
+    assert record == [10]                                # the bare close's NL
+    assert not hook._spent and not hook._held
+
+
+def test_two_mtp_rows_force_no_first_token(_first_token, caplog):
+    cls, ar, record = _first_token
+    crits = [_chain_criteria(cls), _chain_criteria(cls)]
+    hooks = [c._kq_mtp_hook for c in crits]
+    with caplog.at_level("WARNING", logger=sp_mtp.__name__):
+        batch = ar.PromptProcessingBatch.generate(_prompt_batch(crits), None)
+    assert record == [None, None]
+    assert all(c._kq_mtp_hook is None for c in crits)
+    assert all(not h._spent for h in hooks)
+    assert batch._kq_close_hook is None
+    assert "2 rows" in caplog.text
+
+
+def test_mtp_row_without_a_hook_forces_nothing(_mtp_seams):
+    gen, ar = _mtp_seams
+    sp.install_thinking_budget_fix()
+    crit = gen.ResponseGenerator._make_thinking_budget_criteria(
+        _mtp_self(), _budget_args(thinking_budget=0), mx.array([[1, 99]]))
+    assert crit.first_forced_token_id(True) is None
+    assert crit.first_forced_token_id(False) == 10
+
+
+def _spec_batch(ar, uid, **kw):
+    return ar.SpeculativeGenerationBatch(
+        model=types.SimpleNamespace(), draft_model=object(), draft_kind="mtp",
+        uids=[uid], first_tokens=mx.array([5]),
+        prompt_cache=[types.SimpleNamespace()], sampler=None,
+        stop_criteria=lambda tok: False, max_tokens=[4],
+        hidden=mx.zeros((1, 2, 4)), shared_kv_states=None,
+        prompt_tokens=None, **kw)
+
+
+@pytest.mark.parametrize("host", ["none", "active", "queued"])
+def test_mtp_row_behind_a_busy_host_forces_nothing(_first_token, monkeypatch,
+                                                  host):
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    cls, ar, record = _first_token
+    install_continuous_batch_admission()
+    if host == "none":
+        gen_batch = None
+    elif host == "active":
+        gen_batch = _spec_batch(ar, 0)
+    else:
+        # No active row and one queued request: len() promotes it.
+        gen_batch = _spec_batch(ar, 0)
+        gen_batch._finished = [True]
+        gen_batch._pending_injections = [_spec_batch(ar, 1)]
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    ppb = _prompt_batch([crit])
+
+    def step(self, **kw):
+        return ar.PromptProcessingBatch.generate(ppb, None)
+
+    monkeypatch.setattr(ar.BatchGenerator, "_next", step)
+    sp_mtp.install_mtp_thinking_budget()
+    ar.BatchGenerator._next(types.SimpleNamespace(_generation_batch=gen_batch))
+    if host == "none":
+        assert record == [hook.forced_ids[0]]
+        return
+    assert record == [None]
+    assert not hook._held and not hook._spent
+    assert ppb._out.prompt_cache[0]._kq_mtp_thinking_hook is hook
 
 
 def test_mtp_thinking_flags_carry_through_preflight(_mtp_seams):

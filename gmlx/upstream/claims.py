@@ -80,10 +80,14 @@ CLAIMS: tuple[Claim, ...] = (
           "mtp_prefill._install_l0_tenant_rows (publishes the generator's "
           "tenant rows for the step; the prompt batch is built and first "
           "stepped inside _next); lora_rows.install_row_channel (binds the "
-          "generator's row settings as the uid lookup for the step)",
+          "generator's row settings as the uid lookup for the step); "
+          "patches.mtp_thinking (publishes the generator for the step, so "
+          "the first-token site reads the generation batch the extend "
+          "tests)",
           wrappers=("gmlx.cache.fresh_gate", "gmlx.lora_rows",
                     "gmlx.serve.admit_gate",
                     "gmlx.serve.batch_sched", "gmlx.serve.governor",
+                    "gmlx.serve.patches.mtp_thinking",
                     "gmlx.serve.queue_cap", "gmlx.serve.tick_guard",
                     "gmlx.spec.mtp_prefill")),
     # batch_sched's arrival merge relies on insert appending to or

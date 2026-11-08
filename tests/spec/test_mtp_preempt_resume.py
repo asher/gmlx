@@ -573,6 +573,85 @@ def test_preempt_waits_for_first_delivery(monkeypatch):
         (7, 12), (0, 101), (7, 101)]
 
 
+def _closing_hook(close):
+    from gmlx.gen.thinking_budget import MTPFinishThinking
+
+    return MTPFinishThinking(
+        end_seq=(close[-1],), skip_ids=list(close), reclose_ids=list(close),
+        budget=0, start_seq=(30,), start_in_thinking=True)
+
+
+def test_preempt_waits_for_a_close_in_flight(monkeypatch):
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    install_continuous_batch_admission()
+    calls = []
+    monkeypatch.setattr(ar, "run_speculative_server_rounds",
+                        _recording_rounds(calls))
+
+    model = SimpleNamespace()
+    host = _make_batch(ar, uids=(0,), model=model)
+    close = [20, 21, 22]
+    hook = _closing_hook(close)
+    assert hook.take_forced() == close
+    host._kq_close_hook = hook
+    host.next()
+    host.next()
+    host.extend(_make_batch(ar, uids=(7,), model=model))
+
+    for t in close:
+        assert [r.uid for r in host.next()] == [0]   # no preempt
+        assert len(calls) == 1
+        hook.observe(t)
+    host.next()
+    assert len(calls) == 2                       # rebuilt after the close
+    assert calls[1]["hidden"] is None
+
+
+def test_a_close_longer_than_a_block_lands_whole_before_a_preempt(monkeypatch):
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    install_continuous_batch_admission()
+    calls = []
+    rebuilt = _recording_rounds(calls)
+
+    def rounds(model, draft_model, prompt_cache, hidden, **kw):
+        if hidden is None:
+            return rebuilt(model, draft_model, prompt_cache, hidden, **kw)
+        kw.pop("draft_kind", None)
+        kw.pop("token_dtype", None)
+        kw.pop("row_ids", None)
+        return spec.owned_server_rounds(
+            model, draft_model, prompt_cache, hidden, **kw)
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", rounds)
+    model = SimpleNamespace(language_model=_VerifyEchoLM())
+    close = [20, 21, 22, 23, 24, 25, 26]           # seven ids, blocks of 4
+    hook = _closing_hook(close)
+    cache = _FakeCache(width=1)
+    cache._kq_mtp_thinking_hook = hook
+    host = ar.SpeculativeGenerationBatch(
+        model=model, draft_model=_EchoDrafter(cap=0), draft_kind="mtp",
+        uids=[0], first_tokens=mx.array([5]), prompt_cache=[cache],
+        sampler=None, stop_criteria=lambda tok: False, max_tokens=[40],
+        hidden=mx.zeros((1, 4, 8)),
+        shared_kv_states={"full": (mx.zeros((1, 2, 4, 4)),
+                                   mx.zeros((1, 2, 4, 4)))},
+        prompt_tokens=None, greedy_sampling=True)
+    host._kq_close_hook = hook
+    out = [r.token for r in host.next()]         # first token
+    out += [r.token for r in host.next()]        # the close's first chunk
+    assert out == [5, 20, 21, 22, 23]
+    host.extend(_make_batch(ar, uids=(9,), model=model))
+    for _ in range(6):
+        out += [r.token for r in host.next() if r.uid == 0]
+    assert len(calls) == 1                       # the rebuild ran
+    assert out[1:1 + len(close)] == close
+    assert 101 in out[1 + len(close):]
+
+
 # -- preempt capture: the closed round's undelivered tail ------------------
 
 

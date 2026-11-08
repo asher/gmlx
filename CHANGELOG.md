@@ -268,6 +268,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   marker, or on older templates a Python list.
 - Cancel in ComfyUI stops the server's prompt upsampling for a text encode,
   where the server went on writing the caption and encoding it.
+- On a model with a built-in drafter, a thinking-budget close now lands whole
+  when another request joins, where its end was lost.
 
 ## [0.5.4] - 2026-10-29
 

@@ -1746,14 +1746,15 @@ def _first_divergence(a, b):
 # Thinking-budget message on the MTP rounds
 # ---------------------------------------------------------------------------
 
-_BUDGET = 8
 _BUDGET_MESSAGE = "\n\nI am out of time, so I will answer now."
 
 
-def test_mtp_budget_message_then_end_marker(mtp_model):
-    """A lone greedy MTP row with a budget of 8 and a message: the message's
-    ids and the end marker land whole, within one draft block of the
-    budget, and the reasoning ends with the message."""
+@pytest.mark.parametrize("budget", [8, 0])
+def test_mtp_budget_message_then_end_marker(mtp_model, budget):
+    """A lone greedy MTP row with a budget and a message: the message's ids
+    and the end marker land whole, within one draft block of the budget, and
+    the reasoning ends with the message. A budget of 0 on a prompt that
+    opens the block lets no thinking token through."""
     from types import SimpleNamespace
 
     from gmlx._vendor.mlx_vlm.generate.ar import (
@@ -1776,7 +1777,7 @@ def test_mtp_budget_message_then_end_marker(mtp_model):
         # thinks.
         prompt = prompt[:think] + "<think>\n"
     ids = list(tokenizer.encode(prompt, add_special_tokens=False))
-    args = GenerationArguments(max_tokens=64, thinking_budget=_BUDGET,
+    args = GenerationArguments(max_tokens=64, thinking_budget=budget,
                                thinking_budget_message=_BUDGET_MESSAGE)
     hook = mtp_thinking._build_hook(SimpleNamespace(tokenizer=tokenizer), args,
                                     mx.array([ids]))
@@ -1824,11 +1825,13 @@ def test_mtp_budget_message_then_end_marker(mtp_model):
         end = list(hook.end_seq)
         close = next((i for i in range(opened, len(out))
                       if out[i:i + len(end)] == end), None)
-        if close is not None and close - opened + seed <= _BUDGET + block:
+        if close is not None and close - opened + seed <= budget + block:
             pytest.skip("the model closed its thinking inside the budget")
     assert at is not None, tokenizer.decode(out)
+    if budget == 0 and prompt_open:
+        assert at == 0, tokenizer.decode(out)
     thought = at - opened + seed
-    assert _BUDGET <= thought <= _BUDGET + block, (thought, block)
+    assert budget <= thought <= budget + block, (thought, block)
     reasoning = tokenizer.decode(out[:at + len(forced)])
     assert reasoning.endswith(_BUDGET_MESSAGE + tokenizer.decode(
         list(hook.end_seq)))

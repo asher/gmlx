@@ -480,6 +480,7 @@ def seq_thinking_budget_criteria_cls():
                 reasoning_ids, self._start_seq, self._end_seqs)
                 if self._prompt_open and reasoning_ids is not None else 0)
             self.thinking_token_count = self._count_seed
+            self._first_asked = False
             self._reset_stand_down()
 
         def _reset_stand_down(self):
@@ -500,7 +501,26 @@ def seq_thinking_budget_criteria_cls():
             self._tail = list(self._prompt_tail)
             self._steer_left = []
             self._steering = False
+            self._first_asked = False
             self._reset_stand_down()
+
+        def first_forced_token_id(self, speculative=False):
+            """The id that replaces the first generated token, asked once
+            before it is sampled, or None. A block the prompt opens with
+            its budget already spent starts the close there, so no model
+            token gets in first. A speculative batch never reads this
+            criteria, so it forces nothing."""
+            if speculative or self._first_asked:
+                return None
+            self._first_asked = True
+            if (not self.enable_thinking or not self.in_thinking or self.done
+                    or self._force_left or self._steering
+                    or self.thinking_budget is None
+                    or self.thinking_token_count < self.thinking_budget):
+                return None
+            forced = self._start_forcing()
+            self.forced_token_id = None
+            return forced
 
         def _strike(self):
             self._strikes += 1
@@ -1441,6 +1461,7 @@ class MTPFinishThinking:
         self._strikes = 0
         self._forced_closes = 0
         self._own = 0  # tokens of the injected close still to observe
+        self._held: list[int] = []  # the close after a forced first token
         self._tail_max = max(len(self.end_seq), len(self.start_seq or ()), 1,
                              *(len(s) for s in self.alt_end_seqs),
                              *(len(s) for s in self.soft_end_seqs))
@@ -1504,9 +1525,29 @@ class MTPFinishThinking:
             self._answer_pending = False
             self._strikes = 0
 
+    def closing(self) -> bool:
+        """Whether a forced close still has ids to observe."""
+        return self._own > 0
+
+    def take_first(self):
+        """The id that replaces the first generated token, or None. When
+        the prompt's reasoning already spends the budget, the close starts
+        there and its rest goes out at the first round boundary."""
+        if self.budget is None or self.count < self.budget:
+            return None
+        seq = self.take_forced()
+        if not seq:
+            return None
+        self._held = seq[1:]
+        return seq[0]
+
     def take_forced(self):
         """The close sequence to inject at this round boundary, or None.
-        Consumes any pending ^T request either way."""
+        Consumes any pending ^T request, unless it hands out a held rest."""
+        if self._held:
+            # The rest of a close take_first began. Counted there.
+            held, self._held = self._held, []
+            return held
         requested = self._close_requested
         self._close_requested = False
         if self.done or not self.in_thinking:

@@ -293,7 +293,8 @@ def install_continuous_batch_admission() -> None:
         the batch loop, whose first injection drain admits the waiters.
         The rebuild resumes from the round's bonus token, whose KV is not
         in the cache. GMLX_MTP_PREEMPT=0 leaves the old drain-wait
-        behavior.
+        behavior. A thinking-budget close still in flight declines the
+        preempt until its last id goes out.
 
         The rebuilt row carries no APC retirement context (batch-loop rows
         start with retire_ctxs None), so the preempted request's prefix is
@@ -301,6 +302,11 @@ def install_continuous_batch_admission() -> None:
         if not env_bool("GMLX_MTP_PREEMPT", True):
             return False
         if not getattr(self, "_sent_first", False):
+            return False
+        # A thinking-budget close lands whole: the rebuilt row has no hook
+        # and the scalar loop's forced queue dies with its generator.
+        hook = getattr(self, "_kq_close_hook", None)
+        if hook is not None and not self._finished[0] and hook.closing():
             return False
         last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
         if last is None:

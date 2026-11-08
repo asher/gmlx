@@ -1848,6 +1848,11 @@ def stream_speculative(
     # out holds the last chunk's full logits and first_logits is a view of
     # them. The decode rounds read neither, so release them here.
     del out, first_logits
+    if thinking_hook is not None:
+        # A budget the prompt already spent starts the close here.
+        forced = thinking_hook.take_first()
+        if forced is not None:
+            b = int(forced)
     if row_procs is not None:
         row_procs.start(b)
 
