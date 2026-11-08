@@ -61,8 +61,10 @@ def _pool(monkeypatch, budget: int) -> _Pool:
     pool._worker_for = lambda *a, **k: contextlib.nullcontext()
     pool._headroom_fn = lambda: None
     pool._retry_fn = lambda: 1
-    pool.overruns = []
-    pool.overrun_hook = lambda s, n: pool.overruns.append((s, n))
+    # The hook holds the list, not the pool: a cycle through the pool
+    # would keep its models alive past the test until a collection.
+    overruns = pool.overruns = []
+    pool.overrun_hook = lambda s, n: overruns.append((s, n))
     return pool
 
 

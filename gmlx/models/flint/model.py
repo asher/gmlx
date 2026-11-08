@@ -255,8 +255,9 @@ class DecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
     ) -> mx.array:
-        # A float32 stream in a float16 graph (FlintModel._WIDE_FROM): the
-        # sublayers take float16, and the MoE takes bfloat16 for its range.
+        # A float32 stream in a float16 or bfloat16 graph (FlintModel._WIDE):
+        # the sublayers take the activation dtype, and the MoE takes
+        # bfloat16, which in a float16 graph keeps its range.
         act = self.self_attn.sinks.dtype
         if x.dtype == act or x.dtype != mx.float32:
             h = x + self.self_attn(self.input_layernorm(x), mask, cache)
@@ -269,10 +270,14 @@ class DecoderLayer(nn.Module):
 
 
 class FlintModel(nn.Module):
-    # A float16 graph holds the residual stream in float32. Number tokens
-    # push it past 40000 in the last layers, and their routed SwiGLU output
-    # past 300000, beyond float16's 65504.
-    _WIDE_FROM = mx.float16
+    # A float16 or bfloat16 graph holds the residual stream in float32, as
+    # llama.cpp holds it in F32. In float16, number tokens push the stream
+    # past 40000 in the last layers, and their routed SwiGLU output past
+    # 300000, beyond float16's 65504. In bfloat16, the 8-bit mantissa of
+    # each residual add moves the near-tied sigmoid routes, and a route
+    # that moves into an expert of massive activations moves the logits by
+    # nats.
+    _WIDE = True
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -311,7 +316,8 @@ class FlintModel(nn.Module):
                 h, cache[self.swa_idx], window_size=self.sliding_window
             )
         # The sinks carry the graph's activation dtype.
-        wide = self.layers[0].self_attn.sinks.dtype == self._WIDE_FROM
+        act = self.layers[0].self_attn.sinks.dtype
+        wide = self._WIDE and act != mx.float32
         if wide:
             h = h.astype(mx.float32)
 
@@ -319,7 +325,7 @@ class FlintModel(nn.Module):
             h = layer(h, swa_mask if layer.use_sliding else fa_mask, c)
 
         out = self.norm(h)
-        return out.astype(self._WIDE_FROM) if wide else out
+        return out.astype(act) if wide else out
 
 
 class Model(nn.Module):
