@@ -703,3 +703,20 @@ def test_run_refuses_an_embedding_adapter_on_a_tied_model_before_the_load(
     assert cli._exit_code(cli.main, argv) == 1
     err = capsys.readouterr().err
     assert err.strip().splitlines()[-1] == "error: embd.gguf: " + adapter._EMBD_TIED
+
+
+def test_bench_refuses_an_embedding_adapter_on_a_tied_model_before_the_load(
+        tmp_path, monkeypatch, capsys):
+    pytest.importorskip("gguf")
+    import gmlx.load.adapter as adapter
+    import gmlx.load.loader as loader
+    from lora_gguf import mint_adapter, mint_base
+
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    monkeypatch.setattr(loader, "load_model",
+                        lambda *a, **k: pytest.fail("loaded for a refused adapter"))
+    argv = [base, "--no-mtp", "--adapter", ad, "--bench", "16"]
+    assert cli._exit_code(cli.main, argv) == 1
+    err = capsys.readouterr().err
+    assert err.strip().splitlines()[-1] == "error: embd.gguf: " + adapter._EMBD_TIED

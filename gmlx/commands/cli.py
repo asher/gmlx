@@ -1303,6 +1303,7 @@ def _run_bench(args) -> int:
     except argparse.ArgumentTypeError as e:
         print(str(e), file=sys.stderr)
         return 2
+    _check_cli_adapter(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         model, _config, tok = load_model(
             args.gguf,

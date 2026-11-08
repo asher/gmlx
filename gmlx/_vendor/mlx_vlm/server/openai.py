@@ -344,6 +344,9 @@ def _has_logprob_entry(token) -> bool:
     if getattr(token, "token_count", 1) == 0:
         return False
     if token.logprobs is None:
+        # Strict on purpose: a short list would misalign every later
+        # position. A new path that emits tokens on a logprobs request must
+        # give each one an entry, or the request is a 500.
         raise RuntimeError(f"no logprob entry for token {token.token}")
     return True
 
