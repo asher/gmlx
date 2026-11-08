@@ -305,7 +305,7 @@ video_models:
     vae: Comfy-Org__MiniMax-H3/vae/minimax_h3_video_vae_fp16.safetensors
     audio_vae: Comfy-Org__MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors
     adapters: [lightx2v__Minimax-h3-Turbo/minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors]
-    defaults: {steps: 8, shift: 6, size: 1344x768, seconds: 5}
+    defaults: {steps: 8, shift: 6, size: 1344x768, seconds: 5, attention: dense}
 ```
 
 | Key | Default | Meaning |
@@ -318,10 +318,15 @@ video_models:
 | <a id="video_modelstiny_vae"></a>`tiny_vae` | none | The TAEH3 file that `--preview` decodes with |
 | <a id="video_modelsadapters"></a>`adapters` | none | LoRA files applied to every clip, each a path or `{path, strength}` with strength 1 by default |
 | <a id="video_modelsvariant"></a>`variant` | detected | The DiT's variant, such as `fl2va-turbo4` for a merged Turbo file gmlx does not know |
-| <a id="video_modelsdefaults"></a>`defaults` | none | Clip defaults: `steps`, `shift`, `size` as `WxH` and `seconds`. Unset, steps and shift come from the variant, and a clip is 1344x768 for 5 s |
+| <a id="video_modelsdefaults"></a>`defaults` | none | Clip defaults: `steps`, `shift`, `size` as `WxH`, `seconds` and `attention`. Unset, steps and shift come from the variant, and a clip is 1344x768 for 5 s |
 | <a id="video_modelsupsampler"></a>`upsampler` | none | The `models` id of the chat model that rewrites each prompt, as [Prompt upsampling](video.md#prompt-upsampling) describes |
 | <a id="video_modelsupsample_prompt"></a>`upsample_prompt` | none | MiniMax's prompt guide, which the `upsampler` reads, found in `model_dirs` when relative. `gmlx video pull` fetches it |
 | <a id="video_modelsupsample"></a>`upsample` | `true` | Rewrite prompts with the `upsampler`. `false` runs them as typed, unless a request sends `prompt_upsampling: true`. |
+
+`defaults.attention` is `dense`, the default, or `int8`, which runs the
+DiT's attention in int8 as [Int8 attention](video.md#int8-attention)
+describes. A job's `attention` field and the `attention` input of the
+ComfyUI model loader run over it.
 
 ## Profiles
 

@@ -51,6 +51,8 @@ log = logging.getLogger("gmlx")
 # The server feature that rewrites a prompt with the clip's frames and
 # keyframes, and stops the rewrite on an interrupt naming the encode.
 KEYFRAME_UPSAMPLING = "keyframe_upsampling"
+# The server feature that runs an AV step at the attention it names.
+INT8_ATTENTION = "int8_attention"
 
 
 class GmlxError(RuntimeError):

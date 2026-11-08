@@ -160,6 +160,11 @@ class VideoFamily:
         return row.rungs
 
 
+# The kinds of DiT attention a run takes: ``--attention`` and an entry's
+# ``defaults.attention``.
+ATTENTION = ("dense", "int8")
+
+
 @functools.lru_cache(maxsize=1)
 def families() -> tuple[VideoFamily, ...]:
     from . import families as pkg
@@ -203,14 +208,42 @@ def vsa_refusal(fam: VideoFamily, variant: str) -> str | None:
     return None
 
 
-def run_refusal(fam: VideoFamily, variant: str) -> str | None:
-    """Why this Mac or install does not run ``variant`` of ``fam``, or
-    None: its chip, then for a VSA variant the kernel. A run or a pull
-    checks it before it loads or downloads anything."""
+def attention_refusal(fam: VideoFamily, variant: str,
+                      attention: str) -> str | None:
+    """Why this install or Mac does not run ``variant`` with
+    ``attention``, or None. Int8 attention replaces dense attention only,
+    and mlx-kquant's ``sdpa_qk8`` runs it, on a GPU with NAX units (M5
+    and later)."""
+    if attention == "dense":
+        return None
+    import mlx_kquant as kq
+
+    row = fam.variant_row(variant)
+    if row is not None and row.vsa_sparsity:
+        return (f"{fam.title} {variant} runs video sparse attention, and "
+                f"int8 attention applies to dense attention only")
+    what = f"{fam.title} {variant} runs with int8 attention"
+    if getattr(kq, "sdpa_qk8", None) is None:
+        return (f"{what}, and the installed mlx-kquant {kq.__version__} "
+                f"has no sdpa_qk8; update mlx-kquant to 0.5.10 or later")
+    if not kq.nax_available():
+        return (f"{what}, whose kernel needs a GPU with NAX units (M5 or "
+                f"newer), and this Mac's GPU has none")
+    return None
+
+
+def run_refusal(fam: VideoFamily, variant: str,
+                attention: str = "dense") -> str | None:
+    """Why this Mac or install does not run ``variant`` of ``fam`` with
+    ``attention``, or None: its chip, then for a VSA variant the kernel,
+    then the attention. A run or a pull checks it before it loads or
+    downloads anything."""
     why = chip_refusal(fam)
     row = fam.variant_row(variant)
     if why is None and row is not None and row.vsa_sparsity:
         why = vsa_refusal(fam, variant)
+    if why is None:
+        why = attention_refusal(fam, variant, attention)
     return why
 
 

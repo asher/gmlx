@@ -307,6 +307,19 @@ def loader_inputs() -> dict:
             "default": True, "tooltip": "Run gmlx serve when no server answers."})}}
 
 
+# The attention a MiniMax-H3 model's steps run, from the model loader.
+ATTENTION = ("dense", "int8")
+
+
+def model_loader_inputs() -> dict:
+    """The INPUT_TYPES of the model loader: the loaders', and the attention
+    of a MiniMax-H3 model's steps."""
+    return {**loader_inputs(), "optional": {"attention": (list(ATTENTION), {
+        "default": ATTENTION[0],
+        "tooltip": "The attention of each MiniMax-H3 step. int8 is lossy, needs an M5 "
+                   "or newer and does not run with fasth3."})}}
+
+
 def validate(model_name) -> bool | str:
     """ComfyUI's VALIDATE_INPUTS for model_name. Any name passes, so a
     workflow from another Mac or a template reaches the node, which checks

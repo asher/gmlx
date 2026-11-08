@@ -166,7 +166,8 @@ _VIDEO_MODEL_KEYS = frozenset({"path", "variant", "encoder", "encoder_mmproj",
                                "vae", "audio_vae", "tiny_vae", "adapters",
                                "defaults", "upsampler", "upsample",
                                "upsample_prompt"})
-_VIDEO_DEFAULTS_KEYS = frozenset({"steps", "shift", "size", "seconds"})
+_VIDEO_DEFAULTS_KEYS = frozenset({"steps", "shift", "size", "seconds",
+                                  "attention"})
 IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
 IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
@@ -1339,12 +1340,14 @@ class ResolvedVideoModel:
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
-        adapter list, and the size, length and caption rows its memory is
-        priced at, the last set by whether it names an upsampler."""
+        adapter list, the DiT's attention, and the size, length and
+        caption rows its memory is priced at, the last set by whether it
+        names an upsampler."""
         d = self.defaults or {}
         return (self.path, self.variant, self.encoder, self.encoder_mmproj,
                 self.vae, self.audio_vae, tuple(self.adapters),
-                d.get("size"), d.get("seconds"), self.upsampler is not None)
+                d.get("size"), d.get("seconds"), self.upsampler is not None,
+                d.get("attention") or "dense")
 
 
 # Path resolution
@@ -2946,6 +2949,14 @@ def _parse_video_defaults(where: str, raw) -> dict:
     out: dict = {}
     if raw.get("size") is not None:
         out["size"] = _video_size(f"{where}.size", raw["size"])
+    attention = raw.get("attention")
+    if attention is not None:
+        from gmlx.video.registry import ATTENTION
+
+        if attention not in ATTENTION:
+            raise ConfigError(f"{where}.attention: expected one of "
+                              f"{', '.join(ATTENTION)}, got {attention!r}")
+        out["attention"] = attention
     for key in ("steps", "seconds", "shift"):
         v = _coerce_num(key, raw.get(key), float, where=where)
         if v is None:

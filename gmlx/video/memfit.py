@@ -21,7 +21,9 @@ a line fit of what the run adds, both read as MLX's active peak.
   one (FastH3, whose steps run video sparse attention and its gates).
   A lone LoRA in the DiT's activation dtype runs on its file's arrays and
   costs its file once. Any other LoRA costs ``lora_k`` times its file:
-  its arrays and the copies the patch table builds from them.
+  its arrays and the copies the patch table builds from them. A step
+  with int8 attention adds the int8 copies of q and k and their scales
+  by row.
 - audio: the audio VAE's file and its decode by audio latent.
 - decode: the video VAE's file, or TAEH3's for a preview, and one chunk
   of frames by output pixel. A chunk does not grow with the clip.
@@ -72,6 +74,7 @@ class VideoPeaks:
     audio_encode: Line              # per audio latent
     lora_dtype: str = "BF16"        # the DiT's activation dtype
     lora_k: float = 2.0
+    int8_attention: float = 0.0     # per packed row, a step's int8 q and k
 
 
 # MiniMax-H3 Q4_K, the stock Qwen3-VL-32B Q4_K_M encoder, Comfy-Org's
@@ -115,6 +118,10 @@ class VideoPeaks:
 # 1344x768 cells at 22 frames by pixel and the 22 and 124 frame cells at
 # 1344x768 by frame-pixel. The audio VAE reads 1.10 to 1.87 GB over its
 # file from 40 to 600 latents, through the 160 and 600 latent cells.
+#
+# Int8 attention holds, beside a dense step, the int8 q and k of 56 heads
+# of 128 and their float32 scales, one a head: 2 x 56 x 128 + 2 x 56 x 4
+# bytes a packed row. The term is counted, not measured.
 PEAKS = {
     "h3": VideoPeaks(
         encoder_load=0.26 * GiB,
@@ -130,7 +137,8 @@ PEAKS = {
         frame_encode=Line(1.12 * GiB, 26),
         clip_encode=Line(3.52 * GiB, 303),
         clip_frame=17,
-        audio_encode=Line(1.84 * GiB, 301_400)),
+        audio_encode=Line(1.84 * GiB, 301_400),
+        int8_attention=14_784),
 }
 # FastH3: vantagewithai's Q4_K_M with its VSA gates, measured as the H3
 # cells on the same encoder, VAEs and LoRA, in
@@ -247,7 +255,7 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
                 variant: str | None = None, live_lora: bool = False,
                 mmproj: int = 0, tower: int = 0, blocks=(),
                 anchor_frames=(), anchor_audio=(),
-                anchor_vae: int | None = None,
+                anchor_vae: int | None = None, attention: str = "dense",
                 budget: float | None = None) -> VideoPlan:
     """The plan of one run of ``variant``, on its own fits where ``PEAKS``
     has them, else its family's. File sizes in bytes; ``lora_dtypes`` holds
@@ -265,7 +273,8 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
     phase encodes ``anchor_frames``, the frames of each keyframe and
     guide at ``pixels``, through the video VAE file ``anchor_vae``
     (``vae`` when None), and ``anchor_audio``, the latents of each guide
-    audio. ``budget`` defaults to
+    audio. A step with ``attention`` ``"int8"`` holds the int8 copies of
+    q and k too. ``budget`` defaults to
     ``capacity.working_budget_bytes()``."""
     p = PEAKS[variant] if variant in PEAKS else PEAKS[family]
     load = encoder + p.encoder_load
@@ -288,9 +297,12 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
             p, pixels, [int(f) for f in anchor_frames],
             [int(n) for n in anchor_audio],
             vae if anchor_vae is None else anchor_vae, audio_vae)
+    work = step.bytes(rows)
+    if attention == "int8":
+        work += p.int8_attention * rows
     terms["denoise"] = {"dit": dit,
                         "lora": lora if alone else p.lora_k * lora,
-                        "step": step.bytes(rows)}
+                        "step": work}
     if decode:
         terms["audio"] = {"audio_vae": audio_vae,
                           "decode": p.audio.bytes(audio_latents)}
@@ -436,12 +448,12 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
              loras=(), frames: int, width: int, height: int, text: int,
              tiny: bool = False, variant: str | None = None,
              mmproj: str | None = None, blocks=(), anchors=(),
-             anchor_vae: str | None = None,
+             anchor_vae: str | None = None, attention: str = "dense",
              budget: float | None = None) -> VideoPlan:
     """``plan_memory`` from the files at these paths, with ``blocks``
     keyframe vision tokens through ``mmproj`` and placed ``anchors``
     (``layout.AnchorRows``) encoded through ``anchor_vae`` (``vae``
-    when None) and ``audio_vae``."""
+    when None) and ``audio_vae``, the DiT running ``attention``."""
     if blocks and mmproj is None:
         raise ValueError("keyframes need the encoder's mmproj")
     vision = mmproj if blocks else None
@@ -461,7 +473,8 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
                        anchor_audio=[a.audio_t for a in anchors
                                      if a.audio_t],
                        anchor_vae=None if anchor_vae is None
-                       else file_bytes(anchor_vae), budget=budget)
+                       else file_bytes(anchor_vae), attention=attention,
+                       budget=budget)
 
 
 def check(plan: VideoPlan, what: str = "this clip", resize=None) -> None:

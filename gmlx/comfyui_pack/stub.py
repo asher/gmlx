@@ -58,6 +58,10 @@ def _loader():
     return discovery.loader_inputs()
 
 
+def _model_loader():
+    return discovery.model_loader_inputs()
+
+
 def _sigmas():
     size = ("INT", {"default": 0, "min": 0, "max": 16384, "step": 16})
     return {"required": {
@@ -82,7 +86,7 @@ def _h3_prompt():
 # Each node: its inputs, outputs, output names and whether it is an output
 # node, as nodes.py declares them.
 SPECS = {
-    "GmlxModelLoader": (_loader, ("MODEL",), None, False),
+    "GmlxModelLoader": (_model_loader, ("MODEL",), None, False),
     "GmlxCLIPLoader": (_loader, ("CLIP",), None, False),
     "GmlxVAELoader": (_loader, ("VAE",), None, False),
     "GmlxVideoVAELoader": (_loader, ("VAE",), None, False),
@@ -117,7 +121,7 @@ def _node(name: str, text: str):
              "DESCRIPTION": "Not loaded: " + text, "run": run}
     if names:
         attrs["RETURN_NAMES"] = names
-    if inputs is _loader:
+    if inputs in (_loader, _model_loader):
         # A saved model name the list lacks still reaches run, which names the fix.
         attrs["VALIDATE_INPUTS"] = classmethod(lambda cls, model_name: discovery.validate(model_name))
     return type(name, (), attrs)

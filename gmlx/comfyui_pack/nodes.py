@@ -65,9 +65,13 @@ class GmlxModelLoader(_Loader):
     CATEGORY = CATEGORY
     DESCRIPTION = "A diffusion model whose steps run on the gmlx server."
 
-    def load(self, model_name, server_url="", start_server=True):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return discovery.model_loader_inputs()
+
+    def load(self, model_name, server_url="", start_server=True, attention="dense"):
         client, name = connect(model_name, server_url, start_server)
-        return (load_model(client, name),)
+        return (load_model(client, name, attention),)
 
 
 class GmlxCLIPLoader(_Loader):
