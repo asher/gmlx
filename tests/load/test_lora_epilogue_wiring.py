@@ -2,9 +2,9 @@
 """The in-op LoRA epilogue wiring: with a kq build that carries
 ``HAS_LORA_EPILOGUE``, the dense wrapper hands its tables and the published
 row factor to ``KQuantLinear(x, lora=...)`` and the expert container hands
-``lora_a/lora_b`` (plus the arena owner table and the per-row factor) to the
-fused down exit instead of computing the delta with plain ops. CPU-safe:
-the kq gathers are monkeypatched fakes and the device check is stubbed."""
+``lora_a/lora_b`` (plus the per-row factor) to the fused down exit instead
+of computing the delta with plain ops. CPU-safe: the kq gathers are
+monkeypatched fakes and the device check is stubbed."""
 from __future__ import annotations
 
 import mlx.core as mx
@@ -93,7 +93,10 @@ def test_mix_exit_gets_tables_no_table_no_rows_in_static_mode(epilogue_on):
     assert np.allclose(np.array(y.astype(mx.float32)), 7.0)
 
 
-def test_owner_table_and_rows_ride_as_operands(epilogue_on):
+def test_a_streaming_swap_takes_the_plain_op_delta(epilogue_on):
+    """Under a swap the routing ids are arena slots, and kq wants one table
+    row per stack row, so the exit gets no LoRA operands and the delta maps
+    slots through the owner table with plain ops."""
     glu, lo = _fused_lora_container()
     if not glu._kq_mix_scores:
         pytest.skip("build without gather_qmv_mix_ns_kq")
@@ -108,13 +111,7 @@ def test_owner_table_and_rows_ride_as_operands(epilogue_on):
     finally:
         lora_rows.set_rows(None)
         lora_rows.configure("static")
-    kw = epilogue_on["mix_kw"]
-    assert set(kw) == {"lora_a", "lora_b", "lora_table", "lora_rows"}
-    assert kw["lora_table"].dtype == mx.int32
-    assert np.array(kw["lora_table"]).tolist() == [3, -1, 0, 2, 1, -1]
-    assert kw["lora_rows"].dtype == mx.float32
-    assert np.array(kw["lora_rows"]).tolist() == [[1.0, 1.0], [0.0, 0.0]]
-    # The kernel gets the raw slot ids; the table remaps inside it.
+    assert not any(k.startswith("lora_") for k in epilogue_on["mix_kw"])
     assert np.array(epilogue_on["mix_idx"]).tolist() == [[0, 1], [2, 5]]
 
 
@@ -191,19 +188,15 @@ def test_row_factors_are_dense_for_one_published_row():
         lora_rows.set_rows(None)
 
 
-@pytest.mark.parametrize("owners", [False, True])
-def test_the_first_slot_that_is_on_takes_the_epilogue(epilogue_on, owners):
+def test_the_first_slot_that_is_on_takes_the_epilogue(epilogue_on):
     """Slots 0 and 1, every row off in slot 0: the epilogue serves slot 1,
-    with slot 1's tables and, under a streaming swap, its owner table."""
+    with slot 1's tables."""
     glu, lo0 = _fused_lora_container()
     if not glu._kq_mix_scores:
         pytest.skip("build without gather_qmv_mix_ns_kq")
     lo1 = ExpertLoRA(mx.ones((E, INTER, 3), dtype=mx.float32) * 0.03,
                      mx.ones((E, 3, D), dtype=mx.float32) * 0.03, 2.0, slot=1)
     object.__setattr__(glu.down_proj, "_kq_lora_extra", [lo1])
-    if owners:
-        lo0.owner = lambda: np.array([0, 1, 2, 3])
-        lo1.owner = lambda: np.array([3, 2, 1, 0])
     lora_rows.configure("rows", 2)
     reg = lora_rows.UidRegistry()
     reg.register(1, (0.0, 1.0))
@@ -218,7 +211,4 @@ def test_the_first_slot_that_is_on_takes_the_epilogue(epilogue_on, owners):
     kw = epilogue_on["mix_kw"]
     # slot 1's b at scale 2: 0.06; slot 0's would be 0.02.
     assert float(kw["lora_b"][0, 0, 0].astype(mx.float32)) == pytest.approx(0.06, rel=1e-2)
-    if owners:
-        assert np.array(kw["lora_table"]).tolist() == [3, 2, 1, 0]
-    else:
-        assert "lora_table" not in kw
+    assert "lora_table" not in kw

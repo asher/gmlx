@@ -2629,19 +2629,17 @@ def lora_epilogue_wins(rows: int, rank: int) -> bool:
 def _lora_epilogue_kwargs(lo, idx, dtype):
     """The kq ``lora_*`` kwargs for an expert target's fused down exit, or
     ``None`` when the in-op epilogue cannot take this call (older kq build,
-    CPU device, or a rank x k intermediate past the kernel's bound), in
-    which case the caller computes the delta with plain ops."""
-    if not _KQ_LORA_EPILOGUE or _lora_on_cpu():
+    CPU device, a rank x k intermediate past the kernel's bound, or a
+    streaming swap), in which case the caller computes the delta with plain
+    ops. Under a swap the stack is the arena, and kq wants one table row
+    per stack row, not per adapter expert."""
+    if not _KQ_LORA_EPILOGUE or _lora_on_cpu() or lo.owner is not None:
         return None
     t, k = idx.shape
     a_t, b_t = lo.tables(dtype)
     if a_t.shape[-1] * k > 512:
         return None
     kw = {"lora_a": a_t, "lora_b": b_t}
-    if lo.owner is not None:
-        # Arena slot ids -> adapter expert ids inside the kernel; negative
-        # owners (dead slots) skip the row.
-        kw["lora_table"] = mx.array(np.asarray(lo.owner(), dtype=np.int32))
     rows = lora_rows.flat_rows(lo.slot, t, k)
     if rows is not None:
         kw["lora_rows"] = rows
