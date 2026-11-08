@@ -148,6 +148,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   escape gets a 400 naming the field, where it returned a 500.
 - Cancel in ComfyUI stops the server's prompt upsampling for a text encode,
   where the server went on writing the caption and encoding it.
+- Byte-level GGUF tokenizers split words as llama.cpp does for Qwen 3.5,
+  MiniCPM-V 4, SmolLM, GPT-2, Llama 3 and Tekken (Nemotron 3.5, Mistral)
+  vocabs, so Hindi, Thai, blank lines and indented code get llama.cpp's ids.
+  An unknown pre-tokenizer name now prints a warning.
+- `/v1/completions` adds BOS to a raw prompt on Gemma 3 and 4, as
+  llama-server does.
 
 ## [0.5.4] - 2026-10-29
 

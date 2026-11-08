@@ -19,6 +19,8 @@ setup is in the [contributing guide](../../CONTRIBUTING.md).
   autoregressive models, and its parity with OpenJev's helper.
 - [Hadamard-folded GGUFs](hadamard-fold.md): Weights stored under a Hadamard
   rotation, and where gmlx undoes it.
+- [Byte-level pre-tokenizers](pre-tokenizers.md): How a GGUF's pre-tokenizer
+  name picks the word split and flags that llama.cpp uses.
 - [Distillation internals](distill.md): How the teacher pass and the
   training head bound their memory, and the costs of the worked run.
 - [Image serving](image-serving.md): How image jobs share the GPU with chat
