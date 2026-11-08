@@ -167,7 +167,8 @@ def _inject_directives() -> tuple:
     """Parsed GMLX_OOM_INJECT directives (U5 fault injection): a
     comma-separated list of kind@tick, e.g. ``yellow@40,orange@120,
     red@200``. The governor forces the named band's condition at that
-    tick, once; ``throw@N`` and ``kill@N`` belong to the tick guard.
+    tick, once; ``throw``, ``cbfail`` and ``kill`` belong to the tick
+    guard.
     Never set in production."""
     global _inject_memo
     raw = os.environ.get("GMLX_OOM_INJECT", "")
@@ -178,6 +179,8 @@ def _inject_directives() -> tuple:
         if "@" not in part:
             continue
         kind, _, t = part.partition("@")
+        if kind.strip() in ("throw", "cbfail", "kill"):
+            continue  # the tick guard's
         try:
             out.append((kind.strip(), int(t)))
         except ValueError:

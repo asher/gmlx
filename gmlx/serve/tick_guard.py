@@ -159,41 +159,128 @@ class _TickState:
 
 
 _INJECT_FIRED: set = set()
+_INJECT_TICK = [0]
+_REFUSAL = ("[metal::malloc] Attempting to allocate 1 bytes "
+            "(GMLX_OOM_INJECT synthetic)")
+_CB_OOM = ("[METAL] Command buffer execution failed: Insufficient Memory "
+           "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory) "
+           "(GMLX_OOM_INJECT synthetic)")
+_SITES = ("", "decode", "prefill", "round")
 
 
-def _maybe_inject(st: _TickState) -> None:
-    """U5 fault injection: GMLX_OOM_INJECT directives ``throw@N`` (a
-    synthetic allocator error at tick N, exercising the containment
-    ladder end to end) and ``kill@N`` (SIGKILL the worker, exercising
-    the supervisor path). Band directives belong to the governor.
-    Never set in production."""
-    raw = os.environ.get("GMLX_OOM_INJECT", "")
-    if not raw:
-        return
-    for part in raw.split(","):
-        kind, _, t = part.partition("@")
+def _inject_directives() -> list:
+    """The tick guard's GMLX_OOM_INJECT directives, as (kind, tick, site).
+    Band directives belong to the governor."""
+    out = []
+    for part in os.environ.get("GMLX_OOM_INJECT", "").split(","):
+        kind, _, rest = part.partition("@")
         kind = kind.strip()
-        if kind not in ("throw", "kill"):
+        if kind not in ("throw", "cbfail", "kill"):
             continue
+        t, _, site = rest.partition(":")
+        site = site.strip()
         try:
             tick = int(t)
         except ValueError:
             continue
-        # once per process: tick counters restart per batch cycle
-        if st.ticks < tick or (kind, tick) in _INJECT_FIRED:
-            continue
-        _INJECT_FIRED.add((kind, tick))
-        st.injected.add((kind, tick))
-        if kind == "kill":
+        if site in _SITES and not (kind == "kill" and site):
+            out.append((kind, tick, site))
+    return out
+
+
+def _inject_due(site: str):
+    """The directive due at ``site`` now, marked fired, or None. Each fires
+    once per process: tick counters restart per batch cycle."""
+    if not os.environ.get("GMLX_OOM_INJECT"):
+        return None
+    for d in _inject_directives():
+        kind, tick, at = d
+        if at == site and _INJECT_TICK[0] >= tick and d not in _INJECT_FIRED:
+            _INJECT_FIRED.add(d)
+            return d
+    return None
+
+
+def _inject_error(d) -> RuntimeError:
+    kind, tick, site = d
+    where = f" at {site}" if site else ""
+    if kind == "cbfail":
+        _log.warning("[tick-guard] INJECT: synthetic command buffer OOM%s, "
+                     "tick %d", where, _INJECT_TICK[0])
+        return RuntimeError(_CB_OOM)
+    _log.warning("[tick-guard] INJECT: synthetic allocator throw%s, tick %d",
+                 where, _INJECT_TICK[0])
+    return RuntimeError(_REFUSAL)
+
+
+class _FailingRound:
+    """A rounds iterator whose next round raises ``err`` inside the rounds
+    generator, as a failure in the round would."""
+
+    def __init__(self, inner, err):
+        self.inner, self.err = inner, err
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        err, self.err = self.err, None
+        if err is not None:
+            return self.inner.throw(err)
+        return next(self.inner)
+
+    def close(self):
+        self.inner.close()
+
+
+def _maybe_inject(gen, st: _TickState) -> None:
+    """Fault injection, never set in production. GMLX_OOM_INJECT takes
+    ``kind@N`` or ``kind@N:site``. ``throw`` raises an allocator refusal,
+    ``cbfail`` a command buffer out of memory, and ``kill`` sends SIGKILL
+    to the worker. With no site the error comes at the start of tick N.
+    The sites fire the first time they are reached at or after tick N:
+    ``decode`` at the end of a tick that decoded, ``prefill`` as a prompt
+    batch's ``prompt_step`` returns, after the chunk's forward, and
+    ``round`` inside the next round of a speculative batch. Band directives belong to the
+    governor."""
+    if not os.environ.get("GMLX_OOM_INJECT"):
+        return
+    _INJECT_TICK[0] = st.ticks
+    d = _inject_due("")
+    if d is not None:
+        st.injected.add(d)
+        if d[0] == "kill":
             _log.error("[tick-guard] INJECT: SIGKILL at tick %d", st.ticks)
             import signal
 
             os.kill(os.getpid(), signal.SIGKILL)
-        _log.warning("[tick-guard] INJECT: synthetic allocator throw at "
-                     "tick %d", st.ticks)
-        raise RuntimeError(
-            "[metal::malloc] Attempting to allocate 1 bytes "
-            "(GMLX_OOM_INJECT synthetic)")
+        raise _inject_error(d)
+    gb = getattr(gen, "_generation_batch", None)
+    rounds = getattr(gb, "_rounds_iter", None)
+    if rounds is not None and not isinstance(rounds, _FailingRound):
+        d = _inject_due("round")
+        if d is not None:
+            st.injected.add(d)
+            gb._rounds_iter = _FailingRound(rounds, _inject_error(d))
+
+
+def _inject_after_decode(st: _TickState, out) -> None:
+    if not os.environ.get("GMLX_OOM_INJECT") or not out[1]:
+        return
+    d = _inject_due("decode")
+    if d is not None:
+        st.injected.add(d)
+        e = _inject_error(d)
+        salvage(e, out[1])
+        raise e
+
+
+def _inject_in_prefill() -> None:
+    if not os.environ.get("GMLX_OOM_INJECT"):
+        return
+    d = _inject_due("prefill")
+    if d is not None:
+        raise _inject_error(d)
 
 
 def _state(gen) -> _TickState:
@@ -578,13 +665,18 @@ def _install_store_owner(cls) -> None:
         if wrapped_with(orig, _INSTALLED_FLAG):
             continue
 
-        def owned(self, *a, _orig=orig, **k):
+        def owned(self, *a, _orig=orig, _name=name, **k):
             scope = getattr(getattr(self, "_apc_manager", None), "kq_scope",
                             None)
             if scope is None:
-                return _orig(self, *a, **k)
-            with scope(self):
-                return _orig(self, *a, **k)
+                out = _orig(self, *a, **k)
+            else:
+                with scope(self):
+                    out = _orig(self, *a, **k)
+            if _name == "prompt_step":
+                # After the chunk's forward: the batch still holds its rows.
+                _inject_in_prefill()
+            return out
 
         setattr(owned, _INSTALLED_FLAG, True)
         setattr(cls, name, link(owned, orig))
@@ -608,8 +700,9 @@ def install_tick_guard() -> bool:
         if mark is not None:
             mark(st.ticks, getattr(self, "_prompt_batch", None))
         try:
-            _maybe_inject(st)
+            _maybe_inject(self, st)
             out = _orig(self, **kwargs)
+            _inject_after_decode(st, out)
         except RuntimeError as e:
             if is_gpu_fault(e):
                 if not _contain_fault(st, e):

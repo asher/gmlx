@@ -1020,3 +1020,128 @@ def test_retirement_stores_wait_out_the_block():
                 _Manager(), "exact", [1, 2, 3], []) == 0
         assert snapshot._RETIRE_BLOCKED[0] == 1
     assert snapshot._RETIRE_BLOCKED[0] == 0 and calls == []
+
+
+# Injection sites (GMLX_OOM_INJECT, never set in production).
+
+
+def _inject(monkeypatch, directives):
+    monkeypatch.setenv("GMLX_OOM_INJECT", directives)
+    monkeypatch.setattr(tg, "_INJECT_FIRED", set())
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+
+
+def test_a_decode_throw_fires_on_the_first_decoding_tick_from_n(
+        wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    _inject(monkeypatch, "throw@2:decode")
+    gen._generation_batch = FakeGB([7], [1])
+    script.extend([([], [resp(7, 11)]), ([], []), ([], [resp(7, 12)]),
+                   ([], [resp(7, 13)])])
+    tick(gen)                                   # tick 1: before N
+    assert tick(gen) == ([], [])                # tick 2 decoded nothing
+    # Tick 3 decodes: the refusal comes after it, and the guard delivers
+    # what the tick computed.
+    assert [r.token for r in tick(gen)[1]] == [12]
+    st = gen._kq_tick_guard
+    assert st.fail_streak == 1 and st.injected == {("throw", 2, "decode")}
+    assert [r.token for r in tick(gen)[1]] == [13]    # once
+    assert st.ledger[7].committed == [11, 12, 13]
+
+
+def test_a_decode_cbfail_runs_the_command_buffer_path(wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    _inject(monkeypatch, "cbfail@2:decode")
+    gen._generation_batch = FakeGB([7], [1])
+    _droppable(gen, [])
+    script.extend([([], [resp(7, 11)]), ([], [resp(7, 12)])])
+    tick(gen)
+    assert tick(gen) == ([], [])                # the tick's token is dropped
+    st = gen._kq_tick_guard
+    assert st.ledger[7].committed == [11]
+    assert _queue(gen)[0] == (7, [1, 2, 3, 11], 15)
+    assert gen.removed == []
+
+
+def test_a_bare_throw_keeps_its_tick_start_meaning(wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    _inject(monkeypatch, "throw@2,cbfail@9:decode")
+    script.append(([], [resp(7, 11)]))
+    tick(gen)
+    assert tick(gen) == ([], [])                # nothing ran
+    assert script == []
+    assert gen._kq_tick_guard.injected == {("throw", 2, "")}
+
+
+def test_a_prefill_throw_comes_after_a_chunk_ran(monkeypatch):
+    """The prefill site raises as prompt_step returns, while the batch
+    still holds its rows. After generate the rows have left the batch, so
+    a throw there would lose them."""
+    _inject(monkeypatch, "throw@3:prefill,cbfail@5:prefill")
+    calls = []
+
+    class _Batch:
+        def prompt_step(self):
+            calls.append("step")
+
+        def generate(self):
+            calls.append("generate")
+            return ["first"]
+
+    tg._install_store_owner(_Batch)
+    b = _Batch()
+    monkeypatch.setattr(tg, "_INJECT_TICK", [2])
+    b.prompt_step()
+    tg._INJECT_TICK[0] = 3
+    assert b.generate() == ["first"]            # never at generate
+    with pytest.raises(RuntimeError, match="metal::malloc"):
+        b.prompt_step()
+    assert calls == ["step", "generate", "step"]    # the chunk ran first
+    b.prompt_step()                             # once
+    tg._INJECT_TICK[0] = 6
+    with pytest.raises(RuntimeError) as e:
+        b.prompt_step()
+    assert tg.is_command_buffer_failure(e.value)
+
+
+def test_a_round_failure_raises_inside_the_rounds_generator(monkeypatch):
+    _inject(monkeypatch, "cbfail@2:round")
+    closed = []
+
+    def rounds():
+        try:
+            while True:
+                yield [1], None
+        finally:
+            closed.append(True)
+
+    inner = rounds()
+    next(inner)
+    gb = types.SimpleNamespace(_rounds_iter=inner)
+    gen = types.SimpleNamespace(_generation_batch=gb)
+    st = tg._TickState()
+    st.ticks = 1
+    tg._maybe_inject(gen, st)
+    assert gb._rounds_iter is inner             # before N
+    st.ticks = 2
+    tg._maybe_inject(gen, st)
+    with pytest.raises(RuntimeError) as e:
+        next(gb._rounds_iter)
+    assert tg.is_command_buffer_failure(e.value)
+    assert closed == [True]                     # its finally ran, as a real one
+    # Each directive fires once per process, whatever the tick counter.
+    gb._rounds_iter = rounds()
+    st2 = tg._TickState()
+    st2.ticks = 5
+    tg._maybe_inject(gen, st2)
+    assert not isinstance(gb._rounds_iter, tg._FailingRound)
+
+
+def test_the_governor_leaves_the_guards_directives_alone(monkeypatch, caplog):
+    from gmlx.serve import governor
+
+    monkeypatch.setenv("GMLX_OOM_INJECT",
+                       "throw@30:decode,cbfail@120:round,kill@9,red@4")
+    monkeypatch.setattr(governor, "_inject_memo", ("", ()))
+    assert governor._inject_directives() == (("red", 4),)
+    assert "unparsable" not in caplog.text
