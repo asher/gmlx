@@ -170,7 +170,7 @@ status 500, and keeps the ones that ended.
 | A guide video that does not fit in the clip from its frame | The job fails with 400 naming the guide |
 | A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide: "... does not fit in memory beside the models now loaded: no window fits; the clip needs NEED, and FREE is free" |
 | `references` | 400 naming Ref2VA |
-| An `attention` other than `dense` or `int8`, or `int8` on `fasth3`, on an mlx-kquant without it or on a Mac older than M5 | 400 naming `attention` |
+| An `attention` other than `dense` or `int8`, or `int8` on `fasth3`, without sdpa_qk8 or on a Mac older than M5 | 400 naming `attention` |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
 | An unknown or expired job | 404 `not_found` |
 | The content of a job not completed | 409 `not_ready` |

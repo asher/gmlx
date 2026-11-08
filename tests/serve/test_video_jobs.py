@@ -1605,8 +1605,14 @@ def _clip_part_stubs(monkeypatch, order, generate):
     monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: order.append(
         "check"))
     monkeypatch.setattr(pis, "_lora_pool", lambda: pool)
-    monkeypatch.setattr(video_service, "ensure_dit", lambda s: order.append(
-        "ensure_dit"))
+
+    def ensure_dit(s):
+        # The job's encode let the DiT go: it loads again at the entry's
+        # attention.
+        order.append("ensure_dit")
+        if s.pipe.dit is None:
+            s.pipe.dit = SimpleNamespace(attention=s.plan.attention)
+    monkeypatch.setattr(video_service, "ensure_dit", ensure_dit)
     monkeypatch.setattr(pis, "_factor_turn", lambda p, e, s, core, subject:
                         order.append(("turn", core, subject)))
     monkeypatch.setattr(image_service, "lora_settle", lambda p, e, subject:
@@ -1615,8 +1621,8 @@ def _clip_part_stubs(monkeypatch, order, generate):
     monkeypatch.setattr(run, "decode_and_mux", lambda *a, **k: order.append(
         "decode"))
     monkeypatch.setattr(gpu_share, "pacer", lambda: None)
-    served = SimpleNamespace(pipe=SimpleNamespace(
-        default_table="t0", dit=SimpleNamespace(attention="dense")),
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(default_table="t0", dit=None),
         spec=SimpleNamespace(vae="v", audio_vae="a"),
         plan=SimpleNamespace(attention="dense"))
     return SimpleNamespace(_entry=SimpleNamespace(pipeline=served))
@@ -1656,13 +1662,14 @@ def test_the_jobs_turn_runs_after_the_dit_loads_and_settles_in_finally(
 
 
 @pytest.mark.parametrize("entry, left, sent, want", [
-    ("dense", "dense", "int8", "int8"), ("int8", "dense", None, "int8"),
-    ("int8", "int8", "dense", "dense"), ("dense", "int8", None, "dense")])
+    ("dense", None, "int8", "int8"), ("int8", "dense", None, "int8"),
+    ("int8", None, "dense", "dense"), ("dense", "int8", None, "dense")])
 def test_the_clip_is_priced_and_runs_at_the_jobs_attention(
         tmp_path, monkeypatch, entry, left, sent, want):
     """The worker sets the DiT's attention before each clip, the job's
-    else the entry's, over whatever the last job or step left, and the
-    clip's check prices the job's."""
+    else the entry's: after the DiT loads again at the entry's attention
+    (``left`` None, as after the job's encode), or over whatever the last
+    job or step left. The clip's check prices the job's."""
     import mlx.core as mx
 
     from gmlx.serve.patches import image_steps as pis
@@ -1677,7 +1684,9 @@ def test_the_clip_is_priced_and_runs_at_the_jobs_attention(
     monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: checked.append(
         k["attention"]))
     served = hold._entry.pipeline
-    served.plan.attention, served.pipe.dit.attention = entry, left
+    served.plan.attention = entry
+    if left is not None:
+        served.pipe.dit = SimpleNamespace(attention=left)
     store, clock, driver = _store(tmp_path)
     job = _clip_job(store)
     if sent:
