@@ -188,6 +188,22 @@ def _take_queued(rg) -> list:
     return found
 
 
+def _rope_holders(model) -> list:
+    return [h for h in (model, getattr(model, "language_model", None))
+            if h is not None]
+
+
+def seed_text_rope(model) -> None:
+    """Put the rope state of a text row on ``model``: no stored positions
+    and zero int32 deltas, on each holder that has the field. A forward
+    then numbers its chunk from the cache offset."""
+    for holder in _rope_holders(model):
+        if hasattr(holder, "_position_ids"):
+            holder._position_ids = None
+        if hasattr(holder, "_rope_deltas"):
+            holder._rope_deltas = mx.zeros((1, 1), dtype=mx.int32)
+
+
 @contextlib.contextmanager
 def _step_scope(model):
     """One job step: the wired limit, the model's prefill command-buffer
@@ -197,12 +213,9 @@ def _step_scope(model):
     back afterwards."""
     from gmlx.serve import cb_phase
 
-    holders = [model, getattr(model, "language_model", None)]
-    saved = [(h, name, getattr(h, name)) for h in holders if h is not None
+    saved = [(h, name, getattr(h, name)) for h in _rope_holders(model)
              for name in _ROPE_STATE if hasattr(h, name)]
-    for holder, name, _ in saved:
-        setattr(holder, name, None if name == "_position_ids"
-                else mx.zeros((1, 1), dtype=mx.int32))
+    seed_text_rope(model)
     before = cb_phase.snapshot()
     cb_phase.flip("prefill", model)
     wired: Any = contextlib.nullcontext()

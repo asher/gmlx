@@ -245,6 +245,7 @@ include = [
     "gmlx/gen/media_spans.py",
     "gmlx/gen/prefill_decay.py",
     "gmlx/gen/prefill_tail.py",
+    "gmlx/gen/score_reader.py",
     "gmlx/gen/thinking_budget.py",
     "gmlx/image/vision_tap.py",
     "gmlx/load/hadamard_modules.py",
