@@ -31,6 +31,7 @@ from gmlx.upstream.single_bos_fix import (  # noqa: E402
     _adds_only_bos,
     _forwards_to_tokenizer,
     install_single_bos_fix,
+    raw_prompt_special_tokens,
 )
 
 _GENERATION = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
@@ -184,6 +185,22 @@ def test_text_prompt_holds_one_bos(fixed, path, model_type, prompt):
     processor = _make_text_processor(TokenizerWrapper(_tokenizer()))
     ids = _PATHS[path](model_type, processor, prompt)
     assert _bos_ids(ids) == 1
+
+
+@pytest.mark.parametrize("model_type", ["gemma4", "gemma4_text", "llama"])
+@pytest.mark.parametrize("prompt,bos", [("Hello", 1), (_BOS + "Hello", 2)])
+def test_a_raw_prompt_gets_the_tokenizer_special_tokens(fixed, model_type,
+                                                        prompt, bos):
+    """A raw prompt, as /v1/completions sends, is encoded with the
+    tokenizer's special tokens, as llama-server and HF encode it. Gemma with
+    a chat template gets its BOS, and a text that opens with BOS keeps
+    both."""
+    processor = _make_text_processor(TokenizerWrapper(_tokenizer()))
+    processor.chat_template = "t"
+    with raw_prompt_special_tokens():
+        assert _bos_ids(_serve(model_type, processor, prompt)) == bos
+    if model_type == "gemma4":
+        assert 0 not in _row(_serve(model_type, processor, "Hello"))
 
 
 @pytest.mark.parametrize("path", sorted(_PATHS))
