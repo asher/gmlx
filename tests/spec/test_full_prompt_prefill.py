@@ -1726,13 +1726,14 @@ def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
                 zip(s_lps[:n + 1], p_lps[:n + 1])):
             if i < n:
                 assert abs(s_lp - p_lp) <= _LP_TOL
-            # Deep in the tail a bf16 step is a large move in nats but no
-            # move in probability, so the alternatives compare as
-            # probabilities.
-            s_p = {t: math.exp(v) for t, v in s_top}
-            p_p = {t: math.exp(v) for t, v in p_top}
-            for t in s_p.keys() & p_p.keys():
-                assert abs(s_p[t] - p_p[t]) <= _LP_PROB_TOL, t
+            # An alternative gets the chosen token's bound in nats. Deep in
+            # the tail a bf16 step is a large move in nats but no move in
+            # probability, so it may pass on probability instead.
+            s_d, p_d = dict(s_top), dict(p_top)
+            for t in s_d.keys() & p_d.keys():
+                assert (abs(s_d[t] - p_d[t]) <= _LP_TOL
+                        or abs(math.exp(s_d[t]) - math.exp(p_d[t]))
+                        <= _LP_PROB_TOL), t
 
 
 def _first_divergence(a, b):
