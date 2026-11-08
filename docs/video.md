@@ -174,7 +174,7 @@ not the one `off` makes from the same seed.
 gmlx video generate h3 --int8 attention --prompt "..."
 ```
 
-| `--int8` | Runs in int8 | Memory |
+| `--int8` | Runs in int8 | DiT memory |
 |---|---|---|
 | `off` | nothing (the default) | as the default |
 | `attention` | the attention | as the default |

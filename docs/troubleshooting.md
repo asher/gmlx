@@ -535,18 +535,15 @@ before any weight loads:
   0.5.11 or later`: the installed mlx-kquant has no int8 kernel. Update
   gmlx, which brings the mlx-kquant it needs.
 - `MiniMax-H3 fasth3 runs video sparse attention, and int8 attention
-  applies to dense attention only`, or `int8 linears are untested on
-  MiniMax-H3 fasth3, and gmlx runs them on variants with dense attention
-  only`: run `fasth3` at `off`, or the clip on `h3`.
+  applies to dense attention only`, or `..., and int8 linears run on
+  variants with dense attention only`: run `fasth3` at `off`, or the clip
+  on `h3`.
 - `this model's entry loads its DiT at int8 off, so a request names int8
   off or attention, not linears; set the entry's defaults.int8 to run
   linears`: the linear layers are converted as the DiT loads, so a job or
   a ComfyUI loader can change the attention only. Set `defaults.int8` on
   the entry, or add a second entry on the same files at the value you
   want.
-- `defaults.attention: the int8 setting replaces it; set int8 to one of
-  off, attention, linears, all`: an entry written for an earlier build.
-  Replace `attention: int8` with `int8: attention`.
 - A memory refusal that names `int8 off or attention`: the clip or the
   DiT does not fit with the int8 weights of `linears` or `all`, 7.86 GiB
   more than the file's. Run at `off` or `attention`, which keep the

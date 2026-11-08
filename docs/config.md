@@ -335,8 +335,7 @@ the parts of the DiT that run in int8, as
 `linears` and `all` hold 7.86 GiB more memory. Two entries on the same
 files that differ only in `int8` load apart. A job's `int8` field and the
 `int8` input of the ComfyUI model loader run over it when they keep the
-entry's linear layers. `defaults.attention` from before the setting is
-refused with a message that names `int8`.
+entry's linear layers.
 
 ## Profiles
 

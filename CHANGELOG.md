@@ -20,7 +20,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   steps take about half as long as `h3`'s, on an M5 or newer. See
   [FastH3](docs/video.md#fasth3).
 - `--int8 attention`, `linears` or `all` runs MiniMax-H3's attention, its block
-  linears or both in int8 on an M5 or newer; linears cost 7.86 GiB more memory.
+  linears or both in int8 on an M5 or newer. Linears cost 7.86 GiB more memory.
   See [Faster clips with int8](docs/video.md#faster-clips-with-int8).
 - A chat model rewrites MiniMax-H3 prompts in the form of MiniMax's prompt
   guide, which `gmlx video pull` fetches. See
