@@ -1314,6 +1314,25 @@ class GenerationBatch:
 
     def _step(self):
         """Perform one generation step with double buffering."""
+        # gmlx: a step that failed after its sample owes the token it was
+        # about to return. Before S1, so the new sample stays next.
+        owed = getattr(self, "_kq_owed", None)
+        if owed is not None:
+            mx.async_eval(
+                *[
+                    a
+                    for a in (
+                        self._next_tokens,
+                        self._next_lps,
+                        self._next_top_idx,
+                        self._next_top_lp,
+                    )
+                    if a is not None
+                ]
+            )
+            out = self._emit(*owed)
+            self._kq_owed = None
+            return out
         self._current_tokens = self._next_tokens
         self._current_lps = self._next_lps
         inputs = self._current_tokens
@@ -1334,9 +1353,11 @@ class GenerationBatch:
             self._next_lps = None
             self._next_top_idx = None
             self._next_top_lp = None
+            self._kq_owed = (inputs, None, None, None)
             mx.async_eval(self._next_tokens)
-            mx.eval(inputs)
-            return inputs.tolist(), None, None, None
+            out = self._emit(inputs, None, None, None)
+            self._kq_owed = None
+            return out
 
         output = self._language_model(
             inputs[:, None], cache=self.prompt_cache, **fwd_kwargs
@@ -1399,10 +1420,17 @@ class GenerationBatch:
             self._next_top_idx = None
             self._next_top_lp = None
 
+        # gmlx: the new sample is in place. A failure from here on owes
+        # ``inputs``, which the next call returns without a forward.
+        self._kq_owed = (inputs, self._current_lps, prev_top_idx, prev_top_lp)
         mx.async_eval(*eval_targets)
+        out = self._emit(inputs, self._current_lps, prev_top_idx, prev_top_lp)
+        self._kq_owed = None
+        return out
 
-        if self._current_lps is not None:
-            to_eval = [inputs, self._current_lps]
+    def _emit(self, inputs, current_lps, prev_top_idx, prev_top_lp):
+        if current_lps is not None:
+            to_eval = [inputs, current_lps]
             if prev_top_idx is not None:
                 to_eval.extend([prev_top_idx, prev_top_lp])
             mx.eval(*to_eval)
@@ -1410,7 +1438,7 @@ class GenerationBatch:
             top_lp_list = prev_top_lp.tolist() if prev_top_lp is not None else None
             return (
                 inputs.tolist(),
-                self._current_lps.tolist(),
+                current_lps.tolist(),
                 top_idx_list,
                 top_lp_list,
             )
@@ -1430,6 +1458,7 @@ class GenerationBatch:
             self._next_top_lp,
             getattr(self, "_next_raw", None),
             self._rope_deltas,
+            getattr(self, "_kq_owed", None),
         ]
         for c in self.prompt_cache:
             try:
@@ -1450,6 +1479,8 @@ class GenerationBatch:
 
     def extend(self, other: "GenerationBatch"):
         """Extend this batch with another generation batch."""
+        # gmlx: admission runs only after a decode step that returned.
+        assert getattr(self, "_kq_owed", None) is None
         self_was_empty = len(self.uids) == 0
         if not self_was_empty and len(other.uids) > 0:
             self._eval_pending_state()
@@ -1552,6 +1583,7 @@ class GenerationBatch:
             ]
 
         if not keep:
+            self._kq_owed = None
             self.prompt_cache.clear()
             self._current_tokens = None
             self._current_lps = None
@@ -1577,6 +1609,11 @@ class GenerationBatch:
                 self._next_top_lp = self._next_top_lp[keep_arr]
             if self._rope_deltas is not None:
                 self._rope_deltas = self._rope_deltas[keep_arr]
+            owed = getattr(self, "_kq_owed", None)
+            if owed is not None:
+                self._kq_owed = tuple(
+                    a[keep_arr] if a is not None else None for a in owed
+                )
 
     def next(self) -> List[Response]:
         """Generate the next batch of tokens."""

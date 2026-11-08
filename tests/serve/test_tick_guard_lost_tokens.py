@@ -186,6 +186,9 @@ def run(make, *, plan=None, b_max=6, c_at=None, forcing=False,
                     out.setdefault(r.uid, []).append(r)
                 if r.finish_reason:
                     finishes[r.uid] = r.finish_reason
+            st = tg._state(gen)
+            if st.fail_streak or st.fault_streak:
+                continue    # a failed tick can owe a token it computed
             for uid, off in _offsets(gen).items():
                 n = len(out.get(uid, []))
                 gaps.setdefault(uid, set()).add(off - len(prompts[uid]) - n)
@@ -282,3 +285,37 @@ def test_d_forced_eval(engine, monkeypatch):
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_force_next_tokens"))
     got = check(engine, shot, plan=_arm_at(shot, 1), forcing=True)
     assert FORCED in _tokens(got)[0]
+
+
+def test_c_after_the_sample(engine, monkeypatch):
+    """C: the decode step throws after its sample. The next step returns
+    the token the failed one owed, without a forward."""
+    shot = Shot()
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_step"))
+    check(engine, shot, plan=_arm_at(shot, 6))
+
+
+def test_c_in_the_emit_eval(engine, monkeypatch):
+    shot = Shot()
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_step", "_emit", name="eval"))
+    check(engine, shot, plan=_arm_at(shot, 6))
+
+
+def test_a_forced_id_on_the_resume_tick_keeps_its_logprob(engine, monkeypatch):
+    """The step that resumes feeds the owed token to the criteria, which
+    forces an id. The id reports its own raw logprob, which needs the
+    failed step's raw logits."""
+    shot = Shot()
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_step"))
+
+    def plan(t, gen, out):
+        if len(out.get(0, [])) == 2:
+            shot.armed = True
+
+    ref, _, _ = run(engine, forcing=True)
+    got = check(engine, shot, plan=plan, forcing=True)
+    want = [r for r in ref[0] if r.token == FORCED]
+    have = [r for r in got[0] if r.token == FORCED]
+    assert len(have) == len(want) == 1
+    assert have[0].token_logprob == pytest.approx(want[0].token_logprob)
+    assert have[0].token_logprob < -10
