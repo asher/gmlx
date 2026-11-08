@@ -183,6 +183,9 @@ def run(gguf_dir):
 
 
 def test_a_score_beside_an_image_row_reads_text_positions(run):
+    # The ids-against-embeddings probe passed: the job reads the text as
+    # chat reads it.
+    assert run["path"]["refusal"] is None
     busy_values, _ = run["busy"]
     idle_values, _ = run["idle"]
     assert run["forwards"] >= 3
