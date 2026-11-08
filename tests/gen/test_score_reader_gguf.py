@@ -93,3 +93,42 @@ def test_scores_equal_the_models_own_forward(gguf_index, arch, monkeypatch):
     assert len(plan) >= 4
     chunked = _drain(reader.score(ids, K))
     _check(chunked, ids, _log_softmax(lm, [ids[d:d + w] for d, w in plan]))
+
+
+def _tol(logits) -> float:
+    """One bf16 step at the row's largest logit, plus the normalizer's
+    share, as tests/gen/test_serve_logprobs_gguf.py bounds it."""
+    top = float(np.abs(logits).max())
+    return 2.0 ** (np.floor(np.log2(top)) - 7) + 0.02
+
+
+def test_a_streamed_moe_model_scores_on_the_path_its_check_picks(gguf_index):
+    """With its experts streamed, the reader takes the trunk and head split
+    only when the split reproduces the model's own logits; either way the
+    entries are within one bf16 step of a plain forward."""
+    from gmlx.cache.kv_cache import make_prompt_cache
+    from gmlx.gen import score_reader as sr
+    from gmlx.serve.bridge_vlm import load_serveable_model
+
+    path = _require(gguf_index, "qwen35moe")
+    model, processor, _config = load_serveable_model(
+        path, stream="experts", feeder_prefill=False, feeder_decode=False)
+    ids = list(processor.tokenizer.encode(PROMPT))
+    reader = sr.ScoreReader(model)
+    assert reader.streamed
+    _drain(reader.build())
+    print(f"qwen35moe {path}: split={reader.split is not None} "
+          f"refusal={reader.refusal} width={reader.width} reduce={reader.reduce}")
+    assert reader.refusal is None
+    entries = _drain(reader.score(ids, K))
+
+    lm = model.language_model
+    out = lm(mx.array([ids[:-1]]), cache=make_prompt_cache(lm))
+    z = getattr(out, "logits", out)[0].astype(mx.float32)
+    lp, raw = np.array(z - mx.logsumexp(z, axis=-1, keepdims=True)), np.array(z)
+    worst = 0.0
+    for i, (value, _top_ids, _top_vals) in enumerate(entries):
+        diff = abs(value - lp[i, ids[i + 1]])
+        worst = max(worst, diff)
+        assert diff <= _tol(raw[i]), i
+    print(f"qwen35moe: worst gap to a plain forward {worst:.4g}")
