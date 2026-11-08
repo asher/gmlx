@@ -523,3 +523,25 @@ def test_rebuild_row_rewinds_the_criteria_to_the_delivered_tokens(
     for _ in range(3):
         tick(gen)
     assert gen.removed == [8] and tc.calls == [[21]]
+
+
+def _closing_hook():
+    from gmlx.gen.thinking_budget import MTPFinishThinking
+
+    hook = MTPFinishThinking(end_seq=(9,), skip_ids=[], reclose_ids=[9],
+                             forced_ids=[5, 6, 9], budget=0, start_seq=(8,),
+                             start_in_thinking=True)
+    assert hook.take_first() == 5 and hook.closing()
+    return hook
+
+
+def test_mid_close_reads_the_criteria_and_the_hook():
+    plain = types.SimpleNamespace(closing=lambda: True)
+    assert tg.mid_close(tg._Row([1], 4, {}, None, plain))
+    hook = _closing_hook()
+    carrier = types.SimpleNamespace(_kq_mtp_hook=hook)
+    assert tg.mid_close(tg._Row([1], 4, {}, None, carrier))
+    hook.stand_down()
+    assert not tg.mid_close(tg._Row([1], 4, {}, None, carrier))
+    assert not tg.mid_close(tg._Row([1], 4, {}, None, None))
+    assert not tg.mid_close(tg._Row([1], 4, {}, None, object()))

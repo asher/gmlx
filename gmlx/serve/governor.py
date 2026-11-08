@@ -140,6 +140,7 @@ _STATS = {
     "yellow_entries": 0,
     "orange_evictions": 0,
     "orange_retires": 0,
+    "retires_deferred": 0,
     "red_failures": 0,
     "victim_repeats": 0,
     "sheds_suppressed": 0,
@@ -586,11 +587,13 @@ def _apc_disk_armed(gen) -> bool:
 def _retire_largest(gen, st: _GovState) -> bool:
     """Orange's width lever: remove the largest decode row and requeue
     it as itself through the tick guard's ledger (replay = prompt +
-    delivered; APC makes the re-prefill warm)."""
+    delivered; APC makes the re-prefill warm). A row in the middle of a
+    forced close is passed over: the retire can wait, and a close is a
+    few tokens long."""
     from . import tick_guard as tg
 
     tg_st = tg._state(gen)
-    victim = tg._pick_victim(gen, tg_st)
+    victim = tg._pick_victim(gen, tg_st, spare=tg.mid_close)
     if victim is None:
         return False
     if victim == st.last_victim_uid:
@@ -605,6 +608,12 @@ def _retire_largest(gen, st: _GovState) -> bool:
     _STATS["orange_retires"] += 1
     _STATS["last_action"] = f"retire uid={victim}"
     return True
+
+
+def _live_rows(gen) -> bool:
+    from . import tick_guard as tg
+
+    return bool(tg._live_decode_rows(gen))
 
 
 def _fail_largest(gen, st: _GovState, why: str) -> bool:
@@ -936,7 +945,17 @@ def _governor_tick(gen) -> None:
             if st.evict_fraction >= 1.0 and freed < shortfall:
                 # registered caches are dry; the width lever is next
                 if _apc_disk_armed(gen):
-                    _retire_largest(gen, st)
+                    if not _retire_largest(gen, st) and _live_rows(gen):
+                        # Every row is in a forced close. A dry evict while
+                        # they finish is not a shed, so it neither counts
+                        # against the cap nor is measured as a failed
+                        # recovery. Orange tries again next tick; red still
+                        # guards the headroom.
+                        st.shed_times.pop()
+                        st.shed_measure_from = None
+                        _STATS["retires_deferred"] += 1
+                        _STATS["last_action"] = (
+                            "retire deferred: every row is in a forced close")
                 else:
                     st.orange_failed = True  # fall through to red next tick
             st.evict_fraction = min(1.0, st.evict_fraction + 0.5)

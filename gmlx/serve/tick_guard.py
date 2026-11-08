@@ -188,12 +188,28 @@ def _live_decode_rows(gen) -> list:
     return [(u, per.get(u, 0)) for u in uids]
 
 
-def _pick_victim(gen, st: _TickState):
+def mid_close(row) -> bool:
+    """Whether a row's thinking-budget close has an id out: its MTP hook's
+    or its criteria's. A stood-down hook is never closing."""
+    tc = getattr(row, "tc", None)
+    if tc is None:
+        return False
+    hook = getattr(tc, "_kq_mtp_hook", None)
+    if hook is not None and hook.closing():
+        return True
+    closing = getattr(tc, "closing", None)
+    return bool(closing is not None and closing())
+
+
+def _pick_victim(gen, st: _TickState, spare=None):
     """Largest live decode row by resident tokens (prompt + emitted);
-    deterministic, avoiding an immediate repeat victim on ties."""
+    deterministic, avoiding an immediate repeat victim on ties. A row
+    ``spare(row)`` holds is passed over."""
     rows = []
     for uid, ntok in _live_decode_rows(gen):
         row = st.ledger.get(uid)
+        if spare is not None and row is not None and spare(row):
+            continue
         plen = len(row.prompt_ids) if row else 0
         rows.append((plen + ntok, uid))
     if not rows:
