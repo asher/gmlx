@@ -1051,6 +1051,9 @@ class ResponseGenerator:
         self._load_error: Optional[Exception] = None
         self._cancelled: set = set()
         self._cancel_lock = Lock()
+        # gmlx: cancelled uids ``remove`` refused, and the next engine uid.
+        self._kq_unremoved: set = set()
+        self._kq_next_uid = 0
         self._tokenizer_lock = Lock()
         self._thread = Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -1088,6 +1091,91 @@ class ResponseGenerator:
         with self._cancel_lock:
             pending, self._cancelled = self._cancelled, set()
             return pending
+
+    def _drop_cancelled(self, batch_gen, active: dict):
+        """gmlx: drop abandoned requests, and their tick-guard ledger
+        entries. A row ``remove`` cannot take out yet (it shares a prompt
+        batch) is retried each call until it is gone. Returns the engine
+        to keep, or None when only abandoned rows were left in it."""
+        from gmlx.serve import tick_guard
+        from gmlx.serve.row_sampling import live_uids
+
+        unremoved = getattr(self, "_kq_unremoved", None)
+        if unremoved is None:
+            unremoved = self._kq_unremoved = set()
+        cancelled = self._drain_cancellations()
+        if batch_gen is None:
+            return None
+        if unremoved:
+            live = live_uids(batch_gen)
+            for uid in list(unremoved):
+                if uid not in live or batch_gen.remove(uid):
+                    unremoved.discard(uid)
+        for uid in cancelled:
+            if uid not in active:
+                continue
+            removed = batch_gen.remove(uid)
+            tick_guard.forget(batch_gen, uid)
+            info = active.pop(uid)
+            logger.info(
+                "Generation cancelled: request=%s generated_tokens=%d",
+                info.get("request_id", uid),
+                int(info.get("generated_tokens", 0) or 0),
+            )
+            try:
+                info["rqueue"].put(None)
+            except Exception:
+                pass
+            if not removed:
+                unremoved.add(uid)
+        if not active and unremoved:
+            # No request reads the prefill those rows share, and an idle
+            # loop never steps it to its end.
+            tick_guard.drop_prompt_batch(batch_gen)
+            batch_gen.close()
+            return None
+        return batch_gen
+
+    def _new_batch_gen(self, args, stream):
+        """gmlx: build the engine. Its uids continue the previous
+        engine's, so a late cancel names no new request."""
+        from gmlx.serve.row_sampling import RowSettings
+
+        batch_gen = BatchGenerator(
+            self.model.language_model,
+            self.processor,
+            stop_tokens=self.stop_tokens,
+            sampler=self._make_sampler(args),
+            kv_bits=self.kv_bits,
+            kv_key_bits=getattr(self, "kv_key_bits", None),
+            kv_value_bits=getattr(self, "kv_value_bits", None),
+            kv_key_scheme=getattr(self, "kv_key_scheme", None),
+            kv_value_scheme=getattr(self, "kv_value_scheme", None),
+            kv_group_size=self.kv_group_size,
+            kv_quant_scheme=self.kv_quant_scheme,
+            quantized_kv_start=self.quantized_kv_start,
+            compute_logprobs=bool(args.logprobs),
+            top_logprobs_k=self.top_logprobs_k if args.logprobs else 0,
+            # gmlx: the server cap, whatever the first request.
+            # A row whose settings are gone reads the greedy
+            # default, not the first request's.
+            logprobs_cap=self.top_logprobs_k or 0,
+            default_row=RowSettings(),
+            stream=stream,
+            apc_manager=self.apc_manager,
+            draft_model=self.draft_model,
+            draft_kind=self.draft_kind,
+            draft_block_size=_get_draft_block_size_from_env(),
+            greedy_sampling=args.temperature == 0,
+            prefill_step_size=self._effective_prefill_step_size(),
+        )
+        # gmlx: a requeued row replays its delivered tokens,
+        # embedded here as the prompt was.
+        batch_gen._kq_embed_text = self._embed_text
+        batch_gen.uid_count = getattr(self, "_kq_next_uid", 0)
+        # The old engine's uids name no row here.
+        self._kq_unremoved = set()
+        return batch_gen
 
     def _initialize_model(self):
         model, processor, config = load_model_resources(
@@ -1903,21 +1991,7 @@ class ResponseGenerator:
                     break
 
                 # Drop abandoned requests before doing more work.
-                cancelled = self._drain_cancellations()
-                if cancelled and batch_gen is not None:
-                    for uid in cancelled:
-                        if uid in active:
-                            batch_gen.remove(uid)
-                            info = active.pop(uid)
-                            logger.info(
-                                "Generation cancelled: request=%s generated_tokens=%d",
-                                info.get("request_id", uid),
-                                int(info.get("generated_tokens", 0) or 0),
-                            )
-                            try:
-                                info["rqueue"].put(None)
-                            except Exception:
-                                pass
+                batch_gen = self._drop_cancelled(batch_gen, active)
 
                 if new_items and batch_gen is not None and not active:
                     if not batch_gen.has_work:
@@ -1934,39 +2008,7 @@ class ResponseGenerator:
                         request, backend="continuous_batching"
                     )
                     if batch_gen is None:
-                        from gmlx.serve.row_sampling import RowSettings
-
-                        batch_gen = BatchGenerator(
-                            self.model.language_model,
-                            self.processor,
-                            stop_tokens=self.stop_tokens,
-                            sampler=self._make_sampler(args),
-                            kv_bits=self.kv_bits,
-                            kv_key_bits=getattr(self, "kv_key_bits", None),
-                            kv_value_bits=getattr(self, "kv_value_bits", None),
-                            kv_key_scheme=getattr(self, "kv_key_scheme", None),
-                            kv_value_scheme=getattr(self, "kv_value_scheme", None),
-                            kv_group_size=self.kv_group_size,
-                            kv_quant_scheme=self.kv_quant_scheme,
-                            quantized_kv_start=self.quantized_kv_start,
-                            compute_logprobs=bool(args.logprobs),
-                            top_logprobs_k=self.top_logprobs_k if args.logprobs else 0,
-                            # gmlx: the server cap, whatever the first request.
-                            # A row whose settings are gone reads the greedy
-                            # default, not the first request's.
-                            logprobs_cap=self.top_logprobs_k or 0,
-                            default_row=RowSettings(),
-                            stream=generation_stream,
-                            apc_manager=self.apc_manager,
-                            draft_model=self.draft_model,
-                            draft_kind=self.draft_kind,
-                            draft_block_size=_get_draft_block_size_from_env(),
-                            greedy_sampling=args.temperature == 0,
-                            prefill_step_size=self._effective_prefill_step_size(),
-                        )
-                        # gmlx: a requeued row replays its delivered tokens,
-                        # embedded here as the prompt was.
-                        batch_gen._kq_embed_text = self._embed_text
+                        batch_gen = self._new_batch_gen(args, generation_stream)
 
                     # gmlx: one RowSettings per request, read by the prompt
                     # embedding and handed to the insert.
@@ -2032,6 +2074,8 @@ class ResponseGenerator:
                     except Exception as e:
                         rqueue.put(e)
                         continue
+                    # gmlx: the next engine numbers on from here.
+                    self._kq_next_uid = batch_gen.uid_count
 
                     rqueue.put(
                         GenerationContext(

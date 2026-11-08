@@ -156,6 +156,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx serve` frees the prompt memory of a request that ends at a stop
+  string or a client disconnect while other requests run. A request
+  cancelled during a shared prefill now stops instead of running to its
+  token limit.
+- A client that disconnects or stops at a stop string just after its
+  request finishes no longer ends another client's request.
 - The systemone reader no longer reads the rope positions of a live image or
   video chat request, and reads a kept prefix at its own positions.
 - `/v1/systemone` answers on a vision model served with its mmproj, where

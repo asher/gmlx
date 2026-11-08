@@ -514,6 +514,20 @@ def test_requeue_rebuilds_rows_from_the_ledger_in_order():
     assert 9 not in st.ledger
 
 
+def test_forget_drops_the_entry_and_the_rebuilt_mark():
+    gen = FakeGen([], FakeGB([], []))
+    tg.forget(gen, 7)                       # no tick-guard state: a no-op
+    assert not hasattr(gen, "_kq_tick_guard")
+    st = tg._state(gen)
+    _ledger(st, 7, [1, 2], [11])
+    _ledger(st, 8, [3], [])
+    st.rebuilt.update({7, 8})
+    tg.forget(gen, 7)
+    tg.forget(gen, 99)                      # an unknown uid is fine
+    assert set(st.ledger) == {8}
+    assert st.rebuilt == {8}
+
+
 @pytest.mark.parametrize("tc", [object(), _Rewinding(fail=True)],
                          ids=["no-rewind", "rewind-raises"])
 def test_rebuild_row_requeues_whatever_its_criteria_does(tc):

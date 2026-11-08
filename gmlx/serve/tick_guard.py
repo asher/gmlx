@@ -134,6 +134,22 @@ def on_row_failed(fn) -> None:
     _row_failed_callbacks.append(fn)
 
 
+def forget(gen, uid) -> None:
+    """Drop ``uid``'s ledger entry: the request ended without a finish
+    response, so no requeue may bring it back."""
+    st = getattr(gen, "_kq_tick_guard", None)
+    if st is None:
+        return
+    st.ledger.pop(uid, None)
+    st.rebuilt.discard(uid)
+
+
+def drop_prompt_batch(gen) -> None:
+    """Take the prompt batch out of the engine and give back the prefix
+    blocks it holds."""
+    _drop_prompt_batch(gen, None)
+
+
 class _Row:
     __slots__ = ("prompt_ids", "max_tokens", "kwargs", "lp", "tc",
                  "committed")

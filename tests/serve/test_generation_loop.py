@@ -346,3 +346,31 @@ def test_the_context_carries_the_ids_the_worker_inserted(monkeypatch):
         _stop(rg, thread)
     assert inserted == [[7, 8, 9]]
     assert ctx.prompt_ids == [7, 8, 9]
+
+
+def test_each_new_batch_numbers_on_from_the_last(monkeypatch):
+    """A uid names one request for the server's life, so a cancel that
+    arrives after the batch was replaced names no new request."""
+    rg = _response_generator(monkeypatch)
+
+    def insert(self, prompts, **kw):
+        uid = self.uid_count
+        self.uid_count += 1
+        return [uid]
+
+    monkeypatch.setattr(_Batch, "insert", insert)
+    thread = threading.Thread(target=rg._run_impl, daemon=True)
+    thread.start()
+    uids = []
+    try:
+        for _ in range(2):
+            rq: queue.Queue = queue.Queue()
+            rg.requests.put(_GEN.QueuedGenerationRequest(
+                rqueue=rq, raw_inputs={"input_ids": None, "audio_clips": []},
+                prompt_tokens=2, args=_GEN.GenerationArguments(max_tokens=1)))
+            uids.append(rq.get(timeout=5).uid)
+            assert rq.get(timeout=5) is None
+    finally:
+        _stop(rg, thread)
+    assert len(_Batch.made) == 2
+    assert uids == [0, 1]

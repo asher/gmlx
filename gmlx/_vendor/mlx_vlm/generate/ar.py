@@ -3344,6 +3344,9 @@ class BatchGenerator:
             # Being prefilled
             if self._prompt_batch is not None and uid in self._prompt_batch.uids:
                 if len(self._prompt_batch.uids) == 1:
+                    # gmlx: give back the prefix blocks the prefill holds.
+                    self._prompt_batch._apc_harvest_enabled = False
+                    self._prompt_batch._release_apc_meta_blocks()
                     self._prompt_batch.uids = []
                     self._prompt_batch.prompt_cache = []
                     self._prompt_batch = None
