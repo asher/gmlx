@@ -106,7 +106,7 @@ def _drafter_sources() -> list:
     files = list((_ROOT / "spec").rglob("*.py"))
     files += list((_ROOT / "models").glob("*/mtp.py"))
     files += list((_ROOT / "models").glob("*/dspark.py"))
-    files += list((_ROOT / "_vendor" / "mlx_vlm" / "speculative").rglob("*.py"))
+    files += list((_ROOT / "_vendor/mlx_vlm/speculative").rglob("*.py"))
     return sorted(files)
 
 

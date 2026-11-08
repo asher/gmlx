@@ -228,10 +228,10 @@ def _template_sources() -> dict[str, str | None]:
     for model_type in gguf_tokenizer.BUNDLED_CHAT_TEMPLATES:
         out[f"bundled/{model_type}"] = gguf_tokenizer.bundled_chat_template(
             model_type)
-    for p in sorted((_VENDOR / "mlx_vlm" / "models").glob("*/processing_*.py")):
+    for p in sorted((_VENDOR / "mlx_vlm/models").glob("*/processing_*.py")):
         if re.search(r"^DEFAULT_CHAT_TEMPLATE\s*=", p.read_text(), re.M):
             out[f"python/{p.parent.name}"] = None
-    for p in sorted((_VENDOR / "mlx_lm" / "chat_templates").glob("*.py")):
+    for p in sorted((_VENDOR / "mlx_lm/chat_templates").glob("*.py")):
         if p.stem != "__init__":
             out[f"python/mlx_lm/{p.stem}"] = None
     return out
