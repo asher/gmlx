@@ -408,3 +408,98 @@ def test_promotion_drops_stale_attr_rows(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+_MEM = "[metal::malloc] Attempting to allocate 1 bytes (test)"
+
+
+def _guarded(monkeypatch, batch, ledger):
+    """The tick guard over a _next that steps ``batch``."""
+    import types
+
+    import gmlx.eval_guard as eg
+    import gmlx.serve.tick_guard as tg
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    monkeypatch.delenv("GMLX_TICK_GUARD", raising=False)
+    monkeypatch.delenv("GMLX_OOM_INJECT", raising=False)
+    monkeypatch.setattr(eg, "drain_for", lambda site: None)
+    monkeypatch.setattr(ar.BatchGenerator, "_next",
+                        lambda self, **kw: ([], self._generation_batch.next()))
+    assert tg.install_tick_guard()
+    gen = types.SimpleNamespace(_unprocessed_sequences=[],
+                                _generation_batch=batch, removed=[])
+    gen.remove = lambda uid: gen.removed.append(uid)
+    st = gen._kq_tick_guard = tg._TickState()
+    for uid, prompt in ledger.items():
+        st.ledger[uid] = tg._Row(prompt, 64, {}, None, None)
+
+    def tick():
+        return ar.BatchGenerator._next(gen)[1]
+    return gen, tick
+
+
+def test_a_failed_first_token_eval_sends_the_first_tokens_next(monkeypatch):
+    """M1: the first-token eval throws. The first tokens go out once, on
+    the next call."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        for t in (11, 12, 13):
+            yield [t, t + 100], None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    batch = _make_batch(ar, max_tokens=8, uids=(0, 1))
+    calls = []
+    orig = batch._first_entries
+
+    def first_entries():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError(_MEM)
+        return orig()
+
+    batch._first_entries = first_entries
+    gen, tick = _guarded(monkeypatch, batch, {0: [1, 2], 1: [3, 4]})
+    assert tick() == []
+    sent = [(r.uid, r.token) for _ in range(3) for r in tick()]
+    assert sent == [(0, 5), (1, 5), (0, 11), (1, 111), (0, 12), (1, 112)]
+    st = gen._kq_tick_guard
+    assert st.ledger[0].committed == [5, 11, 12]
+
+
+def test_injected_first_tokens_go_out_on_a_failed_round(monkeypatch):
+    """A2: the round after an injection throws. The injected rows' first
+    tokens reach the caller in that tick, and the injection is not
+    repeated."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+    rounds = []
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        n = 0
+        while True:
+            n += 1
+            rounds.append(n)
+            if n == 2:
+                raise RuntimeError(_MEM)
+            yield [20 + n, 30 + n], None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    host = _make_batch(ar, max_tokens=8, uids=(0, 1))
+    other = _make_batch(ar, max_tokens=8, uids=(2,))
+    other.first_tokens = mx.array([7])
+    host.model = type("M", (), {})()
+    gen, tick = _guarded(monkeypatch, host,
+                         {0: [1], 1: [2], 2: [3]})
+    assert [(r.uid, r.token) for r in tick()] == [(0, 5), (1, 5)]
+    assert [(r.uid, r.token) for r in tick()] == [(0, 21), (1, 31)]
+    host.extend(other)
+    assert [(r.uid, r.token) for r in tick()] == [(2, 7)]
+    assert host._all_uids == [0, 1, 2]
+    assert host._pending_injections == []
+    assert len(host.model._generator_injections) == 1
+    assert gen._kq_tick_guard.ledger[2].committed == [7]

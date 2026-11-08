@@ -398,3 +398,61 @@ def test_resumed_processors_resume_every_processor_that_can():
     out = tg._resumed_processors(lp, [5, 6])
     assert out == ["grammar'", plain, "wrapper'"]
     assert seen == [("grammar", [5, 6]), ("wrapper", [5, 6])]
+
+
+def _salvaged(err, *responses):
+    e = RuntimeError(str(err))
+    e._kq_salvage = list(responses)
+    return e
+
+
+def test_a_contained_refusal_delivers_its_salvage(wrapped, monkeypatch):
+    """What the failed tick computed goes out: the guard returns it and
+    the ledger holds it, and a salvaged finish closes the row."""
+    gen, script, drains = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    gen._generation_batch = FakeGB([7, 8], [1, 1])
+    script.append(([], [resp(7, 11), resp(8, 21)]))
+    tick(gen)
+    salvage = [resp(7, 12), resp(8, 22, finish="stop")]
+    script.append(_salvaged(MEM_ERR, *salvage))
+    assert tick(gen) == ([], salvage)
+    st = gen._kq_tick_guard
+    assert st.ledger[7].committed == [11, 12]
+    assert 8 not in st.ledger
+    assert drains == ["engine-tick"] and st.fail_streak == 1
+
+
+def test_a_command_buffer_oom_sends_no_salvage(wrapped, monkeypatch):
+    """A command buffer that ran out of memory spoiled its outputs, so
+    nothing it computed goes out."""
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    script.append(_salvaged(OOM_ERR, resp(7, 11)))
+    assert tick(gen) == ([], [])
+    assert gen._kq_tick_guard.ledger[7].committed == []
+
+
+def test_salvage_is_harvested_before_a_rebuild(wrapped, monkeypatch):
+    """A row rebuilt on the strike that salvaged its token replays it."""
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    gen._generation_batch = FakeGB([7, 8], [3, 5])
+    script.append(([], [resp(7, 11), resp(8, 21)]))
+    tick(gen)
+    script.append(MEM_ERR)
+    tick(gen)
+    script.append(_salvaged(MEM_ERR, resp(8, 22)))
+    _, out = tick(gen)
+    assert [r.token for r in out] == [22] and gen.removed == [8]
+    uid, replay, remaining, *_ = gen._unprocessed_sequences[0]
+    assert uid == 8 and replay == [4, 5, 6, 9, 9, 9, 21, 22]
+    assert remaining == 14
+
+
+def test_salvage_rides_the_exception_ahead_of_inner_frames():
+    e = RuntimeError(MEM_ERR)
+    tg.salvage(e, [1, 2])
+    tg.salvage(e, [0], ahead=True)
+    tg.salvage(e, [])
+    assert e._kq_salvage == [0, 1, 2]

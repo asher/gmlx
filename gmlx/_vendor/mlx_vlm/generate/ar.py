@@ -58,6 +58,7 @@ from .types import GenerateKwargs, ProcessorLike, Unpack
 
 # gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
 from gmlx.gen.logprobs import raw_logprobs, top_logprobs
+from gmlx.serve.tick_guard import salvage as _salvage
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
@@ -1579,6 +1580,14 @@ class GenerationBatch:
 
     def next(self) -> List[Response]:
         """Generate the next batch of tokens."""
+        # gmlx: rows that finished on a tick whose filter failed. By uid: a
+        # remove() since then can have moved them.
+        drop = getattr(self, "_kq_pending_drop", None)
+        if drop:
+            self._kq_pending_drop = None
+            keep = [i for i, uid in enumerate(self.uids) if uid not in drop]
+            if len(keep) < len(self.uids):
+                self.filter(keep)
         if not self.uids:
             return []
 
@@ -1628,6 +1637,24 @@ class GenerationBatch:
                 )
             )
 
+        # gmlx: the responses are built. A failure from here on sends them
+        # with the error, and the finished rows leave on the next call.
+        if len(keep) < len(self.uids):
+            kept = set(keep)
+            self._kq_pending_drop = {
+                uid for i, uid in enumerate(self.uids) if i not in kept
+            }
+        try:
+            self._force_next_tokens(forced_next_tokens)
+            if len(keep) < len(self.uids):
+                self.filter(keep)
+        except BaseException as e:
+            _salvage(e, responses)
+            raise
+        self._kq_pending_drop = None
+        return responses
+
+    def _force_next_tokens(self, forced_next_tokens) -> None:
         has_forced_next_tokens = any(token is not None for token in forced_next_tokens)
         if has_forced_next_tokens:
             force_mask = mx.array(
@@ -1650,11 +1677,6 @@ class GenerationBatch:
             mx.async_eval(self._next_tokens)
             if self._next_lps is not None:
                 mx.async_eval(self._next_lps)
-
-        if len(keep) < len(self.uids):
-            self.filter(keep)
-
-        return responses
 
     @classmethod
     def empty(
@@ -1889,10 +1911,10 @@ class SpeculativeGenerationBatch:
 
         responses: List[GenerationBatch.Response] = []
         if not self._sent_first:
-            self._sent_first = True
+            # gmlx: marked sent once the responses are built, so a failed
+            # eval sends the first tokens on the next call.
             mx.eval(self.first_tokens)
             entries = self._first_entries()
-            self._first_lps = self._first_top_idx = self._first_top_lp = None
             for row, token in enumerate(self.first_tokens.tolist()):
                 if self._finished[row]:
                     continue
@@ -1911,10 +1933,21 @@ class SpeculativeGenerationBatch:
                         top_logprobs=top,
                     )
                 )
+            self._sent_first = True
+            self._first_lps = self._first_top_idx = self._first_top_lp = None
             self._refresh_uids()
             return responses
 
         self._start_rounds()
+        try:
+            return self._next_round(responses)
+        except BaseException as e:
+            # gmlx: the round's tokens so far go out with the error.
+            _salvage(e, responses)
+            self._refresh_uids()
+            raise
+
+    def _next_round(self, responses) -> List[GenerationBatch.Response]:
         try:
             tok_list, round_meta = next(self._rounds_iter)
         except StopIteration:
@@ -3297,7 +3330,6 @@ class BatchGenerator:
 
     def _next(self, **kwargs):
         generation_responses = []
-        prompt_responses = []
 
         # Decode-first: always emit a generation step before touching prefill.
         yield_after_decode = any(
@@ -3305,8 +3337,22 @@ class BatchGenerator:
             for processors in getattr(self._generation_batch, "logits_processors", [])
             for processor in processors or []
         )
-        if len(self._generation_batch) > 0:
+        decoded = len(self._generation_batch) > 0
+        if decoded:
             generation_responses = self._generation_batch.next()
+        try:
+            return self._next_after_decode(
+                decoded, yield_after_decode, generation_responses
+            )
+        except BaseException as e:
+            # gmlx: the decode step's responses ride a failure later in the
+            # tick, so a contained error still delivers them.
+            _salvage(e, generation_responses)
+            raise
+
+    def _next_after_decode(self, decoded, yield_after_decode, generation_responses):
+        prompt_responses = []
+        if decoded:
             self._gen_tokens_counter += len(generation_responses)
             self._steps_counter += 1
             if (

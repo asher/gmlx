@@ -403,24 +403,40 @@ def install_continuous_batch_admission() -> None:
         # The preempt capture: verified tokens the closed round had not yet
         # delivered. They precede everything this call returns.
         pre_responses = self.__dict__.pop("_kq_preempt_responses", None) or []
+        responses = list(pre_responses)
+        try:
+            return _inject_and_step(self, pending, preempted, responses)
+        except BaseException as e:
+            # What this call built goes out with the error, ahead of the
+            # round tokens the inner next salvaged.
+            from gmlx.serve.tick_guard import salvage
+
+            salvage(e, responses, ahead=True)
+            _note_last_tokens(self, getattr(e, "_kq_salvage", ()))
+            raise
+
+    def _inject_and_step(self, pending, preempted, responses):
         if pending and (len(self._all_uids) > 1 or preempted):
-            responses = list(pre_responses)
             gen_inj = getattr(self.model, "_generator_injections", None)
             if gen_inj is None:
                 self.model._generator_injections = []
                 gen_inj = self.model._generator_injections
 
-            for other in pending:
+            # One batch at a time: its first tokens are read before it
+            # joins, and it leaves the pending list once it has, so a
+            # failed read leaves it to join on a later tick.
+            while pending:
+                other = pending[0]
+                mx.eval(other.first_tokens)
+                first_list = other.first_tokens.tolist()
+                first_entries = other._first_entries()
+
                 B_new = len(other._all_uids)
                 base_row = len(self._all_uids)
                 self._all_uids.extend(other._all_uids)
                 self._num_tokens.extend([0] * B_new)
                 self._finished.extend([False] * B_new)
                 self.max_tokens.extend(other.max_tokens)
-
-                mx.eval(other.first_tokens)
-                first_list = other.first_tokens.tolist()
-                first_entries = other._first_entries()
                 for row in range(B_new):
                     abs_row = base_row + row
                     tok = int(first_list[row])
@@ -458,17 +474,11 @@ def install_continuous_batch_admission() -> None:
                         "rope_deltas": getattr(other, "_rope_deltas", None),
                     }
                 )
+                pending.pop(0)
 
-            pending.clear()
             self._refresh_uids()
 
-            more = _orig_next(self)
-            responses.extend(more)
-            _note_last_tokens(self, responses)
-            _release_if_finished(self)
-            return responses
-
-        responses = pre_responses + _orig_next(self)
+        responses.extend(_orig_next(self))
         _note_last_tokens(self, responses)
         _release_if_finished(self)
         return responses

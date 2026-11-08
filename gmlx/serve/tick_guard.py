@@ -72,6 +72,29 @@ def is_gpu_fault(e: BaseException) -> bool:
             and any(m in str(e) for m in _GPU_MARKS))
 
 
+def is_allocator_refusal(e: BaseException) -> bool:
+    """The allocator refused before any work ran. Only then are the
+    arrays the tick computed valid. A command buffer that ran out of
+    memory reports it at a wait, after its outputs were spoiled."""
+    return is_memory_error(e) and not any(m in str(e) for m in _GPU_MARKS)
+
+
+def salvage(exc: BaseException, responses, *, ahead: bool = False) -> None:
+    """Responses a failed tick computed. They ride the exception, so the
+    guard can deliver them and nothing stale outlives the tick. ``ahead``
+    puts them before what an inner frame salvaged."""
+    if not responses:
+        return
+    got = getattr(exc, "_kq_salvage", None)
+    if got is None:
+        got = []
+        exc._kq_salvage = got
+    if ahead:
+        got[:0] = list(responses)
+    else:
+        got.extend(responses)
+
+
 def on_row_failed(fn) -> None:
     """Register ``fn(uid, info: dict)`` for permanently failed rows.
     info carries prompt_len, delivered, and the triggering error text;
@@ -313,8 +336,13 @@ def install_tick_guard() -> bool:
                 return [], []
             if not is_memory_error(e):
                 raise
+            # A refusal ran no work, so what the tick computed goes out,
+            # and a rebuild below replays after it.
+            saved = (list(getattr(e, "_kq_salvage", ()))
+                     if is_allocator_refusal(e) else [])
+            _harvest_responses(st, saved)
             _contain(self, st, e)
-            return [], []
+            return [], saved
         st.fail_streak = 0
         st.fault_streak = 0
         _harvest_responses(st, out[1])
