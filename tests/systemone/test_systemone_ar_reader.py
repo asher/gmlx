@@ -377,3 +377,31 @@ def test_view_kinds_decline_other_caches():
 
     assert ar_reader._view_kinds([KVCache(), ArraysCache(2)]) == ["kv", "arr"]
     assert ar_reader._view_kinds([KVCache(), RotatingKVCache(max_size=8)]) is None
+
+
+class _VlmTokenizer:
+    def encode(self, text, add_special_tokens=True):
+        return [ord(c) for c in text]
+
+    def apply_chat_template(self, messages, **kwargs):
+        return "<user>" + messages[0]["content"]
+
+
+class _VlmProcessor:
+    """A VLM processor served with its mmproj: it does not encode, its
+    tokenizer does."""
+
+    def __init__(self):
+        self.tokenizer = _VlmTokenizer()
+
+
+def test_a_vlm_processor_encodes_with_its_tokenizer():
+    from gmlx.systemone.engine import ChatTokens
+    from gmlx.systemone.model_template import TemplateTokens
+
+    processor = _VlmProcessor()
+    tokens = ar_reader.LetterTokens(processor)
+    assert tokens.letter_ids() == [ord(c) for c in letters.LETTERS]
+    assert tokens.render("hi") == "<user>hi"
+    for cls in (TemplateTokens, ChatTokens):
+        assert cls(processor).wrapper is processor.tokenizer

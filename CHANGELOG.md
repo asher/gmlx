@@ -154,7 +154,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - The systemone reader no longer reads the rope positions of a live image or
   video chat request, and reads a kept prefix at its own positions.
-
+- `/v1/systemone` answers on a vision model served with its mmproj, where
+  it failed with a server error because the processor has no `encode`.
 - A `response_format` grammar uses the vocabulary of the loaded tokenizer,
   and an unloaded model's grammar vocabulary is freed. After a model reload,
   it could mask tokens with the old model's vocabulary.

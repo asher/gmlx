@@ -55,6 +55,18 @@ def language_model(model):
     return getattr(model, "language_model", model)
 
 
+def tokenizer_of(processor):
+    """The tokenizer a decision encodes with: the text server's tokenizer
+    wrapper, else the processor when it encodes, else the tokenizer of a
+    VLM processor served with its mmproj."""
+    wrapper = getattr(processor, "_wrapper", None)
+    if wrapper is not None:
+        return wrapper
+    if callable(getattr(processor, "encode", None)):
+        return processor
+    return getattr(processor, "tokenizer", processor)
+
+
 def text_model(model):
     """The mlx-lm model under the server's text-only wrapper, if any."""
     lm = getattr(model, "language_model", None)
@@ -243,7 +255,7 @@ class LetterTokens:
     so a request can tokenize its passes before the reads start."""
 
     def __init__(self, processor, *, lock=None):
-        self.wrapper = getattr(processor, "_wrapper", processor)
+        self.wrapper = tokenizer_of(processor)
         self.lock = lock if lock is not None else contextlib.nullcontext()
         self._ids: dict[str, list[int]] = {}
 
