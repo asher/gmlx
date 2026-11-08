@@ -547,9 +547,26 @@ before any weight loads:
 - `defaults.attention: the int8 setting replaces it; set int8 to one of
   off, attention, linears, all`: an entry written for an earlier build.
   Replace `attention: int8` with `int8: attention`.
-- `... Run with int8 off or attention, which keep the file's linears, or
-  try a smaller size or a shorter clip`: the clip does not fit with the
-  int8 weights of `linears` or `all`, 7.86 GiB more than the file's.
+- A memory refusal that names `int8 off or attention`: the clip or the
+  DiT does not fit with the int8 weights of `linears` or `all`, 7.86 GiB
+  more than the file's. Run at `off` or `attention`, which keep the
+  file's weights, or make the clip smaller. The text depends on where the
+  check runs:
+  - `this clip does not fit in memory: ... Run with int8 off or
+    attention, which keep the file's linears, or try a smaller size or a
+    shorter clip`, from `gmlx video generate`, and from `gmlx video
+    bench` as `the WxHxF shape does not fit in memory: ...`.
+  - `this clip does not fit in memory: ... Run with int8 off or
+    attention, or try --size WxH, which fits at this length`, the same
+    from `gmlx video generate` when a smaller size or length fits at the
+    current setting.
+  - `The MiniMax-H3 DiT weights of ... GiB exceed the working budget of
+    ... GiB. Run with int8 off or attention, or try a smaller DiT quant`,
+    from the check before the DiT loads.
+  - `video model '...' needs ... GiB for one ... clip of ... frames, over
+    the working budget of ... GiB. Set a smaller defaults.size or
+    defaults.seconds, or defaults.int8 off or attention`, from
+    `gmlx serve` for an entry at `linears` or `all`.
 
 ### Video jobs
 

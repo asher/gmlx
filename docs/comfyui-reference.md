@@ -111,8 +111,8 @@ default, `off`, `attention`, `linears` or `all`. `entry` runs each step at
 the entry's [`defaults.int8`](config.md#video_modelsdefaults) and sends
 nothing. Any other value goes with each step, and the server runs that
 step at it, as [Faster clips with int8](video.md#faster-clips-with-int8)
-describes: it is lossy, needs an M5 or newer, and `attention` and `all`
-do not run with `fasth3`.
+describes: it is lossy, needs an M5 or newer, and no value but `off`
+runs with `fasth3`.
 
 The linear layers are part of the DiT the server loaded, so a value runs
 only when its linear layers match the entry's: `off` and `attention` on an
