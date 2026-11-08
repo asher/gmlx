@@ -269,6 +269,7 @@ include = [
     "gmlx/serve/patches/mtp_thinking.py",
     "gmlx/serve/patches/prefill.py",
     "gmlx/serve/patches/spec_processors.py",
+    "gmlx/serve/patches/tokenize.py",
     "gmlx/serve/residency_footprint.py",
     "gmlx/spec/admission.py",
     "gmlx/spec/ckpt.py",

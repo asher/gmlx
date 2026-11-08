@@ -460,6 +460,44 @@ def test_a_diffusion_model_refuses_return_token_ids(wire, monkeypatch):
     assert "return_token_ids" in r.text and not wire.gen.calls
 
 
+def test_tokenize_messages_gives_the_chat_routes_ids(wire):
+    body = _chat_body(messages=[
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "hi"}])
+    r = wire.client.post("/v1/chat/completions", json=body)
+    assert r.status_code == 200, r.text
+    prompt = wire.gen.calls[-1]["prompt"]
+    chat_ids = list(wire.gen._preprocess_request(prompt)["input_ids"][0])
+    r = wire.client.post("/tokenize", json={**body, "return_token_strs": True})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["tokens"] == chat_ids
+    assert out["count"] == len(chat_ids)
+    assert "max_model_len" in out
+    assert len(out["token_strs"]) == len(chat_ids)
+
+
+def test_tokenize_refuses_media_and_bad_bodies(wire):
+    import base64
+    import io
+
+    from PIL import Image
+
+    png = io.BytesIO()
+    Image.new("RGB", (2, 2)).save(png, format="PNG")
+    image = {"type": "image_url", "image_url": {
+        "url": "data:image/png;base64," + base64.b64encode(png.getvalue()).decode()}}
+    for body, fragment in (
+            ({"messages": [{"role": "user", "content": [image]}]}, "text messages only"),
+            ({"prompt": "a", "messages": [{"role": "user", "content": "a"}]}, "one of"),
+            ({}, "one of"),
+            ({"prompt": ["a"]}, "non-empty string"),
+            ({"prompt": "a", "add_special_tokens": "no"}, "true or false")):
+        r = wire.client.post("/v1/tokenize", json={"model": MODEL_ID, **body})
+        assert r.status_code == 400, (body, r.text)
+        assert fragment in r.text
+
+
 # 3. Anthropic surface (docs/internals/serving-architecture.md - ANTHROPIC_BASE_URL
 #    / Claude Code target /v1/messages)
 def test_messages_wire_shape(wire):

@@ -412,6 +412,39 @@ _MEDIA_TOKENS_PER_IMAGE = {"deepseek_v4_vl": 384, "deepseek_v41_vl": 1024,
                            "minimax_m3_vision": 578}
 
 
+def render_chat(body: dict, processor, config, msgs: list, *, tenant_id=None):
+    """The chat route's prompt for ``body``, whose text messages
+    ``_normalize_messages`` gave as ``msgs``: the instruction merge, the tool
+    choice, the gen-args seam, the role rule and the prefill helper, in the
+    chat route's order. Returns ``(prompt, gen_args)``. A request rule
+    raises the chat route's HTTPException."""
+    from gmlx._vendor.mlx_vlm.server import openai as _oa
+    from gmlx._vendor.mlx_vlm.server.app import _build_gen_args
+    from gmlx._vendor.mlx_vlm.server.schemas import ChatRequest
+
+    from gmlx.serve.patches.chat_behavior import roles_for_render
+    from gmlx.serve.patches.prefill import render_continued
+
+    pkg = importlib.import_module("gmlx._vendor.mlx_vlm.server")
+    req = ChatRequest(**body)
+    # The chat route's order: the instruction merge (developer messages
+    # stay in place), tool_choice, then the developer-role rule at render.
+    _oa._normalize_instruction_messages(msgs)
+    msgs, tools, tool_choice = _oa._prepare_chat_tool_choice(
+        msgs, body.get("tools"), body.get("tool_choice"))
+    gen_args = _build_gen_args(req, processor, tenant_id=tenant_id)
+    template_kwargs = gen_args.to_template_kwargs()
+    if tool_choice is not None:
+        template_kwargs["tool_choice"] = tool_choice
+    msgs = roles_for_render(processor, msgs, template_kwargs)
+    # Through the prefill helper, as the chat route's render wraps: it
+    # continues the final assistant message and keeps its key from Jinja.
+    prompt = render_continued(pkg.apply_chat_template, processor, config,
+                              msgs, num_images=0, tools=tools or None,
+                              **template_kwargs)
+    return prompt, gen_args
+
+
 def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
                     entry, msgs, media, tenant_id):
     """The resident half of :func:`estimate_request`, run with the request
@@ -419,29 +452,8 @@ def _estimate_bound(body, out, t0, path, pkg, rg, model, processor, config,
     from fastapi import HTTPException
 
     try:
-        from gmlx._vendor.mlx_vlm.server import openai as _oa
-        from gmlx._vendor.mlx_vlm.server.app import _build_gen_args
-        from gmlx._vendor.mlx_vlm.server.schemas import ChatRequest
-
-        from gmlx.serve.patches.chat_behavior import roles_for_render
-        from gmlx.serve.patches.prefill import render_continued
-
-        req = ChatRequest(**body)
-        # The chat route's order: the instruction merge (developer messages
-        # stay in place), tool_choice, then the developer-role rule at render.
-        _oa._normalize_instruction_messages(msgs)
-        msgs, tools, tool_choice = _oa._prepare_chat_tool_choice(
-            msgs, body.get("tools"), body.get("tool_choice"))
-        gen_args = _build_gen_args(req, processor, tenant_id=tenant_id)
-        template_kwargs = gen_args.to_template_kwargs()
-        if tool_choice is not None:
-            template_kwargs["tool_choice"] = tool_choice
-        msgs = roles_for_render(processor, msgs, template_kwargs)
-        # Through the prefill helper, as the chat route's render wraps: it
-        # continues the final assistant message and keeps its key from Jinja.
-        prompt = render_continued(pkg.apply_chat_template, processor, config,
-                                  msgs, num_images=0, tools=tools or None,
-                                  **template_kwargs)
+        prompt, gen_args = render_chat(body, processor, config, msgs,
+                                       tenant_id=tenant_id)
         from gmlx.serve.patches.sampling import client_max_tokens
 
         client_set = ("max_tokens" in body or client_max_tokens(
