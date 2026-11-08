@@ -147,10 +147,11 @@ def test_qwen_isolates_each_digit():
 def test_digit_clause_selected_by_pre():
     # The selector picks the family-correct digit clause from the GGUF pre hint;
     # unlisted pres keep the historical single-digit default (no regression).
-    from gmlx.load.tokenizer import _bytelevel_split_patterns
+    from gmlx.load.tokenizer import GPT2_PATTERN, _bytelevel_split_patterns
     for pre in ("llama-bpe", "llama3", "dbrx", "smaug-bpe"):
         assert r"\p{N}{1,3}" in _bytelevel_split_patterns(pre)[0]
-    assert r"\p{N}+" in _bytelevel_split_patterns("gpt-2")[0]
+    # gpt-2 uses the real GPT-2 regex, not a digit variant of the generic one.
+    assert _bytelevel_split_patterns("gpt-2") == (GPT2_PATTERN,)
     for pre in ("qwen2", "qwen3", "qwen35", "some-future-pre"):
         assert r"\p{N}{1,3}" not in _bytelevel_split_patterns(pre)[0]
     # MiniMax (M2 + M3 GGUFs both ship pre='minimax-m2'): llama.cpp's
@@ -213,11 +214,11 @@ def test_kimi_k2_pre_skips_nfc_normalizer():
 
     kimi = _build_bytelevel_bpe(["a", "b"], [], pre_id="kimi-k2")
     assert kimi.normalizer is None
-    default = _build_bytelevel_bpe(["a", "b"], [], pre_id="")
-    assert default.normalizer is not None
+    qwen = _build_bytelevel_bpe(["a", "b"], [], pre_id="qwen2")
+    assert qwen.normalizer is not None
     decomposed = "e\u0301clair"
-    norm = default.normalizer.normalize_str(decomposed)
-    assert norm == "\u00e9clair"          # NFC merges the mark elsewhere...
+    norm = qwen.normalizer.normalize_str(decomposed)
+    assert norm == "\u00e9clair"          # NFC merges the mark for qwen2...
     assert kimi.normalizer is None        # ...but kimi-k2 must keep it raw
 
 
@@ -964,7 +965,7 @@ def test_k2_horizon_pre_full_pattern_override():
 
 
 def test_k2_horizon_pre_keeps_nfc():
-    # The HF tokenizer.json normalizes NFC, so the pre keeps the default.
+    # The HF tokenizer.json normalizes NFC, so the entry sets nfc.
     from gmlx.load.tokenizer import _build_bytelevel_bpe
 
     tok = _build_bytelevel_bpe(["a", "b"], [], pre_id="k2-horizon")

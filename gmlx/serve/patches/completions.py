@@ -24,6 +24,7 @@ from fastapi import HTTPException, Request  # module-level: stringized annotatio
 from pydantic import BaseModel, ConfigDict
 
 from gmlx.gen.generation import StopScanner
+from gmlx.upstream.single_bos_fix import raw_prompt_special_tokens
 from ._common import _remove_routes
 from .api_contract import COMPLETIONS_CONSUMED, warn_ignored_fields
 from .chat_behavior import _request_stop_sequences
@@ -205,7 +206,9 @@ async def completions_endpoint(request: CompletionRequest,
                 status_code=500,
                 detail="continuous-batching engine unavailable; restart the "
                        "server")
-        return rg.generate(prompt, args=gen_args)
+        # A raw prompt gets the tokenizer's special tokens, BOS included.
+        with raw_prompt_special_tokens():
+            return rg.generate(prompt, args=gen_args)
 
     if request.stream:
         return await _stream_completion(
