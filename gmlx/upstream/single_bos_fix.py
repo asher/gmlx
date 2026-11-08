@@ -42,11 +42,18 @@ Inside a call that drops the duplicate, ``process_inputs`` also passes
 the flag to a processor of a type known to forward its keyword arguments
 to its tokenizer: a stock class in ``_FORWARDS_TO_TOKENIZER`` or a
 subclass, or a gmlx class that sets ``KWARGS_REACH_TOKENIZER``.
+
+A raw prompt, as ``/v1/completions`` sends, has no chat template to write
+its BOS. Inside ``raw_prompt_special_tokens`` every ``prepare_inputs``
+binding encodes with the given ``add_special_tokens`` and drops nothing,
+so a Gemma prompt gets the tokenizer's BOS as llama-server and HF give it,
+and two when the text itself opens with BOS.
 Idempotent.
 """
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import importlib
 import inspect
@@ -73,6 +80,9 @@ KWARGS_REACH_TOKENIZER = "_gmlx_kwargs_reach_tokenizer"
 _PROBE = "a"
 # True inside a prepare_inputs call that drops the duplicate BOS.
 _DROPPING = contextvars.ContextVar("_gmlx_single_bos_dropping", default=False)
+# The add_special_tokens a raw prompt route asks for, or None.
+_RAW_SPECIAL: contextvars.ContextVar[bool | None] = contextvars.ContextVar(
+    "_gmlx_raw_prompt_special_tokens", default=None)
 _ONLY_BOS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _LEAD: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _LEAD_IDS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
@@ -249,9 +259,24 @@ def _count_adds_special_tokens(module, processor) -> bool:
     return bool(utils.should_add_special_tokens(model_type, processor))
 
 
+@contextlib.contextmanager
+def raw_prompt_special_tokens(add_special_tokens: bool = True):
+    """Encode prompts inside the block as raw text: with
+    ``add_special_tokens`` and without the duplicate-BOS drop."""
+    token = _RAW_SPECIAL.set(bool(add_special_tokens))
+    try:
+        yield
+    finally:
+        _RAW_SPECIAL.reset(token)
+
+
 def _wrap_prepare(original, *, count=None):
     """``count`` is the module of a count route's binding."""
     def prepare_inputs(processor, *args, **kwargs):
+        raw = _RAW_SPECIAL.get()
+        if raw is not None:
+            kwargs["add_special_tokens"] = raw
+            return original(processor, *args, **kwargs)
         if count is not None and "add_special_tokens" not in kwargs:
             # The count's stock default is off; generation adds the
             # tokenizer's special tokens unless the template owns them.

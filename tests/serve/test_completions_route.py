@@ -109,6 +109,26 @@ def test_non_stream_text_completion_shape():
     assert rg.last_iter.closed
 
 
+def test_the_raw_prompt_is_encoded_with_special_tokens():
+    """The engine encodes the prompt inside raw_prompt_special_tokens, so a
+    Gemma prompt gets its BOS as on llama-server."""
+    from gmlx.upstream import single_bos_fix
+
+    client, rg = _client()
+    seen = []
+    generate = rg.generate
+
+    def recording(prompt, **kwargs):
+        seen.append(single_bos_fix._RAW_SPECIAL.get())
+        return generate(prompt, **kwargs)
+
+    rg.generate = recording
+    r = client.post("/v1/completions", json={"model": "m", "prompt": "hi"})
+    assert r.status_code == 200, r.text
+    assert seen == [True]
+    assert single_bos_fix._RAW_SPECIAL.get() is None
+
+
 def test_non_stream_stop_trims_and_marks_stop():
     client, rg = _client()
     r = client.post("/v1/completions",

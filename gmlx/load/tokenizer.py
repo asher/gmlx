@@ -21,8 +21,9 @@ prescription was wrong; gemma-4 also exports BPE with byte_fallback):
           HF's LlamaTokenizerFast bit-for-bit.
 
   - ByteLevel BPE      (qwen35, qwen3, llama3, gpt2):
-      NFC normalizer; pre-tokenize via GPT-4-style regex split + ByteLevel;
-      ByteLevel decoder + post-processor. byte_fallback=False.
+      NFC normalizer where PRE_TOKENIZERS says so; pre-tokenize via the
+      regex split it gives the GGUF's pre name + ByteLevel; ByteLevel decoder +
+      post-processor. byte_fallback=False.
 
 No transformers monkey-patching, no vendored converters. Built directly
 from `tokenizers` primitives.
@@ -31,6 +32,7 @@ from `tokenizers` primitives.
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -62,19 +64,15 @@ from .gguf_meta import (
 )
 
 
-# GPT-4-style word-split pattern used by Qwen2/3/3.5, Llama3, and GPT-2 BPE
-# pre-tokenizers. Matches contractions, letters, digits, punctuation runs, and
-# whitespace separately so byte-level encoding can isolate words. The one clause
-# that differs across these families is how runs of digits are grouped, so it's
-# a parameter:
-#   Qwen2/3   \p{N}       every digit isolated - Qwen's deliberate arithmetic split
-#   Llama-3   \p{N}{1,3}  groups of up to 3 digits (cl100k / GPT-4)
-#   GPT-2     \p{N}+      the whole digit run
-# Sending Llama-3 / GPT-2 through Qwen's single-digit clause over-tokenizes
-# numbers ("10" -> "1","0" instead of "10"), degrading math/code/date quality
-# (llama.cpp/HF give "10" a single id). The digit clause is selected from the
-# GGUF `tokenizer.ggml.pre` hint by :func:`_bytelevel_split_patterns`.
+# Word-split regexes for byte-level BPE, keyed below by the GGUF
+# `tokenizer.ggml.pre` name. Each is llama.cpp's regex for that name, in the
+# tokenizer.json spelling where llama.cpp keeps one in a comment: case
+# classes as \p{Lu}..., contractions as (?i:...). A tuple of regexes is
+# applied in sequence, as llama.cpp does.
+
+
 def _bytelevel_pattern(digit_clause: str) -> str:
+    """The GPT-4 style split with a family's digit clause."""
     return (
         r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|"
         r"[^\r\n\p{L}\p{N}]?\p{L}+|"
@@ -86,29 +84,34 @@ def _bytelevel_pattern(digit_clause: str) -> str:
     )
 
 
-# `tokenizer.ggml.pre` hint -> digit-grouping clause. Unlisted byte-level pres
-# fall back to Qwen's single-digit clause (the historical default - no behavior
-# change for them; only the known multi-digit families are upgraded).
-_DIGIT_CLAUSE_BY_PRE = {
-    "qwen2": r"\p{N}", "qwen3": r"\p{N}",
-    "qwen35": r"\p{N}", "qwen35moe": r"\p{N}",
-    "llama-bpe": r"\p{N}{1,3}", "llama3": r"\p{N}{1,3}",
-    "gpt-2": r"\p{N}+",
-    # llama.cpp CHATGLM4 (glm4/glm4moe/glm-dsa/glm5-next GGUFs) is the generic
-    # pattern with cl100k digit grouping.
-    "glm4": r"\p{N}{1,3}", "chatglm-bpe": r"\p{N}{1,3}",
-    # llama.cpp DBRX and SMAUG share the llama3 regex. Granite 4.x GGUFs
-    # (granite, granitehybrid, graniteswitch) ship pre='dbrx'.
-    "dbrx": r"\p{N}{1,3}", "smaug-bpe": r"\p{N}{1,3}",
-}
-_DEFAULT_DIGIT_CLAUSE = r"\p{N}"
+# Every digit alone (llama.cpp QWEN2). The fallback for unknown names.
+QWEN2_PATTERN = _bytelevel_pattern(r"\p{N}")
+# Digit runs of up to three (llama.cpp LLAMA3, DBRX, SMAUG, CHATGLM4).
+LLAMA3_PATTERN = _bytelevel_pattern(r"\p{N}{1,3}")
+
+# Qwen 3.5: combining marks stay inside letter runs and out of the
+# punctuation clause.
+QWEN35_PATTERN = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|"
+    r"[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|"
+    r"\p{N}|"
+    r" ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|"
+    r"\s*[\r\n]+|"
+    r"\s+(?!\S)|"
+    r"\s+"
+)
+
+# The GPT-2 regex, verbatim. It has no trailing \s+ clause: whitespace that
+# no clause takes becomes its own piece.
+GPT2_PATTERN = (
+    r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)"
+)
+# SmolLM, StarCoder and their siblings: digits split first, then GPT-2.
+_SMOLLM_PATTERNS = (r"\p{N}", GPT2_PATTERN)
 
 # o200k (GPT-4o) word-split pattern, verbatim from the upstream
-# tokenizer.json. Structurally different from the GPT-4 family above:
-# contraction suffixes attach to the word clauses ("don't" is one
-# pre-token, not "don"+"'t"), letter runs split on case transitions, and
-# digits group up to 3. A digit-clause swap on the generic pattern can't
-# express this, so it's a full-pattern override.
+# tokenizer.json. Contraction suffixes attach to the word clauses, letter
+# runs split on case transitions, and digits group up to 3.
 O200K_PATTERN = (
     r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*"
     r"[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"
@@ -120,6 +123,27 @@ O200K_PATTERN = (
     r"\s+(?!\S)|"
     r"\s+"
 )
+
+
+def _tekken_pattern(digit_clause: str) -> str:
+    """Tekken: the o200k split without contraction suffixes."""
+    return (
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*"
+        r"[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|"
+        r"[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+"
+        r"[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|"
+        f"{digit_clause}|"
+        r" ?[^\s\p{L}\p{N}]+[\r\n/]*|"
+        r"\s*[\r\n]+|"
+        r"\s+(?!\S)|"
+        r"\s+"
+    )
+
+
+TEKKEN_PATTERN = _tekken_pattern(r"\p{N}")
+# Digit groups of three counted from the right.
+TEKKEN_NUM3_PATTERN = _tekken_pattern(
+    r"\p{N}{1,3}(?=(?:\p{N}{3})*(?!\p{N}))|\p{N}{1,2}")
 
 # Kimi K2/K3 word-split, verbatim from tokenization_kimi.py (llama.cpp ports
 # the same pattern as the hand-coded unicode_regex_split_custom_kimi_k2).
@@ -154,13 +178,10 @@ K2_HORIZON_PATTERN = (
     r"\s+"
 )
 
-# DeepSeek-V3 family word-split: llama.cpp applies these three regexes
-# sequentially (each further splits the previous pass's pieces), verbatim
-# from PRE_TYPE_DEEPSEEK3_LLM (llama-vocab.cpp:318-325; the same case also
-# handles JOYAI_LLM and HUNYUAN_DENSE). A tuple here becomes a chain of
-# Split pre-tokenizers in _build_bytelevel_bpe. The second regex is the CJK
-# run clause (kanji U+4E00-9FA5 + hiragana U+3040-309F + katakana
-# U+30A0-30FF), spelled with \u escapes to keep this file ASCII.
+# DeepSeek-V3 family word-split: three regexes in sequence, verbatim from
+# llama.cpp's DEEPSEEK3_LLM group. The second regex is the CJK run clause
+# (kanji U+4E00-9FA5 + hiragana U+3040-309F + katakana U+30A0-30FF), spelled
+# with \u escapes to keep this file ASCII.
 _DEEPSEEK3_PATTERNS = (
     r"\p{N}{1,3}",
     "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
@@ -187,57 +208,82 @@ _FLINT_PATTERNS = (
     r"\s+",
 )
 
-# Pres whose split regex is not a digit-clause variant of the generic
-# pattern (llama.cpp PRE_TYPE_GPT4O members, plus MiniMax: llama.cpp's
-# PRE_TYPE_MINIMAX_M2 regex is the o200k pattern verbatim - MiniMax-M2 and
-# MiniMax-M3 GGUFs both ship pre='minimax-m2'). Values are a single pattern
-# or a tuple of patterns applied in sequence (llama.cpp multi-regex pres).
-_PATTERN_BY_PRE = {
-    "gpt-4o": O200K_PATTERN, "llama4": O200K_PATTERN,
-    "kanana2": O200K_PATTERN, "talkie": O200K_PATTERN,
-    "minimax-m2": O200K_PATTERN,
-    # DeepSeek-V3/R1 conversions ship pre='deepseek-v3'; DeepSeek V4 Flash
-    # ships pre='joyai-llm'; llama.cpp maps both (and hunyuan-dense) to the
-    # same 3-regex set. Before this entry, deepseek-v3 silently fell back to
-    # the single-digit clause (over-splitting numbers and CJK).
-    "deepseek-v3": _DEEPSEEK3_PATTERNS,
-    "joyai-llm": _DEEPSEEK3_PATTERNS,
-    "hunyuan-dense": _DEEPSEEK3_PATTERNS,
-    # HY4-preview ships pre='hyv4'; llama.cpp puts LLAMA_VOCAB_PRE_TYPE_HYV4
-    # in the same 3-regex group as deepseek3-llm and hunyuan-dense.
-    "hyv4": _DEEPSEEK3_PATTERNS,
-    # Kimi K2 and K3 GGUFs both ship pre='kimi-k2' (tiktoken vocab; the
-    # converter synthesizes merges from the rank order). Before this entry the
-    # pre fell back to the single-digit clause - over-splitting numbers and
-    # gluing Han runs to Latin words.
-    "kimi-k2": KIMI_K2_PATTERN,
-    "k2-horizon": K2_HORIZON_PATTERN,
-    "flint": _FLINT_PATTERNS,
-}
 
-# Pres that split raw codepoints: their reference tokenizers apply no
-# unicode normalization, and NFC would merge decomposed combining marks
-# (e + U+0301 -> e-acute) and shift the split boundaries. kimi-k2 is
-# tiktoken-family; flint's tokenizer.json has a null normalizer.
-_NO_NFC_PRES = frozenset({"kimi-k2", "flint"})
+@dataclass(frozen=True)
+class PreTokenizer:
+    """How llama.cpp splits and merges for one `tokenizer.ggml.pre` name.
+
+    ``ignore_merges`` emits a pre-token that is a whole vocab entry as one
+    id, without running the merges. ``add_bos`` is the default for
+    `tokenizer.ggml.add_bos_token` when the GGUF lacks the key; None keeps
+    the key's own default. ``nfc`` applies NFC before the split. llama.cpp
+    never normalizes; set it only where the reference tokenizer.json
+    declares NFC, so those names match Hugging Face.
+    """
+    patterns: tuple[str, ...]
+    ignore_merges: bool = False
+    add_bos: bool | None = None
+    nfc: bool = False
+
+
+def _entry(pattern, *, ignore_merges=False, add_bos=None,
+           nfc=False) -> PreTokenizer:
+    patterns = pattern if isinstance(pattern, tuple) else (pattern,)
+    return PreTokenizer(patterns, ignore_merges, add_bos, nfc)
+
+
+def _group(names: str, entry: PreTokenizer) -> dict[str, PreTokenizer]:
+    return dict.fromkeys(names.split(), entry)
+
+
+# `tokenizer.ggml.pre` name -> split regexes and flags, from the BPE load
+# block of llama.cpp's src/llama-vocab.cpp. tests/load/data/llama_cpp_pre.json
+# holds a snapshot of that table, and a test keeps the two in step. Line
+# numbers below are at the snapshot's commit. qwen3, qwen35moe and hyv4 are
+# names llama.cpp does not list; gmlx keeps them for GGUFs already written
+# with them. nfc is set per name: the Qwen tokenizer.json files and
+# K2-Horizon's declare NFC.
+PRE_TOKENIZERS: dict[str, PreTokenizer] = {
+    **_group("qwen2 qwen3 deepseek-r1-qwen", _entry(QWEN2_PATTERN, nfc=True)),
+    **_group("f2llmv2 kormo megrez grok-2 hunyuan solar-open stablelm2",
+             _entry(QWEN2_PATTERN)),
+    **_group("qwen35 qwen35moe", _entry(QWEN35_PATTERN, nfc=True)),
+    # llama-vocab.cpp:2481-2496 sets ignore_merges and add_bos.
+    **_group("llama-bpe llama3 llama-v3 falcon3 falcon-h1 midm-2.0 "
+             "jina-v5-nano lfm2",
+             _entry(LLAMA3_PATTERN, ignore_merges=True, add_bos=True)),
+    **_group("dbrx smaug-bpe chatglm-bpe", _entry(LLAMA3_PATTERN)),
+    # llama-vocab.cpp:2608-2615.
+    **_group("glm4 glm5", _entry(LLAMA3_PATTERN, ignore_merges=True)),
+    **_group("gpt-2 olmo mpt jais trillion granite-docling phi-2 exaone4 "
+             "gigachat a.x-4.0 mellum modern-bert roberta-bpe jina-de "
+             "jina-es jina-v1-en jina-v2-code jina-v2-de jina-v2-es",
+             _entry(GPT2_PATTERN)),
+    **_group("smollm starcoder codeshell command-r exaone refact "
+             "minerva-7b mellum2", _entry(_SMOLLM_PATTERNS)),
+    # llama-vocab.cpp:2622-2634 sets ignore_merges and add_bos.
+    **_group("tekken pixtral",
+             _entry(TEKKEN_PATTERN, ignore_merges=True, add_bos=True)),
+    "tekken-num3": _entry(TEKKEN_NUM3_PATTERN, ignore_merges=True,
+                          add_bos=True),
+    **_group("gpt-4o llama4 kanana2 talkie minimax-m2", _entry(O200K_PATTERN)),
+    **_group("deepseek-v3 joyai-llm hunyuan-dense hy_v4 hyv4",
+             _entry(_DEEPSEEK3_PATTERNS)),
+    "kimi-k2": _entry(KIMI_K2_PATTERN),
+    "k2-horizon": _entry(K2_HORIZON_PATTERN, nfc=True),
+    "flint": _entry(_FLINT_PATTERNS),
+}
+_FALLBACK = _entry(QWEN2_PATTERN)
+
+
+def pre_tokenizer(pre_id: str) -> PreTokenizer:
+    """The table entry for ``pre_id``, or the qwen2 split for a name the
+    table does not list."""
+    return PRE_TOKENIZERS.get(pre_id, _FALLBACK)
 
 
 def _bytelevel_split_patterns(pre_id: str) -> tuple[str, ...]:
-    """The byte-level word-split regex(es) for a GGUF `tokenizer.ggml.pre`
-    hint, with the family-correct digit-grouping clause (or a full-pattern
-    override for families the generic pattern can't express). Multi-regex
-    pres (deepseek-v3/joyai-llm) return several patterns to be applied in
-    sequence, mirroring llama.cpp's sequential regex splitting."""
-    if pre_id in _PATTERN_BY_PRE:
-        pat = _PATTERN_BY_PRE[pre_id]
-        return pat if isinstance(pat, tuple) else (pat,)
-    return (_bytelevel_pattern(
-        _DIGIT_CLAUSE_BY_PRE.get(pre_id, _DEFAULT_DIGIT_CLAUSE)),)
-
-# pre-tokenizer hint string -> algorithm bucket. Hints come from the
-# `tokenizer.ggml.pre` GGUF KV (set by llama.cpp's
-# convert_hf_to_gguf.py based on the source tokenizer's metadata).
-_BYTELEVEL_PRES = {"qwen2", "qwen3", "qwen35", "qwen35moe", "llama-bpe", "llama3"}
+    return pre_tokenizer(pre_id).patterns
 
 
 # Public entry point
@@ -369,6 +415,15 @@ def load_tokenizer_from_gguf(
                       has_merges=bool(raw_merges), has_scores=bool(scores))
     if style == "bytelevel":
         tok = _build_bytelevel_bpe(tokens, raw_merges, pre_id=pre_id)
+        if pre_id not in PRE_TOKENIZERS:
+            loadlog.warn(
+                f"[tokenizer] unknown pre-tokenizer {pre_id!r}: splitting "
+                "words with the generic pattern, so token ids can differ "
+                "from llama.cpp")
+        if add_bos is None:
+            # As in llama.cpp, the pre name sets the default and a present
+            # key wins.
+            add_bos = pre_tokenizer(pre_id).add_bos
     elif style == "spm":
         unk_str = tokens[unk_id] if unk_id is not None else None
         if raw_merges:
@@ -571,7 +626,7 @@ def _classify(model_id: str, pre_id: str, *,
     of merges/scores to pick the right path.
     """
     # ByteLevel BPE conversions always ship a merge list.
-    if has_merges and (pre_id in _BYTELEVEL_PRES or model_id == "gpt2"):
+    if has_merges and (pre_id in PRE_TOKENIZERS or model_id == "gpt2"):
         return "bytelevel"
     if has_merges:
         # SPM-style BPE with explicit merges (gemma4/gemma3), or any other
@@ -625,21 +680,18 @@ def _build_bytelevel_bpe(tokens: list[str], raw_merges: list[str],
         loadlog.verbose_print(
             f"[tokenizer] dropped {len(parsed) - len(merges)} merges whose "
             "parts/product are not vocab entries (control-token spellings)")
-    # glm4's tokenizer.json sets "ignore_merges": true - vocab entries are
-    # emitted directly without merge derivation. Without it greedy BPE cannot
-    # reach some entries: " CJK" spellings lose to a shorter first merge and
-    # stop short, inflating mixed Chinese-English token counts ~13%. Applied
-    # to pre=glm4 only (chatglm-bpe shares the split pattern but is a
-    # different tokenizer not confirmed to declare the flag).
+    # Without ignore_merges greedy BPE cannot reach some vocab entries: on
+    # glm4, " CJK" spellings lose to a shorter first merge and stop short.
+    entry = pre_tokenizer(pre_id)
     tok = Tokenizer(models.BPE(
         vocab=vocab, merges=merges,
         byte_fallback=False, fuse_unk=False,
-        ignore_merges=(pre_id == "glm4")))
-    if pre_id not in _NO_NFC_PRES:
+        ignore_merges=entry.ignore_merges))
+    if entry.nfc:
         tok.normalizer = normalizers.NFC()
     tok.pre_tokenizer = pre_tokenizers.Sequence([
         pre_tokenizers.Split(Regex(p), behavior="isolated", invert=False)
-        for p in _bytelevel_split_patterns(pre_id)
+        for p in entry.patterns
     ] + [
         pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
     ])
