@@ -51,7 +51,7 @@
   "mlx_lm/models/gemma2.py": {"status": "verbatim", "upstream": "64b0935b06fe2c4d5d4ed23a9cf62deb6218c55a88b9403a657afe9e2be8f251"},
   "mlx_lm/models/gemma3.py": {"status": "verbatim", "upstream": "69d321648629b0f22e8cd9f3c3b597af6f34b5405c761ce089e825deebb2939a"},
   "mlx_lm/models/gemma3_text.py": {"status": "verbatim", "upstream": "884bb398288beda5e90caf3de60a15f5d17b8e383d28c85cca07de1e0aeafa38"},
-  "mlx_lm/models/gemma3n.py": {"status": "verbatim", "upstream": "5278b3075e5d07db69bb5c0db52fe4e2ce9d345524aa97496040803db6d8b0d6"},
+  "mlx_lm/models/gemma3n.py": {"sha256": "a058d5a288d142b2e38579ecf6e8bd22992c4eb9418795673ab888c6249a7921", "status": "edited", "upstream": "5278b3075e5d07db69bb5c0db52fe4e2ce9d345524aa97496040803db6d8b0d6"},
   "mlx_lm/models/gemma4.py": {"status": "verbatim", "upstream": "4671e4a63cb9849582abac566599a0a85370a46d410f4ad69d81a88788d00fd8"},
   "mlx_lm/models/gemma4_text.py": {"sha256": "60c4103097c68fd30c3d4f85e4252299d818ef75cb25e1c3836739766cc0d250", "status": "alias", "upstream": "77f46bc3f162a0b9513157dade4be2c381d4df3295262c69034a53d46111370f"},
   "mlx_lm/models/glm.py": {"status": "verbatim", "upstream": "a122242c74beabed8ab1ed7cfc60f8b7891f71d69e1ecd9a25206f4493751fa2"},
