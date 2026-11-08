@@ -85,6 +85,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Flint holds its residual stream in float32 in a bfloat16 graph too, as
+  llama.cpp does, so a request in a batch no longer answers differently
+  from the same request alone.
 - Served and VLM chat prompts render on transformers 5.22.2, where a request
   that set no thinking control failed with "'enable_thinking' is undefined".
 - A fraction in a config key that takes a whole number, such as `port` or

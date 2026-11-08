@@ -490,9 +490,9 @@ def _loader_shaped():
 @pytest.mark.parametrize("act", ["bfloat16", "float16"])
 def test_residual_stream_dtype(monkeypatch, act):
     """With the loader's dtypes (fp32 router, everything else in the
-    activation dtype) a bfloat16 graph keeps every layer in bfloat16. A
-    float16 graph holds the residual stream in float32, runs the MoE in
-    bfloat16 and returns float16 logits."""
+    activation dtype) a bfloat16 or float16 graph holds the residual stream
+    in float32, as llama.cpp does, runs the MoE in bfloat16 and returns
+    logits in its own dtype."""
     monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", act)
     model, _ = _loader_shaped()
     dt = getattr(mx, act)
@@ -519,8 +519,7 @@ def test_residual_stream_dtype(monkeypatch, act):
     finally:
         DecoderLayer.__call__, FlintMoE.__call__ = call, moe_call
     assert logits.dtype == dt
-    wide = dt == mx.float16
-    assert outs and set(outs) == {mx.float32 if wide else dt}
+    assert outs and set(outs) == {mx.float32}
     assert moe_ins and set(moe_ins) == {mx.bfloat16}
 
 
@@ -549,7 +548,7 @@ def test_float16_graph_survives_swiglu_past_float16_range(monkeypatch):
     # The CPU gather_mm takes float32 only, so the float16 arm runs on the GPU.
     if mx.default_device().type == mx.DeviceType.gpu:
         with monkeypatch.context() as m:
-            m.setattr(FlintModel, "_WIDE_FROM", mx.bfloat16)
+            m.setattr(FlintModel, "_WIDE", False)
             unwide = model(mx.array(tokens)[None])
             mx.eval(unwide)
             assert not np.isfinite(_np(unwide)).all()
