@@ -27,11 +27,66 @@ Most flags have a direct equivalent:
 | `--ignore-eos` | `--ignore-eos` on `serve` | The flag has the same effect, for benchmarks at a fixed length. |
 | `--api-key K` | [`server.api_key`](config.md#serverapi_key) | The key is set only in the configuration file, so it never shows in process listings or shell history. |
 | `--parallel N` | None | The server batches concurrent requests with no setting, and `--budget-gb` limits the memory of loaded models. |
-| `--lora FILE` | `--adapter FILE` | [LoRA adapters](lora.md) covers adapter files in both directions. |
+| `--lora FILE` | `--adapter FILE` | Repeat the flag for each adapter. [LoRA adapters](lora.md) covers adapter files in both directions. |
+| `--lora-scaled FILE:SCALE` | `--adapter FILE:STRENGTH` | The same scale. A negative strength subtracts the adapter. |
+| `--lora-init-without-apply` | `--adapter FILE:0` | The adapter loads at strength 0, and each request sets its own strength. |
+| `--reasoning-budget N` | `--thinking-budget N` | `-1` sets no budget in both. In a config, the [`thinking_budget`](config.md#samplingthinking_budget) key sets it. |
+| `--reasoning-budget-message MESSAGE` | [`thinking_budget_message`](config.md#samplingthinking_budget_message) | A sampling key in the configuration file, with no flag. |
 
 The server answers the OpenAI, Anthropic Messages and OpenAI Responses APIs
 on one port, and the [HTTP API](api.md) lists the fields that each one
-accepts.
+accepts. These llama-server request fields carry over:
+
+| llama-server | gmlx | Notes |
+|--------------|------|-------|
+| `lora: [{"id": 0, "scale": 0.5}]` | The same | The id is the adapter's index in `/v1/models`. Each item needs its `scale`. A bad or repeated id gets a 400. |
+| `reasoning_budget_tokens`, `reasoning_budget_message` | The same | gmlx also names them `thinking_budget` and `thinking_budget_message`. |
+| A last assistant message, which llama-server continues | `continue_final_message: true` and `add_generation_prompt: false` | Send both fields to llama-server too. In gmlx, only some chat templates can continue a message. |
+| `logprobs: true` | `logprobs: true` and `top_logprobs: 20` | llama-server returns 20 alternatives by default. gmlx returns them only when the request sets `top_logprobs`. |
+
+[Mixing adapters per request](lora.md#mixing-adapters-per-request),
+[Thinking budget](api.md#thinking-budget),
+[Assistant prefill](api.md#assistant-prefill) and
+[Logprobs](api.md#logprobs) describe the fields. gmlx has no
+`/lora-adapters` route, so each request sets the adapter strengths it needs.
+
+### Assistant prefill
+
+gmlx continues a message in the prompt that llama-server renders, with
+these differences:
+
+- Prefill is opt-in. llama-server continues a last assistant message by
+  default, and gmlx continues it only when the request sets
+  `continue_final_message`. With that field, llama-server continues a last
+  message of any role, and gmlx needs an assistant message.
+- gmlx merges all system messages into one system message at the start.
+  llama-server keeps each one where the client sent it.
+- gmlx gives the template a system message as one string, also when the
+  client sends it as text parts. llama-server can give the template the
+  parts, and a Gemma 4 template renders parts with a space before the end of
+  the turn.
+- The reply holds only the new text. A llama-server reply that is not
+  streamed also holds the prefill.
+- llama-server turns thinking on when the template has a switch, and gmlx
+  keeps the template's default. Send `chat_template_kwargs` with
+  `enable_thinking` to get the same prompt from both servers.
+
+### KL divergence
+
+`llama-perplexity` measures the KL divergence in two runs. The first saves
+the reference model's log-probabilities, and the second compares the test
+model with them. `gmlx kld` does both in one command:
+
+```sh
+llama-perplexity -m Qwen3.5-9B-BF16.gguf -f page.txt -c 512 --kl-divergence-base base.kld
+llama-perplexity -m Qwen3.5-9B-Q4_K_M.gguf -c 512 --kl-divergence-base base.kld --kl-divergence
+gmlx kld Qwen3.5-9B-Q4_K_M.gguf --reference Qwen3.5-9B-BF16.gguf --text page.txt
+```
+
+`-c N` is `--ctx N`, which is 512 by default, and `--chunks N` has the same
+name. gmlx reports the same Mean KLD and Same top p. To score adapters,
+give one `--adapter FILE:STRENGTH` flag for each strength, as
+[gmlx kld](cli.md#gmlx-kld) shows.
 
 ## Ollama
 

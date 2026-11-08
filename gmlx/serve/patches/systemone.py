@@ -11,7 +11,6 @@ reads live in ``gmlx.systemone``."""
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import importlib
 import inspect
 import json
@@ -26,6 +25,9 @@ from fastapi.responses import JSONResponse, Response
 
 import gmlx.serve.bridge_vlm as serving
 from gmlx import lora_rows
+from gmlx.serve import job_route
+from gmlx.serve.job_route import request_lora as _request_lora
+from gmlx.serve.job_route import salted as _salted
 from gmlx.systemone import ar_reader, letters, model_template
 from gmlx.systemone import (
     Limits,
@@ -52,7 +54,6 @@ _ENDPOINT = "/v1/systemone"
 _PREWARM = "/v1/prewarm"
 _RUNTIME_ATTR = "_kq_systemone_runtime"
 _LETTERS_ATTR = "_kq_systemone_letters"
-_DISCONNECT_POLL_S = 0.5
 _NO_IMAGES = "images are not supported: the served model is text-only"
 
 _log = logging.getLogger(__name__)
@@ -154,37 +155,20 @@ def _letter_reader(lrt: _LetterRuntime, engine_rg) -> ar_reader.LetterReader:
     return lrt.reader
 
 
-def _prefixes(engine_rg, reader, scales, tenant: str | None = None):
+def _prefixes(engine_rg, reader, lora_salt: int, tenant: str | None = None):
     """Where the engine keeps decision prefixes: its APC manager, or none."""
     from gmlx.systemone.prefixes import ApcPrefixes, Prefixes, prefix_salt
 
     manager = getattr(engine_rg, "apc_manager", None)
     if manager is None:
         return Prefixes()
-    return ApcPrefixes(manager, prefix_salt(scales, tenant), reader.make_cache)
+    return ApcPrefixes(manager, prefix_salt(lora_salt, tenant), reader.make_cache)
 
 
 def _tenant(http_request: Request) -> str | None:
     """The APC tenant of a request, read as the chat routes read it. A
     launch session socket sets it, so a session's prefixes stay its own."""
     return importlib.import_module("gmlx._vendor.mlx_vlm.server.app")._read_tenant_id(http_request)
-
-
-def _rows_scope(scales):
-    """Publishes the request's adapter scales around each reader forward
-    while the server runs adapters per row."""
-    @contextlib.contextmanager
-    def scope(rows: int):
-        if lora_rows.mode() != "rows":
-            yield
-            return
-        pad = (0.0,) * max(lora_rows.n_slots() - len(scales), 0)
-        lora_rows.set_rows([tuple(scales) + pad] * rows)
-        try:
-            yield
-        finally:
-            lora_rows.clear_rows()
-    return scope
 
 
 def _settings(installed):
@@ -272,31 +256,8 @@ def _admit_letters(rg, tokens, texts: list[str], extra: int) -> int:
 def _resolve_engine(field, profile, cfg, runtime):
     """Load the model a request names and return ``(rg, hold, spec,
     model_str)``. The caller releases ``hold``."""
-    from gmlx.serve.residency import _http_from_resolver_error
-
-    app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
-    # The residency seam resolves the model string with the body profile
-    # from this context variable.
-    token = serving.set_request_profile(profile)
-    try:
-        try:
-            model_str = _pick_model(field, profile, cfg)
-        except (serving.ModelNotFound, serving.ModelFileMissing,
-                serving.UnknownProfile, serving.NoModelSpecified) as e:
-            raise _http_from_resolver_error(e) from e
-        app_mod.get_cached_model(model_str)
-        spec = serving.get_active_spec()
-    finally:
-        serving.reset_request_profile(token)
-    guard = runtime.response_generator
-    rg = getattr(guard, "_rg", guard)
-    hold = getattr(guard, "_hold", None)
-    if rg is None:
-        if hold is not None:
-            hold.release()
-        raise HTTPException(status_code=500, detail=(
-            "the model engine is unavailable; restart the server"))
-    return rg, hold, spec, model_str
+    return job_route.resolve_engine(
+        lambda: _pick_model(field, profile, cfg), profile, runtime)
 
 
 def _record_failure(runtime, model, error: str) -> None:
@@ -305,17 +266,6 @@ def _record_failure(runtime, model, error: str) -> None:
                                        stream=False, error=error)
     except Exception:  # noqa: BLE001 - metrics must not fail the request
         _log.debug("failure-metrics record raised", exc_info=True)
-
-
-async def _watch_disconnect(http_request: Request, stop: threading.Event):
-    try:
-        while not stop.is_set():
-            if await http_request.is_disconnected():
-                stop.set()
-                return
-            await asyncio.sleep(_DISCONNECT_POLL_S)
-    except asyncio.CancelledError:
-        pass
 
 
 def make_systemone_endpoint(installed):
@@ -396,7 +346,7 @@ def make_systemone_endpoint(installed):
 
             return schema, job, admitted
 
-        def _letters_job(rg, spec, resolved):
+        def _letters_job(rg, spec, resolved, lora):
             schema, state = _backend("letters")
             if letters.has_image(body.get("state")):
                 raise HTTPException(status_code=400, detail=_NO_IMAGES)
@@ -406,14 +356,14 @@ def make_systemone_endpoint(installed):
             texts = (letters.pass_texts(schema, state, style)
                      + letters.winner_bounds(schema, state, style))
             admitted = _admit_letters(rg, tokens, texts, ar_reader.TAIL_TOKENS)
-            scales = lora_rows.request_scales(spec)
+            lora = _salted(lora, rg)
 
             def job(engine_rg, should_stop):
                 reader = _letter_reader(lrt, engine_rg)
                 return ar_reader.decide_letters(
                     reader, tokens, schema, state,
-                    prefixes=_prefixes(engine_rg, reader, scales, tenant),
-                    should_stop=should_stop, rows_scope=_rows_scope(scales),
+                    prefixes=_prefixes(engine_rg, reader, lora.salt, tenant),
+                    should_stop=should_stop, rows_scope=lora_rows.rows_scope(lora.scales),
                     style=style)
 
             return schema, job, admitted
@@ -428,13 +378,14 @@ def make_systemone_endpoint(installed):
             try:
                 resolved = spec.id if spec is not None else (model_str or shown["model"])
                 shown["model"] = resolved
+                lora = _request_lora(spec, body)
                 if is_diffusion_model(getattr(rg, "model", None)):
                     schema, job, admitted = _diffusion_job(rg)
                     result, completion_tokens = run_on_engine(
                         rg, job, request_id=request_id, prompt_tokens=admitted,
                         stop=stop, timeout_s=gen.get_token_queue_timeout())
                     return "diffusion", schema, resolved, result, completion_tokens
-                schema, job, admitted = _letters_job(rg, spec, resolved)
+                schema, job, admitted = _letters_job(rg, spec, resolved, lora)
                 result = run_on_engine(
                     rg, job, request_id=request_id, prompt_tokens=admitted,
                     stop=stop, timeout_s=gen.get_token_queue_timeout(),
@@ -444,7 +395,7 @@ def make_systemone_endpoint(installed):
                 if hold is not None:
                     hold.release()
 
-        watcher = asyncio.create_task(_watch_disconnect(http_request, stop))
+        watcher = asyncio.create_task(job_route.watch_disconnect(http_request, stop))
         try:
             backend, schema, resolved, result, completion_tokens = (
                 await asyncio.to_thread(_run))
@@ -542,6 +493,7 @@ def make_prewarm_endpoint(installed):
                 body.get("model"), profile, cfg, runtime)
             try:
                 resolved = spec.id if spec is not None else model_str
+                lora = _request_lora(spec, body)
                 if is_diffusion_model(getattr(rg, "model", None)):
                     raise HTTPException(status_code=400, detail=(
                         f"model {resolved!r} reads decisions without a kept "
@@ -551,14 +503,14 @@ def make_prewarm_endpoint(installed):
                 ids, _split = ar_reader.split_point(tokens, state, style)
                 _admit_letters(rg, tokens,
                                [letters.as_format(style).prefix_text(state)], 1)
-                scales = lora_rows.request_scales(spec)
+                lora = _salted(lora, rg)
 
                 def job(engine_rg, should_stop):
                     reader = _letter_reader(lrt, engine_rg)
                     return ar_reader.prewarm(
                         reader, tokens, state,
-                        prefixes=_prefixes(engine_rg, reader, scales, tenant),
-                        rows_scope=_rows_scope(scales), style=style)
+                        prefixes=_prefixes(engine_rg, reader, lora.salt, tenant),
+                        rows_scope=lora_rows.rows_scope(lora.scales), style=style)
 
                 prefix = run_on_engine(
                     rg, job, request_id=f"pw-{uuid.uuid4().hex[:12]}",
@@ -569,7 +521,7 @@ def make_prewarm_endpoint(installed):
                 if hold is not None:
                     hold.release()
 
-        watcher = asyncio.create_task(_watch_disconnect(http_request, stop))
+        watcher = asyncio.create_task(job_route.watch_disconnect(http_request, stop))
         try:
             resolved, prefix = await asyncio.to_thread(_run)
         except HTTPException:

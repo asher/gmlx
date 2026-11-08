@@ -206,6 +206,9 @@ def test_gen_marks_the_thinking_budget_hit(tmp_path, stub_server, monkeypatch):
     assert rows["long"]["messages"][-1]["reasoning_content"].startswith("thinking")
     sent = [c for c in _Handler.calls if c.get("thinking_budget")]
     assert sent and all(c["thinking_budget"] == 40 for c in sent)
+    # An explicit null keeps a server's profile message off the cut.
+    assert all("thinking_budget_message" in c
+               and c["thinking_budget_message"] is None for c in sent)
     # a server gen did not start sees the switch and the kwargs on the request itself
     assert all(c["thinking"] == "on" for c in sent)
     assert all(c["chat_template_kwargs"] == {"preserve_thinking": True} for c in sent)

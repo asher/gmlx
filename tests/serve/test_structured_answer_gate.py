@@ -189,3 +189,44 @@ def test_speculative_grammar_consumes_only_the_answer(monkeypatch):
     assert g.masks([at.PIECES[at.EOM], at.PIECES["<|start|>"]]) is None
     rows.commit(tok.encode(_HEADER + _CONTENT))
     assert tok.decode(matcher.consumed) == _CONTENT
+
+
+def _constrained_steps(proc, rec, first_ctx, gen, start):
+    """The batch loop from step ``start``: the first call with
+    ``first_ctx``, then each sampled token through ``process_last_token``.
+    The indices into ``gen`` of the constrained tokens."""
+    logits, out = mx.zeros((1, 8)), []
+    before = rec.calls
+    proc(mx.array(first_ctx), logits)
+    if rec.calls > before:
+        out.append(start)
+    for k in range(start, len(gen) - 1):
+        before = rec.calls
+        proc.process_last_token(gen[k], logits)
+        if rec.calls > before:
+            out.append(k + 1)
+    return out
+
+
+@pytest.mark.parametrize("ctx", ["full", "tail"])
+@pytest.mark.parametrize("where", ["before-header", "in-header", "in-answer"])
+def test_a_resumed_gate_constrains_as_the_uncut_run(where, ctx):
+    """A requeued row resumes its processor from the delivered tokens. The
+    replay's first call is the decode step of the last delivered token,
+    with the full replay context or, after an APC hit, only its tail."""
+    tok = at.AtemTokenizer()
+    proc, rec = _serve_proc(tok)
+    prompt = tok.encode(_PROMPT)
+    reason, header = tok.encode(_REASON), tok.encode(_HEADER)
+    gen = tok.encode(_REASON + _HEADER + _CONTENT)
+    uncut = _constrained_steps(proc.clone(), rec, prompt, gen, 0)
+    assert len(uncut) == len(tok.encode(_CONTENT))
+    cut = {"before-header": len(reason),
+           "in-header": len(reason) + 2,
+           "in-answer": len(reason) + len(header) + 2}[where]
+    committed = gen[:cut]
+    resumed = proc.resumed(committed)
+    first = prompt + committed if ctx == "full" else committed[-1:]
+    got = _constrained_steps(resumed, rec, first, gen, cut)
+    assert got == [i for i in uncut if i >= cut]
+

@@ -12,19 +12,17 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Callable, Optional
 
-from gmlx import lora_rows
-
 from . import ar_reader
 
 
-def prefix_salt(scales=None, tenant: str | None = None) -> int:
+def prefix_salt(lora_salt: int = 0, tenant: str | None = None) -> int:
     """The APC salt of a decision prefix: the reader version, the forward
-    size, the request's adapter scales when any is set, and its APC tenant
-    when it has one."""
+    size, the request's adapter salt when any adapter is on, and its APC
+    tenant when it has one."""
     key = repr(("gmlx-letters", ar_reader.READER_VERSION, ar_reader.FORWARD_TOKENS))
     salt = int.from_bytes(hashlib.blake2b(key.encode(), digest_size=8).digest(), "little")
-    if scales and any(scales):
-        salt ^= lora_rows.lora_salt(scales)
+    if lora_salt:
+        salt ^= int(lora_salt)
     if tenant:
         salt ^= int.from_bytes(hashlib.blake2b(
             repr(("gmlx-tenant", tenant)).encode(), digest_size=8).digest(), "little")

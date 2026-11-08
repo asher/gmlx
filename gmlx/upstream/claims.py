@@ -79,21 +79,28 @@ CLAIMS: tuple[Claim, ...] = (
           "via the pending-list stash); "
           "mtp_prefill._install_l0_tenant_rows (publishes the generator's "
           "tenant rows for the step; the prompt batch is built and first "
-          "stepped inside _next)",
-          wrappers=("gmlx.cache.fresh_gate", "gmlx.serve.admit_gate",
+          "stepped inside _next); lora_rows.install_row_channel (binds the "
+          "generator's row settings as the uid lookup for the step); "
+          "patches.mtp_thinking (publishes the generator for the step, so "
+          "the first-token site reads the generation batch the extend "
+          "tests)",
+          wrappers=("gmlx.cache.fresh_gate", "gmlx.lora_rows",
+                    "gmlx.serve.admit_gate",
                     "gmlx.serve.batch_sched", "gmlx.serve.governor",
+                    "gmlx.serve.patches.mtp_thinking",
                     "gmlx.serve.queue_cap", "gmlx.serve.tick_guard",
                     "gmlx.spec.mtp_prefill")),
     # batch_sched's arrival merge relies on insert appending to or
     # rebinding _unprocessed_sequences.
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator.insert",
           "lora_rows (per-row prompt_kwargs carry the APC "
-          "salt, positional order prompts, max_tokens, prompt_kwargs); "
-          "seed_rows (returned uids); mtp_prefill._install_l0_tenant_rows "
+          "salt, positional order prompts, max_tokens, prompt_kwargs, "
+          "logits_processors, thinking_budget_criteria, attention_mask, "
+          "row_settings); "
+          "mtp_prefill._install_l0_tenant_rows "
           "(each row's _apc_tenant kwarg, None included, on the generator "
           "by returned uid)",
-          wrappers=("gmlx.lora_rows", "gmlx.serve.seed_rows",
-                    "gmlx.spec.mtp_prefill")),
+          wrappers=("gmlx.lora_rows", "gmlx.spec.mtp_prefill")),
     # --- prompt batches, speculative and AR batch engine ---
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.__init__",
           "cascade_sdpa.install_cascade_stamp (token-prefix stamp at "
@@ -143,7 +150,7 @@ CLAIMS: tuple[Claim, ...] = (
           "ckpt._install_plain_ckpt_decode (token accounting and "
           "decode-time snapshots)",
           wrappers=("gmlx.lora_rows", "gmlx.serve.cb_phase",
-                    "gmlx.serve.seed_rows", "gmlx.spec.ckpt")),
+                    "gmlx.spec.ckpt")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "GenerationBatch.filter",
           "ckpt._install_plain_ckpt_decode (B=1 retirement at row exit)",
           wrappers=("gmlx.spec.ckpt",)),
@@ -152,11 +159,12 @@ CLAIMS: tuple[Claim, ...] = (
           "media_spans.install_span_aware_prompt_step (the block step; a "
           "chunk past right-padded row ends rides the _suffix_lens end "
           "clip and the _speculative_prefill.append output); "
-          "prefill_decay (each chunk is sized from the decayed step)",
+          "prefill_decay (each chunk is sized from the decayed step); "
+          "tick_guard (the batch's APC stores belong to it)",
           install="gmlx.gen.media_spans:install_span_aware_prompt_step",
           wrappers=("gmlx.gen.media_spans", "gmlx.gen.prefill_decay",
                     "gmlx.lora_rows", "gmlx.serve.cb_phase",
-                    "gmlx.spec.mtp_prefill")),
+                    "gmlx.serve.tick_guard", "gmlx.spec.mtp_prefill")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar",
           "PromptProcessingBatch.needs_processing",
           "prefill_decay.install_prefill_decay (a batch that hands "
@@ -179,17 +187,17 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.serve.cb_phase",)),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "PromptProcessingBatch.generate",
           "mtp_prefill.install_full_prompt_mtp_prefill; "
-          "seed_rows.install_per_request_seed (row-uid publish); "
           "patches.mtp_thinking (thinking-hook transport); "
           "patches.spec_processors (reads each row's processors and "
           "prompt tokens before the prefill clears them, outermost); "
           "patches.context_copy (hangs the prompt indexes on the "
-          "speculative batch)",
+          "speculative batch); tick_guard (the batch's APC stores belong "
+          "to it)",
           wrappers=("gmlx.lora_rows", "gmlx.serve.cb_phase",
                     "gmlx.serve.patches.context_copy",
                     "gmlx.serve.patches.mtp_thinking",
-                    "gmlx.serve.patches.spec_processors", "gmlx.serve.seed_rows",
-                    "gmlx.spec.mtp_prefill")),
+                    "gmlx.serve.patches.spec_processors",
+                    "gmlx.serve.tick_guard", "gmlx.spec.mtp_prefill")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar",
           "SpeculativeGenerationBatch._start_rounds",
           "patches.spec_processors (stashes the row processors on the first "
@@ -199,8 +207,7 @@ CLAIMS: tuple[Claim, ...] = (
                     "gmlx.serve.patches.spec_processors")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.next",
           "admission.install_continuous_batch_admission",
-          wrappers=("gmlx.serve.cb_phase", "gmlx.serve.seed_rows",
-                    "gmlx.spec.admission")),
+          wrappers=("gmlx.serve.cb_phase", "gmlx.spec.admission")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "SpeculativeGenerationBatch.filter",
           "admission._filter_with_release (per-row release rides the "
           "mark-finished contract; the rounds generator sheds via "
@@ -283,13 +290,9 @@ CLAIMS: tuple[Claim, ...] = (
                     "gmlx.serve.patches.sampling")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._make_logits_processors",
-          "seed_rows.install_per_request_seed; "
-          "lora_rows.install_row_channel (engine-thread handoff to the "
-          "insert that takes the result as an argument); "
           "patches.spec_processors (puts the deferred processors back "
           "before the row's processors are built)",
-          wrappers=("gmlx.lora_rows", "gmlx.serve.patches.spec_processors",
-                    "gmlx.serve.seed_rows")),
+          wrappers=("gmlx.serve.patches.spec_processors",)),
     Claim("gmlx._vendor.mlx_vlm.server.generation", "ResponseGenerator._step",
           "patches.row_failed (permanently failed rows delivered "
           "to their response queues on the engine thread)",
@@ -297,8 +300,10 @@ CLAIMS: tuple[Claim, ...] = (
                     "gmlx.serve.patches.row_failed")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "GenerationArguments.to_template_kwargs",
-          "patches.chat_behavior (chat_template_kwargs transform)",
-          wrappers=("gmlx.serve.patches.chat_behavior",)),
+          "patches.chat_behavior (chat_template_kwargs transform); "
+          "patches.prefill (the continuation and add_generation_prompt)",
+          wrappers=("gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill")),
     Claim("gmlx._vendor.mlx_vlm.server.generation",
           "ResponseGenerator._preprocess_request",
           "patches.apc.install_retire_render_capture (ids hop and "
@@ -316,9 +321,11 @@ CLAIMS: tuple[Claim, ...] = (
     Claim("gmlx._vendor.mlx_vlm.server.openai", "apply_chat_template",
           "patches.apc.install_retire_render_capture (render-context "
           "memo, module attr); render.install_faithful_history (inner "
-          "key-merge wrap)",
+          "key-merge wrap); prefill.install_assistant_prefill (continues "
+          "the final assistant message)",
           wrappers=("gmlx.serve.patches.apc",
                     "gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill",
                     "gmlx.serve.patches.render")),
     # estimate._estimate_bound follows the chat route's merge.
     Claim("gmlx._vendor.mlx_vlm.server.openai", "_normalize_instruction_messages",
@@ -352,12 +359,13 @@ CLAIMS: tuple[Claim, ...] = (
           "aliases",
           how="route", paths=("/messages", "/v1/messages")),
     Claim("gmlx._vendor.mlx_vlm.server.anthropic", "apply_chat_template",
-          "patches.render, patches.apc and patches.chat_behavior (faithful "
-          "history, retire capture, thinking seed and developer-role "
-          "normalization wrap every render binding _render_target_modules "
-          "captures)",
+          "patches.render, patches.prefill, patches.apc and "
+          "patches.chat_behavior (faithful history, assistant prefill, "
+          "retire capture, thinking seed and developer-role normalization "
+          "wrap every render binding _render_target_modules captures)",
           wrappers=("gmlx.serve.patches.apc",
                     "gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill",
                     "gmlx.serve.patches.render")),
     # The Messages route's conversion step: gmlx claims it and calls the
     # stock helpers as the stock body does.
@@ -398,10 +406,12 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.serve.patches.audio_cascade",
                     "gmlx.serve.patches.native_audio")),
     Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.apply_chat_template",
-          "patches.render, patches.apc and patches.chat_behavior (gmlx wraps "
-          "the member beside both route-module copies)",
+          "patches.render, patches.prefill, patches.apc and "
+          "patches.chat_behavior (gmlx wraps the member beside both "
+          "route-module copies)",
           wrappers=("gmlx.serve.patches.apc",
                     "gmlx.serve.patches.chat_behavior",
+                    "gmlx.serve.patches.prefill",
                     "gmlx.serve.patches.render")),
     Claim("gmlx._vendor.mlx_vlm.server.app", "_protocol_deps.build_gen_args",
           "patches._common._install_gen_args_transform (each "
@@ -420,13 +430,11 @@ CLAIMS: tuple[Claim, ...] = (
           wrappers=("gmlx.serve.patches.render",)),
     Claim("gmlx._vendor.mlx_vlm.prompt_utils", "get_chat_template",
           "patches.render.install_faithful_history (owned render "
-          "tail mirrors the stock function's); system_content_fix (a text-only "
-          "system or developer message reaches the template as a "
-          "string); render._install_nested_in_place (wrapped: within an "
+          "tail mirrors the stock function's); "
+          "render._install_nested_in_place (wrapped: within an "
           "in-place render, the images of a nested rebuild go back in "
           "place)",
-          wrappers=("gmlx.serve.patches.render",
-                    "gmlx.upstream.system_content_fix")),
+          wrappers=("gmlx.serve.patches.render",)),
     Claim("gmlx._vendor.mlx_vlm.server", "_infer_tool_parser_from_processor",
           "patches.apc.install_retire_render_capture (wrapped: "
           "records the request's tool_parser override for the retirement "

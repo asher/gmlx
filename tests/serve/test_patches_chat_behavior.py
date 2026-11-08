@@ -14,6 +14,7 @@ import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import chat_behavior as sp_chat  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
+from gmlx.serve.patches import prefill  # noqa: E402
 from gmlx.config import ResolvedModel  # noqa: E402
 
 _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
@@ -70,6 +71,61 @@ def test_armed_criteria_reset_restores_prompt_seed():
     assert c.in_thinking is False                       # back to the prompt seed
 
 
+def _built_criteria(args, prompt):
+    """The criteria as the installed builder makes it."""
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    cls = gen.ResponseGenerator
+    original = cls._make_thinking_budget_criteria
+    try:
+        sp.install_thinking_budget_fix()
+        me = types.SimpleNamespace(tokenizer=_MsgThinkTok())
+        return cls._make_thinking_budget_criteria(me, args, prompt)
+    finally:
+        cls._make_thinking_budget_criteria = original
+
+
+class _MsgThinkTok(_FakeThinkTok):
+    _MAP = dict(_FakeThinkTok._MAP, **{"Answer now.": [60, 61]})
+
+
+def _builder_args(**kw):
+    base = dict(thinking_budget=2, enable_thinking=False,
+                thinking_start_token=None, thinking_end_token=None,
+                thinking_budget_message="Answer now.")
+    base.update(kw)
+    return types.SimpleNamespace(**base)
+
+
+def test_budget_fix_builder_passes_message():
+    crit = _built_criteria(_builder_args(), mx.array([[1, 99, 10]]))
+    assert crit.in_thinking and crit.thinking_token_count == 1  # seeded
+    assert _drive(crit, [5, 6, 60, 61, 100]) == [60, 61, 100, None, None]
+
+
+def test_budget_fix_builder_takes_no_negative_budget():
+    assert _built_criteria(_builder_args(thinking_budget=-1),
+                           mx.array([[1, 99]])) is None
+
+
+def test_mtp_build_hook_passes_message():
+    from gmlx.serve.patches import mtp_thinking
+
+    rg = types.SimpleNamespace(tokenizer=_MsgThinkTok())
+    hook = mtp_thinking._build_hook(rg, _builder_args(thinking_budget=5),
+                                    mx.array([[1, 99, 10]]))
+    assert hook.forced_ids == [60, 61, 100]
+    assert hook.in_thinking and hook.count == 1
+
+
+def test_split_puts_message_in_reasoning():
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    text = "Plan the trip.Time is up, so I will answer now.</think>Day one."
+    reasoning, content = sp_chat._split_thinking_keep_indent(
+        rs, rs.ThinkingStreamState, "<think>" + text, "<think>", "</think>")
+    assert reasoning == "Plan the trip.Time is up, so I will answer now."
+    assert content == "Day one."
+
+
 # ATEM (Muse Spark, Muse Glimmer) with the real token ids: the reasoning
 # header is five tokens and ends on <|message|>, which opens every message.
 # Counting must start only on the whole header, and a commentary <|eom|>
@@ -123,17 +179,18 @@ def test_atem_serve_budget_caps_reasoning_only(template):
     text = _atem_serve_run(
         crit, " to=self<|message|>Thinking hard about it now.<|eom|>"
         + _ATEM_REST, _ATEM_REST, tok)
-    assert text == (" to=self<|message|>Thinking hard about\n<|eom|>"
+    assert text == (" to=self<|message|>Thinking hard\n<|eom|>"
                     + _ATEM_REST)
 
 
 def test_atem_serve_budget_leaves_the_answer_alone():
-    """The budget=3 case that used to cut the answer after its first token:
-    every <|message|> turned counting on."""
+    """The case that used to cut the answer after its first token: every
+    <|message|> turned counting on. Three reasoning tokens fit a budget of
+    4."""
     tok = at.AtemTokenizer()
     script = (" to=self<|message|>abc<|eom|>"
               "<|start|>assistant to=user<|message|>Hello world foo bar")
-    crit = _atem_criteria(3, tok)
+    crit = _atem_criteria(4, tok)
     assert _atem_serve_run(crit, script, "", tok) == script
     assert crit.thinking_token_count == 3
 
@@ -146,7 +203,7 @@ def test_atem_serve_commentary_first_then_capped_reasoning():
     text = _atem_serve_run(
         crit, head + " to=self<|message|>Thinking hard about it now.<|eom|>"
         + answer, answer, tok)
-    assert text == (head + " to=self<|message|>Thinking hard about\n<|eom|>"
+    assert text == (head + " to=self<|message|>Thinking hard\n<|eom|>"
                     + answer)
 
 
@@ -282,6 +339,74 @@ def test_nonstream_split_strips_xtml_section_markers():
         sp_chat._LAST_RENDERED_PROMPT.reset(tok)
 
 
+_XTML_PAIR = ("<|open|>think<|sep|>", "<|close|>think<|sep|>")
+
+
+def _stream_split(monkeypatch, prompt, text, step, pair=_XTML_PAIR):
+    rs = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
+    cls = rs.ThinkingStreamState
+    monkeypatch.setattr(cls, "__init__", cls.__init__)
+    monkeypatch.setattr(cls, "feed", cls.feed)
+    sp.install_stream_thinking_seed()
+    tok = sp_chat._LAST_RENDERED_PROMPT.set("<|open|>message<|sep|>" + prompt)
+    try:
+        st = cls(True, *pair)
+        deltas = [st.feed(text[i:i + step]) for i in range(0, len(text), step)]
+        deltas.append(st.feed("", last=True))
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+    return ("".join(d.reasoning or "" for d in deltas),
+            "".join(d.content or "" for d in deltas))
+
+
+@pytest.mark.parametrize("prompt,text", [
+    ("<|open|>think<|sep|>",
+     "plan<|close|>think<|sep|><|open|>response<|sep|>2+2 equals 4."
+     "<|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>"),
+    ("<|open|>response<|sep|>",
+     "2+2 equals 4.<|close|>response<|sep|><|close|>message<|sep|>"),
+])
+@pytest.mark.parametrize("step", [1, 2, 5])
+def test_stream_split_strips_xtml_section_markers(monkeypatch, prompt, text,
+                                                  step):
+    """Kimi-K3: the streamed content drops the section markers, also when
+    a marker arrives split over chunks."""
+    reasoning, content = _stream_split(monkeypatch, prompt, text, step)
+    assert reasoning == ("plan" if "think" in prompt else "")
+    assert content == "2+2 equals 4."
+
+
+@pytest.mark.parametrize("prompt,text", [
+    ("<|open|>think<|sep|>",
+     "plan<|close|>think<|sep|><|open|>response<|sep|>\n\n  x = 1 \n"
+     "<|close|>response<|sep|><|close|>message<|sep|>"),
+    ("<|open|>response<|sep|>", " \n\tx < y\n\n  z <\n<|close|>response<|sep|>"),
+    ("<|open|>response<|sep|>", "a <|close|>response<|sep|> \n"),
+])
+@pytest.mark.parametrize("step", [1, 3, 64])
+def test_stream_xtml_content_trims_as_the_reply_split(monkeypatch, prompt,
+                                                      text, step):
+    """Kimi-K3: the streamed content keeps the whitespace the reply split
+    keeps."""
+    monkeypatch.setattr(_APP, "_split_thinking_text",
+                        _APP._split_thinking_text)
+    content = _stream_split(monkeypatch, prompt, text, step)[1]
+    tok = sp_chat._LAST_RENDERED_PROMPT.set("<|open|>message<|sep|>" + prompt)
+    try:
+        want = _APP._split_thinking_text(text, *_XTML_PAIR)[1]
+    finally:
+        sp_chat._LAST_RENDERED_PROMPT.reset(tok)
+    assert content == want
+
+
+@pytest.mark.parametrize("step", [1, 4])
+def test_stream_split_keeps_xtml_text_for_other_markers(monkeypatch, step):
+    text = "x</think>keep <|close|>message<|sep|> text"
+    _r, content = _stream_split(monkeypatch, "<think>", text, step,
+                                ("<think>", "</think>"))
+    assert content == "keep <|close|>message<|sep|> text"
+
+
 def test_nonstream_split_keeps_first_line_code_indent():
     """The stock splitter .strip()s content, which deletes the first line's
     leading indent from verbatim-code replies. The seeded splitter trims
@@ -364,34 +489,17 @@ def test_make_criteria_honors_budget_when_enable_thinking_false():
         cls._make_thinking_budget_criteria = original
 
 
-def test_seed_leaves_the_thinking_budget_criteria_to_the_budget_fix():
-    # The seed rides the logits-processors hook, which the engine thread
-    # builds as an argument of the request's insert. The criteria hook runs
-    # on the request's own thread when it arrives, so a seed stashed there
-    # reached whichever insert came next. tbfix keeps the criteria seam to
-    # itself: one call runs its construction and stashes no seed, and a
-    # tbfix re-install sees its own flag and no-ops.
-    import gmlx.serve.seed_rows as sr
+def test_the_budget_fix_owns_the_criteria_seam():
+    # tbfix rebinds the criteria seam without delegating: one call runs its
+    # construction, and a re-install sees its own flag and no-ops. The
+    # request's seed rides its row settings, never this seam.
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
-    ar = importlib.import_module("gmlx._vendor.mlx_vlm.generate.ar")
     cls = gen.ResponseGenerator
-    saved = (cls._make_thinking_budget_criteria, cls._make_logits_processors,
-             ar.BatchGenerator.insert, ar.GenerationBatch._step,
-             ar.PromptProcessingBatch.generate,
-             ar.SpeculativeGenerationBatch.next)
-    sr._PENDING.clear()
-    # A full server install in an earlier test leaves the seed installed and
-    # wraps the processors seam again, so the flag is checked only when this
-    # test installs the seed itself.
-    fresh = not getattr(ar.BatchGenerator.insert, sr._INSTALLED_FLAG, False)
+    saved = cls._make_thinking_budget_criteria
     try:
         sp.install_thinking_budget_fix()
-        sr.install_per_request_seed()
         crit = cls._make_thinking_budget_criteria
-        assert not getattr(crit, sr._INSTALLED_FLAG, False)  # no seed on this seam
         assert getattr(crit, sp_chat._TBUDGET_FLAG, False)
-        if fresh:
-            assert getattr(cls._make_logits_processors, sr._INSTALLED_FLAG, False)
         sp.install_thinking_budget_fix()
         assert cls._make_thinking_budget_criteria is crit    # re-install no-ops
         me = types.SimpleNamespace(
@@ -402,13 +510,8 @@ def test_seed_leaves_the_thinking_budget_criteria_to_the_budget_fix():
             thinking_start_token=None, thinking_end_token=None)
         out = crit(me, args, [1, 2, 3])
         assert out is not None and out.in_thinking is False  # tbfix ran
-        assert not sr._PENDING                               # no seed stashed here
     finally:
-        (cls._make_thinking_budget_criteria, cls._make_logits_processors,
-         ar.BatchGenerator.insert, ar.GenerationBatch._step,
-         ar.PromptProcessingBatch.generate,
-         ar.SpeculativeGenerationBatch.next) = saved
-        sr._PENDING.clear()
+        cls._make_thinking_budget_criteria = saved
 
 
 # 7b. chat_template_kwargs passthrough
@@ -647,6 +750,22 @@ def test_request_thinking_off_without_a_switch_sets_a_budget_of_zero(name):
     assert out.thinking_budget is None
 
 
+def test_thinking_off_on_a_preopened_block_closes_before_the_first_token():
+    """Thinking off on a template with no switch that opens the block in the
+    generation prompt: the reply's reasoning is the bare close alone."""
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    proc = types.SimpleNamespace(
+        chat_template="{{ '<|im_start|>assistant\\n<think>\\n' }}")
+    req = types.SimpleNamespace(model_fields_set=set(),
+                                chat_template_kwargs=None, thinking="off")
+    args = sp_chat._stash_template_kwargs(gen.GenerationArguments(), req, proc)
+    assert args.thinking_budget == 0
+    crit = _built_criteria(args, mx.array([[1, 99, 10]]))
+    assert crit.in_thinking
+    assert crit.first_forced_token_id(False) == 10
+    assert _drive(crit, [10, 100, 5]) == [100, None, None]
+
+
 @pytest.mark.parametrize("tools, steered", [(None, True), ([], True),
                                              ([{"type": "function"}], False)])
 def test_request_tools_decide_whether_a_forced_close_opens_the_answer(
@@ -810,10 +929,7 @@ class _GateTok:
 
 
 def test_a_served_render_keeps_the_templates_thinking_default():
-    from gmlx.upstream.system_content_fix import install_system_content_fix
-
     sp.install_chat_template_kwargs()
-    install_system_content_fix()
     pu = importlib.import_module("gmlx._vendor.mlx_vlm.prompt_utils")
     msgs = [{"role": "user", "content": "hi"}]
     assert pu.get_chat_template(_GateTok(), msgs, True) == "THINK"
@@ -868,6 +984,11 @@ def test_a_served_text_render_keeps_a_template_default_off():
     assert pu.get_chat_template(proc, msgs, True) == "NOTHINK"
     assert pu.get_chat_template(proc, msgs, True,
                                 enable_thinking=True) == "THINK"
+
+
+def test_the_prefill_gate_takes_the_served_text_processor():
+    _, proc = _served(_ThinkVocabOffTok())
+    assert prefill._renders_template_text(proc)
 
 
 # The old-style role dispatch from issue #66: no developer alias, else-raise.

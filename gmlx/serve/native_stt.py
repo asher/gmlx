@@ -238,7 +238,8 @@ def chat_request(model_id: str, task: str, fields: dict, seconds: float):
              "input_audio": {"data": audio, "format": "wav"}}]}],
         max_tokens=budget, temperature=fields["temperature"], top_p=1.0,
         top_k=0, min_p=0.0, repetition_penalty=1.0, presence_penalty=0.0,
-        frequency_penalty=0.0, enable_thinking=False, thinking_budget=None)
+        frequency_penalty=0.0, enable_thinking=False, thinking_budget=None,
+        thinking_budget_message=None)
 
 
 def _chat_endpoint():

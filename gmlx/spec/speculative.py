@@ -35,6 +35,9 @@ from gmlx import mlx_guards
 from gmlx.cache.kv_append import release as _release_kv
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
+from gmlx.gen.logprobs import RoundLogprobs
+from gmlx.gen.thinking_budget import drop_mtp_hook
+from gmlx.serve.row_sampling import RowSampler
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
 # spec_helpers) instead of mlx-vlm's private speculative API. The drafter model
@@ -1124,6 +1127,8 @@ def _owned_decode_rounds(
     row_procs=None,
     copy_prompt: list[int] | PromptIndex | None = None,
     rope_deltas: mx.array | None = None,
+    round_lp: list | None = None,
+    lp_k: int = 0,
 ) -> Iterator[int]:
     """Owned MTP decode loop, shared by the CLI prefill+decode path and the
     serve decode-only path.
@@ -1149,10 +1154,16 @@ def _owned_decode_rounds(
     copy_prompt, the request's full prompt ids or their PromptIndex, turns
     on context copy (gmlx.spec.context_copy) when the model or
     GMLX_CONTEXT_COPY enables it and the target can roll a copy back.
+
+    round_lp, when given, holds the round's LogprobEntry per yielded token,
+    indexed like round_pos: raw f32 logprobs and the top ``lp_k`` of the
+    target's verify logits at each emitted position. The verify then skips
+    the fused argmax, so the walk and the logprobs share one head pass.
     """
     token_dtype = mx.int32
     row_uid = (getattr(model, "_kq_row_uids", None) or [None])[0]
     greedy = sampler is None
+    want_lp = round_lp is not None
     # greedy_draft: draft the head's argmax even under a sampling target (llama
     # parity). The target is still sampled (sampler passed to the walk) unless the
     # whole round is greedy. A deterministic draft consumes no RNG, so coupling is
@@ -1363,6 +1374,7 @@ def _owned_decode_rounds(
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
             gated = False
             copied: list[int] = []
+            round_rl = None
             forced = (_next_forced_chunk(thinking_hook, forced_queue, block_total)
                       if thinking_hook is not None else None)
             if forced is not None:
@@ -1385,8 +1397,12 @@ def _owned_decode_rounds(
                         axis=1)
                     verify = _mtp_verify_target(lm, verify_input, prompt_cache,
                                                 sampler,
-                                                sample_target_tokens=greedy,
+                                                sample_target_tokens=greedy and not want_lp,
                                                 rope_deltas=rope_deltas)
+                    if want_lp:
+                        verify.logits = _verify_logits(lm, verify)
+                        round_rl = RoundLogprobs(verify.logits, lp_k,
+                                                 drafts=draft_tokens)
                 _tv = time.perf_counter()
                 accepted, new_tokens = bs - 1, list(forced)
             else:
@@ -1441,7 +1457,8 @@ def _owned_decode_rounds(
                             axis=1)
                         verify = _mtp_verify_target(
                             lm, verify_input, prompt_cache, sampler,
-                            sample_target_tokens=greedy and row_procs is None,
+                            sample_target_tokens=(greedy and row_procs is None
+                                                  and not want_lp),
                             rope_deltas=rope_deltas)
                     if snap is not None:
                         # The first layers run while the host waits for the
@@ -1465,6 +1482,14 @@ def _owned_decode_rounds(
                                              token_dtype=token_dtype,
                                              shared_kv=_needs_shared_kv,
                                              rope_deltas=rope_deltas)
+                if want_lp:
+                    # Built once the gate has resolved, so a gated round
+                    # never evaluates the verify graph it dropped.
+                    with mx.stream(generation_stream):
+                        verify.logits = _verify_logits(lm, verify)
+                        round_rl = RoundLogprobs(
+                            verify.logits, lp_k,
+                            drafts=draft_tokens if not gated else None)
 
                 if _ROUND_PROFILE:
                     mx.eval(verify.hidden)
@@ -1536,6 +1561,9 @@ def _owned_decode_rounds(
                 # The whole round, before delivery: a preempt hands the
                 # undelivered tail to the rebuilt loop as output.
                 row_procs.commit(new_tokens)
+            if round_lp is not None:
+                round_lp[:] = (round_rl.entries([new_tokens])[0]
+                               if round_rl is not None else [None] * n_new)
             delivered = 0
             try:
                 for tok in new_tokens:
@@ -1559,6 +1587,12 @@ def _owned_decode_rounds(
                     # the bonus stays out of the cache as the rebuild's
                     # first input.
                     capture.extend(int(t) for t in new_tokens[delivered:])
+                    capture_lp = getattr(model, "_kq_preempt_capture_lp", None)
+                    if capture_lp is not None:
+                        tail = (round_lp[delivered:] if round_lp is not None
+                                else [])
+                        capture_lp.extend(tail + [None] * (
+                            n_new - delivered - len(tail)))
                     if _has_rollback and accepted < bs - 1:
                         with mx.stream(generation_stream):
                             _rollback_fn(prompt_cache, verify.gdn_states,
@@ -1815,6 +1849,11 @@ def stream_speculative(
     # out holds the last chunk's full logits and first_logits is a view of
     # them. The decode rounds read neither, so release them here.
     del out, first_logits
+    if thinking_hook is not None:
+        # A budget the prompt already spent starts the close here.
+        forced = thinking_hook.take_first()
+        if forced is not None:
+            b = int(forced)
     if row_procs is not None:
         row_procs.start(b)
 
@@ -1851,6 +1890,10 @@ def owned_server_rounds(
     stop_check: Callable[[int, int], bool] | None = None,
     eos_token_ids: set | None = None,
     rope_deltas: mx.array | None = None,
+    row_settings=None,
+    default_row=None,
+    logprobs_cap: int = 0,
+    row_uids: list | None = None,
     **_extra,
 ) -> Iterator[tuple]:
     """Decode-only owned MTP round for the serve path (batch size 1).
@@ -1864,6 +1907,11 @@ def owned_server_rounds(
     instead of running a full engine tick per token. Routes through the
     OWNED decode loop, not mlx-vlm's _mtp_rounds, so the serve path is the
     same engine the CLI uses and is batching-ready.
+
+    ``row_settings`` (uid -> RowSettings) gives the row its own sampler,
+    seed and logprob settings; the metadata then carries ``logprobs``, one
+    LogprobEntry or None per row. Without it the loop uses ``sampler`` and
+    ``greedy_sampling`` (the CLI path).
     """
     lm = model.language_model if hasattr(model, "language_model") else model
     b = (int(first_bonus.reshape(-1).item())
@@ -1902,6 +1950,24 @@ def owned_server_rounds(
         row_procs.start(b)
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
     eff_sampler = None if greedy_sampling else sampler
+    round_lp = None
+    lp_k = 0
+    seeded = None
+    if row_settings is not None:
+        # The row's own settings, never the generator's first request.
+        uid = (getattr(model, "_kq_row_uids", None) or row_uids or [None])[0]
+        rs = (row_settings.get(uid) if uid is not None else None) or default_row
+        if rs is not None:
+            eff_sampler = rs.sampler
+            if rs.logprobs:
+                round_lp = []
+                lp_k = int(logprobs_cap or 0) if rs.top_k > 0 else 0
+            if eff_sampler is not None and rs.seed is not None and isinstance(
+                    getattr(eff_sampler, "_kq_row_seeds", None), dict):
+                # The instance is this row's own: its keyed draws read the
+                # row's seed through _seeded_target_draw.
+                seeded = (eff_sampler, getattr(eff_sampler, "_kq_rows", None))
+                eff_sampler._kq_rows = [uid]
     generated = [b]
     pos = [0, 1]
     rounds = _owned_decode_rounds(
@@ -1912,7 +1978,8 @@ def owned_server_rounds(
         drafter_warm=drafter_warm, sidecar_ctx=sidecar_ctx,
         seed_stream=seed_stream, thinking_hook=thinking_hook, round_pos=pos,
         row_procs=row_procs, copy_prompt=copy_prompt,
-        rope_deltas=_row_deltas(rope_deltas, 1))
+        rope_deltas=_row_deltas(rope_deltas, 1),
+        round_lp=round_lp, lp_k=lp_k)
     try:
         for tok in rounds:
             generated.append(tok)
@@ -1941,8 +2008,14 @@ def owned_server_rounds(
                 prompt_cache = hidden = shared_kv_states = None
                 drafter_warm = first_bonus = prompt_tokens = copy_prompt = None
                 sidecar_ctx = None
-            yield [tok], {"round_pos": pos[0], "round_len": pos[1]}
+            meta = {"round_pos": pos[0], "round_len": pos[1]}
+            if round_lp is not None:
+                meta["logprobs"] = [round_lp[pos[0]] if pos[0] < len(round_lp)
+                                    else None]
+            yield [tok], meta
     finally:
+        if seeded is not None:
+            seeded[0]._kq_rows = seeded[1]
         # Non-terminal finishes (client disconnect mid-stream): close the
         # round loop first -- its mid-round-close rollback must trim the
         # target cache before the retirement snapshot reads it (implicit
@@ -2807,6 +2880,10 @@ def _owned_decode_rounds_batch(
     row_procs: list | None = None,
     handoff: dict | None = None,
     rope_deltas: mx.array | None = None,
+    row_settings=None,
+    default_row=None,
+    lp_k: int = 0,
+    uids: list | None = None,
 ) -> Iterator[tuple[list[int | None], Any]]:
     """Owned batched MTP decode loop (B >= 1 under continuous batching).
 
@@ -2858,9 +2935,15 @@ def _owned_decode_rounds_batch(
     loop keeps it in cache row order (injected rows concatenate, finished
     rows filter out with the cache) and passes it on every target forward,
     so a prefill that writes the model's attribute never reaches the batch.
+
+    ``row_settings`` (uid -> RowSettings) gives each row its own sampler,
+    seed and logprob settings, read every round, so an injected row of
+    another kind joins as itself. A row that wants logprobs gets the raw f32
+    logprobs and top ``lp_k`` of the target's verify logits at every emitted
+    position, in the metadata's ``logprobs`` list. Without row settings the
+    loop samples every row with ``sampler`` (the CLI path).
     """
     token_dtype = mx.int32
-    greedy = sampler is None
     B_orig = len(b)
     row_deltas = _row_deltas(rope_deltas, B_orig)
     row_ids = list(range(B_orig)) if row_ids is None else list(row_ids)
@@ -2868,7 +2951,18 @@ def _owned_decode_rounds_batch(
     # the model before the generator starts, injected rows append theirs.
     row_uids = list(getattr(model, "_kq_row_uids", None) or [])
     if len(row_uids) != B_orig:
-        row_uids = [None] * B_orig
+        row_uids = list(uids) if uids is not None and len(uids) == B_orig \
+            else [None] * B_orig
+    row_sampler = (RowSampler(row_settings, default_row)
+                   if row_settings is not None else None)
+    lp_cap = int(lp_k or 0)
+    if row_sampler is not None:
+        row_sampler.rebind(row_uids)
+        sampler = row_sampler.effective()
+    greedy = sampler is None
+    # Verify forwards never sample with a row sampler: a sampled round
+    # draws in the walk, from the f32 logits.
+    verify_sampler = None if row_sampler is not None else sampler
 
     # Per-row budgets: ar.py freezes max_tokens = max() over the rows at
     # generator start; rows injected mid-flight carry their own in the
@@ -2994,6 +3088,7 @@ def _owned_decode_rounds_batch(
     # loop's stochastic walk: drafts drawn from a stashed proposal q.
     stoch_stash: list[mx.array] = []
     mixed_stoch = (mixed and cap == 1 and _STOCH_ACCEPT and not greedy
+                   and not isinstance(sampler, RowSampler)
                    and _stoch_supported_sampler(sampler)
                    and getattr(drafter, "stochastic_draft", True))
     if mixed_stoch:
@@ -3202,12 +3297,16 @@ def _owned_decode_rounds_batch(
     _gated_pending = None
     _inject_hold = False
 
-    def _gated_step(inputs, process=None):
-        """One plain target decode step: [n_active] tokens in, [n_active] out.
+    def _gated_step(inputs, process=None, *, step_greedy, step_sampler,
+                    step_lp, step_k):
+        """One plain target decode step: [n_active] tokens in, [n_active] out,
+        with the step's RoundLogprobs over every row when ``step_lp``.
 
         Deliberately NOT _mtp_verify_target -- its plain branch hardcodes
         return_hidden/return_shared_kv with no off switch, so shared-KV archs
-        would materialize every shared layer per emitted token.
+        would materialize every shared layer per emitted token. The round's
+        own greedy flag and sampler come in as arguments: a batch that
+        started greedy can take a sampled row.
         """
         # Same per-row publish as the verify rounds: the gated round is the
         # only target forward of a width-capped batch, so a missing publish
@@ -3217,14 +3316,45 @@ def _owned_decode_rounds_batch(
             out = lm(inputs[:, None], cache=prompt_cache,
                      **_rope_kw(row_deltas))
             logits = getattr(out, "logits", out)[:, -1, :]
+            rl = (RoundLogprobs(logits[:, None, :], step_k) if step_lp
+                  else None)
             if process is not None:
                 logits = _process_rows(
                     logits.astype(mx.float32)[:, None, :], process)[:, 0, :]
-            if greedy:
-                return mx.argmax(logits, axis=-1).astype(token_dtype)
+            if step_greedy:
+                return mx.argmax(logits, axis=-1).astype(token_dtype), rl
             logits = logits.astype(mx.float32)  # 16-bit logprob math skews sampled verify
             logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
-            return sampler(logprobs).reshape(-1).astype(token_dtype)
+            return step_sampler(logprobs).reshape(-1).astype(token_dtype), rl
+
+    def _pending_arrays(pending) -> list:
+        toks, rl = pending
+        return [toks] + (rl.arrays() if rl is not None else [])
+
+    def _round_logprobs(verify, want, k, drafts):
+        """The round's RoundLogprobs over the rows in ``want``, sharing the
+        walk's head projection, or None."""
+        if not want:
+            return None
+        with mx.stream(generation_stream):
+            logits = _verify_logits(lm, verify)
+            verify.logits = logits
+            if len(want) != int(logits.shape[0]):
+                idx = mx.array(want, dtype=mx.int32)
+                logits = logits[idx]
+                drafts = None if drafts is None else drafts[idx]
+            return RoundLogprobs(logits, k, drafts=drafts)
+
+    def _round_rows():
+        """The active rows' (sampler, greedy, logprob rows, top-k width)."""
+        if row_sampler is None:
+            return sampler, sampler is None, [], 0
+        row_sampler.rebind([row_uids[i] for i in active_idx])
+        eff = row_sampler.effective()
+        rows = row_sampler.rows()
+        want = [j for j, r in enumerate(rows) if r.logprobs]
+        k = lp_cap if any(rows[j].top_k > 0 for j in want) else 0
+        return eff, eff is None, want, k
 
     def _trip_width_gate(width: int) -> None:
         """Latch the batch into plain decode until it drains under the cap."""
@@ -3244,6 +3374,7 @@ def _owned_decode_rounds_batch(
         if getattr(thinking_hook, "budget", None) is not None:
             print(f"[thinking-budget] dropped: {reason}",
                   file=sys.stderr, flush=True)
+        drop_mtp_hook(thinking_hook)
         thinking_hook = None
         forced_queue.clear()
 
@@ -3260,7 +3391,7 @@ def _owned_decode_rounds_batch(
         return all(max_tok[i] - emitted[i] >= _RESUME_MIN_REMAINING
                    for i in active_idx)
 
-    def _arm_capture():
+    def _arm_capture(want, k):
         """Capture round: an S=1 verify of the pending bonus tokens with
         hidden/shared-KV capture on, then the drafter cold start from that
         fresh state (the generator-entry sequence, never stale per-row
@@ -3272,9 +3403,12 @@ def _owned_decode_rounds_batch(
         with mx.stream(generation_stream), \
                 lora_rows.published([row_uids[i] for i in active_idx]):
             verify = _mtp_verify_target(
-                lm, b_arr[:, None], prompt_cache, sampler,
-                sample_target_tokens=greedy and not has_procs,
+                lm, b_arr[:, None], prompt_cache, verify_sampler,
+                sample_target_tokens=greedy and not has_procs and not want,
                 rope_deltas=row_deltas)
+        if not greedy and row_sampler is not None:
+            verify.target_tokens = None
+        rl = _round_logprobs(verify, want, k, None)
         budgets = [max(1, max_tok[i] - emitted[i]) for i in active_idx]
         process = (_round_procs([[]] * len(active_idx)) if has_procs
                    else None)
@@ -3301,7 +3435,7 @@ def _owned_decode_rounds_batch(
                         next_b[j:j + 1])
                 _eval_parked(drafter, parked.values())
         hidden = _mtp_draft_hidden(lm, verify.hidden[:k, -1:, :])
-        return accepted_list, new_tokens_list, verify
+        return accepted_list, new_tokens_list, verify, rl
 
     def _drain_injections():
         # continuous-batch injection
@@ -3405,6 +3539,7 @@ def _owned_decode_rounds_batch(
                     print("[thinking-budget] dropped: request joined a "
                           "batched MTP generation", file=sys.stderr,
                           flush=True)
+                drop_mtp_hook(inj_hook, warn=True)
 
                 inj_offset = _mtp_cache_offset_max(inj["prompt_cache"])
                 # Entries without per-row budgets (older producers, test
@@ -3484,6 +3619,11 @@ def _owned_decode_rounds_batch(
                 dispatch_next = False
         n_active = len(active_idx)
         mixed_round = None
+        # Every round reads the active rows' own settings.
+        eff, greedy, want, round_k = _round_rows()
+        _walk_sampler = eff
+        round_rl = None
+        rl_rows: list[int] = []
 
         # ^T/budget forced close: only for a single armed row (see the
         # docstring). take_forced consumes a pending ^T request, so it must
@@ -3516,6 +3656,8 @@ def _owned_decode_rounds_batch(
             if _SHAPE_DEBUG:
                 _log_cache_shape_once("gated", prompt_cache, n_active)
             has_procs = _has_row_procs()
+            step_kw = dict(step_greedy=greedy, step_sampler=eff,
+                           step_lp=bool(want), step_k=round_k)
             if _gated_pending is None:
                 # Prime: first gated round, or the batch shape just changed.
                 # Costs one un-overlapped forward, amortized over every round
@@ -3523,9 +3665,12 @@ def _owned_decode_rounds_batch(
                 _gated_pending = _gated_step(
                     mx.array([b[active_idx[j]] for j in range(n_active)],
                              dtype=token_dtype),
-                    _round_procs([[]] * n_active) if has_procs else None)
-                mx.async_eval(_gated_pending)
-            toks = _gated_pending
+                    _round_procs([[]] * n_active) if has_procs else None,
+                    **step_kw)
+                mx.async_eval(*_pending_arrays(_gated_pending))
+            toks, round_rl = _gated_pending
+            if round_rl is not None:
+                rl_rows = list(range(n_active))
             # Rows are independent within a decode step, so a row that turns
             # out to finish this round only wastes its own lookahead; the
             # keep_mx filter below slices it back out. The extra KV position
@@ -3533,8 +3678,8 @@ def _owned_decode_rounds_batch(
             # (retirement is driven by `positions`, not the cache offset) and
             # nothing reads the cache offset while gated.
             if dispatch_next and not has_procs:
-                _gated_pending = _gated_step(toks)
-                mx.async_eval(_gated_pending)
+                _gated_pending = _gated_step(toks, **step_kw)
+                mx.async_eval(*_pending_arrays(_gated_pending))
             else:
                 _gated_pending = None
             # Under GMLX_ROUND_PROFILE the columns read as dispatch (CPU build
@@ -3554,7 +3699,9 @@ def _owned_decode_rounds_batch(
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
             bs = 1
             max_a = 0
-            accepted_list, new_tokens_list, verify = _arm_capture()
+            accepted_list, new_tokens_list, verify, round_rl = _arm_capture(
+                want, round_k)
+            rl_rows = list(want)
             log_rows = []
             _td = _tv = time.perf_counter() if _ROUND_PROFILE else _t0
             _t1 = time.perf_counter()
@@ -3578,8 +3725,11 @@ def _owned_decode_rounds_batch(
                 verify_input = mx.concatenate(
                     [b_arr[:, None], draft_tokens], axis=1)
                 verify = _mtp_verify_target(
-                    lm, verify_input, prompt_cache, sampler,
-                    sample_target_tokens=greedy, rope_deltas=row_deltas)
+                    lm, verify_input, prompt_cache, verify_sampler,
+                    sample_target_tokens=greedy and not want,
+                    rope_deltas=row_deltas)
+            round_rl = _round_logprobs(verify, want, round_k, draft_tokens)
+            rl_rows = list(want)
             if _ROUND_PROFILE:
                 mx.eval(verify.hidden)
             _tv = time.perf_counter() if _ROUND_PROFILE else _t0
@@ -3644,9 +3794,13 @@ def _owned_decode_rounds_batch(
                 verify_input = mx.concatenate(
                     [b_arr[:, None], draft_tokens], axis=1)
                 verify = _mtp_verify_target(
-                    lm, verify_input, prompt_cache, sampler,
-                    sample_target_tokens=greedy and not has_procs,
+                    lm, verify_input, prompt_cache, verify_sampler,
+                    sample_target_tokens=greedy and not has_procs and not want,
                     rope_deltas=row_deltas)
+            if not greedy and row_sampler is not None:
+                verify.target_tokens = None
+            round_rl = _round_logprobs(verify, want, round_k, draft_tokens)
+            rl_rows = list(want)
             if _ROUND_PROFILE:
                 mx.eval(verify.hidden)
             _tv = time.perf_counter()
@@ -3657,7 +3811,9 @@ def _owned_decode_rounds_batch(
                 process = _round_procs(draft_tokens.tolist())
             budgets = [max_tok[o] - emitted[o] for o in active_idx]
             stoch_j = (spec_j[0] if mixed_stoch and len(spec) == 1
-                       and n_draft > 0 else None)
+                       and n_draft > 0 and eff is not None
+                       and not isinstance(eff, RowSampler)
+                       and _stoch_supported_sampler(eff) else None)
             accepted_list, new_tokens_list = _mixed_walk(
                 lm, verify, draft_tokens, _walk_sampler, budgets,
                 stoch_row=stoch_j, q_rows=list(stoch_stash), process=process)
@@ -3727,9 +3883,13 @@ def _owned_decode_rounds_batch(
                 verify_input = mx.concatenate(
                     [b_arr[:, None], draft_tokens], axis=1)
                 verify = _mtp_verify_target(
-                    lm, verify_input, prompt_cache, sampler,
-                    sample_target_tokens=greedy and not has_procs,
+                    lm, verify_input, prompt_cache, verify_sampler,
+                    sample_target_tokens=greedy and not has_procs and not want,
                     rope_deltas=row_deltas)
+            if not greedy and row_sampler is not None:
+                verify.target_tokens = None
+            round_rl = _round_logprobs(verify, want, round_k, draft_tokens)
+            rl_rows = list(want)
             if _ROUND_PROFILE:
                 mx.eval(verify.hidden)
             _tv = time.perf_counter()
@@ -3776,8 +3936,14 @@ def _owned_decode_rounds_batch(
                 rp.commit(new_tokens_list[j])
 
         max_new = max(len(nt) for nt in new_tokens_list) if new_tokens_list else 0
+        row_lp: list = [None] * n_active
+        if round_rl is not None:
+            ents = round_rl.entries([new_tokens_list[j] for j in rl_rows])
+            for w, j in enumerate(rl_rows):
+                row_lp[j] = ents[w]
         for pos in range(max_new):
             tokens_out: list[int | None] = [None] * B_orig
+            lp_out: list | None = [None] * B_orig if round_rl is not None else None
             for j in range(n_active):
                 orig = active_idx[j]
                 if pos < len(new_tokens_list[j]) and not finished[orig]:
@@ -3785,6 +3951,8 @@ def _owned_decode_rounds_batch(
                     if thinking_hook is not None and n_active == 1:
                         thinking_hook.observe(tok)
                     tokens_out[orig] = tok
+                    if lp_out is not None and row_lp[j] is not None:
+                        lp_out[orig] = row_lp[j][pos]
                     gen_rows[orig].append(tok)
                     emitted[orig] += 1
                     if emitted[orig] >= max_tok[orig]:
@@ -3793,7 +3961,10 @@ def _owned_decode_rounds_batch(
                         finished[orig] = True
                     if stop_check is not None and stop_check(orig, tok):
                         finished[orig] = True
-            yield tokens_out, {"round_pos": pos, "round_len": max_new}
+            meta = {"round_pos": pos, "round_len": max_new}
+            if lp_out is not None:
+                meta["logprobs"] = lp_out
+            yield tokens_out, meta
         _t2 = time.perf_counter()
 
         for j in range(n_active):
@@ -3889,7 +4060,10 @@ def _owned_decode_rounds_batch(
                 if _gated_pending is not None:
                     # Same row order as the cache filter, so the dispatched
                     # lookahead stays aligned with the surviving rows.
-                    _gated_pending = _gated_pending[keep_mx]
+                    p_toks, p_rl = _gated_pending
+                    _gated_pending = (
+                        p_toks[keep_mx],
+                        p_rl.select(keep_slots) if p_rl is not None else None)
                 if mixed:
                     _mixed_filter()
                 elif not gated:
@@ -4014,6 +4188,10 @@ def owned_server_rounds_batch(
     eos_token_ids: set | None = None,
     row_ids: list[int] | None = None,
     rope_deltas: mx.array | None = None,
+    row_settings=None,
+    default_row=None,
+    logprobs_cap: int = 0,
+    row_uids: list | None = None,
     **_extra,
 ) -> Iterator[tuple[list[int | None], Any]]:
     """Decode-only owned MTP round for the serve path (batch size >= 2).
@@ -4037,6 +4215,7 @@ def owned_server_rounds_batch(
     # its request.
     _pop_copy_prompt(prompt_cache)
     if thinking_hook is not None and B != 1:
+        drop_mtp_hook(thinking_hook)
         thinking_hook = None
     elif thinking_hook is not None:
         thinking_hook.observe(b[0])  # the already-emitted first bonus
@@ -4072,4 +4251,5 @@ def owned_server_rounds_batch(
         stop_check=stop_check, eos_token_ids=eos_token_ids,
         row_ids=row_ids, retire_ctx0=retire_ctx0,
         thinking_hook=thinking_hook, row_procs=row_procs, handoff=handoff,
-        rope_deltas=rope_deltas)
+        rope_deltas=rope_deltas, row_settings=row_settings,
+        default_row=default_row, lp_k=logprobs_cap, uids=row_uids)

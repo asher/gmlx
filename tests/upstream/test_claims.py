@@ -510,6 +510,7 @@ _CENSUSED = (
     "gmlx.serve.patches.messages_route",
     "gmlx.serve.patches.mtp_thinking",
     "gmlx.serve.patches.observability",
+    "gmlx.serve.patches.prefill",
     "gmlx.serve.patches.render",
     "gmlx.serve.patches.routes",
     "gmlx.serve.patches.row_failed",
@@ -517,7 +518,6 @@ _CENSUSED = (
     "gmlx.serve.patches.spec_processors",
     "gmlx.serve.queue_cap",
     "gmlx.serve.residency",
-    "gmlx.serve.seed_rows",
     "gmlx.serve.tick_guard",
     "gmlx.spec.admission",
     "gmlx.spec.ckpt",
@@ -530,7 +530,6 @@ _CENSUSED = (
     "gmlx.upstream.dsv32_patches",
     "gmlx.upstream.gdn_patches",
     "gmlx.upstream.single_bos_fix",
-    "gmlx.upstream.system_content_fix",
 )
 
 

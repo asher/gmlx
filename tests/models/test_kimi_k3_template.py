@@ -107,9 +107,8 @@ def test_thinking_effort_renders_and_validates():
 
 # mlx-lm's TokenizerWrapper only detects thinking support from vocab token
 # pairs (<think>/</think> etc). K3's think channel is XTML: "think" is plain
-# text between structural tokens, so detection misses it and the wrapper
-# injects enable_thinking=False into a thinking-default template. The loader
-# helper renders the template's own default generation prompt and flips the
+# text between structural tokens, so detection misses it. The loader
+# helper renders the template's own default generation prompt and sets the
 # wrapper's think markers when it opens the XTML think channel.
 
 class _StubRaw:

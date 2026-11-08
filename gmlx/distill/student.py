@@ -72,6 +72,9 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
     LoRA adapter applied live."""
     import gmlx.load.loadlog as loadlog
     from gmlx.load.loader import load_model
+    if adapter:
+        from gmlx.load.adapter import adapter_load_refusal
+        adapter_load_refusal(gguf_path, [adapter])
     with loadlog.load_ui(False, gguf_path):
         model, config, tokenizer = load_model(gguf_path, hf_source=hf_source)
     llamacpp_bos_default(tokenizer, gguf_path)

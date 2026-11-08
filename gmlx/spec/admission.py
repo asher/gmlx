@@ -10,6 +10,7 @@ import logging
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.gen.thinking_budget import drop_mtp_hook
 from gmlx.spec.engine import _debug_note
 from gmlx.spec.kv_quant import batch_liftable, lift_single_cache
 from gmlx.upstream.patching import link
@@ -100,6 +101,10 @@ def install_continuous_batch_admission() -> None:
         setattr(self, _RELEASE_PENDING_FLAG, False)
         mx.clear_cache()
         return True
+
+    # The tick guard drops a batch whose state a failed command buffer
+    # spoiled through the same release.
+    setattr(SpecBatch, "_kq_release_heavy_state", _release_heavy_state)
 
     def _release_if_finished(self) -> None:
         if _orig_len(self) == 0:
@@ -216,7 +221,8 @@ def install_continuous_batch_admission() -> None:
         for c in self.prompt_cache:
             c.filter(idx)
         for name in ("hidden", "prompt_tokens", "first_tokens",
-                     "_rope_deltas"):
+                     "_rope_deltas", "_first_lps", "_first_top_idx",
+                     "_first_top_lp"):
             arr = getattr(self, name, None)
             if arr is not None:
                 setattr(self, name, arr[idx])
@@ -292,7 +298,8 @@ def install_continuous_batch_admission() -> None:
         the batch loop, whose first injection drain admits the waiters.
         The rebuild resumes from the round's bonus token, whose KV is not
         in the cache. GMLX_MTP_PREEMPT=0 leaves the old drain-wait
-        behavior.
+        behavior. A thinking-budget close still in flight declines the
+        preempt until its last id goes out.
 
         The rebuilt row carries no APC retirement context (batch-loop rows
         start with retire_ctxs None), so the preempted request's prefix is
@@ -300,6 +307,11 @@ def install_continuous_batch_admission() -> None:
         if not env_bool("GMLX_MTP_PREEMPT", True):
             return False
         if not getattr(self, "_sent_first", False):
+            return False
+        # A thinking-budget close lands whole: the rebuilt row has no hook
+        # and the scalar loop's forced queue dies with its generator.
+        hook = getattr(self, "_kq_close_hook", None)
+        if hook is not None and not self._finished[0] and hook.closing():
             return False
         last = getattr(self, "_kq_last_tokens", {}).get(self._all_uids[0])
         if last is None:
@@ -311,6 +323,8 @@ def install_continuous_batch_admission() -> None:
             return False
         it = self._rounds_iter
         captured = []
+        # The tail's LogprobEntry per token, filled beside ``captured``.
+        captured_lp: list = []
         # The scalar loop fills this when the rebuilt batch can keep the
         # row's live drafter (a mixed batch); the batch loop pops it.
         handoff: dict = {}
@@ -322,14 +336,23 @@ def install_continuous_batch_admission() -> None:
         if it is not None:
             self._rounds_iter = None
             self.model._kq_preempt_capture = captured
+            self.model._kq_preempt_capture_lp = captured_lp
             self.model._kq_preempt_handoff = handoff
             try:
                 it.close()
+            except BaseException as e:
+                # The close ran the round's tail on a generator the batch
+                # has let go of; the row is rebuilt from what it delivered.
+                from gmlx.serve.tick_guard import mark_broken
+
+                mark_broken(e, [self._all_uids[0]])
+                raise
             finally:
-                try:
-                    del self.model._kq_preempt_capture
-                except AttributeError:
-                    pass
+                for name in ("_kq_preempt_capture", "_kq_preempt_capture_lp"):
+                    try:
+                        delattr(self.model, name)
+                    except AttributeError:
+                        pass
                 if not handoff:
                     try:
                         del self.model._kq_preempt_handoff
@@ -337,7 +360,7 @@ def install_continuous_batch_admission() -> None:
                         pass
         responses = []
         uid = self._all_uids[0]
-        for tok in captured:
+        for n, tok in enumerate(captured):
             if self._finished[0]:
                 break
             tok = int(tok)
@@ -345,8 +368,11 @@ def install_continuous_batch_admission() -> None:
             finish = self._finish_reason(0, tok)
             if finish is not None:
                 self._finished[0] = True
+            entry = captured_lp[n] if n < len(captured_lp) else None
+            lp, top = self._logprob_fields(uid, entry)
             responses.append(self.Response(
-                uid=uid, token=tok, token_logprob=0.0, finish_reason=finish))
+                uid=uid, token=tok, token_logprob=lp, finish_reason=finish,
+                top_logprobs=top))
             last = tok
         self._kq_preempt_responses = responses
         if self._finished[0]:
@@ -364,6 +390,8 @@ def install_continuous_batch_admission() -> None:
         self.shared_kv_states = None
         self.prompt_tokens = None
         self.model._kq_rebuild_emitted = [int(self._num_tokens[0])]
+        # The rebuilt batch has no hook; the row goes on without it.
+        drop_mtp_hook(hook)
         _debug_note("[mtp] preempt: scalar generation rebuilt for "
                     "continuous batching")
         return True
@@ -389,23 +417,40 @@ def install_continuous_batch_admission() -> None:
         # The preempt capture: verified tokens the closed round had not yet
         # delivered. They precede everything this call returns.
         pre_responses = self.__dict__.pop("_kq_preempt_responses", None) or []
+        responses = list(pre_responses)
+        try:
+            return _inject_and_step(self, pending, preempted, responses)
+        except BaseException as e:
+            # What this call built goes out with the error, ahead of the
+            # round tokens the inner next salvaged.
+            from gmlx.serve.tick_guard import salvage
+
+            salvage(e, responses, ahead=True)
+            _note_last_tokens(self, getattr(e, "_kq_salvage", ()))
+            raise
+
+    def _inject_and_step(self, pending, preempted, responses):
         if pending and (len(self._all_uids) > 1 or preempted):
-            responses = list(pre_responses)
             gen_inj = getattr(self.model, "_generator_injections", None)
             if gen_inj is None:
                 self.model._generator_injections = []
                 gen_inj = self.model._generator_injections
 
-            for other in pending:
+            # One batch at a time: its first tokens are read before it
+            # joins, and it leaves the pending list once it has, so a
+            # failed read leaves it to join on a later tick.
+            while pending:
+                other = pending[0]
+                mx.eval(other.first_tokens)
+                first_list = other.first_tokens.tolist()
+                first_entries = other._first_entries()
+
                 B_new = len(other._all_uids)
                 base_row = len(self._all_uids)
                 self._all_uids.extend(other._all_uids)
                 self._num_tokens.extend([0] * B_new)
                 self._finished.extend([False] * B_new)
                 self.max_tokens.extend(other.max_tokens)
-
-                mx.eval(other.first_tokens)
-                first_list = other.first_tokens.tolist()
                 for row in range(B_new):
                     abs_row = base_row + row
                     tok = int(first_list[row])
@@ -413,12 +458,15 @@ def install_continuous_batch_admission() -> None:
                     finish = self._finish_reason(abs_row, tok)
                     if finish is not None:
                         self._finished[abs_row] = True
+                    lp, top = other._logprob_fields(
+                        other._all_uids[row], first_entries[row])
                     responses.append(
                         self.Response(
                             uid=other._all_uids[row],
                             token=tok,
-                            token_logprob=0.0,
+                            token_logprob=lp,
                             finish_reason=finish,
+                            top_logprobs=top,
                         )
                     )
 
@@ -440,17 +488,12 @@ def install_continuous_batch_admission() -> None:
                         "rope_deltas": getattr(other, "_rope_deltas", None),
                     }
                 )
+                pending.pop(0)
+                # The joined rows are live now: a failure on a later batch
+                # must find them in uids.
+                self._refresh_uids()
 
-            pending.clear()
-            self._refresh_uids()
-
-            more = _orig_next(self)
-            responses.extend(more)
-            _note_last_tokens(self, responses)
-            _release_if_finished(self)
-            return responses
-
-        responses = pre_responses + _orig_next(self)
+        responses.extend(_orig_next(self))
         _note_last_tokens(self, responses)
         _release_if_finished(self)
         return responses

@@ -464,7 +464,10 @@ class LanguageModel(nn.Module):
         if input_embeddings is None:
             h = self.embed_tokens(inputs) * (self.hidden_size**0.5)
         else:
-            h = input_embeddings
+            # gmlx: the embeddings path scales as the token path does. The
+            # batch engine prefills from get_input_embeddings, which returns
+            # the unscaled embed_tokens rows, and decodes from token ids.
+            h = input_embeddings * (self.hidden_size**0.5)
 
         per_layer_inputs = self.get_per_layer_inputs(inputs)
         per_layer_inputs = self.project_per_layer_inputs(h, per_layer_inputs)

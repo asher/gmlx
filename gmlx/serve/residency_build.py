@@ -7,8 +7,9 @@ import os
 
 from .residency_footprint import (_decode_feeder_of, _drafter_bytes,
                                   _plain_footprint, _prefill_ring_of,
+                                  _refuse_streamed_fused_adapter,
                                   _stamp_apc_mode, _stamp_boot_kv_costs,
-                                  _streamed_shares)
+                                  _streamed_shares, text_adapter_bytes)
 from .residency_types import _Entry, _Scratch, _build_scratch, _log
 
 
@@ -109,6 +110,8 @@ class _ChatBuild:
                   else max(0, streamed_table_bytes(model_path) - deferred))
         mmproj = getattr(build_spec, "mmproj", None) or ""
         extra = os.path.getsize(mmproj) if os.path.isfile(mmproj) else 0
+        # The adapters wire with the text set.
+        extra += text_adapter_bytes(build_spec)
         room = bmod.kv_room_bytes(model_path, env=env, resident=True)
         held, _ceiling, host, _floor = self._stream_reservations()
         drafter = _drafter_bytes(model_path, build_spec)
@@ -168,6 +171,9 @@ class _ChatBuild:
 
         force_table_stream(
             getattr(build_spec, "stream", None) in ("cpu", "experts"))
+        # The text adapters' bytes, added where each figure is used: the
+        # repricing below resets gate_bytes from the base.
+        adapter_bytes = text_adapter_bytes(build_spec)
         gate_bytes = footprint
         streamed = 0
         shares = (0, 0)
@@ -205,11 +211,13 @@ class _ChatBuild:
                         stream_tables_for_memory(model_path)
                         gate_bytes = _plain_footprint(model_path, footprint,
                                                       env)
-                elif self._tables_for_memory(model_path, gate_bytes, env):
+                elif self._tables_for_memory(model_path,
+                                             gate_bytes + adapter_bytes, env):
                     gate_bytes = _plain_footprint(model_path, footprint, env)
             if for_memory:
                 # Priced and gated as a stream build; the install streams
                 # the experts without trying the wire.
+                _refuse_streamed_fused_adapter(model_path, build_spec, env)
                 stream_experts_for_memory(model_path, for_memory)
                 force_table_stream(True)
                 shares = predicted_stream_bytes(str(model_path), env)
@@ -235,7 +243,7 @@ class _ChatBuild:
                     "experts %.1f GB; gating on %.1f GB resident)",
                     streamed / 1e9, shares[0] / 1e9, shares[1] / 1e9,
                     gate_bytes / 1e9)
-        self._gate(gate_bytes, model_path,
+        self._gate(gate_bytes + adapter_bytes, model_path,
                    streaming=(getattr(build_spec, "stream", None) == "experts"
                               or bool(for_memory)))
         guarded = _latch_guarded_wire(
@@ -245,11 +253,11 @@ class _ChatBuild:
         _say_tables_offloaded(model_path, offloaded)
         # What the entry holds resident. A streaming build adds its decode
         # arena below, once the loader has sized it.
-        resident_bytes = gate_bytes
+        resident_bytes = gate_bytes + adapter_bytes
         # The boot table feeds request admission (width/ctx budgets), so a
         # streaming model's table must also price only the resident share:
         # the expert stacks decode through the disk arena, not the KV budget.
-        install_boot_table(str(model_path), gate_bytes, str(model_path),
+        install_boot_table(str(model_path), resident_bytes, str(model_path),
                            env=env)
         scratch = _Scratch()
         token = _build_scratch.set(scratch)
@@ -376,7 +384,7 @@ class _ChatBuild:
                         "this load has no streaming install; re-pricing "
                         "the resident weights", model_path)
                     gate_bytes = _plain_footprint(model_path, footprint, env)
-                    resident_bytes = gate_bytes
+                    resident_bytes = gate_bytes + adapter_bytes
                     repriced = priced_up = True
                 elif done is not None and sum(done) != streamed:
                     _log.warning(
@@ -387,7 +395,7 @@ class _ChatBuild:
                         done[1] / 1e9, streamed / 1e9)
                     gate_bytes = preload_gate_bytes(
                         footprint, "experts", sum(done))
-                    resident_bytes = gate_bytes
+                    resident_bytes = gate_bytes + adapter_bytes
                     repriced = True
                     priced_up = sum(done) < streamed
             # The decode arena is MLX-tracked and sized at install, after
@@ -396,7 +404,8 @@ class _ChatBuild:
             # see the KV room that is really left.
             feeder = _decode_feeder_of(rg)
             if feeder is not None and getattr(feeder, "nominal_bytes", 0):
-                resident_bytes = (gate_bytes + int(feeder.nominal_bytes)
+                resident_bytes = (gate_bytes + adapter_bytes
+                                  + int(feeder.nominal_bytes)
                                   + _prefill_ring_of(rg))
                 try:
                     install_boot_table(

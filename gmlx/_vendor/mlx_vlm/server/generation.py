@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from queue import Empty as QueueEmpty
 from queue import Queue
 from threading import Event, Lock, Thread
-from typing import Callable, Generator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Generator, List, Optional, Tuple
 
 import mlx.core as mx
 from fastapi import HTTPException
@@ -45,6 +45,9 @@ from ..structured import ThinkingAwareLogitsProcessor
 from ..tokenizer_utils import _ServerTokenStreamer, make_streaming_detokenizer
 from ..utils import ThinkingBudgetCriteria, load, prepare_inputs, resolve_eos_token_ids
 from .runtime import runtime
+
+if TYPE_CHECKING:
+    from gmlx.gen.thinking_budget import ThinkMarkers
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
 
@@ -308,11 +311,15 @@ def get_quantized_kv_start():
 def get_top_logprobs_k():
     """Max per-token top_logprobs honored by the server (0 = disabled).
 
-    Set via TOP_LOGPROBS_K env var. OpenAI caps this at 20. When 0, requests
-    with top_logprobs>0 still succeed but the top_logprobs list stays empty.
+    Set via TOP_LOGPROBS_K env var. gmlx: 20 by default, vLLM's
+    max_logprobs default, and capped at TOP_LOGPROBS_CEILING, 100. When 0,
+    requests with top_logprobs>0 still succeed but the top_logprobs list
+    stays empty.
     """
-    k = int(os.environ.get("TOP_LOGPROBS_K", 0))
-    return max(0, min(k, 20))
+    from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING, TOP_LOGPROBS_DEFAULT
+
+    k = int(os.environ.get("TOP_LOGPROBS_K", TOP_LOGPROBS_DEFAULT))
+    return max(0, min(k, TOP_LOGPROBS_CEILING))
 
 
 def _token_window_rate(token_times: List[float], window: int) -> Optional[float]:
@@ -618,6 +625,7 @@ class GenerationArguments:
     typical_p: float = 1.0
     seed: Optional[int] = None
     logprobs: bool = False
+    top_logprobs: int = 0  # gmlx: the request's alternatives per token
     repetition_penalty: Optional[float] = None
     repetition_context_size: Optional[int] = DEFAULT_REPETITION_CONTEXT_SIZE
     presence_penalty: Optional[float] = None
@@ -642,6 +650,8 @@ class GenerationArguments:
     reasoning: Optional[bool] = None
     reasoning_effort: Optional[str] = None
     thinking_budget: Optional[int] = None
+    # gmlx: forced ahead of the end marker when the budget runs out.
+    thinking_budget_message: Optional[str] = None
     thinking_start_token: Optional[str] = None
     thinking_end_token: Optional[str] = None
     skip_special_tokens: bool = True
@@ -740,6 +750,8 @@ class GenerationContext:
 
     uid: int
     prompt_tokens: int
+    # gmlx: the ids the worker inserted (chat ``return_token_ids``).
+    prompt_ids: Optional[List[int]] = None
 
 
 @dataclass
@@ -845,7 +857,7 @@ class StreamingToken:
 
     text: str
     token: int
-    logprobs: float
+    logprobs: Optional[float]  # gmlx: None when the row wants no logprobs
     finish_reason: Optional[str]
     peak_memory: float = 0.0
     prompt_tps: Optional[float] = None
@@ -1039,6 +1051,9 @@ class ResponseGenerator:
         self._load_error: Optional[Exception] = None
         self._cancelled: set = set()
         self._cancel_lock = Lock()
+        # gmlx: cancelled uids ``remove`` refused, and the next engine uid.
+        self._kq_unremoved: set = set()
+        self._kq_next_uid = 0
         self._tokenizer_lock = Lock()
         self._thread = Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -1076,6 +1091,91 @@ class ResponseGenerator:
         with self._cancel_lock:
             pending, self._cancelled = self._cancelled, set()
             return pending
+
+    def _drop_cancelled(self, batch_gen, active: dict):
+        """gmlx: drop abandoned requests, and their tick-guard ledger
+        entries. A row ``remove`` cannot take out yet (it shares a prompt
+        batch) is retried each call until it is gone. Returns the engine
+        to keep, or None when only abandoned rows were left in it."""
+        from gmlx.serve import tick_guard
+        from gmlx.serve.row_sampling import live_uids
+
+        unremoved = getattr(self, "_kq_unremoved", None)
+        if unremoved is None:
+            unremoved = self._kq_unremoved = set()
+        cancelled = self._drain_cancellations()
+        if batch_gen is None:
+            return None
+        if unremoved:
+            live = live_uids(batch_gen)
+            for uid in list(unremoved):
+                if uid not in live or batch_gen.remove(uid):
+                    unremoved.discard(uid)
+        for uid in cancelled:
+            if uid not in active:
+                continue
+            removed = batch_gen.remove(uid)
+            tick_guard.forget(batch_gen, uid)
+            info = active.pop(uid)
+            logger.info(
+                "Generation cancelled: request=%s generated_tokens=%d",
+                info.get("request_id", uid),
+                int(info.get("generated_tokens", 0) or 0),
+            )
+            try:
+                info["rqueue"].put(None)
+            except Exception:
+                pass
+            if not removed:
+                unremoved.add(uid)
+        if not active and unremoved:
+            # No request reads the prefill those rows share, and an idle
+            # loop never steps it to its end.
+            tick_guard.drop_prompt_batch(batch_gen)
+            batch_gen.close()
+            return None
+        return batch_gen
+
+    def _new_batch_gen(self, args, stream):
+        """gmlx: build the engine. Its uids continue the previous
+        engine's, so a late cancel names no new request."""
+        from gmlx.serve.row_sampling import RowSettings
+
+        batch_gen = BatchGenerator(
+            self.model.language_model,
+            self.processor,
+            stop_tokens=self.stop_tokens,
+            sampler=self._make_sampler(args),
+            kv_bits=self.kv_bits,
+            kv_key_bits=getattr(self, "kv_key_bits", None),
+            kv_value_bits=getattr(self, "kv_value_bits", None),
+            kv_key_scheme=getattr(self, "kv_key_scheme", None),
+            kv_value_scheme=getattr(self, "kv_value_scheme", None),
+            kv_group_size=self.kv_group_size,
+            kv_quant_scheme=self.kv_quant_scheme,
+            quantized_kv_start=self.quantized_kv_start,
+            compute_logprobs=bool(args.logprobs),
+            top_logprobs_k=self.top_logprobs_k if args.logprobs else 0,
+            # gmlx: the server cap, whatever the first request.
+            # A row whose settings are gone reads the greedy
+            # default, not the first request's.
+            logprobs_cap=self.top_logprobs_k or 0,
+            default_row=RowSettings(),
+            stream=stream,
+            apc_manager=self.apc_manager,
+            draft_model=self.draft_model,
+            draft_kind=self.draft_kind,
+            draft_block_size=_get_draft_block_size_from_env(),
+            greedy_sampling=args.temperature == 0,
+            prefill_step_size=self._effective_prefill_step_size(),
+        )
+        # gmlx: a requeued row replays its delivered tokens,
+        # embedded here as the prompt was.
+        batch_gen._kq_embed_text = self._embed_text
+        batch_gen.uid_count = getattr(self, "_kq_next_uid", 0)
+        # The old engine's uids name no row here.
+        self._kq_unremoved = set()
+        return batch_gen
 
     def _initialize_model(self):
         model, processor, config = load_model_resources(
@@ -1260,7 +1360,13 @@ class ResponseGenerator:
         )
 
     def _cpu_preprocess(self, prompt, images=None, audio=None, videos=None) -> dict:
-        """CPU-only: tokenize text, load/resize images. Thread-safe."""
+        """CPU-only: tokenize text, load/resize images. Thread-safe.
+
+        gmlx: a list of token ids is the prompt as sent; no tokenizer runs."""
+        # gmlx: a token-id prompt (/v1/completions) reaches the engine as is.
+        if isinstance(prompt, list) and not images and not audio and not videos:
+            ids = mx.array([[int(t) for t in prompt]], dtype=mx.int32)
+            return {"input_ids": ids, "attention_mask": mx.ones(ids.shape, dtype=mx.int32)}
         add_special_tokens = (
             getattr(self.processor, "chat_template", None) is None
             if self.model.config.model_type
@@ -1509,6 +1615,45 @@ class ResponseGenerator:
             seed=args.seed,
         )
 
+    # gmlx: one request's row settings for BatchGenerator.insert. The
+    # sampler is built without the seed, which rides in the settings and is
+    # registered on this instance for the row's uid.
+    def _row_settings(self, args: GenerationArguments):
+        import copy
+
+        from gmlx.serve.row_sampling import RowSettings, sampler_key, takes_row_seeds
+
+        seed = getattr(args, "seed", None)
+        seedless = copy.copy(args)
+        seedless.seed = None
+        sampler = self._make_sampler(seedless)
+        key = sampler_key(args)
+        if sampler is None:
+            seed = None
+        elif seed is not None and not takes_row_seeds(sampler):
+            # A sampler without per-row keys keeps the seed as its base.
+            sampler = self._make_sampler(args)
+            key = key + (("seed", int(seed)),)
+            seed = None
+        cap = int(self.top_logprobs_k or 0)
+        logprobs = bool(getattr(args, "logprobs", False))
+        top_k = min(int(getattr(args, "top_logprobs", 0) or 0), cap) if logprobs else 0
+        # gmlx: the row's adapter scales, salted from the adapters this
+        # copy loaded. A missing identity raises into the insert's except.
+        lora = getattr(args, "_kq_lora", None)
+        if lora is not None:
+            from gmlx.serve.lora_request import salted
+
+            lora = salted(lora, getattr(self.model, "gmlx_adapter_identities", None))
+        return RowSettings(
+            sampler=sampler,
+            seed=None if seed is None else int(seed),
+            logprobs=logprobs,
+            top_k=max(0, top_k),
+            key=key,
+            lora=lora,
+        )
+
     def _make_logits_processors(
         self, args: GenerationArguments, input_ids: Optional[mx.array] = None
     ) -> List[Callable[[mx.array, mx.array], mx.array]]:
@@ -1522,21 +1667,61 @@ class ResponseGenerator:
             args.frequency_context_size,
         )
         if args.logits_processors is not None:
-            from gmlx.gen.thinking_budget import has_answer_header, prompt_tail_ids
+            from gmlx.gen.thinking_budget import (
+                BARE,
+                MAYBE,
+                answer_gate_kind,
+                has_answer_header,
+                prompt_tail_ids,
+                request_think_markers,
+            )
 
             request_processors = args.logits_processors
-            already_closed = (
-                input_ids is not None
-                and self._prompt_thinking_already_closed(args, input_ids)
-            )
-            # gmlx: an answer with a header of its own (ATEM) is gated on that
-            # header in every request, thinking or not.
-            if has_answer_header(args.thinking_start_token) or (
-                args.enable_thinking and not already_closed
-            ):
-                request_processors = self._wrap_processors_until_thinking_done(
-                    args, request_processors, prompt_tail_ids(input_ids)
+            # gmlx: the gate reads the request's resolved think markers and
+            # the prompt state, not args.enable_thinking, which is True on
+            # every request that does not turn thinking off at the top
+            # level. A model that never writes </think> otherwise never gets
+            # its grammar. The budget hook resolved the markers under the
+            # tokenizer lock; this takes that value.
+            markers = request_think_markers(
+                args,
+                getattr(self, "processor", None) or self.tokenizer,
+                input_ids,
+                self.tokenizer,
+            ).on_vocab(self.tokenizer)
+            if markers.partial:
+                # One configured marker: the gate as before, with <think>
+                # filling the missing side.
+                already_closed = (
+                    input_ids is not None
+                    and self._prompt_thinking_already_closed(args, input_ids)
                 )
+                wrap = has_answer_header(args.thinking_start_token) or (
+                    args.enable_thinking and not already_closed
+                )
+                if wrap:
+                    request_processors = self._wrap_processors_until_thinking_done(
+                        args, request_processors, prompt_tail_ids(input_ids)
+                    )
+            else:
+                start_seq, end_seq = markers.seqs(self.tokenizer)
+                cont = getattr(args, "_kq_continue", None)
+                kind = answer_gate_kind(
+                    markers,
+                    start_seq,
+                    end_seq,
+                    thinking_off=bool(getattr(args, "_kq_thinking_explicit", False))
+                    and not args.enable_thinking,
+                    continues_content=getattr(cont, "mode", None) == "content",
+                )
+                if kind != BARE:
+                    request_processors = self._wrap_processors_until_thinking_done(
+                        args,
+                        request_processors,
+                        prompt_tail_ids(input_ids),
+                        markers=markers,
+                        maybe_seq=start_seq if kind == MAYBE else None,
+                    )
             processors.extend(request_processors)
         return processors
 
@@ -1591,9 +1776,19 @@ class ResponseGenerator:
         args: GenerationArguments,
         processors: List[Callable[[mx.array, mx.array], mx.array]],
         prompt_ids: Optional[List[int]] = None,
+        markers: Optional["ThinkMarkers"] = None,
+        maybe_seq: Optional[Tuple[int, ...]] = None,
     ) -> List[Callable[[mx.array, mx.array], mx.array]]:
-        thinking_start_token = args.thinking_start_token or DEFAULT_THINKING_START_TOKEN
-        thinking_end_token = args.thinking_end_token or DEFAULT_THINKING_END_TOKEN
+        # gmlx: ``markers`` (resolved think markers) replace the args pair;
+        # ``maybe_seq`` is the start marker a reply may open first.
+        pair = markers.pair if markers is not None else None
+        if pair is not None:
+            thinking_start_token, thinking_end_token = pair
+        else:
+            thinking_start_token = (
+                args.thinking_start_token or DEFAULT_THINKING_START_TOKEN
+            )
+            thinking_end_token = args.thinking_end_token or DEFAULT_THINKING_END_TOKEN
         return [
             ThinkingAwareLogitsProcessor(
                 processor=processor,
@@ -1602,6 +1797,7 @@ class ResponseGenerator:
                 thinking_end_token=thinking_end_token,
                 enable_thinking=True,
                 prompt_ids=prompt_ids,
+                maybe_seq=maybe_seq,
             )
             for processor in processors
         ]
@@ -1624,13 +1820,28 @@ class ResponseGenerator:
             prompt_preopens_thinking=prompt_preopens_thinking,
         )
 
+    def _embed_text(self, ids, row_settings=None) -> dict:
+        """gmlx: text embedding fields of ``ids`` under the row's adapter
+        scales, for a requeued row's delivered tokens."""
+        from gmlx.serve.replay_prompt import embed_text
+
+        return embed_text(self.model, ids, row_settings)
+
     def _gpu_embed(
         self,
         raw_inputs: dict,
         images=None,
         apc_semantic_hash: Optional[int] = None,
+        *,
+        row_settings=None,
     ) -> Tuple[mx.array, dict]:
-        """GPU-only: run vision encoder if needed. Must run on GPU thread."""
+        """GPU-only: run vision encoder if needed. Must run on GPU thread.
+
+        gmlx: ``row_settings`` is the row's ``RowSettings``; its adapter
+        scales are published for the embedding call, so a token embedding
+        adapter adds its delta at the row's strengths."""
+        from gmlx import lora_rows
+
         input_ids = raw_inputs.get("input_ids")
         pixel_values = raw_inputs.get("pixel_values")
         mask = raw_inputs.get("attention_mask")
@@ -1654,9 +1865,10 @@ class ResponseGenerator:
                 and getattr(input_ids, "shape", (0,))[0] == 1):
             data_kwargs["prompt_rows"] = True
         # Always call get_input_embeddings — BatchGenerator requires inputs_embeds
-        embed = self.model.get_input_embeddings(
-            input_ids, pixel_values, mask=mask, **data_kwargs
-        )
+        with lora_rows.tuple_scope(lora_rows.row_tuple(row_settings), rows=1):
+            embed = self.model.get_input_embeddings(
+                input_ids, pixel_values, mask=mask, **data_kwargs
+            )
         # Remove cache kwargs before passing to BatchGenerator
         data_kwargs.pop("vision_cache", None)
         data_kwargs.pop("_image_key", None)
@@ -1779,21 +1991,7 @@ class ResponseGenerator:
                     break
 
                 # Drop abandoned requests before doing more work.
-                cancelled = self._drain_cancellations()
-                if cancelled and batch_gen is not None:
-                    for uid in cancelled:
-                        if uid in active:
-                            batch_gen.remove(uid)
-                            info = active.pop(uid)
-                            logger.info(
-                                "Generation cancelled: request=%s generated_tokens=%d",
-                                info.get("request_id", uid),
-                                int(info.get("generated_tokens", 0) or 0),
-                            )
-                            try:
-                                info["rqueue"].put(None)
-                            except Exception:
-                                pass
+                batch_gen = self._drop_cancelled(batch_gen, active)
 
                 if new_items and batch_gen is not None and not active:
                     if not batch_gen.has_work:
@@ -1810,29 +2008,15 @@ class ResponseGenerator:
                         request, backend="continuous_batching"
                     )
                     if batch_gen is None:
-                        batch_gen = BatchGenerator(
-                            self.model.language_model,
-                            self.processor,
-                            stop_tokens=self.stop_tokens,
-                            sampler=self._make_sampler(args),
-                            kv_bits=self.kv_bits,
-                            kv_key_bits=getattr(self, "kv_key_bits", None),
-                            kv_value_bits=getattr(self, "kv_value_bits", None),
-                            kv_key_scheme=getattr(self, "kv_key_scheme", None),
-                            kv_value_scheme=getattr(self, "kv_value_scheme", None),
-                            kv_group_size=self.kv_group_size,
-                            kv_quant_scheme=self.kv_quant_scheme,
-                            quantized_kv_start=self.quantized_kv_start,
-                            compute_logprobs=bool(args.logprobs),
-                            top_logprobs_k=self.top_logprobs_k if args.logprobs else 0,
-                            stream=generation_stream,
-                            apc_manager=self.apc_manager,
-                            draft_model=self.draft_model,
-                            draft_kind=self.draft_kind,
-                            draft_block_size=_get_draft_block_size_from_env(),
-                            greedy_sampling=args.temperature == 0,
-                            prefill_step_size=self._effective_prefill_step_size(),
-                        )
+                        batch_gen = self._new_batch_gen(args, generation_stream)
+
+                    # gmlx: one RowSettings per request, read by the prompt
+                    # embedding and handed to the insert.
+                    try:
+                        settings = self._row_settings(args)
+                    except Exception as e:
+                        rqueue.put(e)
+                        continue
 
                     # Vision encoder runs on the GPU thread; text tokenization
                     # already happened on the caller thread.
@@ -1842,11 +2026,19 @@ class ResponseGenerator:
                             prompt_tokens,
                             prefill_step_size=self._effective_prefill_step_size(),
                         )
-                    input_ids, gen_kwargs = self._gpu_embed(
-                        raw_inputs,
-                        images,
-                        apc_semantic_hash=request.apc_semantic_hash,
-                    )
+                    # gmlx: a missed adapter publish fails its own request.
+                    from gmlx import lora_rows
+
+                    try:
+                        input_ids, gen_kwargs = self._gpu_embed(
+                            raw_inputs,
+                            images,
+                            apc_semantic_hash=request.apc_semantic_hash,
+                            row_settings=settings,
+                        )
+                    except lora_rows.LoraRowsError as e:
+                        rqueue.put(e)
+                        continue
                     has_embeds = bool(gen_kwargs.get("inputs_embeds") is not None)
                     # Preserve tenant isolation for manually queued requests
                     # that predate server-side semantic hash computation.
@@ -1867,20 +2059,30 @@ class ResponseGenerator:
 
                     try:
                         thinking_budget_criteria = request.thinking_budget_criteria
+                        prompt_ids = input_ids.squeeze(0).tolist()
                         (uid,) = batch_gen.insert(
-                            [input_ids.squeeze(0).tolist()],
+                            [prompt_ids],
                             max_tokens=args.max_tokens,
                             prompt_kwargs=[gen_kwargs],
                             logits_processors=[
                                 self._make_logits_processors(args, input_ids)
                             ],
                             thinking_budget_criteria=[thinking_budget_criteria],
+                            # gmlx: the request's own sampler and logprobs.
+                            row_settings=[settings],
                         )
                     except Exception as e:
                         rqueue.put(e)
                         continue
+                    # gmlx: the next engine numbers on from here.
+                    self._kq_next_uid = batch_gen.uid_count
 
-                    rqueue.put(GenerationContext(uid=uid, prompt_tokens=prompt_tokens))
+                    rqueue.put(
+                        GenerationContext(
+                            uid=uid, prompt_tokens=prompt_tokens, prompt_ids=prompt_ids
+                        )
+                    )
+                    prompt_ids = None
                     active[uid] = {
                         "rqueue": rqueue,
                         "streamer": _ServerTokenStreamer(
@@ -1901,6 +2103,7 @@ class ResponseGenerator:
                 # gmlx: the loop variables would keep the last request's
                 # inputs (images, audio rows) alive until the next request.
                 request = raw_inputs = images = input_ids = gen_kwargs = None
+                settings = None
 
                 if not active or batch_gen is None:
                     continue

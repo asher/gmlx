@@ -14,6 +14,7 @@ import gmlx.serve.patches as sp  # noqa: E402
 from gmlx.serve.patches import _common as sp_common  # noqa: E402
 from gmlx.serve.patches import sampling as sp_sampling  # noqa: E402
 import gmlx.serve.bridge_vlm as serving  # noqa: E402
+import mlx.core as mx  # noqa: E402
 
 _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
@@ -106,10 +107,10 @@ def _mtp_seams():
     had_flag = getattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, False)
     setattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG, True)
     saved = (cls.generate, cls._make_thinking_budget_criteria,
-             ar.PromptProcessingBatch.generate)
+             ar.PromptProcessingBatch.generate, ar.BatchGenerator._next)
     yield gen, ar
     (cls.generate, cls._make_thinking_budget_criteria,
-     ar.PromptProcessingBatch.generate) = saved
+     ar.PromptProcessingBatch.generate, ar.BatchGenerator._next) = saved
     if not had_flag:
         delattr(ar.PromptProcessingBatch, _FULL_PREFILL_FLAG)
 
@@ -160,9 +161,10 @@ def test_mtp_thinking_defers_budget_only_for_mtp(_mtp_seams):
     assert cls.generate(_mtp_self(), "p", args=args) == "gen"
     assert seen[-1] is None                              # moved aside
     assert getattr(args, sp_mtp._DEFERRED_ATTR) == 6
-    # Non-MTP drafter: untouched, so the upstream raise still fires there.
+    # A client budget on a stock drafter: untouched, so the upstream raise
+    # still fires there as a backstop.
     eagle = types.SimpleNamespace(draft_model=object(), draft_kind="eagle")
-    args2 = _budget_args()
+    args2 = _budget_args(_kq_budget_field="thinking_budget")
     cls.generate(eagle, "p", args=args2)
     assert seen[-1] == 6 and not hasattr(args2, sp_mtp._DEFERRED_ATTR)
     # Plain model and args=None: untouched.
@@ -171,6 +173,32 @@ def test_mtp_thinking_defers_budget_only_for_mtp(_mtp_seams):
     cls.generate(plain, "p", args=args3)
     assert seen[-1] == 6
     cls.generate(_mtp_self(), "p")                       # args=None tolerated
+
+
+def test_defer_drops_config_budget_on_separate_drafter(_mtp_seams, caplog):
+    gen, _ar = _mtp_seams
+    cls = gen.ResponseGenerator
+    seen = []
+
+    def stub(self, prompt, images=None, audio=None, args=None, videos=None):
+        seen.append(args.thinking_budget)
+        return "gen"
+
+    cls.generate = stub
+    sp_mtp.install_mtp_thinking_budget()
+    eagle = types.SimpleNamespace(draft_model=object(), draft_kind="eagle3")
+    args = _budget_args(_kq_budget_field=None)
+    with caplog.at_level("WARNING", logger=sp_mtp.__name__):
+        assert cls.generate(eagle, "p", args=args) == "gen"
+    assert seen[-1] is None and args.thinking_budget is None
+    assert [r.message for r in caplog.records] == [
+        "thinking_budget ignored: this model's drafter cannot run a "
+        "thinking budget"]
+    # A kind with no drafter loaded is no drafter.
+    args = _budget_args()
+    cls.generate(types.SimpleNamespace(draft_model=None, draft_kind="eagle3"),
+                 "p", args=args)
+    assert seen[-1] == 6
 
 
 def test_mtp_thinking_criteria_restores_even_on_early_out(_mtp_seams):
@@ -211,34 +239,20 @@ def test_mtp_thinking_criteria_restores_on_raise(_mtp_seams):
     assert args.thinking_budget == 6                     # not stranded
 
 
-def test_mtp_thinking_full_chain_with_seed_and_tbfix(_mtp_seams):
-    # Runtime chain mtp -> tbfix with the seed installed beside it: one call
-    # restores the deferred budget, builds the armed criteria, and attaches
-    # the rounds hook to it. The seed rides the logits-processors hook, so
-    # the criteria call stashes none.
-    import gmlx.serve.seed_rows as sr
+def test_mtp_thinking_full_chain_with_tbfix(_mtp_seams):
+    # Runtime chain mtp -> tbfix: one call restores the deferred budget,
+    # builds the armed criteria, and attaches the rounds hook to it. A
+    # seeded request needs nothing more: its seed rides its row settings.
     gen, ar = _mtp_seams
     cls = gen.ResponseGenerator
-    saved_insert = (ar.BatchGenerator.insert, ar.GenerationBatch._step,
-                    ar.SpeculativeGenerationBatch.next,
-                    cls._make_logits_processors)
-    sr._PENDING.clear()
-    try:
-        sp.install_thinking_budget_fix()
-        sr.install_per_request_seed()
-        sp_mtp.install_mtp_thinking_budget()
-        args = _budget_args(thinking_budget=None, seed=11)
-        setattr(args, sp_mtp._DEFERRED_ATTR, 6)
-        crit = cls._make_thinking_budget_criteria(_mtp_self(), args, [1, 2])
-        assert args.thinking_budget == 6
-        assert not sr._PENDING
-        assert crit is not None and crit.in_thinking is False   # tbfix armed
-        assert crit._kq_mtp_hook is not None and crit._kq_mtp_hook.budget == 6
-    finally:
-        (ar.BatchGenerator.insert, ar.GenerationBatch._step,
-         ar.SpeculativeGenerationBatch.next,
-         cls._make_logits_processors) = saved_insert
-        sr._PENDING.clear()
+    sp.install_thinking_budget_fix()
+    sp_mtp.install_mtp_thinking_budget()
+    args = _budget_args(thinking_budget=None, seed=11)
+    setattr(args, sp_mtp._DEFERRED_ATTR, 6)
+    crit = cls._make_thinking_budget_criteria(_mtp_self(), args, [1, 2])
+    assert args.thinking_budget == 6
+    assert crit is not None and crit.in_thinking is False   # tbfix armed
+    assert crit._kq_mtp_hook is not None and crit._kq_mtp_hook.budget == 6
 
 
 def test_mtp_thinking_transport_stash_and_batch_drop(_mtp_seams):
@@ -252,34 +266,170 @@ def test_mtp_thinking_transport_stash_and_batch_drop(_mtp_seams):
     cache_entry = types.SimpleNamespace()
     batch = types.SimpleNamespace(prompt_cache=[cache_entry], uids=["u"])
     me = types.SimpleNamespace(
-        draft_model=object(), draft_kind="mtp",
+        draft_model=object(), draft_kind="mtp", uids=["u"],
         thinking_budget_criteria=[crit], _out=batch)
     assert wrapper(me, None) is batch
     assert cache_entry._kq_mtp_thinking_hook is hook     # B==1 stash
+    assert batch._kq_close_hook is hook
     # B>1: dropped, nothing stashed.
     c2 = types.SimpleNamespace()
     batch2 = types.SimpleNamespace(prompt_cache=[c2], uids=["u", "v"])
     me2 = types.SimpleNamespace(
-        draft_model=object(), draft_kind="mtp",
+        draft_model=object(), draft_kind="mtp", uids=["u", "v"],
         thinking_budget_criteria=[crit, crit], _out=batch2)
     wrapper(me2, None)
     assert not hasattr(c2, "_kq_mtp_thinking_hook")
+    assert batch2._kq_close_hook is None
+    assert crit._kq_mtp_hook is None                     # detached
     # Criteria/rows mismatch: dropped, not indexed blindly.
+    crit = types.SimpleNamespace(_kq_mtp_hook=hook)
     c3 = types.SimpleNamespace()
     batch3 = types.SimpleNamespace(prompt_cache=[c3], uids=["u"])
     me3 = types.SimpleNamespace(
-        draft_model=object(), draft_kind="mtp",
+        draft_model=object(), draft_kind="mtp", uids=["u"],
         thinking_budget_criteria=[crit, crit], _out=batch3)
     wrapper(me3, None)
     assert not hasattr(c3, "_kq_mtp_thinking_hook")
     # Non-MTP batch: untouched.
+    crit = types.SimpleNamespace(_kq_mtp_hook=hook)
     c4 = types.SimpleNamespace()
     batch4 = types.SimpleNamespace(prompt_cache=[c4], uids=["u"])
     me4 = types.SimpleNamespace(
-        draft_model=None, draft_kind=None,
+        draft_model=None, draft_kind=None, uids=["u"],
         thinking_budget_criteria=[crit], _out=batch4)
     wrapper(me4, None)
     assert not hasattr(c4, "_kq_mtp_thinking_hook")
+    assert not hasattr(batch4, "_kq_close_hook")
+    assert crit._kq_mtp_hook is hook
+
+
+def _first_token_site(record):
+    """PromptProcessingBatch.generate up to its first token: each row's
+    criteria is asked for a forced first id, as ar.py asks it."""
+
+    def generate(self, sampler, *a, **k):
+        spec = self.draft_model is not None and self.draft_kind is not None
+        for c in self.thinking_budget_criteria:
+            ask = getattr(c, "first_forced_token_id", None)
+            record.append(ask(spec) if ask is not None else None)
+        return self._out
+
+    return generate
+
+
+def _chain_criteria(cls, ids=(1, 99), budget=0):
+    """The criteria the installed chain builds for an MTP request whose
+    prompt opens the block, with the budget already spent."""
+    args = _budget_args(thinking_budget=None)
+    setattr(args, sp_mtp._DEFERRED_ATTR, budget)
+    return cls._make_thinking_budget_criteria(_mtp_self(), args,
+                                              mx.array([list(ids)]))
+
+
+def _prompt_batch(crits, *, mtp=True):
+    out = types.SimpleNamespace(prompt_cache=[types.SimpleNamespace()],
+                                uids=[f"u{i}" for i in range(len(crits))])
+    return types.SimpleNamespace(
+        draft_model=object() if mtp else None, draft_kind="mtp" if mtp else None,
+        uids=list(out.uids), thinking_budget_criteria=list(crits), _out=out)
+
+
+@pytest.fixture
+def _first_token(_mtp_seams):
+    gen, ar = _mtp_seams
+    sp.install_thinking_budget_fix()
+    record = []
+    ar.PromptProcessingBatch.generate = _first_token_site(record)
+    sp_mtp.install_mtp_thinking_budget()
+    return gen.ResponseGenerator, ar, record
+
+
+def test_mtp_one_row_takes_the_first_token_from_the_hook(_first_token):
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    close = list(hook.forced_ids)
+    ppb = _prompt_batch([crit])
+    batch = ar.PromptProcessingBatch.generate(ppb, None)
+    assert record == [close[0]]
+    assert hook._held == close[1:] and hook.closing()
+    assert batch.prompt_cache[0]._kq_mtp_thinking_hook is hook
+    assert batch._kq_close_hook is hook
+
+
+def test_plain_batch_takes_the_first_token_from_the_criteria(_first_token):
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    ar.PromptProcessingBatch.generate(_prompt_batch([crit], mtp=False), None)
+    assert record == [10]                                # the bare close's NL
+    assert not hook._spent and not hook._held
+
+
+def test_two_mtp_rows_force_no_first_token(_first_token, caplog):
+    cls, ar, record = _first_token
+    crits = [_chain_criteria(cls), _chain_criteria(cls)]
+    hooks = [c._kq_mtp_hook for c in crits]
+    with caplog.at_level("WARNING", logger=sp_mtp.__name__):
+        batch = ar.PromptProcessingBatch.generate(_prompt_batch(crits), None)
+    assert record == [None, None]
+    assert all(c._kq_mtp_hook is None for c in crits)
+    assert all(not h._spent for h in hooks)
+    assert batch._kq_close_hook is None
+    assert "2 rows" in caplog.text
+
+
+def test_mtp_row_without_a_hook_forces_nothing(_mtp_seams):
+    gen, ar = _mtp_seams
+    sp.install_thinking_budget_fix()
+    crit = gen.ResponseGenerator._make_thinking_budget_criteria(
+        _mtp_self(), _budget_args(thinking_budget=0), mx.array([[1, 99]]))
+    assert crit.first_forced_token_id(True) is None
+    assert crit.first_forced_token_id(False) == 10
+
+
+def _spec_batch(ar, uid, **kw):
+    return ar.SpeculativeGenerationBatch(
+        model=types.SimpleNamespace(), draft_model=object(), draft_kind="mtp",
+        uids=[uid], first_tokens=mx.array([5]),
+        prompt_cache=[types.SimpleNamespace()], sampler=None,
+        stop_criteria=lambda tok: False, max_tokens=[4],
+        hidden=mx.zeros((1, 2, 4)), shared_kv_states=None,
+        prompt_tokens=None, **kw)
+
+
+@pytest.mark.parametrize("host", ["none", "active", "queued"])
+def test_mtp_row_behind_a_busy_host_forces_nothing(_first_token, monkeypatch,
+                                                  host):
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    cls, ar, record = _first_token
+    install_continuous_batch_admission()
+    if host == "none":
+        gen_batch = None
+    elif host == "active":
+        gen_batch = _spec_batch(ar, 0)
+    else:
+        # No active row and one queued request: len() promotes it.
+        gen_batch = _spec_batch(ar, 0)
+        gen_batch._finished = [True]
+        gen_batch._pending_injections = [_spec_batch(ar, 1)]
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    ppb = _prompt_batch([crit])
+
+    def step(self, **kw):
+        return ar.PromptProcessingBatch.generate(ppb, None)
+
+    monkeypatch.setattr(ar.BatchGenerator, "_next", step)
+    sp_mtp.install_mtp_thinking_budget()
+    ar.BatchGenerator._next(types.SimpleNamespace(_generation_batch=gen_batch))
+    if host == "none":
+        assert record == [hook.forced_ids[0]]
+        return
+    assert record == [None]
+    assert not hook._held and not hook._spent
+    assert ppb._out.prompt_cache[0]._kq_mtp_thinking_hook is hook
 
 
 def test_mtp_thinking_flags_carry_through_preflight(_mtp_seams):
@@ -622,3 +772,311 @@ def test_fast_sampler_install_lands():
         assert (s.top_k, s.min_p, s.seed) == (40, 0.05, 3)
     finally:
         cls._make_sampler = original
+
+
+# 6c. thinking-budget fields and llama-server's names for them
+_RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
+
+
+@pytest.fixture
+def budget_seam(monkeypatch):
+    """The gen-args seam with the budget transform, installed in the
+    server's order. Call it with a request and an optional profile."""
+    monkeypatch.delenv("MLX_VLM_THINKING_BUDGET", raising=False)
+    monkeypatch.setattr(_RUNTIME, "response_generator", None)
+    sp.install_gen_args_profile_injection()
+    sp.install_max_completion_tokens()
+    sp.install_thinking_budget_fields()
+
+    def build(request, spec=None, *, route=False):
+        tok = serving.set_active_spec(spec)
+        rtok = sp_sampling._generation_route.set(route)
+        try:
+            return _APP._build_gen_args(request)
+        finally:
+            sp_sampling._generation_route.reset(rtok)
+            serving.reset_active_spec(tok)
+    return build
+
+
+def _refused(build, request, spec=None, **kw):
+    with pytest.raises(sp_common.refusal_type()) as e:
+        build(request, spec, **kw)
+    assert e.value.status_code == 400
+    return str(e.value)
+
+
+def _anthropic(**kw):
+    return _SCHEMAS.AnthropicRequest(
+        model="m", max_tokens=64, messages=[{"role": "user", "content": "hi"}],
+        **kw)
+
+
+def _completion(**kw):
+    from gmlx.serve.patches.completions import CompletionRequest
+    return CompletionRequest(model="m", prompt="hi", **kw)
+
+
+def test_reasoning_budget_tokens_sets_thinking_budget(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_tokens=32))
+    assert args.thinking_budget == 32
+    assert args._kq_budget_field == "reasoning_budget_tokens"
+    args = budget_seam(_completion(reasoning_budget_tokens=0))
+    assert args.thinking_budget == 0
+
+
+def test_both_budget_names_is_400(budget_seam):
+    msg = _refused(budget_seam, _chat(thinking_budget=8,
+                                      reasoning_budget_tokens=8))
+    assert msg == "Set thinking_budget or reasoning_budget_tokens, not both."
+    # A null under one name is no value, so it does not conflict.
+    args = budget_seam(_chat(thinking_budget=None, reasoning_budget_tokens=8))
+    assert args.thinking_budget == 8
+
+
+def test_both_message_names_is_400(budget_seam):
+    msg = _refused(budget_seam, _chat(thinking_budget_message="a",
+                                      reasoning_budget_message=""))
+    assert msg == ("Set thinking_budget_message or reasoning_budget_message, "
+                   "not both.")
+    args = budget_seam(_chat(thinking_budget_message=None,
+                             reasoning_budget_message="Stop."))
+    assert args.thinking_budget_message == "Stop."
+
+
+def test_anthropic_budget_tokens_conflict_names_thinking_budget_tokens(
+        budget_seam):
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+    req = anthropic._anthropic_request_with_derived_fields(_anthropic(
+        thinking={"type": "enabled", "budget_tokens": 64},
+        reasoning_budget_tokens=32))
+    assert _refused(budget_seam, req) == (
+        "Set thinking.budget_tokens or reasoning_budget_tokens, not both.")
+    req = anthropic._anthropic_request_with_derived_fields(_anthropic(
+        thinking={"type": "enabled", "budget_tokens": -2}))
+    assert _refused(budget_seam, req) == (
+        "thinking.budget_tokens must be an integer of -1 or more.")
+
+
+def test_anthropic_explicit_thinking_budget_keeps_its_name(budget_seam,
+                                                           monkeypatch):
+    """thinking.budget_tokens is named only when the budget came from it."""
+    anthropic = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
+
+    def req(budget):
+        return anthropic._anthropic_request_with_derived_fields(_anthropic(
+            thinking={"type": "enabled", "budget_tokens": 2048},
+            thinking_budget=budget))
+
+    assert _refused(budget_seam, req(-2)) == (
+        "thinking_budget must be an integer of -1 or more.")
+    _drafter(monkeypatch, object(), "eagle3")
+    assert "Remove thinking_budget," in _refused(budget_seam, req(8),
+                                                 route=True)
+
+
+def test_alias_blocks_profile_budget(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_tokens=32),
+                       _spec(thinking_budget=1024))
+    assert args.thinking_budget == 32
+    assert budget_seam(_chat(), _spec(thinking_budget=1024)).thinking_budget == 1024
+
+
+def test_profile_message_fills_an_unset_message(budget_seam):
+    args = budget_seam(_chat(), _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message == "Answer."
+    args = budget_seam(_chat(reasoning_budget_message="Go."),
+                       _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message == "Go."
+
+
+def test_empty_alias_message_blocks_profile_message(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_message=""),
+                       _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message == ""
+
+
+@pytest.mark.parametrize("field", ["thinking_budget_message",
+                                   "reasoning_budget_message"])
+def test_null_message_blocks_profile_message(budget_seam, field):
+    args = budget_seam(_chat(**{field: None}),
+                       _spec(thinking_budget_message="Answer."))
+    assert args.thinking_budget_message is None
+
+
+def test_upsampler_style_null_message_blocks_profile_message(budget_seam):
+    req = _chat(thinking_budget=None, thinking_budget_message=None)
+    args = budget_seam(req, _spec(thinking_budget=64,
+                                  thinking_budget_message="Answer."))
+    assert args.thinking_budget is None
+    assert args.thinking_budget_message is None
+
+
+def test_null_alias_budget_is_no_budget(budget_seam):
+    args = budget_seam(_chat(reasoning_budget_tokens=None),
+                       _spec(thinking_budget=1024))
+    assert args.thinking_budget is None
+    assert args._kq_budget_field is None
+
+
+@pytest.mark.parametrize("field", ["thinking_budget", "reasoning_budget_tokens"])
+def test_client_minus_one_takes_profile_budget(budget_seam, field):
+    args = budget_seam(_chat(**{field: -1}), _spec(thinking_budget=96))
+    assert args.thinking_budget == 96
+    assert args._kq_budget_field is None  # not the client's budget
+
+
+def test_client_minus_one_takes_env_budget(budget_seam, monkeypatch):
+    monkeypatch.setenv("MLX_VLM_THINKING_BUDGET", "48")
+    assert budget_seam(_chat(reasoning_budget_tokens=-1)).thinking_budget == 48
+    monkeypatch.delenv("MLX_VLM_THINKING_BUDGET")
+    assert budget_seam(_chat(reasoning_budget_tokens=-1)).thinking_budget is None
+
+
+def test_profile_minus_one_is_no_budget(budget_seam, monkeypatch):
+    assert budget_seam(_chat(), _spec(thinking_budget=-1)).thinking_budget is None
+    monkeypatch.setenv("MLX_VLM_THINKING_BUDGET", "-1")
+    assert budget_seam(_chat()).thinking_budget is None
+
+
+@pytest.mark.parametrize("value", [True, 2.0, "5", -2])
+def test_alias_budget_types_are_400(budget_seam, value):
+    assert _refused(budget_seam, _chat(reasoning_budget_tokens=value)) == (
+        "reasoning_budget_tokens must be an integer of -1 or more.")
+
+
+@pytest.mark.parametrize("value", [True, 2.0, "5", -2])
+def test_completions_budget_types_are_400(budget_seam, value):
+    assert _refused(budget_seam, _completion(thinking_budget=value)) == (
+        "thinking_budget must be an integer of -1 or more.")
+
+
+def test_declared_budget_below_minus_one_is_400(budget_seam):
+    assert _refused(budget_seam, _chat(thinking_budget=-2)) == (
+        "thinking_budget must be an integer of -1 or more.")
+    # The declared field keeps the schema's coercion.
+    assert budget_seam(_chat(thinking_budget=2.0)).thinking_budget == 2
+
+
+@pytest.mark.parametrize("field", ["thinking_budget_message",
+                                   "reasoning_budget_message"])
+@pytest.mark.parametrize("value", [5, ["a"], True])
+def test_message_types_are_400(budget_seam, field, value):
+    assert _refused(budget_seam, _chat(**{field: value})) == (
+        f"{field} must be a string.")
+
+
+def _drafter(monkeypatch, draft_model, kind):
+    rg = types.SimpleNamespace(draft_model=draft_model, draft_kind=kind)
+    monkeypatch.setattr(_RUNTIME, "response_generator", rg)
+
+
+def test_budget_on_separate_drafter_is_400(budget_seam, monkeypatch):
+    _drafter(monkeypatch, object(), "eagle3")
+    assert _refused(budget_seam, _chat(reasoning_budget_tokens=16),
+                    route=True) == (
+        "This model cannot run a thinking budget while it speculates with "
+        "draft kind 'eagle3'. Remove reasoning_budget_tokens, or serve the "
+        "model without the drafter.")
+    assert "Remove thinking_budget," in _refused(
+        budget_seam, _chat(thinking_budget=0), route=True)
+
+
+def test_budget_on_mtp_kind_drafter_does_not_refuse(budget_seam, monkeypatch):
+    _drafter(monkeypatch, object(), "mtp")
+    args = budget_seam(_chat(reasoning_budget_tokens=16), route=True)
+    assert args.thinking_budget == 16
+
+
+def test_kind_without_drafter_does_not_refuse(budget_seam, monkeypatch):
+    _drafter(monkeypatch, None, "eagle3")
+    args = budget_seam(_chat(reasoning_budget_tokens=16), route=True)
+    assert args.thinking_budget == 16
+
+
+def test_count_with_budget_on_separate_drafter_does_not_refuse(
+        budget_seam, monkeypatch):
+    _drafter(monkeypatch, object(), "eagle3")
+    args = budget_seam(_chat(reasoning_budget_tokens=16), route=False)
+    assert args.thinking_budget == 16
+
+
+def test_minus_one_on_separate_drafter_does_not_refuse(budget_seam,
+                                                      monkeypatch):
+    _drafter(monkeypatch, object(), "eagle3")
+    args = budget_seam(_chat(reasoning_budget_tokens=-1),
+                       _spec(thinking_budget=64), route=True)
+    assert args.thinking_budget == 64 and args._kq_budget_field is None
+
+
+def test_budget_route_marks_generation_routes_only():
+    seen = {}
+
+    async def stub(request):
+        seen["route"] = sp_sampling._generation_route.get()
+
+    app = _APP.app
+    sp_common._remove_routes(app, "/v1/chat/completions",
+                             "/v1/messages/count_tokens")
+    app.add_api_route("/v1/chat/completions", stub, methods=["POST"])
+    app.add_api_route("/v1/messages/count_tokens", stub, methods=["POST"])
+    sp.install_thinking_budget_route()
+    sp.install_thinking_budget_route()   # idempotent
+    import asyncio
+    chat = sp_common._find_route(app, "/v1/chat/completions", "POST")
+    count = sp_common._find_route(app, "/v1/messages/count_tokens", "POST")
+    asyncio.run(chat.endpoint(request=None))
+    assert seen["route"] is True
+    asyncio.run(count.endpoint(request=None))
+    assert seen["route"] is False
+    assert sp_sampling._generation_route.get() is False
+
+
+def test_a_rewind_reaches_the_mtp_hook(_first_token):
+    """A requeued MTP row rewinds its criteria and the hook it carries.
+    The first id went out and was never observed, so the replay owes the
+    second."""
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    close = list(hook.forced_ids)
+    ar.PromptProcessingBatch.generate(_prompt_batch([crit]), None)
+    assert record == [close[0]]
+    crit.rewind([close[0]])
+    assert hook._own == len(close) - 1
+    assert hook.take_first() == close[1]
+    crit._kq_mtp_hook = None          # dropped since: read at call time
+    crit.rewind([])
+
+
+def test_a_hook_carrier_forwards_rewind():
+    seen = []
+    carrier = sp_mtp._HookCarrier()
+    carrier.rewind([1])               # no hook: nothing to do
+    carrier._kq_mtp_hook = types.SimpleNamespace(rewind=seen.append)
+    carrier.rewind([1, 2])
+    assert seen == [[1, 2]]
+
+
+def test_a_criteria_row_mismatch_names_itself(_first_token, caplog):
+    cls, ar, record = _first_token
+    crit = _chain_criteria(cls)
+    hook = crit._kq_mtp_hook
+    ppb = _prompt_batch([crit, crit])
+    ppb.uids = ["u0"]
+    with caplog.at_level("WARNING", logger=sp_mtp.__name__):
+        ar.PromptProcessingBatch.generate(ppb, None)
+    assert "the MTP prompt batch has 2 criteria for 1 row(s)" in caplog.text
+    assert "batch together" not in caplog.text
+    assert hook.done
+
+
+def test_a_dropped_hook_that_owes_a_close_says_so(_first_token, caplog):
+    cls, ar, record = _first_token
+    crits = [_chain_criteria(cls), _chain_criteria(cls)]
+    hooks = [c._kq_mtp_hook for c in crits]
+    assert hooks[0].take_forced()          # its close is in flight
+    with caplog.at_level("WARNING"):
+        ar.PromptProcessingBatch.generate(_prompt_batch(crits), None)
+    assert caplog.text.count("in the middle of its forced close") == 1
+    assert all(h.done and not h.closing() for h in hooks)

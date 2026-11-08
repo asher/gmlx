@@ -1432,6 +1432,7 @@ def generate_speculative_owned(
         end_token=thinking_end_token,
         prompt_ids=prompt_ids,
         prompt=prompt,
+        reasoning_ids=prompt_ids,
     )
     set_finish_key_target(hook)
     chunk = _rows_chunk(model, prompt_cache, input_ids, max_tokens, prompt_rows)
@@ -1627,6 +1628,7 @@ def _stream_generate_speculative_owned(
         end_token=thinking_end_token,
         prompt_ids=prompt_ids,
         prompt=prompt,
+        reasoning_ids=prompt_ids,
     )
     set_finish_key_target(hook)
     tic = time.perf_counter()

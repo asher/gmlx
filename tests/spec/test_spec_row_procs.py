@@ -178,6 +178,28 @@ def test_gated_xtc_starts_after_thinking_like_plain_decode():
     assert out[:3] == [END_THINK, DIGITS[0], DIGITS[1]]
 
 
+def test_a_maybe_row_xtc_starts_one_position_later():
+    from test_spec_grammar import _served
+
+    rows = SpecRowProcessors.from_processors(
+        _served(_recorder(seen := [])), PROMPT)
+    plan = rows.plan([])
+    assert plan is None or plan.starts == [[None]]
+    rows.start(DIGITS[0])
+    rows.apply(mx.zeros((2, 8)), rows.plan([DIGITS[1]]))
+    assert seen == [[DIGITS[0]], [DIGITS[0], DIGITS[1]]]
+
+
+def test_a_maybe_row_xtc_waits_for_the_end_after_a_start_token():
+    from test_spec_grammar import START_THINK, _served
+
+    rows = SpecRowProcessors.from_processors(
+        _served(_recorder([])), PROMPT)
+    rows.start(START_THINK)
+    plan = rows.plan([DIGITS[1], END_THINK, DIGITS[5]])
+    assert plan.starts == [[None, None, 4, 4]]
+
+
 def test_supported_refuses_stateful_processors():
     class _Stateful:
         def process_last_token(self, token, logits):

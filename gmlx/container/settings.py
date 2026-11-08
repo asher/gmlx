@@ -3585,7 +3585,7 @@ def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
                                      if os.path.exists(c)), os.path.join(cwd, p)))
 
     for model in cfg.models.values():
-        for p in (model.path, model.mmproj, model.draft_gguf, model.adapter):
+        for p in (model.path, model.mmproj, model.draft_gguf, *model.adapter_paths()):
             if p and not str(p).startswith("hf:"):
                 out.append((model_file(str(p)), "the model file {path} is", load))
     # A chat template that holds no Jinja names a file, which the loader

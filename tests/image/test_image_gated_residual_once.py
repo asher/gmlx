@@ -58,3 +58,32 @@ def test_with_compile_off_a_call_holds_one_block_of_float32_copies(
     assert mx.array_equal(got, want)
     # The output and one block's copies; all at once it is 5 outputs.
     assert peak < 2 * x.nbytes, (peak, x.nbytes)
+
+
+def test_with_compile_off_each_block_writes_into_the_one_output(
+        monkeypatch):
+    """MLX frees what a command buffer used when the buffer's completed
+    handler runs, which can be after mx.eval returns. A block update that
+    finds the output still held copies the whole output. Over many blocks
+    and calls, a handler is late at some block boundary."""
+    monkeypatch.setattr(epilogues, "ONCE_ROWS", 16)
+    x, g, y = _inputs(4096, width=64)
+    want = _rounded_once(x, g, y)
+    mx.eval(want)
+    peaks = []
+    for _ in range(20):
+        mx.synchronize()
+        mx.clear_cache()
+        base = mx.get_active_memory()
+        mx.reset_peak_memory()
+        mx.disable_compile()
+        try:
+            got = ops.gated_residual_once(x, g, y)
+            mx.eval(got)
+            mx.synchronize()
+        finally:
+            mx.enable_compile()
+        peaks.append(mx.get_peak_memory() - base)
+        assert mx.array_equal(got, want)
+        del got
+    assert max(peaks) < 2 * x.nbytes, (max(peaks), x.nbytes)

@@ -102,6 +102,7 @@ from .hardening import (
     install_loopback_host_guard,
 )
 from .messages_route import install_messages_route
+from .prefill import install_assistant_prefill
 from .mtp_thinking import install_mtp_thinking_budget
 from .context_copy import install_context_copy_transport
 from .spec_processors import install_mtp_logits_processors
@@ -144,6 +145,8 @@ from .sampling import (
     install_fast_sampler,
     install_gen_args_profile_injection,
     install_max_completion_tokens,
+    install_thinking_budget_fields,
+    install_thinking_budget_route,
     install_xtc_sampling,
 )
 
@@ -154,6 +157,7 @@ __all__ = [
     "install_retire_render_capture",
     "install_api_contract",
     "install_api_key_auth",
+    "install_assistant_prefill",
     "install_audio_speech_route",
     "install_audio_transcription_route",
     "install_audio_translation_route",
@@ -180,6 +184,8 @@ __all__ = [
     "install_keep_route",
     "install_loopback_host_guard",
     "install_max_completion_tokens",
+    "install_thinking_budget_fields",
+    "install_thinking_budget_route",
     "install_messages_route",
     "install_metrics_prometheus",
     "install_models_endpoint_override",
@@ -237,6 +243,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_health_liveness_override()
     install_gen_args_profile_injection()
     install_max_completion_tokens()
+    install_thinking_budget_fields()
     install_vanilla_stream_chunks()
     install_xtc_sampling()
     if os.environ.get("GMLX_STEP_LOG"):
@@ -247,14 +254,13 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # This rebinds the criteria seam without delegating, so a wrapper of
     # that seam (mtp_thinking's restore) installs after it.
     install_thinking_budget_fix()
-    from ..seed_rows import install_per_request_seed
-    install_per_request_seed()
     import gmlx.lora_rows as lora_rows
     if os.environ.get("GMLX_LORA_ROWS"):
         # Arm the strict per-forward publish invariant (a missed publish
         # site raises instead of serving a stale or absent row vector).
         lora_rows.configure("rows", 1)
-    lora_rows.install_lora_gen_args()
+    from gmlx.serve.lora_request import install_lora_gen_args
+    install_lora_gen_args()
     lora_rows.install_row_channel()
     from gmlx.spec.admission import install_continuous_batch_admission
     from gmlx.spec.engine import install_owned_spec_engine
@@ -311,8 +317,6 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from gmlx.cache.kvarn_apc import install_kvarn_apc
     install_kvarn_apc()
     install_chat_template_kwargs()
-    from gmlx.upstream.system_content_fix import install_system_content_fix
-    install_system_content_fix()
     from gmlx.upstream.single_bos_fix import install_single_bos_fix
     install_single_bos_fix(count_routes=True)
     install_stream_timings()
@@ -322,6 +326,10 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     # Before the load-offload / profile-capture / keepalive wrappers so they
     # wrap the completions route too.
     install_completions_route()
+    from .tokenize import install_tokenize_routes
+
+    install_tokenize_routes()
+    install_thinking_budget_route()
     # engine_jobs imports mlx_vlm.server statically, so it loads here.
     from gmlx.config import SystemoneCfg
     from gmlx.serve.engine_jobs import install_engine_jobs
@@ -351,7 +359,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_scoped_cache_reset()
     install_capacity_plan()
     install_estimate()
-    # Render-wrap nesting per target: seed(retire(faithful(orig))).
+    # Render-wrap nesting per target: role(seed(retire(prefill(faithful(orig))))).
     # Faithful innermost so the retire capture memoizes it and predictions
     # see the render the server produces. Seed outermost for two reasons:
     # the faithful wrap's inner return_messages=True call would feed an
@@ -370,6 +378,11 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_native_audio()
     install_messages_route()
     install_apc_lone_harvest()
+    # Outside faithful history (it renders the history without the continued
+    # message through it) and inside the retire capture, which records the
+    # continued prompt. Its chat-route check lands outside the dry-run and
+    # load-offload wraps, so an invalid request loads no model.
+    install_assistant_prefill()
     install_retire_render_capture()
     install_stream_thinking_seed()
     # Outermost render wrap: the retire capture below it must memoize the

@@ -12,6 +12,7 @@ processor outside the known forwarding types as stock.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import inspect
 import types
@@ -494,3 +495,21 @@ def test_known_processors_take_the_flag_only_through_kwargs(path):
     assert any(p.kind is p.VAR_KEYWORD for p in params.values())
     assert _forwards_to_tokenizer(object.__new__(cls))
     assert not _forwards_to_tokenizer(_StrictProcessor())
+
+
+def test_a_token_id_prompt_reaches_the_engine_as_sent(fixed):
+    """An id prompt calls no tokenizer and gets no special tokens, with the
+    raw prompt flag set or not."""
+    class _NoTokenizer:
+        chat_template = None
+
+        def __getattr__(self, name):
+            raise AssertionError(f"the tokenizer was used ({name})")
+
+    rg = types.SimpleNamespace(model=_model("gemma4"), processor=_NoTokenizer())
+    for scope in (raw_prompt_special_tokens(True), raw_prompt_special_tokens(False),
+                  contextlib.nullcontext()):
+        with scope:
+            raw = _GENERATION.ResponseGenerator._cpu_preprocess(rg, [7, 0, 9])
+        assert _row(raw["input_ids"]) == [7, 0, 9]
+        assert raw["attention_mask"].tolist() == [[1, 1, 1]]

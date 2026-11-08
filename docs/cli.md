@@ -32,7 +32,9 @@ gmlx help serve       # the same as gmlx serve --help
 | [`gmlx profiles`](#gmlx-profiles) | Show the family sampling defaults and intents. |
 | [`gmlx talk`](#gmlx-talk) | Voice chat with a served model. |
 | [`gmlx train`](#gmlx-train) | Train a LoRA adapter on a GGUF base. |
+| [`gmlx capture`](#gmlx-capture) | Record the residual stream after each block over sets of prompts. |
 | [`gmlx distill`](#gmlx-distill) | Distill a teacher GGUF into a student adapter offline. |
+| [`gmlx kld`](#gmlx-kld) | Measure the KL divergence of a GGUF from a reference GGUF over a text. |
 | [`gmlx image`](#gmlx-image) | Generate images from GGUF diffusion models. |
 | [`gmlx comfyui`](#gmlx-comfyui) | Put the gmlx node pack into ComfyUI, or remove it. |
 | [`gmlx doctor`](#gmlx-doctor) | Check the runtime, config, models and services. |
@@ -158,10 +160,10 @@ the [`sampling` keys](config.md#sampling):
 | `--mmproj PATH` | None | Load this projector GGUF to make the model multimodal. |
 | `--asr PATH` | Found beside the model | Speech companion GGUF for a model that reads audio through one, such as [Granite Switch](granite-switch.md). |
 | `--no-asr` | Off | Pair no speech companion. |
-| `--adapter PATH` | None | Apply this GGUF LoRA adapter at load, for text only. |
+| `--adapter PATH[:STRENGTH]` | None | Load this GGUF LoRA adapter, for text only, at this default strength, 1 when left out. A request can set its own. Repeat the flag for more. |
 | `--profile NAME` | None | Apply a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. |
 | `--system-prompt STR` | None | Use this system prompt when the request has none. |
-| `--thinking-budget N` | Unlimited | Cap reasoning tokens for each request. `0` closes thinking at once. |
+| `--thinking-budget N` | Unlimited | Cap reasoning tokens for each request. `0` closes thinking at once, and `-1` sets no budget. |
 | `--kv-quant-scheme {auto,uniform,kvarn}` | `auto` | Pick the [scheme](kv-quantization.md#the-scheme-gmlx-picks) for the model, affine, or kvarn, where `--kv-bits` defaults to 6. |
 | `--max-kv-size N` | None | Cap the request context budget at N tokens. |
 
@@ -337,7 +339,8 @@ gmlx run coder --prompt "Refactor this loop."    # a config id, with its setting
 
 The positional argument is a path, or a model id or alias from your server
 config. A config id brings its path, sampling, system prompt, template,
-adapter, drafter and streaming settings, and flags you pass still win.
+adapters at their strengths, drafter and streaming settings, and flags you
+pass still win. A typed `--adapter` replaces the entry's adapters.
 
 These flags control generation:
 
@@ -394,7 +397,7 @@ These flags control loading:
 | `--no-chat-template` | Off | Pass the prompt verbatim. |
 | `--no-remap` | Off | Keep raw GGUF tensor names. |
 | `--no-zero-copy` | Off | Copy tensors out of the mmap instead of viewing them. |
-| `--adapter PATH` | None | Apply this GGUF LoRA adapter at load, for text only. |
+| `--adapter PATH[:STRENGTH]` | None | Apply this GGUF LoRA adapter at load at this strength, 1 when left out, for text only. Repeat for more adapters. |
 
 These flags control multimodal input, as [Vision and audio](vlm.md)
 describes. Under `--mmproj`, the bench and report flags and `--stream-cpu`
@@ -521,8 +524,9 @@ These flags say where the model runs:
 | `--no-family-defaults` | Off | Do not apply the family's sampling defaults on a bare path. |
 
 Slash commands in the chat change the system prompt, sampling, penalties,
-`--reasoning`, `--thinking` and `--thinking-budget` as you go. The other
-flags last for the whole chat.
+`--reasoning`, `--thinking`, `--thinking-budget` and the `--adapter`
+strength as you go, as [Use the adapter](lora.md#use-the-adapter) shows for
+`/adapter`. The other flags last for the whole chat.
 
 These flags control display and sessions:
 
@@ -1070,6 +1074,96 @@ gmlx run base-Q8_0.gguf --adapter my-lora.gguf --prompt "..."
 The data can be chat messages, prompt and completion pairs, or plain text,
 in the formats mlx-lm's trainer accepts.
 
+## gmlx capture
+
+`gmlx capture` runs sets of prompts through a model and records the
+residual stream after each decoder block. Steering and interpretability
+tools read the output, a safetensors file.
+
+```sh
+gmlx capture model.gguf --prompts harmful=harmful.jsonl \
+    --prompts harmless=harmless.jsonl --rows harmless --no-think \
+    --out capture.safetensors
+```
+
+A prompt file is JSONL: one JSON string on each line, so a prompt can
+hold newlines. Blank lines are skipped. All the sets run in one model
+load. Each prompt renders as an optional system message and one user
+message, with a generation prompt, through the same chat template and
+tokenizer path as `gmlx serve`. Each prompt runs alone, with no KV cache
+kept between prompts.
+
+The positional argument is a path, or a model id or alias from your server
+config. A config id brings its path, chat template, streaming settings,
+system message, thinking controls, `chat_template_kwargs` and adapters,
+and flags you pass still win. A MoE that does not fit in memory streams its
+experts, as in `gmlx run`.
+
+`--adapter PATH[:STRENGTH]` captures the model with that GGUF LoRA adapter
+applied, at strength 1 when left out.
+
+The recorded value of a block is its output averaged over the last
+`--positions` prompt tokens, in float32. This is the block output that
+llama.cpp's `cvector-generator` reads as `l_out`. On a model with
+hyper-connection residual streams the streams are averaged, which is the
+stream mean of the block output that llama.cpp names `l_last` on these
+models. On gemma-3n the value is the active AltUp stream, the slice that
+`cvector-generator` reads. MTP and nextn blocks are left out, so the layer
+count is the GGUF's block count less its nextn layers.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Load this GGUF, or this config id or alias. |
+| `--prompts NAME=FILE` | Required | Add a set named NAME from a JSONL file. Repeat for more sets. A name holds letters, digits, `_` and `-`. |
+| `--out FILE` | Required | Write the safetensors file here. |
+| `--positions N` | `1` | Average each block output over the last N prompt tokens. |
+| `--rows SET` | None | Also write the per-prompt rows of this set. Repeat the flag, or give a comma list. |
+| `--limit N` | All | Use only the first N prompts of each set. |
+| `--system TEXT` | None | Render each prompt after this system message. |
+| `--think`, `--no-think` | The template's default | Render with thinking on or off, through the variable the template reads. |
+| `--chat-template STR_OR_PATH` | The GGUF's | Replace the chat template with inline Jinja or a `.jinja` or `.txt` file. |
+| `--config FILE` | The first default location | Resolve a model id against this config. |
+| `--adapter PATH[:STRENGTH]` | The entry's, else none | Capture with this GGUF LoRA adapter at this strength, 1 when left out. Repeat for more adapters. |
+| `--json` | Off | Print one JSON line for each prompt and a last result line. |
+| `-v`, `--verbose` | Off | Print the full load diagnostics. |
+| `--stream-experts`, `--stream-cpu` | Off | Stream a model bigger than memory, as in [run](#streaming-flags). |
+| `--prefill-feeder`, `--no-prefill-feeder` | On | Stage a streamed model's experts directly from the GGUF. |
+| `--dtype DTYPE` | `auto` | Set the activation dtype: `auto`, `bfloat16` or `float16`. |
+| `--rope-scaling`, `--rope-scale`, `--rope-freq-base`, `--rope-freq-scale`, `--yarn-orig-ctx` | The header's | Set the rope scaling, as in [run](#rope-scaling-flags). |
+| `--yarn-ext-factor`, `--yarn-attn-factor`, `--yarn-beta-slow`, `--yarn-beta-fast` | The header's | Set the YaRN factors, as in [run](#rope-scaling-flags). |
+
+The file holds these tensors:
+
+| Name | Shape and type | Meaning |
+|------|----------------|---------|
+| `<set>.mean` | `[n_layer, n_embd]` float32 | The mean over the set's prompts. Every set has one. |
+| `<set>.rows` | `[n_layer, n_prompts, n_embd]` float16 | One row for each prompt. Only the sets named in `--rows` have one. A value past the float16 range stops the run. |
+
+The file's metadata holds these keys, each a string:
+
+| Key | Meaning |
+|-----|---------|
+| `format` | `gmlx.capture` |
+| `arch` | The GGUF's `general.architecture`, such as `llama` |
+| `file`, `file_size` | The GGUF's file name, and its size in bytes over all its shards |
+| `sets` | A JSON map from set name to prompt count |
+| `positions` | The `--positions` value |
+| `think` | `on`, `off`, `default`, or the thinking mode of a config entry |
+| `adapters` | A JSON list with the `file` name, `strength` and loaded `sha256` of each adapter, or `[]` |
+| `gmlx_version` | The gmlx version that wrote the file |
+
+With `--json`, every line on stdout is a JSON object with an `event` key,
+and other output goes to stderr. This run on SmolLM2-135M-Instruct had two
+prompts in each set:
+
+```json
+{"event": "progress", "set": "harmful", "done": 1, "total": 2, "tokens": 36}
+{"event": "progress", "set": "harmful", "done": 2, "total": 2, "tokens": 34}
+{"event": "progress", "set": "harmless", "done": 1, "total": 2, "tokens": 33}
+{"event": "progress", "set": "harmless", "done": 2, "total": 2, "tokens": 36}
+{"event": "result", "out": "capture.safetensors", "n_layer": 30, "n_embd": 576, "sets": {"harmful": 2, "harmless": 2}, "rows": ["harmless"]}
+```
+
 ## gmlx distill
 
 `gmlx distill` trains a LoRA adapter for a small GGUF on a larger model's
@@ -1077,6 +1171,113 @@ outputs. [Distillation](distill.md) is the guide,
 [Distillation walkthrough](distill-walkthrough.md) runs one task end to end,
 and every action's flags are in the
 [Distillation reference](distill-reference.md).
+
+## gmlx kld
+
+`gmlx kld` measures how far a GGUF's next-token distribution is from a
+reference GGUF's over a text, such as a quant against the BF16 file of the
+same model. It also measures how far LoRA adapters at given strengths move
+a model. It computes the numbers that `llama-perplexity --kl-divergence`
+reports, so the two runtimes give comparable results.
+
+```sh
+gmlx kld Qwen3.5-9B-Q4_K_M.gguf --reference Qwen3.5-9B-BF16.gguf --text page.txt
+gmlx kld Qwen3.5-9B-Q4_K_M.gguf --reference Qwen3.5-9B-BF16.gguf --text page.txt \
+    --ctx 512 --chunks 16 --json
+gmlx kld Qwen3.5-9B-Q4_K_M.gguf --text page.txt \
+    --adapter a.gguf:0.5 --adapter a.gguf:1.5 --adapter b.gguf
+```
+
+Each `--adapter PATH[:STRENGTH]` flag is one scored point: MODEL with that
+adapter at that strength, 1 when left out. The flags and `--reference`
+decide what is scored:
+
+| Flags | Reference | Points |
+|-------|-----------|--------|
+| `--reference` | The reference GGUF | MODEL |
+| `--reference` and `--adapter` | The reference GGUF | MODEL, then MODEL with each adapter point |
+| `--adapter` | MODEL without adapters | Each adapter point |
+| Neither | None | The command stops. |
+
+With `--reference`, the reference loads first, alone, and scores the text
+into a temporary file. Then it unloads and MODEL loads with the adapters,
+so the two models never share memory. Without it, MODEL scores the
+reference and the points in one load. The temporary file needs about
+127 MB per chunk for a 248k vocabulary at `--ctx 512`. It goes in the
+temporary folder, which `TMPDIR` sets, and gmlx checks the free space
+before the reference loads.
+
+The text is cut into chunks of `--ctx` tokens, and each chunk is scored
+from its middle position to its second-last. The text must hold at least
+two chunks. The two GGUFs must have the same tokenizer, or the command
+stops before any load.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `MODEL`, positional | Required | Score this GGUF, or this model id or alias from the config. |
+| `--reference FILE` | MODEL without adapters, with `--adapter` | Score MODEL against this GGUF or config id. |
+| `--adapter PATH[:STRENGTH]` | None | Score MODEL with this GGUF LoRA adapter at this strength, 1 when left out. Repeat for more points. |
+| `--text FILE` | Required | Score this UTF-8 text. One trailing newline is dropped, as llama.cpp does. |
+| `--ctx N` | `512` | Cut the text into chunks of N tokens. |
+| `--chunks N` | Every whole chunk | Score at most N chunks. |
+| `--json` | Off | Print JSON lines in place of the table. |
+| `--config FILE` | The first default location | Resolve a model id against this config. |
+| `-v`, `--verbose` | Off | Print the full load diagnostics. |
+
+The placement flags apply to each model in turn, as the
+[Streaming flags](#streaming-flags) table describes: `--stream-experts`,
+`--stream-cpu`, `--stream-fast-disk`, `--prefill-feeder`,
+`--no-prefill-feeder`, `--decode-feeder`, `--no-decode-feeder`,
+`--gpu-keepwarm`, `--no-gpu-keepwarm`, `--moe-experts`,
+`--moe-expert-mass`, `--moe-expert-probe`, `--moe-miss-shed`,
+`--moe-layer-shed` and `--moe-prestage`.
+
+A model given as a config id loads with the placement of its config entry,
+`stream:` and the MoE settings, where you typed no placement flag. The
+command stops before any load when the entry sets `adapters` (or
+`adapter`) or `rope_scaling`, which `gmlx kld` does not apply. Pass the
+GGUF path to score the bare file, with `--adapter` for each adapter point.
+An adapter on the output head also stops the command, because the head
+runs in float32 without adapters.
+
+The table gives two numbers for each point, each with its standard error:
+
+| Name | Meaning |
+|------|---------|
+| Mean KLD | The mean KL divergence from the reference to MODEL over the scored positions, in nats. 0 means the same distribution. |
+| Same top p | The share of scored positions where both models rank the same token first, as a percent. |
+
+This run scores one adapter at two strengths against the bare model. The
+output starts with the full paths of MODEL and the reference, then ends
+with this table:
+
+```sh
+gmlx kld SmolLM2-135M-Instruct-Q8_0.gguf --text page.txt --ctx 128 --chunks 4 \
+    --adapter a.gguf:0.5 --adapter a.gguf
+```
+
+```text
+scored:     252 positions in 4 chunks of 128 tokens
+
+point       Mean KLD               Same top p
+a.gguf:0.5  0.030248 +/- 0.002329  95.238 +/- 1.344 %
+a.gguf:1    0.092942 +/- 0.007206  92.460 +/- 1.667 %
+```
+
+With `--json`, each line is one JSON object with an `event` key. A
+`progress` line comes after each chunk of each pass, and one `result` line
+for each point comes last, in the order of the table:
+
+| Key | Meaning |
+|-----|---------|
+| `event` | `progress` or `result`. |
+| `stage` | On a progress line, `reference` or `model`, the pass that scored the chunk. |
+| `chunk`, `chunks` | On a progress line, the chunk it scored and the chunk count. |
+| `model`, `reference` | The two GGUF paths. |
+| `adapter`, `strength` | On a result line, the adapter path and strength of the point, or `null` for MODEL without adapters. |
+| `mean_kld`, `mean_kld_unc` | Mean KLD and its standard error. |
+| `same_top_p`, `same_top_p_unc` | Same top p and its standard error, as a fraction from 0 to 1. |
+| `positions`, `chunks`, `ctx` | The positions scored, the chunks and the chunk length. |
 
 ## gmlx image
 
@@ -1599,6 +1800,8 @@ These verbs also use other codes:
 | `rm` | 1 when you declined or a file could not be deleted, 2 for an unknown id, a bad config, or a missing `--yes`. |
 | `ps` | 1 when the server answered with an error or is not gmlx, 3 when no server was reachable. |
 | `systemone` | 1 when the file, the request or the model was refused, or no server was reachable. |
+| `capture` | 1 when the model fails to load or the run fails, 2 when a flag, the model path, a prompt file or an adapter file is wrong. |
+| `kld` | 1 when a model or tokenizer fails to load, 2 when a flag, file or tokenizer match is wrong, the text is short, `TMPDIR` lacks space or a head cannot be scored. |
 | `doctor` | 1 when a check failed, 2 when the `--config` file does not exist. |
 | `launch` | The client's own status once it runs, else a code from the next table. |
 

@@ -5009,10 +5009,6 @@ def load_vlm_model(
     """
     _log = loadlog.verbose_print
 
-    # A text-only system message reaches a Gemma-4 template as a string;
-    # the processor built below enables it.
-    from gmlx.upstream.system_content_fix import install_system_content_fix
-    install_system_content_fix()
     # A prompt that opens with BOS is encoded without another.
     from gmlx.upstream.single_bos_fix import install_single_bos_fix
     install_single_bos_fix()
@@ -5198,8 +5194,6 @@ def load_vlm_model(
         if callable(bind):
             bind(model)
         _log("[vlm] processor: synthesized from GGUF (no download)")
-    from gmlx.upstream.system_content_fix import enable_system_content_fix
-    enable_system_content_fix(processor, model_type)
     collect_after_load()
     from gmlx.gen.prefill_decay import note_resident_model
 

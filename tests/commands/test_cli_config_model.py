@@ -582,3 +582,30 @@ def test_no_mmproj_refuses_mmproj(build):
     with pytest.raises(SystemExit) as exc:
         build().parse_args(["m.gguf", "--mmproj", "mm.gguf", "--no-mmproj"])
     assert exc.value.code == 2
+
+
+def _adapters_config(tmp_path, adapters):
+    for name in ("a.gguf", "b.gguf"):
+        (tmp_path / name).write_bytes(b"GGUF")
+    return _config(tmp_path, body=(
+        f"server:\n  model_dirs: [{tmp_path}]\n"
+        f"models:\n  m: {{path: m-Q4_K_M.gguf, adapters: {adapters}}}\n"))
+
+
+@pytest.mark.parametrize("adapters, want", [
+    ("[a.gguf, b.gguf]", [("a.gguf", 1.0), ("b.gguf", 1.0)]),
+    ("[{path: a.gguf, strength: 0.5}]", [("a.gguf", 0.5)]),
+    ("[{path: a.gguf, strength: 1}]", [("a.gguf", 1.0)]),
+])
+def test_an_entry_runs_with_its_adapters_and_strengths(tmp_path, adapters, want):
+    cfg, gguf = _adapters_config(tmp_path, adapters)
+    rc, args = _resolve(["m", "--config", cfg])
+    assert rc is None and args.gguf == gguf
+    assert args.adapter == [(str(tmp_path / p), st) for p, st in want]
+
+
+def test_a_typed_adapter_replaces_the_entry_adapters(tmp_path):
+    cfg, _ = _adapters_config(tmp_path, "[a.gguf, b.gguf]")
+    rc, args = _resolve(["m", "--config", cfg, "--adapter",
+                         f"{tmp_path / 'b.gguf'}:0.5"])
+    assert rc is None and args.adapter == [(str(tmp_path / "b.gguf"), 0.5)]

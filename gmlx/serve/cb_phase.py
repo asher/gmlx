@@ -219,6 +219,15 @@ def end_lift() -> None:
         _set(pre, None)
 
 
+def relift() -> None:
+    """Lift again for a later streamed load in one process: the CLI entry
+    lifted for the first load, and that install ended the lift. Nothing
+    while a lift holds, and nothing without a CLI lift (the user's pin,
+    or a placement from config, which lifts through ``lift``)."""
+    if _state["lifted"] and _state["pre_lift"] is None:
+        lift()
+
+
 def install_cb_phase_flips() -> bool:
     """Wrap the mlx-vlm engine's step entrypoints with phase flips."""
     if not _live():

@@ -19,7 +19,9 @@ This page covers chat models. Image models take LoRAs too, as
 - [Train an adapter](#train-an-adapter)
 - [Use the adapter](#use-the-adapter)
 - [Serving one base with many adapters](#serving-one-base-with-many-adapters)
+- [Mixing adapters per request](#mixing-adapters-per-request)
 - [Adapter format and interop](#adapter-format-and-interop)
+- [Adapters on MoE models](#adapters-on-moe-models)
 - [Limitations](#limitations)
 
 ## Training data
@@ -101,16 +103,39 @@ gmlx run qwen3-0.6b-q8 --prompt "What's the weather like today?"    # The model 
 Qwen3 is a thinking model, so `run` prints its reasoning first. The adapted
 model thinks briefly and then answers like a pirate.
 
-In `gmlx chat`, `/adapter off` and `/adapter on` turn the adapter off and
-on for the next turns, and `/adapter 0.5` scales it.
+`--adapter PATH:STRENGTH` applies the adapter at a strength, 1 when left
+out. Strength 0.5 adds half the adapter's change, 2 adds twice, and a
+negative strength subtracts it. `serve`, `run`, `chat`, `capture` and
+`kld` read the flag the same way: the text after the last colon is a
+strength only when it is a number, so a path that holds a colon needs no
+suffix. Repeat the flag to apply more adapters.
+
+```sh
+gmlx run qwen3-0.6b-q8 --adapter ~/models/pirate-lora.gguf:0.5 --prompt "What's the weather like today?"
+```
+
+In `gmlx chat`, the command-line strength applies from the first turn.
+A strength is absolute, never a multiple of another:
+
+| Command | Effect |
+|---------|--------|
+| `/adapter` | Print the strength in effect. |
+| `/adapter 0.5` | Run the adapter at strength 0.5 from the next turn. |
+| `/adapter on` | Go back to the command-line strength. |
+| `/adapter off` | Run the adapter at strength 0. |
 
 `gmlx serve` with `--adapter` needs no config file. It serves the adapted
 model under an id from the model's file name, here `qwen3-0.6b`, and the
-model without the adapter as `qwen3-0.6b-base`:
+model without the adapter as `qwen3-0.6b-base`. The strength is the
+default for requests that set none, as an entry's
+[`adapters`](#mixing-adapters-per-request) strength is:
 
 ```sh
-gmlx serve ~/models/unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf
+gmlx serve ~/models/unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf --adapter ~/models/pirate-lora.gguf:0.8
 ```
+
+To measure how far an adapter moves the model at a few strengths, run
+[`gmlx kld`](cli.md#gmlx-kld) with one `--adapter` flag for each strength.
 
 ## Serving one base with many adapters
 
@@ -130,7 +155,7 @@ models:
 ```
 
 The model loads once, and a request applies the adapter of the id it
-names. Nothing else in the API concerns adapters:
+names:
 
 ```sh
 curl -s http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -143,7 +168,7 @@ Requests to different ids batch together and do not wait for each other.
 To keep one shared copy:
 
 - Keep every other setting the same across the ids, including
-  `speculative`. An id that differs in more than `adapter` loads its own
+  `speculative`. An id that differs in more than its adapters loads its own
   copy. A shared [profile](config.md#profiles) keeps the settings equal.
 - Write a relative adapter path as you would a model path. It resolves in
   [`server.model_dirs`](config.md#servermodel_dirs).
@@ -163,21 +188,126 @@ To compare adapters in one conversation, run
 `gmlx chat --server qwen3-0.6b-pirate` and switch with
 [`/model <id>`](chat.md#undo-retry-and-sessions).
 
+The adapter files count in the copy's memory at twice their size, beside
+the model, when the server checks whether the model fits.
+
+## Mixing adapters per request
+
+Give each adapter its own id, as in
+[Serving one base with many adapters](#serving-one-base-with-many-adapters),
+when clients pick an adapter by model name. Use one id whose requests set
+the strengths, as below, to compare or blend adapters without a new id for
+each mix.
+
+An entry can load several adapters, each at a default strength. List them
+in [`adapters`](config.md#modelsadapters). A bare path runs at strength 1:
+
+```yaml
+models:
+  qwen3-0.6b-mix:
+    path: unsloth__Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf
+    adapters:
+      - {path: pirate-lora.gguf, strength: 0}
+      - {path: formal-lora.gguf, strength: 0.5}
+```
+
+A request sets the strength of any of these adapters for itself only.
+Requests at different strengths batch together, and a strength change does
+not reload the model. The chat, completions, Responses and Messages routes
+take two fields, and so do `/v1/systemone` and `/v1/prewarm`:
+
+| Field | Shape | Adapters the request does not list |
+|-------|-------|-------------------------------------|
+| `adapters` | `[{"id": "pirate-lora.gguf", "strength": 0.8}]`, or a bare id for strength 1 | Keep the entry's default strength |
+| `lora` | `[{"id": 0, "scale": 0.8}]`, as in llama-server | Run at 0. An empty list keeps the defaults. |
+
+```sh
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "qwen3-0.6b-mix",
+  "adapters": [{"id": "pirate-lora.gguf", "strength": 0.8}],
+  "messages": [{"role": "user", "content": "What is the weather like today?"}]
+}'
+```
+
+An `adapters` id is one of these:
+
+- The adapter's path as the config writes it, such as `loras/pirate-lora.gguf`.
+- The file name, with or without its extension, when only one adapter of
+  the entry has it.
+- A path inside a model folder that is the same file as one of the
+  entry's adapters.
+
+A `lora` id is the adapter's index in the entry's `adapters` list, from 0.
+`/v1/models` lists each entry's adapters with their `index`, file `name`,
+default `strength` and `sha256`. The `sha256` is the hash of the bytes the
+loaded copy read, and it is `null` while the model is not loaded.
+
+A request gets a 400 in these cases:
+
+- It sets both `adapters` and `lora`.
+- An id is an absolute path, starts with `~`, or has a `..` part.
+- An id names no adapter of the entry, including one of another entry
+  on the same model, or a file name that two adapters share.
+- An id is listed twice, or a strength is not a number from -100 to 100.
+- The entry loads no adapters and a field is not empty.
+
+A request cannot add an adapter the entry does not load.
+
+`lora` differs from llama-server in three ways: a bad or repeated id gets a
+400, a `lora` item needs its `scale`, and the server has no
+`/lora-adapters` route for global strengths.
+
 ## Adapter format and interop
 
 Adapters use the llama.cpp GGUF LoRA format. gmlx loads PEFT adapters
 converted with llama.cpp's `convert_lora_to_gguf.py` and the GGUF adapters
 published for llama.cpp, and llama.cpp loads gmlx adapters with `--lora`.
+An adapter with no `adapter.lora.alpha`, or an alpha of 0, applies at its
+strength with no alpha scaling, as in llama.cpp.
+
+A PEFT adapter that trains `embed_tokens` holds a `token_embd.weight`
+pair. gmlx adds its delta to each looked-up row before the model scales the
+rows, where llama.cpp adds it. `gmlx train` writes no such pair.
+
+## Adapters on MoE models
+
+An adapter can change the down projections of MoE experts, but not their
+gate or up projections.
+
+On a model whose MoE blocks run fused, such as Qwen3.5 and Qwen3.6 MoE, a
+block takes its slower unfused path only in a step where a request has one
+of the block's adapters on. In `gmlx serve` the other steps keep the fused
+speed. `gmlx run`, `--bench` included, and `gmlx chat` run every step of
+an adapted block unfused.
+
+An expert adapter on such a model needs the experts in memory. A load that
+streams the experts, such as one with `--stream-experts` or a model too
+large for memory, refuses it. To stream them anyway, set
+`GMLX_FUSED_MOE_BLOCK=0`, which loads the blocks unfused:
+
+```sh
+GMLX_FUSED_MOE_BLOCK=0 gmlx serve --config ~/.config/gmlx/gmlx.yaml
+```
+
+On gpt-oss and on native-FP expert stacks, an expert adapter needs
+`GMLX_FUSED_MOE=0`, which loads every MoE block unfused.
 
 ## Limitations
 
 - Only LoRA adapters work. DoRA on a quantized model is not supported.
-- An adapter can change the dense linear layers and the down projections
-  of MoE experts. Loading refuses an adapter that changes the gate or up
-  projections of experts, the embeddings, or any expert weight on a model
-  that runs a fused MoE block, such as Gemma and gpt-oss.
+- An adapter can change the dense linear layers, the token embedding and
+  the [expert down projections](#adapters-on-moe-models).
+- A token embedding pair needs a model with its own output head, so Gemma 4
+  and a few other models refuse it before they load.
 - Adapters work on text models only, so `--adapter` does not combine with
   `--mmproj`.
+- `gmlx run` and `gmlx chat` apply an entry's adapters at the entry's
+  strengths. In `gmlx chat`, `/adapter S` sets every adapter to S.
+- A speculative drafter runs without the adapters' output head and token
+  embedding pairs, which can lower the share of accepted drafts. The output
+  stays the same.
+- An image model that borrows a chat model as its text encoder runs the
+  encoder with every adapter off.
 - `--grad-checkpoint` is refused on Kimi K3 and DeepSeek-V4.1.
 - The loader checks that the adapter is for the model's architecture, but
   not that the model is the one it was trained on.

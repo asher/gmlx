@@ -159,9 +159,9 @@ def revise(model_field, prompt: str, requested: bool | None = None,
 
 def _upsampler_identity(up: str) -> tuple:
     """What tells one chat model of the pool from another: the load
-    signature of its resolved entry, its adapter and its template
-    controls. A config reload that changes any of them writes new
-    captions."""
+    signature of its resolved entry, its adapters with their default
+    strengths and its template controls. A config reload that changes
+    any of them writes new captions."""
     from .residency import _http_from_resolver_error
 
     try:
@@ -170,7 +170,8 @@ def _upsampler_identity(up: str) -> tuple:
             serving.UnknownProfile, serving.NoModelSpecified) as e:
         raise (_http_from_resolver_error(e) or e) from e
     kwargs = getattr(spec, "chat_template_kwargs", None) or {}
-    return (spec.load_signature(), getattr(spec, "adapter", None),
+    adapters = tuple((a.path, a.strength) for a in getattr(spec, "adapter_list", ()))
+    return (spec.load_signature(), adapters,
             tuple(sorted((k, repr(v)) for k, v in kwargs.items())),
             repr(getattr(spec, "thinking", None)))
 
@@ -200,12 +201,13 @@ def _chat_in_context(up: str, req, stop) -> str:
     token_iter = None
     try:
         # Every sampling field is set, so no profile of the chat model
-        # changes the decode.
+        # changes the decode. A null budget still takes the environment's.
         request = schemas.ChatRequest(
             model=up, messages=messages, max_tokens=req.max_tokens,
             temperature=req.temperature, top_p=1.0, top_k=0, min_p=0.0,
             presence_penalty=req.presence_penalty, repetition_penalty=None,
             frequency_penalty=None, xtc_probability=0.0,
+            thinking_budget=None, thinking_budget_message=None,
             thinking=req.thinking, stream=False)
         gen_args = app_mod._build_gen_args(request, processor)
         gen_args.logprobs = False

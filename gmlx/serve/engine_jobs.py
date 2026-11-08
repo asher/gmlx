@@ -14,8 +14,8 @@ loop calls between decode steps, takes the job out of the queue and runs
 one step per call, so chat keeps decoding while a job runs. The job must
 leave the engine as it found it: it never drains cancellations, never
 touches the stop tokens and never reseeds the RNG. Each step runs under
-the wired limit and the model's prefill command-buffer caps, and
-restores any rope position state it changed. An engine cancel for the
+the wired limit, the model's prefill command-buffer caps and a text row's
+rope position state, and puts the chat rope state back after. An engine cancel for the
 job's uid never reaches it, since the batch loop drains that uid and
 finds no row; the job's stop event is its only cancel.
 
@@ -188,16 +188,34 @@ def _take_queued(rg) -> list:
     return found
 
 
+def _rope_holders(model) -> list:
+    return [h for h in (model, getattr(model, "language_model", None))
+            if h is not None]
+
+
+def seed_text_rope(model) -> None:
+    """Put the rope state of a text row on ``model``: no stored positions
+    and zero int32 deltas, on each holder that has the field. A forward
+    then numbers its chunk from the cache offset."""
+    for holder in _rope_holders(model):
+        if hasattr(holder, "_position_ids"):
+            holder._position_ids = None
+        if hasattr(holder, "_rope_deltas"):
+            holder._rope_deltas = mx.zeros((1, 1), dtype=mx.int32)
+
+
 @contextlib.contextmanager
 def _step_scope(model):
     """One job step: the wired limit, the model's prefill command-buffer
-    caps, and the rope position state of multimodal models put back
-    afterwards."""
+    caps, and the rope position state of a text row. A step starts with no
+    stored positions and zero deltas, the state a text forward leaves, so
+    each chunk is numbered from its cache offset; the chat state is put
+    back afterwards."""
     from gmlx.serve import cb_phase
 
-    holders = [model, getattr(model, "language_model", None)]
-    saved = [(h, name, getattr(h, name)) for h in holders if h is not None
+    saved = [(h, name, getattr(h, name)) for h in _rope_holders(model)
              for name in _ROPE_STATE if hasattr(h, name)]
+    seed_text_rope(model)
     before = cb_phase.snapshot()
     cb_phase.flip("prefill", model)
     wired: Any = contextlib.nullcontext()
@@ -244,8 +262,26 @@ def _advance(rg, run: _StepJob) -> bool:
         run.rqueue.put(_JobError(e if isinstance(e, JobCancelled)
                                  else JobCancelled(str(e))))
     except Exception as e:  # noqa: BLE001 - forwarded to the waiting caller
+        _reclaim_after(e)
         run.rqueue.put(_JobError(e))
     return True
+
+
+def _reclaim_after(e: BaseException) -> None:
+    """A step hit a memory error: drain the engine and free the
+    allocator's cache, as the tick guard does after a failed tick, so the
+    next tick does not meet the same pressure."""
+    from gmlx.eval_guard import drain_for
+    from gmlx.serve.tick_guard import is_memory_error
+
+    if not is_memory_error(e):
+        return
+    try:
+        drain_for("engine-job")
+        mx.clear_cache()
+    except Exception:  # noqa: BLE001 - the caller still gets the first error
+        _log.warning("engine job: reclaim after a memory error failed",
+                     exc_info=True)
 
 
 def _install_step_jobs() -> None:

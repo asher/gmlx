@@ -5,7 +5,6 @@ and the engine is a ResponseGenerator shell, so no model loads."""
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import importlib
 import logging
@@ -587,16 +586,6 @@ def test_the_route_registers_both_paths_idempotently(app):
     assert paths.count("/v1/prewarm") == 1 and paths.count("/prewarm") == 1
 
 
-def test_a_disconnect_sets_the_stop_event():
-    class _Req:
-        async def is_disconnected(self):
-            return True
-
-    stop = threading.Event()
-    asyncio.run(route._watch_disconnect(_Req(), stop))
-    assert stop.is_set()
-
-
 # the letter readout on a text model
 
 def test_a_text_model_answers_with_the_letter_readout(app, caplog):
@@ -732,7 +721,7 @@ def test_a_letter_decision_past_its_deadline_is_a_504(app, monkeypatch):
 
 
 def test_the_rows_scope_publishes_the_request_scales():
-    scope = route._rows_scope((1.0,))
+    scope = lora_rows.rows_scope((1.0,))
     with scope(3):
         assert lora_rows.row_scales() is None
     lora_rows.configure("rows", 2)
@@ -824,3 +813,85 @@ def test_prewarm_checks_its_body(app, body, status):
 def test_prewarm_on_a_diffusion_model_is_a_400(app):
     r = app.use().post("/v1/prewarm", json={"state": "s"})
     assert r.status_code == 400 and "letter readout" in r.text
+
+
+# adapters and lora
+
+
+@pytest.fixture
+def adapted(app, tmp_path):
+    """jev-latest with two adapters, resolved as the residency seam does."""
+    import hashlib
+
+    from gmlx.load.adapter import AdapterIdentity
+
+    serving.clear_resolved_models()
+    ids = []
+    for name in ("a.gguf", "b.gguf"):
+        (tmp_path / name).write_bytes(b"GGUF" + name.encode())
+        data = (tmp_path / name).read_bytes()
+        ids.append(AdapterIdentity(str(tmp_path / name),
+                                   hashlib.sha256(data).hexdigest(), len(data)))
+    serving.register_resolved_models(build_config({
+        "server": {"host": "127.0.0.1", "port": 8080},
+        "models": {"jev-latest": {"path": "/abs/jev.gguf", "adapters": [
+            {"path": str(tmp_path / "a.gguf"), "strength": 0},
+            str(tmp_path / "b.gguf")]}}}))
+
+    def get_cached_model(model, *a, **k):
+        app.loaded.append(model)
+        serving.set_active_spec(serving.resolve_request_model(model)[1])
+        return None, None, None
+
+    _APP.get_cached_model = get_cached_model
+    yield tuple(ids)
+    serving.clear_resolved_models()
+
+
+def test_equal_strengths_key_one_prefix_on_both_routes(app, adapted, monkeypatch):
+    salts = []
+
+    def prefixes(rg, reader, lora_salt, tenant):
+        salts.append(lora_salt)
+        return _Kept()
+    monkeypatch.setattr(route, "_prefixes", prefixes)
+    client = app.use(diffusion_model=False)
+    object.__setattr__(app.rg.model, "gmlx_adapter_identities", adapted)
+    state = _letter_ticket()["state"]
+    same = ({"adapters": [{"id": "a.gguf", "strength": 0.5}]},
+            {"lora": [{"id": 0, "scale": 0.5}, {"id": 1, "scale": 1}]})
+    for fields in same:
+        assert client.post("/v1/systemone", json=_letter_ticket(**fields)).status_code == 200
+        r = client.post("/v1/prewarm", json={"state": state, **fields})
+        assert r.status_code == 200, r.text
+    assert len(salts) == 4 and len(set(salts)) == 1 and salts[0] != 0
+    client.post("/v1/prewarm", json={"state": state, "lora": [{"id": 1, "scale": 0}]})
+    client.post("/v1/prewarm", json={"state": state,
+                                     "adapters": [{"id": "a", "strength": 0.25}]})
+    assert salts[-2] == 0 and salts[-1] not in (0, salts[0])
+
+
+@pytest.mark.parametrize("path", ["/v1/systemone", "/v1/prewarm"])
+def test_a_bad_adapter_field_is_a_400_before_any_job(app, adapted, path):
+    client = app.use(diffusion_model=False)
+    body = (_letter_ticket(adapters=["c.gguf"]) if path == "/v1/systemone"
+            else {"state": "s", "adapters": ["c.gguf"]})
+    r = client.post(path, json=body)
+    assert r.status_code == 400, r.text
+    assert "adapter 'c.gguf' is not an adapter of model 'jev-latest'" in r.text
+    assert _LetterReader.built == []
+
+
+def test_an_adapted_decision_on_a_copy_without_identities_is_a_500(app, adapted):
+    client = app.use(diffusion_model=False)
+    r = client.post("/v1/systemone", json=_letter_ticket(adapters=["a.gguf"]))
+    assert r.status_code == 500, r.text
+    assert "has no loaded adapter identities; this is a gmlx defect" in r.text
+
+
+def test_a_lora_field_on_a_diffusion_model_is_a_400(app):
+    client = app.use()
+    r = client.post("/v1/systemone", json=_ticket(lora=[{"id": 0, "scale": 1}]))
+    assert r.status_code == 400, r.text
+    assert "loads no adapters" in r.text
+    assert client.post("/v1/systemone", json=_ticket(lora=[], adapters=None)).status_code == 200

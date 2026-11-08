@@ -13,6 +13,8 @@ import os
 import sys
 import time
 
+from .adapter_flag import add_adapter_flag, adapter_paths, duplicate_adapter
+
 
 def _prog() -> str:
     """The command name shown in help/usage text - always ``gmlx`` (the console
@@ -1091,13 +1093,11 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
         action="store_true",
         help="Pair no speech companion, even one found beside the model.",
     )
-    ap.add_argument(
-        "--adapter",
-        default=None,
-        metavar="PATH",
-        help="GGUF LoRA adapter applied live over the base at load - "
-        "base stays K-quant, no merge. Text path only (not "
-        "--mmproj / --speculative).",
+    add_adapter_flag(
+        ap,
+        help="GGUF LoRA adapter applied live over the base at load, at "
+        "this strength (default 1); base stays K-quant, no merge. Repeat "
+        "for more adapters. Text path only (not --mmproj).",
     )
 
     add_speculative_args(ap)
@@ -1303,6 +1303,7 @@ def _run_bench(args) -> int:
     except argparse.ArgumentTypeError as e:
         print(str(e), file=sys.stderr)
         return 2
+    _check_cli_adapter(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         model, _config, tok = load_model(
             args.gguf,
@@ -1315,6 +1316,7 @@ def _run_bench(args) -> int:
             verbose=args.verbose,
         )
     print_family_note(args)
+    _apply_cli_adapter(args, model, _config)
     _apply_placement(args, model)
     decode_tokens = args.bench_decode_tokens or _BENCH_DECODE["bench"]
     print(
@@ -1395,6 +1397,7 @@ def _run_bench_depths(args) -> int:
     check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
                   streaming=getattr(args, "stream_experts", False))
     drafter = None
+    _check_cli_adapter(args, mtp=bool(speculative))
     if speculative:
         with loadlog.load_ui(args.verbose, args.gguf):
             model, drafter, _config, tok = load_mtp_model(
@@ -1406,6 +1409,7 @@ def _run_bench_depths(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not getattr(args, "stream_experts", False),
+                before_wire=_cli_adapter_hook(args),
             )
     else:
         with loadlog.load_ui(args.verbose, args.gguf):
@@ -1419,7 +1423,7 @@ def _run_bench_depths(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
             )
-    _apply_cli_adapter(args, model, _config)
+        _apply_cli_adapter(args, model, _config)
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
 
@@ -1484,25 +1488,95 @@ def _run_bench_depths(args) -> int:
     return 0
 
 
-def _apply_cli_adapter(args, model, config) -> None:
-    """``--adapter`` on the run/chat/bench trunks: install the live GGUF LoRA
-    on the text trunk (``model.language_model`` on an MTP target, whose leaf
-    paths the adapter remap targets) before placement, so the installer sees
-    the plain SwitchGLU owners (it refuses offload/fusion wrappers in the
-    owner's MRO). The base arch gates the adapter up front: a mismatched
-    family fails with "adapter arch X != base arch Y", not a missing-targets
-    install error."""
+def _check_cli_adapter(args, *, mtp: bool = False) -> None:
+    """``--adapter`` on the run/chat/bench trunks: refuse, from the base and
+    adapter headers and before the load, an adapter the base cannot take
+    (an embedding adapter on a tied model, say, or expert LoRA on a fused
+    MoE block that streams its experts). ``mtp`` is the load's MTP choice.
+    Exits with the reason."""
     if not getattr(args, "adapter", None):
+        return
+    from gmlx.load.adapter import adapter_load_refusal
+
+    stream = ("experts" if getattr(args, "stream_experts", False)
+              else "cpu" if getattr(args, "stream_cpu", False) else None)
+    paths = [os.path.abspath(os.path.expanduser(p)) for p, _ in args.adapter]
+    try:
+        adapter_load_refusal(args.gguf, paths, stream=stream, mtp=mtp)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}") from None
+
+
+def _apply_cli_adapter(args, model, config, *, fold: bool = True) -> None:
+    """``--adapter`` on the run/chat/bench trunks: install each live GGUF
+    LoRA, adapter i in row-channel slot i, on the text trunk
+    (``model.language_model`` on an MTP target, whose leaf paths the
+    adapter remap targets) before placement, so the installer sees the
+    plain SwitchGLU owners (it refuses offload wrappers in the owner's
+    MRO). An MTP load runs it through ``before_wire``. A trunk that already
+    carries these adapters is left as is. The base arch gates the adapter
+    up front: a mismatched family fails with "adapter arch X != base arch
+    Y", not a missing-targets install error.
+
+    ``fold`` multiplies each adapter's strength into its static scale, for
+    run, which publishes no row vector. Chat installs at strength 1 and
+    publishes the strengths instead, so ``/adapter`` can change them."""
+    items = getattr(args, "adapter", None)
+    if not items:
         return
     from gmlx.load.adapter import apply_gguf_adapter
     from gmlx.load.discovery import header_meta
 
-    adapter = os.path.abspath(os.path.expanduser(args.adapter))
+    paths = tuple(os.path.abspath(os.path.expanduser(p)) for p, _ in items)
+    trunk = getattr(model, "language_model", model)
+    if trunk.__dict__.get("_kq_cli_adapter") == paths:
+        return
     base_arch = (getattr(args, "arch", None)
                  or (header_meta(args.gguf) or {}).get("arch"))
-    trunk = getattr(model, "language_model", model)
-    n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch)
-    print(f"[adapter] applied {n}-module GGUF LoRA from {adapter}")
+    import gmlx.load.loadlog as loadlog
+
+    for slot, (adapter, (_p, strength)) in enumerate(zip(paths, items)):
+        n = apply_gguf_adapter(trunk, config, adapter, base_arch=base_arch,
+                               slot=slot, strength=strength if fold else 1.0)
+        loadlog.note(f"[adapter] applied {n}-module GGUF LoRA from {adapter} "
+                     f"at strength {strength:g}")
+    object.__setattr__(trunk, "_kq_cli_adapter", paths)
+
+
+def _streamed_mtp(args) -> bool:
+    """Whether a streamed run takes the MTP path, as ``resolve_speculative``
+    decides it, without its side effects. Streaming turns auto MTP off, so
+    only an explicit choice counts."""
+    if getattr(args, "no_speculative", False):
+        return False
+    if getattr(args, "native_mtp", False) or getattr(args, "speculative", None):
+        return True
+    return bool(getattr(args, "draft_gguf", None)
+                and not getattr(args, "draft_gguf_auto", False))
+
+
+def _streamed_adapter_refusal(args, mtp: bool | None = None) -> str | None:
+    """Why ``--adapter`` cannot load with the requested expert streaming,
+    from the headers alone, or None. ``mtp`` is the caller's MTP choice,
+    when it has made one."""
+    if not getattr(args, "adapter", None) or not (
+            getattr(args, "stream_experts", False)
+            or getattr(args, "stream_cpu", False)):
+        return None
+    from gmlx.load.adapter import fused_expert_lora_refusal
+
+    return fused_expert_lora_refusal(
+        args.gguf, [os.path.expanduser(p) for p, _ in args.adapter],
+        mtp=_streamed_mtp(args) if mtp is None else mtp)
+
+
+def _cli_adapter_hook(args, *, fold: bool = True):
+    """The ``before_wire`` hook of an MTP load: the ``--adapter`` install on
+    the trunk before the table install and the wire, or None."""
+    if not getattr(args, "adapter", None):
+        return None
+    return lambda trunk, config: _apply_cli_adapter(args, trunk, config,
+                                                    fold=fold)
 
 
 def _apply_placement(args, model) -> None:
@@ -1674,6 +1748,7 @@ def _run_generate(args) -> int:
         from gmlx.gen.generation import generate_speculative
         from gmlx.spec.mtp_load import load_mtp_model
 
+        _check_cli_adapter(args, mtp=True)
         with loadlog.load_ui(args.verbose, args.gguf):
             model, drafter, _config, tok = load_mtp_model(
                 args.gguf,
@@ -1684,8 +1759,8 @@ def _run_generate(args) -> int:
                 rope_override=rope_override_from_args(args),
                 verbose=args.verbose,
                 wire=not args.stream_experts,
+                before_wire=_cli_adapter_hook(args),
             )
-        _apply_cli_adapter(args, model, _config)
         # Streaming placement applies to the target trunk only (the drafter
         # block is small and stays resident); the verify calls ride the
         # decode-feeder arena like any small chunk.
@@ -1738,6 +1813,7 @@ def _run_generate(args) -> int:
 
     import gmlx.load.loadlog as loadlog
 
+    _check_cli_adapter(args)
     with loadlog.load_ui(args.verbose, args.gguf):
         model, config, tok = load_model(
             args.gguf,
@@ -2214,7 +2290,8 @@ def _apply_resolved_to_args(args, rm, explicit: set) -> list[str]:
          "reasoning_effort")
     if not getattr(args, "no_mmproj", False):
         _set("mmproj", rm.mmproj, "mmproj")
-    _set("adapter", rm.adapter, "adapter")
+    items = tuple(getattr(rm, "adapter_list", ()) or ())
+    _set("adapter", [(a.path, a.strength) for a in items] or None, "adapter")
     _set("draft_gguf", rm.draft_gguf, "draft_gguf")
     if not getattr(args, "no_asr", False):
         _set("asr", getattr(rm, "asr", None), "asr")
@@ -3065,11 +3142,15 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     for flag, val in (
         ("--mmproj", args.mmproj),
         ("--draft-gguf", args.draft_gguf),
-        ("--adapter", args.adapter),
+        *(("--adapter", p) for p in adapter_paths(args.adapter)),
     ):
         if val and not os.path.exists(os.path.expanduser(val)):
             print(f"error: {flag}: no such file: {val}", file=sys.stderr)
             return 2
+    twice = duplicate_adapter(args.adapter)
+    if twice is not None:
+        print(f"error: --adapter: {twice} is given twice", file=sys.stderr)
+        return 2
     normalize_kv_scheme(args)
     rc = apply_family_defaults(args, parser, argv)
     if rc is not None:
@@ -3077,6 +3158,10 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     apply_transcription_defaults(args, parser, argv)
     # After the config/family overlays: either may have seeded a cap.
     resolve_max_tokens(args)
+    why = _streamed_adapter_refusal(args)
+    if why:
+        print(f"error: --adapter: {why}", file=sys.stderr)
+        return 2
     from gmlx.load.arch_table import UnsupportedArchError
     from gmlx.load.preflight import UnsupportedCodecError
 
@@ -3147,8 +3232,8 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
 # Verbs route to the per-area entry points (run == this module's `main`; serve /
 # init / sync-models / launch / stop / restart / status / logs / service ==
 # server.main; validate / pull / list / ps / profiles == manage; chat == chat;
-# train == train; distill == distill; image == image; comfyui == comfyui;
-# systemone == systemone).
+# train == train; distill == distill; kld == kld; image == image;
+# comfyui == comfyui; systemone == systemone).
 # The macOS menu bar is `gmlx launch menubar`, not a top-level verb.
 _VERBS = (
     "run",
@@ -3172,7 +3257,9 @@ _VERBS = (
     "profiles",
     "doctor",
     "train",
+    "capture",
     "distill",
+    "kld",
     "image",
     "video",
     "comfyui",
@@ -3214,7 +3301,9 @@ def _print_umbrella_help(prog: str = "gmlx") -> None:
         "(add an id to resolve one model)\n"
         "  doctor       check the runtime, config, models, and services in one pass\n"
         "  train        finetune a LoRA adapter on a GGUF base (writes a GGUF adapter)\n"
+        "  capture      record the residual stream after each block over prompt files\n"
         "  distill      offline distillation: cache a teacher, align, train, eval\n"
+        "  kld          KL divergence over a text from a reference GGUF to a model\n"
         "  image        generate images from GGUF diffusion models\n"
         "  video        generate clips with sound from GGUF diffusion models\n"
         "  comfyui      put the gmlx node pack into ComfyUI (install, uninstall, status)\n"
@@ -3361,21 +3450,29 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
             return server_main(
                 rest if verb == "serve" else [verb, *rest], prog=f"{prog} {verb}"
             )
-        if verb in ("train", "distill"):
+        if verb in ("train", "distill", "kld"):
             # MLX multiplies float32 matrices at TF32 precision on M5-class
             # GPUs by default; the chunked gated delta training scan needs
-            # exact float32 (gmlx.tune.gdn.f32_gemm_exact), and LoRA's
-            # float32 rank matmuls are small. setdefault keeps an explicit
-            # override in charge.
+            # exact float32 (gmlx.tune.gdn.f32_gemm_exact), LoRA's float32
+            # rank matmuls are small, and kld's head is float32 to keep the
+            # logits exact. setdefault keeps an explicit override in charge.
             os.environ.setdefault("MLX_ENABLE_TF32", "0")
         if verb == "train":
             from .train import cmd_train
 
             return cmd_train(rest, prog=f"{prog} train")
+        if verb == "capture":
+            from .capture import cmd_capture
+
+            return cmd_capture(rest, prog=f"{prog} capture")
         if verb == "distill":
             from .distill import cmd_distill
 
             return cmd_distill(rest, prog=f"{prog} distill")
+        if verb == "kld":
+            from .kld import cmd_kld
+
+            return cmd_kld(rest, prog=f"{prog} kld")
         if verb == "image":
             from .image import cmd_image
 

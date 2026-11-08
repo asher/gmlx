@@ -202,10 +202,10 @@ def test_first_close_carries_wrap_phrase_recloses_terse():
     tokens = [1, 2, START]
     p(mx.array(tokens), _logits())
     forced = []
-    for tid in (50, 51, W1, W2, END):
+    for tid in (50, W1, W2, END):
         tokens.append(tid)
         forced.append(_argmax_if_forced(p(mx.array(tokens), _logits())))
-    assert forced == [None, W1, W2, END, None]  # phrase, then the close
+    assert forced == [W1, W2, END, None]  # phrase, then the close
     tokens.append(60)  # an answer token lands
     p(mx.array(tokens), _logits())
     # Spent-mode reopen: the terse reclose, not the phrase again.
@@ -409,8 +409,7 @@ def test_channel_forced_close_floor_and_instant_reclose():
         eos_ids=[EOS],
     )
     tokens = [1, 2]
-    p(mx.array(tokens), _logits())  # baseline
-    tokens.append(50)
+    # Budget 0 in an open block: the first step is already forced.
     assert _argmax_if_forced(p(mx.array(tokens), _logits())) == NL
     tokens.append(NL)
     assert _argmax_if_forced(p(mx.array(tokens), _logits())) == CH_CLOSE
@@ -622,8 +621,8 @@ def test_prompt_opens_thinking_uses_tokenizer_markers():
     assert prompt_opens_thinking(
         "x <|channel>thought done <channel|> answer", tokenizer=tok
     ) is False
-    # the default <think> spelling must NOT match this model's prompt
-    assert prompt_opens_thinking("x <|channel>thought reasoning") is False
+    # With no tokenizer every known pair is scanned, gemma's among them.
+    assert prompt_opens_thinking("x <|channel>thought reasoning") is True
 
 
 def test_prompt_open_think_tag_returns_model_spelling():
@@ -838,10 +837,10 @@ def test_make_mtp_finish_hook_factory():
 
 def test_mtp_hook_budget_trips_on_its_own():
     h = _mtp_hook(start_in_thinking=True, budget=3, forced_ids=[8, 9, END])
-    for t in (50, 51, 52):
+    for t in (50, 51):
         h.observe(t)
-    assert h.take_forced() is None  # count == budget: not over yet
-    h.observe(53)
+    assert h.take_forced() is None  # under the budget
+    h.observe(52)
     assert h.take_forced() == [8, 9, END]  # budget phrase, not the ^T one
     for t in (8, 9, END):
         h.observe(t)
@@ -862,11 +861,11 @@ def test_mtp_hook_natural_close_disarms_budget():
 def test_mtp_hook_reopen_resets_count():
     h = _mtp_hook(start_in_thinking=False, budget=3)
     h.observe(START)
-    for t in (50, 51, 52):
+    for t in (50, 51):
         h.observe(t)
-    assert h.take_forced() is None  # at budget, not over
-    h.observe(53)
-    assert h.take_forced() is not None  # over
+    assert h.take_forced() is None  # under the budget
+    h.observe(52)
+    assert h.take_forced() is not None  # at the budget
 
 
 def test_make_mtp_finish_hook_budget_variants():
@@ -969,10 +968,9 @@ def test_atem_budget_caps_reasoning_only(template):
             _ATEM_PROMPT, tokenizer=tok))
     rest = _COMMENTARY + _ANSWER
     text = _atem_run(p, _REASON + rest, rest, tok=tok)
-    # Three reasoning tokens pass, the fourth trips the cap, and the close
-    # is the wrap phrase and the whole end marker. Commentary and answer
-    # then run untouched.
-    assert text == (" to=self<|message|>Thinking hard about"
+    # Three reasoning tokens pass, then the close is the wrap phrase and
+    # the whole end marker. Commentary and answer then run untouched.
+    assert text == (" to=self<|message|>Thinking hard"
                     + BUDGET_WRAP_PHRASE + "<|eom|>" + rest)
     assert p._spent and not p.done
 
@@ -984,7 +982,7 @@ def test_atem_budget_is_spent_on_reasoning_after_commentary():
                                        start_in_thinking=False)
     head = " to=commentary<|message|>Hello world<|eom|><|start|>assistant"
     text = _atem_run(p, head + _REASON + _ANSWER, _ANSWER)
-    assert text == (head + " to=self<|message|>Thinking hard about"
+    assert text == (head + " to=self<|message|>Thinking hard"
                     + BUDGET_WRAP_PHRASE + "<|eom|>" + _ANSWER)
 
 
@@ -1013,11 +1011,11 @@ def test_atem_mtp_hook_counts_reasoning_only():
     tok = at.AtemTokenizer()
     h = make_mtp_finish_hook(tok, budget=3,
                              prompt_ids=tok.encode(_ATEM_PROMPT))
-    for t in tok.encode(" to=self<|message|>Thinking hard"):
+    for t in tok.encode(" to=self<|message|>Thinking"):
         h.observe(t)
-    assert h.in_thinking and h.count == 3
+    assert h.in_thinking and h.count == 2
     assert h.take_forced() is None
-    h.observe(tok.encode(" about")[0])
+    h.observe(tok.encode(" hard")[0])
     forced = h.take_forced()
     assert forced is not None and forced[-1] == 200007
     for t in forced:
@@ -1159,3 +1157,339 @@ def test_k2_high_close_has_no_alias():
     p = make_thinking_budget_processor(
         tok, 4, start_in_thinking=True, prompt=k2.generation_prompt("high"))
     assert p.alt_end_seqs == ()
+
+
+
+# --- budget message and the count rule ---------------------------------------
+#
+# A budget of N lets N thinking tokens through, 0 closes at the start marker,
+# and the prompt's tokens after its last start marker count, as llama.cpp
+# counts them. The message replaces the newline of the serve close and the
+# wrap phrase of the MTP close.
+
+from gmlx.gen.thinking_budget import (  # noqa: E402
+    budget_message_ids,
+    prompt_reasoning_tokens,
+    prompt_tail_ids,
+    seq_thinking_budget_criteria_cls,
+)
+
+M1, M2 = 60, 61  # message tokens
+ANS = 70
+
+
+class _MsgTok(_FakeTok):
+    """_FakeTok with budget messages: one plain, one holding the end marker,
+    one holding EOS."""
+
+    _MAP = dict(_FakeTok._MAP, **{
+        "Answer now.": [M1, M2],
+        "Stop</think>here": [M1, END, M2],
+        "Bye": [M1, EOS],
+    })
+
+
+def _serve(budget, *, message=None, prompt_open=True, reasoning_ids=None):
+    return seq_thinking_budget_criteria_cls()(
+        tokenizer=_MsgTok(), thinking_budget=budget,
+        thinking_end_token="</think>", thinking_start_token="<think>",
+        enable_thinking=True, prompt_open_thinking=prompt_open,
+        message=message, reasoning_ids=reasoning_ids)
+
+
+def _serve_drive(crit, script, after=(), limit=40):
+    """Drive the criteria as the batch loop does: a forced id replaces the
+    model's next token. The model writes ``script`` until a close is
+    forced, then ``after``."""
+    src, rest, out, nxt, cut = iter(script), iter(after), [], None, False
+    while len(out) < limit:
+        if nxt is not None:
+            tid, cut = nxt, True
+        else:
+            tid = next(rest if cut else src, None)
+            if tid is None:
+                break
+        out.append(tid)
+        crit(tid)
+        nxt = crit.pop_forced_token_id()
+    return out
+
+
+def test_serve_criteria_forces_message_then_end_marker():
+    c = _serve(2, message="Answer now.")
+    out = _serve_drive(c, [50, 51, 52, 53], [ANS, ANS + 1])
+    assert out == [50, 51, M1, M2, END, ANS, ANS + 1]
+    assert c._spent and not c.in_thinking
+
+
+def test_serve_criteria_empty_message_forces_end_marker_only():
+    c = _serve(2, message="")
+    assert _serve_drive(c, [50, 51, 52], [ANS]) == [50, 51, END, ANS]
+
+
+def test_serve_criteria_without_message_keeps_the_newline():
+    c = _serve(2)
+    assert _serve_drive(c, [50, 51, 52], [ANS]) == [50, 51, NL, END, ANS]
+
+
+def test_serve_criteria_message_holding_end_marker_runs_to_completion():
+    c = _serve(1, message="Stop</think>here")
+    out = _serve_drive(c, [50, 51, 52], [ANS])
+    assert out == [50, M1, END, M2, END, ANS]
+    assert c._spent and not c.in_thinking and c._forced_closes == 1
+
+
+def test_serve_criteria_reopen_after_spend_recloses_without_message():
+    c = _serve(1, message="Answer now.")
+    out = _serve_drive(c, [50, 51], [ANS, START, ANS + 1])
+    assert out == [50, M1, M2, END, ANS, START, NL, END, ANS + 1]
+
+
+def test_serve_criteria_reset_clears_forced_run():
+    c = _serve(1, message="Answer now.", reasoning_ids=[1, START, 5])
+    assert c(50) == M1  # the seed of 1 meets the budget
+    c.reset_thinking_state()
+    assert c._force_left == 0 and c.thinking_token_count == 1
+    assert c(M1) == M1  # a fresh run, not the rest of the old one
+
+
+def _cli(budget, **kw):
+    kw.setdefault("start_in_thinking", True)
+    return ThinkingBudgetProcessor(end_seq=(END,), forced_ids=[NL, END],
+                                   budget=budget, start_seq=(START,), **kw)
+
+
+def _thinking_before_force(path, budget, *, seed=0):
+    """Thinking tokens that pass before the first forced id, from an open
+    block."""
+    if path == "serve":
+        c = _serve(budget, reasoning_ids=[1, START] + [5] * seed)
+        out = _serve_drive(c, list(range(20, 40)))
+        return out.index(NL)
+    if path == "cli":
+        forced = _run(_cli(budget, count_seed=seed), list(range(20, 40)))
+        return forced.index(NL)
+    h = _mtp_hook(start_in_thinking=True, budget=budget, count_seed=seed,
+                  forced_ids=[NL, END])
+    for n in range(40):
+        if h.take_forced() is not None:
+            return n
+        h.observe(20 + n)
+    raise AssertionError("never forced")
+
+
+@pytest.mark.parametrize("path", ["serve", "cli", "mtp"])
+def test_budget_n_allows_n_tokens(path):
+    assert _thinking_before_force(path, 3) == 3
+
+
+@pytest.mark.parametrize("path", ["cli", "mtp"])
+def test_prompt_tokens_after_start_marker_count(path):
+    # A "<think>\n" generation prompt spends one unit on its newline.
+    assert _thinking_before_force(path, 3, seed=1) == 2
+
+
+def test_serve_prompt_tokens_after_start_marker_count():
+    c = _serve(3, reasoning_ids=[1, 2, START, NL])
+    assert c.thinking_token_count == 1
+    assert _serve_drive(c, [50, 51, 52, 53])[:3] == [50, 51, NL]
+
+
+def test_budget_zero_trips_at_start_marker():
+    c = _serve(0, prompt_open=False)
+    assert _serve_drive(c, [START, 50, 51], [ANS]) == [START, NL, END, ANS]
+    forced = _run(_cli(0, start_in_thinking=False), [START, 50, 51],
+                  prompt=(1, 2, 3))
+    assert forced[:2] == [None, NL]
+    h = _mtp_hook(start_in_thinking=False, budget=0)
+    h.observe(START)
+    assert h.take_forced() is not None
+
+
+def test_prefilled_reasoning_longer_than_tail_counts():
+    """Forty prefilled reasoning ids seed 40, where the 16-id tail sees 16."""
+    ids = [1, 2, START] + [5] * 40
+    assert prompt_tail_ids(ids).count(5) == 16
+    c = _serve(64, reasoning_ids=ids)
+    assert c.thinking_token_count == 40
+    h = make_mtp_finish_hook(_MsgTok(), budget=64, start_in_thinking=True,
+                             reasoning_ids=ids)
+    assert h.count == 40
+    tok = _TextTok()
+    p = make_thinking_budget_processor(
+        tok, 64, start_in_thinking=True, start_token="<think>",
+        end_token="</think>", prompt="sys<think>" + "a" * 40)
+    assert p.count == 40
+
+
+def test_reset_restores_seed():
+    c = _serve(8, reasoning_ids=[START, 5, 5])
+    for t in (50, 51):
+        c(t)
+    assert c.thinking_token_count == 4
+    c.reset_thinking_state()
+    assert c.thinking_token_count == 2 and c.in_thinking
+
+
+def test_first_token_passes_when_prompt_meets_budget():
+    """The first token comes from prefill, before the criteria sees
+    anything, so one thinking token passes before the forced run."""
+    c = _serve(2, message="Answer now.", reasoning_ids=[START, 5, 5])
+    assert _serve_drive(c, [50, 51], [ANS]) == [50, M1, M2, END, ANS]
+
+
+def test_seed_is_zero_when_the_prompt_is_closed():
+    c = _serve(2, prompt_open=False, reasoning_ids=[START, 5, END])
+    assert c.thinking_token_count == 0
+    h = make_mtp_finish_hook(_MsgTok(), budget=2, start_in_thinking=False,
+                             reasoning_ids=[START, 5])
+    assert h.count == 0
+
+
+def test_prompt_reasoning_tokens_open_block_counts_after_start():
+    assert prompt_reasoning_tokens([1, START, 5, 6, 7], (START,), ((END,),)) == 3
+    assert prompt_reasoning_tokens(mx.array([[1, START, 5]]), (START,),
+                                   ((END,),)) == 1
+
+
+def test_prompt_reasoning_tokens_closed_block_is_zero():
+    assert prompt_reasoning_tokens([START, 5, END, 6], (START,), ((END,),)) == 0
+
+
+def test_prompt_reasoning_tokens_no_start_is_zero():
+    assert prompt_reasoning_tokens([1, 2, 3], (START,), ((END,),)) == 0
+    assert prompt_reasoning_tokens([1, START], (), ((END,),)) == 0
+    assert prompt_reasoning_tokens(None, (START,), ((END,),)) == 0
+
+
+def test_prompt_reasoning_tokens_uses_last_start():
+    ids = [START, 5, 5, 5, END, 6, START, 7, 8]
+    assert prompt_reasoning_tokens(ids, (START,), ((END,),)) == 2
+
+
+def test_prompt_reasoning_tokens_multi_id_markers():
+    s, e1, e2 = (30, 31), (40, 41), (42,)
+    assert prompt_reasoning_tokens([1, 30, 31, 5, 6], s, (e1, e2)) == 2
+    # Half of a start or an end marker is no marker.
+    assert prompt_reasoning_tokens([1, 31, 5, 6], s, (e1, e2)) == 0
+    assert prompt_reasoning_tokens([30, 31, 5, 40, 6], s, (e1, e2)) == 3
+    # Any of the end markers closes the block.
+    assert prompt_reasoning_tokens([30, 31, 5, 42, 6], s, (e1, e2)) == 0
+    assert prompt_reasoning_tokens([30, 31, 5, 40, 41], s, (e1, e2)) == 0
+
+
+def test_prompt_reasoning_tokens_partial_marker_does_not_count():
+    s = (30, 31)
+    assert prompt_reasoning_tokens([1, 2, 30], s, ((40,),)) == 0
+    assert prompt_reasoning_tokens([30, 31, 5, 30], s, ((40,),)) == 2
+
+
+class _TextTok:
+    """One id per character, the think tags as single ids."""
+
+    _TAGS = {"<think>": START, "</think>": END}
+
+    def encode(self, text, add_special_tokens=True):
+        ids, i = [], 0
+        while i < len(text):
+            tag = next((t for t in self._TAGS if text.startswith(t, i)), None)
+            if tag:
+                ids.append(self._TAGS[tag])
+                i += len(tag)
+            else:
+                ids.append(NL if text[i] == "\n" else 20 + ord(text[i]) % 60)
+                i += 1
+        return ids
+
+    def decode(self, ids):
+        back = {v: k for k, v in self._TAGS.items()}
+        return "".join(back.get(int(t), "\n" if t == NL else "?") for t in ids)
+
+
+def test_budget_message_ids_parse_specials_without_bos():
+    from tokenizers import pre_tokenizers
+
+    from gmlx.load.tokenizer import load_tokenizer_from_gguf
+
+    specials = ["<s>", "</s>", "<pad>", "</think>"]
+    toks = specials + sorted(pre_tokenizers.ByteLevel.alphabet()) + ["He"]
+    tok = load_tokenizer_from_gguf({
+        "general.architecture": "qwen2",
+        "tokenizer.ggml.model": "gpt2",
+        "tokenizer.ggml.pre": "qwen2",
+        "tokenizer.ggml.tokens": toks,
+        "tokenizer.ggml.merges": ["H e"],
+        "tokenizer.ggml.token_type": [3] * 4 + [1] * (len(toks) - 4),
+        "tokenizer.ggml.bos_token_id": 0,
+        "tokenizer.ggml.eos_token_id": 1,
+        "tokenizer.ggml.padding_token_id": 2,
+        "tokenizer.ggml.add_bos_token": True,
+    }, "qwen2")
+    text = "He said</think>"
+    assert tok.encode(text)[0] == 0  # the tokenizer adds a BOS by default
+    ids = budget_message_ids(tok, text)
+    assert ids[0] != 0 and ids[-1] == 3  # no BOS, and the special is one id
+    assert list(ids) == tok.encode(text, add_special_tokens=False)
+    assert budget_message_ids(tok, "") == ()
+    assert budget_message_ids(tok, None) is None
+
+
+def test_mtp_factory_message_replaces_wrap_phrase():
+    h = make_mtp_finish_hook(_MsgTok(), budget=5, start_in_thinking=True,
+                             message="Answer now.")
+    assert h.forced_ids == [M1, M2, END]
+    assert h.reclose_ids == [NL, END]  # recloses keep the bare close
+    h0 = make_mtp_finish_hook(_MsgTok(), budget=0, start_in_thinking=True,
+                              message="")
+    assert h0.forced_ids == [END]
+
+
+def test_the_vocab_probe_never_changes_the_shared_markers():
+    from gmlx.gen.thinking_budget import ThinkMarkers
+
+    kept = ThinkMarkers(prompt="Q <think>\n")
+    found = kept.on_vocab(_FakeTok())
+    assert found.pair == ("<think>", "</think>") and found.state == "open"
+    assert found.seqs(_FakeTok()) == ((START,), (END,))
+    # The reasoning split and the retire mirror read the render's pair.
+    assert (kept.pair, kept.start, kept.end, kept.state) == (None,) * 4
+    assert kept.on_vocab(_FakeTok()) is found
+    assert kept.seqs(_FakeTok()) == ((START,), (END,))
+
+
+def test_markers_that_do_not_encode_log_and_gate_bare(caplog):
+    from gmlx.gen.thinking_budget import BARE, ThinkMarkers, answer_gate_kind
+
+    class _Broken:
+        def encode(self, text, add_special_tokens=True):
+            raise RuntimeError("no backend")
+
+    markers = ThinkMarkers("<think>", "</think>", prompt="Q")
+    with caplog.at_level("WARNING", logger="gmlx.gen.thinking_budget"):
+        seqs = markers.seqs(_Broken())
+    assert seqs == (None, None)
+    assert "do not encode" in caplog.text
+    assert answer_gate_kind(markers, *seqs) == BARE
+
+
+def test_a_raw_prompt_resolves_once_per_request():
+    from types import SimpleNamespace
+
+    from gmlx.gen import thinking_budget as tb
+
+    decodes = []
+
+    class _Tok(_FakeTok):
+        def decode(self, ids, **_kw):
+            decodes.append(list(ids))
+            return "Q <think>\n"
+
+    args = SimpleNamespace(thinking_start_token="<think>",
+                           thinking_end_token="</think>")
+    ids = mx.array([[1, 2, START, NL]])
+    first = tb.request_think_markers(args, None, ids, _Tok())
+    assert tb.request_think_markers(args, None, ids, _Tok()) is first
+    assert first.state == "open" and len(decodes) == 1
+    # Another prompt on the same arguments resolves again.
+    other = tb.request_think_markers(args, None, mx.array([[1, 2]]), _Tok())
+    assert other is not first and len(decodes) == 2

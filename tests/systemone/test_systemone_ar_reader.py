@@ -92,13 +92,28 @@ def test_the_float32_rows_path_is_chosen_and_matches_the_logits(tie, quantized):
 def test_a_logit_transform_falls_back_to_full_logits():
     model = _model()
 
+    class ScaledText(nn.Module):
+        """A language model that scales its head's logits."""
+
+        def __init__(self, inner):
+            super().__init__()
+            self.model = inner.model
+            self.lm_head = inner.lm_head
+            self.inner = inner
+
+        def __call__(self, x, cache=None):
+            return self.inner(x, cache=cache) * 0.5
+
+        def make_cache(self):
+            return self.inner.make_cache()
+
     class Scaled(nn.Module):
         def __init__(self, inner):
             super().__init__()
-            self.language_model = inner.language_model
+            self.language_model = ScaledText(inner.language_model)
 
         def __call__(self, x, cache=None):
-            return self.language_model(x, cache=cache) * 0.5
+            return self.language_model(x, cache=cache)
 
         def make_cache(self):
             return self.language_model.make_cache()
@@ -110,6 +125,34 @@ def test_a_logit_transform_falls_back_to_full_logits():
     cache = run_to_end(reader.prefill(prefix))
     (got,) = run_to_end(reader.tails(cache, prefix, [_ids(9, 2)]))
     want = _reference(scaled, prefix + _ids(9, 2))
+    assert mx.max(mx.abs(mx.array(got) - want)).item() < TOL
+
+
+@_NEEDS_GPU
+def test_the_check_and_the_full_reads_call_the_language_model():
+    """Chat calls the language model, never the outer class, so the reader
+    checks and reads that object. An outer-only transform is not read."""
+    model = _model()
+
+    class Outer(nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.language_model = inner.language_model
+
+        def __call__(self, x, cache=None):
+            raise AssertionError("the outer class was called")
+
+        def make_cache(self):
+            return self.language_model.make_cache()
+
+    outer = Outer(model)
+    reader = LetterReader(outer, LETTER_IDS)
+    assert reader.check() == "rows"
+    reader.path = "logits"
+    prefix = _ids(20, 1)
+    cache = run_to_end(reader.prefill(prefix))
+    (got,) = run_to_end(reader.tails(cache, prefix, [_ids(9, 2)]))
+    want = _reference(model, prefix + _ids(9, 2))
     assert mx.max(mx.abs(mx.array(got) - want)).item() < TOL
 
 
@@ -311,7 +354,7 @@ def test_a_prefix_kept_by_the_apc_manager_equals_a_cold_one(hybrid):
     for c, w in zip(fresh, kept.lookup(ids)):
         for a, b in zip(c.state, w.state):
             assert mx.array_equal(a, b).item()
-    assert ApcPrefixes(manager, prefix_salt((1.0,)), reader.make_cache).lookup(ids) is None
+    assert ApcPrefixes(manager, prefix_salt(0x5EED), reader.make_cache).lookup(ids) is None
     # A launch session reads under its own tenant, so it finds no TCP client's prefix.
     assert ApcPrefixes(manager, prefix_salt(tenant="launch-a"),
                        reader.make_cache).lookup(ids) is None
@@ -334,3 +377,31 @@ def test_view_kinds_decline_other_caches():
 
     assert ar_reader._view_kinds([KVCache(), ArraysCache(2)]) == ["kv", "arr"]
     assert ar_reader._view_kinds([KVCache(), RotatingKVCache(max_size=8)]) is None
+
+
+class _VlmTokenizer:
+    def encode(self, text, add_special_tokens=True):
+        return [ord(c) for c in text]
+
+    def apply_chat_template(self, messages, **kwargs):
+        return "<user>" + messages[0]["content"]
+
+
+class _VlmProcessor:
+    """A VLM processor served with its mmproj: it does not encode, its
+    tokenizer does."""
+
+    def __init__(self):
+        self.tokenizer = _VlmTokenizer()
+
+
+def test_a_vlm_processor_encodes_with_its_tokenizer():
+    from gmlx.systemone.engine import ChatTokens
+    from gmlx.systemone.model_template import TemplateTokens
+
+    processor = _VlmProcessor()
+    tokens = ar_reader.LetterTokens(processor)
+    assert tokens.letter_ids() == [ord(c) for c in letters.LETTERS]
+    assert tokens.render("hi") == "<user>hi"
+    for cls in (TemplateTokens, ChatTokens):
+        assert cls(processor).wrapper is processor.tokenizer

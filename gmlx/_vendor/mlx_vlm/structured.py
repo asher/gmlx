@@ -1,4 +1,5 @@
 import json
+import weakref
 from typing import Any
 
 import mlx.core as mx
@@ -36,6 +37,10 @@ def _apply_llguidance_mask(logits: mx.array, mask: mx.array) -> mx.array:
     )[0]
 
 
+# gmlx: a replayed maybe step's mask row; the decision asks the matcher.
+_ACCEPTS = object()
+
+
 def _allocate_shared_bitmask(batch_size: int, vocab_size: int):
     """Allocate a CPU-writable mask backed by MLX shared memory."""
     mask = mx.full(
@@ -70,6 +75,29 @@ class LLGuidanceLogitsProcessor:
 
     def clone(self) -> "LLGuidanceLogitsProcessor":
         return LLGuidanceLogitsProcessor(self.grammar, self.llg_tokenizer)
+
+    # gmlx: a requeued row replays its prompt plus the tokens it delivered.
+    def resumed(self, committed) -> "LLGuidanceLogitsProcessor":
+        """A processor for a row replayed as its prompt plus ``committed``.
+        Live, each decode step consumes the token it was given, so after n
+        delivered tokens the matcher has consumed all n. The replay's first
+        call consumes the last one, so this one consumes the rest."""
+        out = self.clone()
+        committed = [int(t) for t in committed]
+        if not committed:
+            return out
+        out._start()
+        for t in committed[:-1]:
+            out._consume_tokens([t])
+        return out
+
+    def _start(self) -> None:
+        self._setup(1)
+        self.is_first_token = False
+
+    def _accepts(self, token: int) -> bool:
+        """Whether the matcher allows ``token`` next, without consuming it."""
+        return self.ll_matchers[0].validate_tokens([int(token)]) == 1
 
     def reset(self):
         self.is_first_token = True
@@ -160,6 +188,16 @@ class ThinkingAwareLogitsProcessor:
     ends reasoning also ends commentary and tool calls. ``prompt_ids`` gives
     the prompt's last tokens, so a header the prompt begins completes on the
     generated rest.
+
+    gmlx: ``maybe_seq`` (the start marker's ids) is for a prompt that neither
+    opens nor closes a block, so the reply may open one first. A grammar
+    then masks the first step with its own mask plus the first start token.
+    A sampled token the grammar accepts keeps the grammar on. The first
+    start token, when the grammar refuses it, starts a block: the grammar
+    resets, the next steps allow only the rest of the start marker, and the
+    wrapper waits for the end marker. Another processor (XTC) skips the
+    first step, then waits for the end marker after the first start token
+    and runs from the next step after any other token.
     """
 
     def __init__(
@@ -170,6 +208,7 @@ class ThinkingAwareLogitsProcessor:
         thinking_end_token: str = "</think>",
         enable_thinking: bool = False,
         prompt_ids=None,
+        maybe_seq=None,
     ) -> None:
         # gmlx: gate on the whole answer opener, see the class docstring.
         from gmlx.gen.thinking_budget import AnswerGate, answer_opener_seqs
@@ -191,9 +230,22 @@ class ThinkingAwareLogitsProcessor:
         self._prompt_ids = [int(t) for t in (prompt_ids or ())][-16:]
         self.answer_gate = AnswerGate(seqs, self._prompt_ids)
         self._n_seen = None
+        self._maybe_seq = tuple(int(t) for t in (maybe_seq or ()))
         self._active = not enable_thinking or (
             bool(self._prompt_ids) and self.answer_gate.opened()
         )
+        self._start_maybe()
+        self._resume_last = False
+
+    def _start_maybe(self) -> None:
+        # "first" until the first step, then "pending" until the first
+        # sampled token decides; None after that, or with no maybe_seq.
+        self._maybe = "first" if self._maybe_seq and not self._active else None
+        self._force: list[int] = []
+        self._grammar_row = None
+
+    def _is_grammar(self) -> bool:
+        return isinstance(self.processor, LLGuidanceLogitsProcessor)
 
     def clone(self) -> "ThinkingAwareLogitsProcessor":
         processor = (
@@ -208,6 +260,7 @@ class ThinkingAwareLogitsProcessor:
             thinking_end_token=self.thinking_end_token,
             enable_thinking=self.enable_thinking,
             prompt_ids=self._prompt_ids,
+            maybe_seq=self._maybe_seq,
         )
 
     def reset(self):
@@ -216,9 +269,80 @@ class ThinkingAwareLogitsProcessor:
         self._active = not self.enable_thinking or (
             bool(self._prompt_ids) and self.answer_gate.opened()
         )
+        self._start_maybe()
         self._active_context = []
+        self._resume_last = False
         if hasattr(self.processor, "reset"):
             self.processor.reset()
+
+    # gmlx: a requeued row replays its prompt plus the tokens it delivered.
+    def resumed(self, committed) -> "ThinkingAwareLogitsProcessor":
+        """A processor for a row replayed as its prompt plus ``committed``.
+        It replays the prefill call and the decode steps of all but the last
+        delivered token, without logits. The replay's first call is then the
+        decode step of the last one, whatever context it gets."""
+        out = self.clone()
+        committed = [int(t) for t in committed]
+        if not committed:
+            return out
+        out._replay_prefill()
+        for t in committed[:-1]:
+            out._replay_step(t)
+        out._resume_last = True
+        return out
+
+    def _replay_inner(self, token: int) -> None:
+        """What ``_delegate_process_last_token`` does to the inner state."""
+        inner = self.processor
+        if isinstance(inner, LLGuidanceLogitsProcessor):
+            if inner.is_first_token:
+                inner._start()
+            else:
+                inner._consume_tokens([token])
+        elif not hasattr(inner, "process_last_token"):
+            self._active_context.append(token)
+
+    def _replay_prefill(self) -> None:
+        """The prefill call on the prompt. The gate holds the prompt's tail
+        already."""
+        grammar = isinstance(self.processor, LLGuidanceLogitsProcessor)
+        if self._active:
+            if grammar:
+                self.processor._start()
+        elif self._maybe == "first":
+            self._maybe = "pending"
+            if grammar:
+                self.processor._start()
+                self._grammar_row = _ACCEPTS
+        elif self.answer_gate.opened():
+            self._activate()
+            if grammar:
+                self.processor._start()
+
+    def _replay_step(self, token: int) -> None:
+        """``process_last_token`` without logits."""
+        if self._maybe == "first":
+            self.answer_gate.feed(token)
+            self._maybe = "pending"
+            if self._is_grammar():
+                self._replay_inner(token)
+                self._grammar_row = _ACCEPTS
+            return
+        if self._maybe == "pending":
+            self.answer_gate.feed(token)
+            if not self._decide(token):
+                self._activate()
+                self._replay_inner(token)
+            return
+        if not self._active:
+            if self._force:
+                self._after_forced(token)
+                self.answer_gate.feed(token)
+                return
+            if not self.answer_gate.feed(token):
+                return
+            self._activate()
+        self._replay_inner(token)
 
     def _activate(self) -> None:
         self._active = True
@@ -233,8 +357,71 @@ class ThinkingAwareLogitsProcessor:
         self._active_context.append(last_token)
         return self.processor(mx.array(self._active_context), logits)
 
+    def _first_step(self, logits: mx.array, masked) -> mx.array:
+        """The maybe state's first step: the grammar's mask plus the first
+        start token, or no processing for another processor."""
+        self._maybe = "pending"
+        if not self._is_grammar():
+            return logits
+        masked = masked()
+        self._grammar_row = masked
+        first = self._maybe_seq[0]
+        keep = mx.arange(logits.shape[-1]) == first
+        return mx.where(keep, logits.reshape(masked.shape), masked).reshape(
+            logits.shape
+        )
+
+    def _decide(self, token: int) -> bool:
+        """The first sampled token of a maybe state. True when it starts
+        a block."""
+        self._maybe = None
+        row, self._grammar_row = self._grammar_row, None
+        if row is _ACCEPTS:
+            # A replayed step has no mask row: ask the matcher.
+            if self.processor._accepts(token):
+                return False
+        elif row is not None:
+            flat = row.reshape(-1, row.shape[-1])[0]
+            if bool(mx.isfinite(flat[token]).item()):
+                return False
+        if token != self._maybe_seq[0]:
+            return False
+        if hasattr(self.processor, "reset"):
+            self.processor.reset()
+        if self._is_grammar():
+            self._force = list(self._maybe_seq[1:])
+        return True
+
+    def _forced(self, logits: mx.array) -> mx.array:
+        keep = mx.arange(logits.shape[-1]) == self._force[0]
+        return mx.where(keep, logits, mx.array(-float("inf"), logits.dtype))
+
+    def _after_forced(self, token: int) -> None:
+        if self._force and token == self._force[0]:
+            self._force.pop(0)
+        else:
+            self._force = []
+
     def process_last_token(self, last_token: int, logits: mx.array) -> mx.array:
+        if self._maybe == "first":
+            # Called with a token before the first step: a seed, not a
+            # sample.
+            self.answer_gate.feed(last_token)
+            return self._first_step(
+                logits,
+                lambda: self._delegate_process_last_token(last_token, logits),
+            )
+        if self._maybe == "pending":
+            self.answer_gate.feed(last_token)
+            if not self._decide(last_token):
+                self._activate()
+                return self._delegate_process_last_token(last_token, logits)
+            return self._forced(logits) if self._force else logits
         if not self._active:
+            if self._force:
+                self._after_forced(last_token)
+                self.answer_gate.feed(last_token)
+                return self._forced(logits) if self._force else logits
             if not self.answer_gate.feed(last_token):
                 return logits
             self._activate()
@@ -262,8 +449,33 @@ class ThinkingAwareLogitsProcessor:
         return gate.advance(new) is not None
 
     def __call__(self, input_ids: mx.array, logits: mx.array) -> mx.array:
+        if self._resume_last:
+            # gmlx: the replay's first call. With an APC hit its context is
+            # only the uncached tail, which still ends with the last
+            # delivered token.
+            self._resume_last = False
+            return self.process_last_token(
+                int(input_ids.reshape(-1)[-1].item()), logits
+            )
         if self._active:
             return self.processor(input_ids, logits)
+
+        if self._maybe == "first":
+            self._observe_context(input_ids)
+            return self._first_step(
+                logits, lambda: self.processor(input_ids, logits)
+            )
+        if self._maybe == "pending":
+            self._observe_context(input_ids)
+            token = int(input_ids.reshape(-1)[-1].item())
+            if not self._decide(token):
+                self._active = True
+                return self.processor(input_ids, logits)
+            return self._forced(logits) if self._force else logits
+        if self._force:
+            self._observe_context(input_ids)
+            self._after_forced(int(input_ids.reshape(-1)[-1].item()))
+            return self._forced(logits) if self._force else logits
 
         if self._observe_context(input_ids):
             self._activate()
@@ -279,8 +491,29 @@ def _serialize_schema(schema: str | dict[str, Any]) -> str:
 
 
 # Building an llguidance tokenizer walks the entire vocab (~1.5s for a 150k
-# token model), so we keep the result around for the lifetime of the process.
+# token model), so we keep the result around.
+# gmlx: an entry is freed with its tokenizer, not kept for the process. A bare
+# id(tokenizer) key kept every old vocab and gave a new tokenizer at a freed id
+# the old one.
 _llg_tokenizer_cache = {}
+
+
+def _cached_llg_tokenizer(tokenizer):
+    key = id(tokenizer)
+    entry = _llg_tokenizer_cache.get(key)
+    if entry is not None and entry[0]() is tokenizer:
+        return entry[1]
+    import llguidance.hf
+
+    llg_tokenizer = llguidance.hf.from_tokenizer(tokenizer)
+
+    def _drop(ref, key=key):
+        if _llg_tokenizer_cache.get(key, (None,))[0] is ref:
+            del _llg_tokenizer_cache[key]
+
+    # from_tokenizer takes only a PreTrainedTokenizerFast, which takes weak refs.
+    _llg_tokenizer_cache[key] = (weakref.ref(tokenizer, _drop), llg_tokenizer)
+    return llg_tokenizer
 
 
 def build_json_schema_logits_processor(tokenizer, schema: str | dict[str, Any]):
@@ -293,10 +526,7 @@ def build_json_schema_logits_processor(tokenizer, schema: str | dict[str, Any]):
             "Install mlx-vlm with llguidance available."
         ) from exc
 
-    llg_tokenizer = _llg_tokenizer_cache.get(id(tokenizer))
-    if llg_tokenizer is None:
-        llg_tokenizer = llguidance.hf.from_tokenizer(tokenizer)
-        _llg_tokenizer_cache[id(tokenizer)] = llg_tokenizer
+    llg_tokenizer = _cached_llg_tokenizer(tokenizer)  # gmlx: weak entry
 
     schema_text = _serialize_schema(schema)
     if hasattr(llg, "JsonCompiler"):

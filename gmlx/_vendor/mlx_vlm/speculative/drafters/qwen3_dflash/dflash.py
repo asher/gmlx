@@ -211,7 +211,10 @@ class DFlashDraftModel(nn.Module):
                 raise AttributeError(
                     f"Cannot find embed_tokens in {type(target_model).__name__}"
                 )
-            self.embed_tokens = (
+            from gmlx.load.modules import lora_base
+
+            # gmlx: the base table. A draft call publishes no row vector.
+            self.embed_tokens = lora_base(
                 inner.embed_tokens
                 if hasattr(inner, "embed_tokens")
                 else inner.embeddings
@@ -220,9 +223,13 @@ class DFlashDraftModel(nn.Module):
                 self.embed_tokens, "embed_scale", getattr(inner, "embed_scale", 1.0)
             )
         lm = getattr(target_model, "language_model", target_model)
+        from gmlx.load.modules import lora_base
+
+        # gmlx: the base head. An output.weight adapter's wrapper reads a
+        # row vector, and a draft call publishes none.
         self.lm_head = (
-            getattr(target_model, "lm_head", None)
-            or getattr(lm, "lm_head", None)
+            lora_base(getattr(target_model, "lm_head", None)
+                      or getattr(lm, "lm_head", None))
             or self.embed_tokens.as_linear
         )
         self.argmax_from_hidden = getattr(lm, "speculative_argmax_from_hidden", None)

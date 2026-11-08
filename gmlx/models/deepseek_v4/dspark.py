@@ -256,10 +256,16 @@ class DeepseekV4DSparkDrafter(nn.Module):
             raise AttributeError(
                 f"Cannot find embed_tokens in {type(target_model).__name__}"
             )
-        self._input_embed = inner.embed_tokens
+        from gmlx.load.modules import lora_base
+
+        # The base table: a draft call publishes no row vector.
+        self._input_embed = lora_base(inner.embed_tokens)
         lm = getattr(target_model, "language_model", target_model)
-        self._lm_head_fn = getattr(target_model, "lm_head", None) or getattr(
-            lm, "lm_head", None
+
+        # The base head: an output.weight adapter's wrapper reads a row
+        # vector, and a draft call publishes none.
+        self._lm_head_fn = lora_base(
+            getattr(target_model, "lm_head", None) or getattr(lm, "lm_head", None)
         )
         if self._lm_head_fn is None:
             raise AttributeError(

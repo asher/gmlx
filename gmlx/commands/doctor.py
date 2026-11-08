@@ -167,7 +167,8 @@ def check_models(cfg, *, deep: bool = False) -> dict:
     from .manage import _shard_names
     misses: list[str] = []
     entries = [(mid, (("path", m.path), ("mmproj", m.mmproj),
-                      ("draft", m.draft_gguf), ("adapter", m.adapter)))
+                      ("draft", m.draft_gguf),
+                      *(("adapter", a) for a in m.adapter_paths())))
                for mid, m in cfg.models.items()]
     entries += [(iid, _image_files(cfg, m))
                 for iid, m in cfg.image_models.items()]

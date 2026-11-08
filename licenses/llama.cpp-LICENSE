@@ -9,6 +9,9 @@ clip_graph_muse_glimmer and the host-side index math in tools/mtmd/clip.cpp,
 and its projector constants and tensor remap in gmlx/load/vlm.py follow
 clip.cpp. The Kimi-K3 chat-template fixture
 tests/fixtures/kimi_k3_template.jinja comes from llama.cpp PR #26185.
+The block output that gmlx capture records in gmlx/tune/capture.py
+follows the l_out tensor that tools/cvector-generator reads, and the
+stream mean of a hyper-connection residual follows hc_stream_mean.
 llama.cpp is distributed under the MIT License:
 
 MIT License

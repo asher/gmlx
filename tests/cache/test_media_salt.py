@@ -422,6 +422,10 @@ def test_a_run_maps_to_an_image_only_when_it_holds_that_image():
 
 # -- the block and exact tiers ---------------------------------------------
 
+_LORA_SALT = lora_rows.row_salt(
+    (SimpleNamespace(sha256="a" * 64), SimpleNamespace(sha256="b" * 64)), (1.0, 0.0))
+
+
 def _kv(n, seed):
     k = mx.random.normal((1, 2, n, 8), key=mx.random.key(seed))
     return [k], [k + 1]
@@ -448,7 +452,7 @@ def test_the_block_walk_restores_the_prefix_before_a_new_image():
     # another tenant salt or LoRA mask restores nothing.
     for salt, want in ((MediaSalt(7, [(40, 112), b]), 32),
                        (MediaSalt(8, [a, b]), 0),
-                       (MediaSalt(7, [a, b]) ^ lora_rows.lora_salt((1.0, 0.0)),
+                       (MediaSalt(7, [a, b]) ^ _LORA_SALT,
                         0)):
         blocks, n = m.lookup_prefix(t2, extra_hash=salt)
         m.release(blocks)
@@ -503,7 +507,7 @@ def _restores(t2):
                 (MediaSalt(7, [a, (80, 223)]), 80),
                 (MediaSalt(7, [(40, 112), b]), 32),
                 (MediaSalt(8, [a, b]), 0),
-                (MediaSalt(7, [a, b]) ^ lora_rows.lora_salt((1.0, 0.0)), 0))
+                (MediaSalt(7, [a, b]) ^ _LORA_SALT, 0))
 
 
 def test_a_block_restore_holds_the_images_of_its_own_prefix():
@@ -598,7 +602,7 @@ def test_the_exact_tier_restores_an_entry_under_fewer_images():
     got, p = m.lookup_exact_cache(t2, extra_hash=MediaSalt(7, [a, b]))
     assert got is not None and p == len(t1)
     for salt in (MediaSalt(7, [(40, 112), b]), MediaSalt(8, [a, b]),
-                 MediaSalt(7, [a, b]) ^ lora_rows.lora_salt((1.0, 0.0))):
+                 MediaSalt(7, [a, b]) ^ _LORA_SALT):
         assert m.lookup_exact_cache(t2, extra_hash=salt) == (None, 0)
     # A text entry ending before the first image restores for that prefix.
     m.store_exact_cache(t1[:32], _row(32, 2), extra_hash=7)
@@ -638,24 +642,21 @@ def _static_rows():
 
 
 def test_a_lora_row_keeps_the_per_prefix_salt(_static_rows):
+    from gmlx.serve.lora_request import RowLora
+    from gmlx.serve.row_sampling import RowSettings
     lora_rows.install_row_channel()
     lora_rows.ensure_rows(2)
     bg = SimpleNamespace(max_tokens=8, logits_processors=None,
                          _unprocessed_sequences=[], uid_count=100,
                          apc_manager=object(),
                          _apc_extra_hash=lambda kw: 1234)
-    args = SimpleNamespace(
-        logit_bias=None, repetition_penalty=None, repetition_context_size=20,
-        presence_penalty=None, presence_context_size=20,
-        frequency_penalty=None, frequency_context_size=20,
-        logits_processors=None, enable_thinking=False, _kq_lora=(1.0, 0.0))
+    lora = RowLora((1.0, 0.0), np.asarray((1.0, 0.0), np.float32), _LORA_SALT, "m")
     s = MediaSalt(7, [(40, 111)])
     kw = {"_apc_semantic_hash": s}
-    server.ResponseGenerator._make_logits_processors(SimpleNamespace(), args,
-                                                     None)
-    ar.BatchGenerator.insert(bg, [[1, 2]], prompt_kwargs=[kw])
+    ar.BatchGenerator.insert(bg, [[1, 2]], prompt_kwargs=[kw],
+                             row_settings=[RowSettings(lora=lora)])
     got = kw["_apc_semantic_hash"]
-    mask = lora_rows.lora_salt((1.0, 0.0))
+    mask = _LORA_SALT
     assert isinstance(got, MediaSalt)
     assert got.at(40) == 7 ^ mask and got.at(41) == s.at(41) ^ mask
 

@@ -629,3 +629,58 @@ def test_available_drained_charges_live_arena(monkeypatch):
     arena = _Arena(30e9)
     installs.record_arena(arena)
     assert mp.available_drained_bytes() == pytest.approx(58e9)
+
+
+def test_an_id_prompt_is_priced_by_its_length(tight):
+    rg = _rg(DENSE)
+    with pytest.raises(PromptTooLongError) as e:
+        mp.preflight_prompt_memory(rg, [5] * 100_000)
+    assert "prompt_tokens=100000" in str(e.value)
+    mp.preflight_prompt_memory(rg, [5] * 50_000)
+    assert not rg._pre_calls
+
+
+# A Qwen3.5-9B-sized dense stack: 128 KiB of fp16 KV per token.
+SCORED = _model(num_hidden_layers=32, num_attention_heads=16,
+                num_key_value_heads=4, head_dim=256, vocab_size=248_320)
+
+
+@pytest.fixture
+def small_mac(monkeypatch):
+    """A 5.7 GB working set with 2.5 GB of weights: 1.2 GB of room."""
+    import mlx.core as mx
+
+    import gmlx.gen.prefill_decay as pd
+    from gmlx.stream import installs
+
+    monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
+    monkeypatch.delenv("GMLX_PREFLIGHT_MEM", raising=False)
+    monkeypatch.setattr(mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 5.7e9})
+    monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 2.5e9)
+    monkeypatch.setattr(installs, "_ARENAS", [])
+    monkeypatch.setattr("gmlx.stream.expert_streaming.experts_streamed",
+                        lambda m: False)
+    assert mp.available_drained_bytes() == pytest.approx(1.2e9)
+
+
+def test_a_scoring_job_is_priced_at_real_values(small_mac):
+    rg = _rg(SCORED)
+    mp.preflight_scoring(rg, 10)
+    mp.preflight_scoring(rg, 2048)
+    with pytest.raises(PromptTooLongError) as e:
+        mp.preflight_scoring(rg, 8192)
+    assert "prompt_tokens=8192" in str(e.value)
+
+
+def test_a_scoring_job_prices_fp16_kv_under_a_quantized_policy(
+        small_mac, monkeypatch):
+    def quarter(rg, model):
+        return [(w, b / 4) for w, b in mp.kv_layer_costs(model)]
+
+    monkeypatch.setattr(mp, "_policy_costs", quarter)
+    rg = _rg(SCORED)
+    # 6,000 tokens fit at 4-bit KV and not at fp16.
+    assert mp.prompt_kv_bytes(quarter(rg, SCORED), 6000) < 0.3e9
+    with pytest.raises(PromptTooLongError):
+        mp.preflight_scoring(rg, 6000)

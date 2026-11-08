@@ -309,6 +309,63 @@ def _chat_usage_chunk(
     )
 
 
+# gmlx: faithful logprobs. A logprob request on an entry that cannot
+# report the model's own distribution is refused, and a logprob row that
+# reaches the route without its entry is an internal error, never 0.0.
+def _refuse_unfaithful_token_ids(model_id, model, request) -> None:
+    """gmlx: a diffusion token holds a whole block, so it has no per-token ids."""
+    if not getattr(request, "return_token_ids", None):
+        return
+    from ..generate.diffusion import is_diffusion_model
+
+    if is_diffusion_model(model):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"return_token_ids is not available on diffusion model '{model_id}'"
+            ),
+        )
+
+
+def _refuse_unfaithful_logprobs(model_id, model, gen_args) -> None:
+    if not getattr(gen_args, "logprobs", False):
+        return
+    from gmlx.spec.engine import spec_kind_unsupported
+
+    from ..generate.diffusion import is_diffusion_model
+
+    if is_diffusion_model(model):
+        raise HTTPException(
+            status_code=400,
+            detail=f"logprobs are not available on diffusion model '{model_id}'",
+        )
+    rg = runtime.response_generator
+    kind = (
+        spec_kind_unsupported(rg)
+        if rg is not None and getattr(rg, "draft_model", None) is not None
+        else None
+    )
+    if kind:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"logprobs are not available while model '{model_id}' speculates "
+                f"with draft kind '{kind}'; set speculative: false on the entry"
+            ),
+        )
+
+
+def _has_logprob_entry(token) -> bool:
+    if getattr(token, "token_count", 1) == 0:
+        return False
+    if token.logprobs is None:
+        # Strict on purpose: a short list would misalign every later
+        # position. A new path that emits tokens on a logprobs request must
+        # give each one an entry, or the request is a 500.
+        raise RuntimeError(f"no logprob entry for token {token.token}")
+    return True
+
+
 def register_routes(app, deps):
     global _INHERIT_ADAPTER
     global get_cached_model, _build_gen_args, _read_tenant_id
@@ -1683,6 +1740,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
             )
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
+        _refuse_unfaithful_logprobs(request.model, model, gen_args)  # gmlx
+        _refuse_unfaithful_token_ids(request.model, model, request)  # gmlx
         if tools and tool_module is not None:
             gen_args.skip_special_tokens = False
 
@@ -1762,6 +1821,12 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
 
                         output_tokens = 0
                         request_id = f"chatcmpl-{uuid.uuid4()}"
+                        # gmlx: the first chunk carries the prompt's ids.
+                        pending_prompt_ids = (
+                            getattr(ctx, "prompt_ids", None)
+                            if request.return_token_ids
+                            else None
+                        )
                         thinking_state = make_response_stream_state(
                             processor,
                             prompt_has_open_thinking(
@@ -1806,25 +1871,41 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             )
 
                             chunk_logprobs = None
-                            if request.logprobs and token.finish_reason != "stop":
+                            # gmlx: the stop token keeps its entry; a row
+                            # with no token adds none.
+                            if request.logprobs and _has_logprob_entry(token):
                                 req_top_k = int(request.top_logprobs or 0)
+                                rg = runtime.response_generator
                                 chunk_logprobs = ChatLogprobs(
                                     content=[
                                         _make_logprob_content(
-                                            runtime.response_generator.tokenizer,
+                                            rg.tokenizer,
                                             token.token,
                                             token.logprobs,
                                             top_logprobs=token.top_logprobs,
                                             top_k=req_top_k,
+                                            as_ids=bool(
+                                                request.return_tokens_as_token_ids
+                                            ),
+                                            lock=getattr(rg, "_tokenizer_lock", None),
                                         )
                                     ]
                                 )
+
+                            # gmlx: every emitted token's id, when asked.
+                            chunk_ids = (
+                                [int(token.token)]
+                                if request.return_token_ids
+                                and getattr(token, "token_count", 1) != 0
+                                else None
+                            )
 
                             # Skip empty deltas (e.g. suppressed tool-call tokens)
                             has_payload = (
                                 bool(delta_content)
                                 or bool(delta_reasoning)
                                 or chunk_logprobs is not None
+                                or chunk_ids is not None
                             )
                             if has_payload:
                                 choices = [
@@ -1835,6 +1916,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                             reasoning=delta_reasoning,
                                         ),
                                         logprobs=chunk_logprobs,
+                                        token_ids=chunk_ids,
                                     )
                                 ]
                                 chunk_data = ChatStreamChunk(
@@ -1845,7 +1927,9 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                     timings=StreamingTimings(
                                         predicted_per_second=chunk_rate
                                     ),
+                                    prompt_token_ids=pending_prompt_ids,
                                 )
+                                pending_prompt_ids = None
 
                                 yield f"data: {chunk_data.model_dump_json()}\n\n"
 
@@ -1878,7 +1962,9 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                     timings=StreamingTimings(
                                         predicted_per_second=metrics.rate
                                     ),
+                                    prompt_token_ids=pending_prompt_ids,
                                 )
+                                pending_prompt_ids = None
                                 yield f"data: {chunk_data.model_dump_json()}\n\n"
                         if not terminal_emitted:
                             finish_reason = finish_reason or "stop"
@@ -1888,6 +1974,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 finish_reason,
                                 metrics.rate,
                             )
+                            chunk_data.prompt_token_ids = pending_prompt_ids
+                            pending_prompt_ids = None
                             yield f"data: {chunk_data.model_dump_json()}\n\n"
                         if emit_usage:
                             chunk_data = _chat_usage_chunk(
@@ -2091,6 +2179,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                 collected_logprobs: List[
                     Tuple[int, float, Optional[List[Tuple[int, float]]]]
                 ] = []
+                prompt_ids: Optional[List[int]] = None
+                generated_ids: Optional[List[int]] = None
 
                 if runtime.response_generator is not None:
 
@@ -2102,6 +2192,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                         text = ""
                         pt = gt = 0
                         fr = None
+                        ids: List[int] = []
                         ctx, token_iter = runtime.response_generator.generate(
                             prompt=formatted_prompt,
                             images=images if images else None,
@@ -2114,10 +2205,16 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             text += token.text
                             gt += getattr(token, "token_count", 1)
                             metrics.record_chunk(token)
-                            if request.logprobs and token.finish_reason != "stop":
+                            # gmlx: as in the stream.
+                            if request.logprobs and _has_logprob_entry(token):
                                 logprobs.append(
                                     (token.token, token.logprobs, token.top_logprobs)
                                 )
+                            if (
+                                request.return_token_ids
+                                and getattr(token, "token_count", 1) != 0
+                            ):
+                                ids.append(int(token.token))
                             if token.finish_reason:
                                 fr = token.finish_reason
                                 break
@@ -2125,7 +2222,10 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             token_iter.close()
                         except Exception:
                             pass
-                        return pt, text, gt, fr, metrics, logprobs
+                        return pt, text, gt, fr, metrics, logprobs, (
+                            getattr(ctx, "prompt_ids", None),
+                            ids,
+                        )
 
                     (
                         prompt_tokens,
@@ -2134,6 +2234,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                         finish_reason,
                         metrics,
                         collected_logprobs,
+                        (prompt_ids, generated_ids),
                     ) = await asyncio.to_thread(_blocking_generate)
                 else:
                     gen_result = generate(
@@ -2221,6 +2322,10 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 lp,
                                 top_logprobs=top_lps,
                                 top_k=req_top_k,
+                                as_ids=bool(request.return_tokens_as_token_ids),
+                                lock=getattr(
+                                    runtime.response_generator, "_tokenizer_lock", None
+                                ),
                             )
                             for tid, lp, top_lps in collected_logprobs
                         ]
@@ -2240,6 +2345,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             tool_calls=parsed_tool_calls,
                         ),
                         logprobs=response_logprobs,
+                        token_ids=generated_ids if request.return_token_ids else None,
                     )
                 ]
                 result = ChatResponse(
@@ -2251,6 +2357,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                     timings=GenerationTimings.from_metrics(
                         metrics, prompt_tokens, output_tokens
                     ),
+                    prompt_token_ids=prompt_ids if request.return_token_ids else None,
                 )
 
                 elapsed = time.perf_counter() - request_start

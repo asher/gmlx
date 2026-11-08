@@ -227,6 +227,8 @@ class NemotronHMamba2Mixer(nn.Module):
         B = B.reshape(batch_size, seq_len, self.n_groups, self.ssm_state_size)
         C = C.reshape(batch_size, seq_len, self.n_groups, self.ssm_state_size)
         state = cache[1] if cache else None
+        # A right-padded batch ends each row's state at its length.
+        lengths = cache.lengths if cache else None
 
         y, state = ssm_update(
             hidden_states,
@@ -239,6 +241,7 @@ class NemotronHMamba2Mixer(nn.Module):
             state,
             self.time_step_limit,
             mask,
+            lengths,
         )
         if cache:
             cache[1] = state

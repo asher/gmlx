@@ -5,6 +5,7 @@ the make_cache fallback's `.cache` was missed, and every served request
 against an mlx-lm model without its own make_cache died in
 make_prompt_cache (ModuleNotFoundError: gmlx.cache)."""
 import mlx.nn as nn
+import pytest
 
 from gmlx.models.vlm_text_only import LanguageModel
 
@@ -119,3 +120,73 @@ def test_logits_to_keep_reaches_a_trunk_that_takes_the_embeddings():
     # The full head is a TF32 GEMM on the GPU, the kept column a GEMV.
     np.testing.assert_allclose(np.array(kept), np.array(full[:, -1:]),
                                atol=1e-2)
+
+
+def _synth(meta_and_shapes):
+    from gmlx.load.config_synth import synthesize_config
+    from gmlx.load.loader import build_model
+
+    meta, shapes = meta_and_shapes
+    return build_model(synthesize_config(meta, shapes))
+
+
+def _gemma3n():
+    from gmlx.load.loader import build_model
+
+    layer_types = ["sliding_attention", "full_attention"] * 2
+    return build_model({"model_type": "gemma3n", "text_config": dict(
+        model_type="gemma3n_text", hidden_size=64, num_hidden_layers=4,
+        intermediate_size=128, num_attention_heads=4, num_key_value_heads=2,
+        head_dim=16, rms_norm_eps=1e-6, vocab_size=32,
+        vocab_size_per_layer_input=32, num_kv_shared_layers=2,
+        sliding_window=512, max_position_embeddings=1024, rope_theta=1e6,
+        rope_local_base_freq=1e4, final_logit_softcapping=30.0,
+        layer_types=layer_types, activation_sparsity_pattern=[0.95, 0, 0, 0],
+        hidden_size_per_layer_input=16, altup_num_inputs=4,
+        altup_coef_clip=120.0, altup_correct_scale=True, altup_active_idx=0,
+        laurel_rank=8, rope_scaling=None)})
+
+
+def _text_models():
+    """Every text model type the CPU tier builds: the GGUF architectures
+    from synthesized configs, the owned ones as the loader leaves them, and
+    gemma-3n."""
+    from test_config_synth import DENSE_ARCHES, _meta_for, _meta_gemma4_size
+    from test_rope_swap import ARCHES
+    from tune.tiny_train_archs import CASES, build
+
+    rows = {a: (lambda a=a: _synth(ARCHES[a]())) for a in ARCHES}
+    rows.update({a: (lambda a=a: _synth((_meta_for(a), {})))
+                 for a in DENSE_ARCHES if a not in rows})
+    rows["gemma4"] = lambda: _synth((_meta_gemma4_size(
+        "gemma4", layers=6, hidden=64, experts=None),
+        {"blk.5.attn_v.weight": [16, 64]}))
+    rows.update({f"owned:{n}": (lambda n=n: build(n)[:2]) for n in CASES})
+    rows["gemma3n"] = _gemma3n
+    return rows
+
+
+_TEXT_MODELS = _text_models()
+
+
+@pytest.mark.parametrize("name", sorted(_TEXT_MODELS))
+def test_prefill_from_embeddings_matches_prefill_from_ids(name):
+    """The batch engine prefills from get_input_embeddings and decodes from
+    token ids. Both forwards of a served text model give the same logits,
+    bit for bit."""
+    import mlx.core as mx
+
+    from gmlx.models.vlm_text_only import Model as TextOnlyModel
+    from gmlx.serve import bridge_vlm
+
+    model, config = _TEXT_MODELS[name]()
+    mx.eval(model.parameters())
+    served = TextOnlyModel(model, config=bridge_vlm._as_dict(config))
+    bridge_vlm._ensure_text_embedding_probe(served, model)
+    lm = served.language_model
+    ids = mx.array([[1, 5, 2, 7, 3]])
+    want = lm(ids, cache=lm.make_cache()).logits
+    embeds = served.get_input_embeddings(ids).inputs_embeds
+    got = lm(ids, cache=lm.make_cache(), inputs_embeds=embeds).logits
+    assert got.shape == want.shape
+    assert mx.array_equal(got, want).item()

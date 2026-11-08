@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import weakref
 from typing import NoReturn
 from types import SimpleNamespace
 
@@ -54,7 +55,8 @@ _TABLE: dict | None = None
 # GGUF path -> per-layer KV cost entries of the boot table, kept out of
 # the table /v1/metrics dumps; stamped on the model at build.
 _BOOT_KV_COSTS: dict = {}
-_UNSTAMPED_WARNED: set = set()
+# id(model) -> weak ref to a model warned about as unstamped.
+_UNSTAMPED_WARNED: dict = {}
 
 
 def overcommit() -> bool:
@@ -447,8 +449,14 @@ def boot_kv_rates(model) -> dict:
         if costs:
             break
     if not costs:
-        if id(model) not in _UNSTAMPED_WARNED:
-            _UNSTAMPED_WARNED.add(id(model))
+        key = id(model)
+        seen = _UNSTAMPED_WARNED.get(key)
+        if seen is None or seen() is not model:
+            try:
+                _UNSTAMPED_WARNED[key] = weakref.ref(
+                    model, lambda _, key=key: _UNSTAMPED_WARNED.pop(key, None))
+            except TypeError:
+                _UNSTAMPED_WARNED[key] = lambda: model   # a stand-in model
             _log.warning("[capacity] no boot KV costs stamped on %s; "
                          "admission projects only after the first batch",
                          type(model).__name__)

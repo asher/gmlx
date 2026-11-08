@@ -48,7 +48,7 @@ is internal and may change between releases.
 | `MLX_VLM_MAX_RESIDENT_MODELS` | Unset | Most models resident at once when neither `--max-models` nor `server.max_models` sets a cap. |
 | `MLX_VLM_PINNED_MODELS` | Unset | Comma-separated model paths to pin, added to `--pin` and `pin: true` entries. |
 | `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | `1800` | Seconds without a next token before a request fails. `server.token_queue_timeout_s` sets the same limit and wins. |
-| `TOP_LOGPROBS_K` | `0` | Most `top_logprobs` a request may get, up to 20, as [Logprobs](api.md#logprobs) describes. |
+| `TOP_LOGPROBS_K` | `20` | Most `top_logprobs` a request may get, up to 100. Chat clamps a larger request; `/v1/completions` answers 400. [Logprobs](api.md#logprobs) has more. |
 | `GMLX_QUEUE_DEPTH_CAP` | Twice the decode batch | Waiting requests the server admits before it answers 503. `0` disables the cap. |
 | `GMLX_PREFLIGHT_MEM` | `1` | `0` turns off the memory check that answers 400 when a prompt cannot fit. |
 | `GMLX_OVERCOMMIT` | `0` | `1` skips the memory checks before a load, so a MoE [keeps its experts in memory](streaming.md#when-a-moe-streams-its-experts), except as that page says. |
@@ -63,6 +63,8 @@ is internal and may change between releases.
 |------|---------|---------|
 | `GMLX_CACHE_LIMIT_GB` | Sized from the weights | MLX buffer cache limit of `serve`, `run` and `chat` in GiB, over `server.cache_limit_gb` in `serve`. `0` disables it, and `unlimited` lifts the limit. |
 | `GMLX_DECODE_ARENA_GB` | What the memory ceiling leaves | Size of a streamed model's expert [arena](glossary.md#arena) in GiB. Lower it to keep a second model loaded. |
+| `GMLX_FUSED_MOE` | `1` | `0` loads every MoE block unfused, which is slower. An expert adapter on gpt-oss or a native-FP expert stack needs it. |
+| `GMLX_FUSED_MOE_BLOCK` | `1` | `0` loads the fused MoE blocks of models such as Qwen3.5 MoE and Gemma 4 unfused, which is slower. An expert adapter then loads while the experts stream. |
 | `GMLX_GOVERNOR` | `1` | `0` turns off the [governor](glossary.md#governor) that sheds requests when memory runs out. |
 | `GMLX_SPARSE_ATTN` | `0` | `1` turns on top-k sparse attention for deep decode, which is lossy. |
 | `GMLX_SPARSE_K` | `2048` | Tokens that sparse attention reads in each step. |

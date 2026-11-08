@@ -18,8 +18,13 @@ sets up the server is in [Configuration](config.md).
 - [Request features](#request-features)
   - [Tool calling](#tool-calling)
   - [Parameter support](#parameter-support)
+  - [Adapters](#adapters)
+  - [Thinking budget](#thinking-budget)
   - [Structured output](#structured-output)
   - [Logprobs](#logprobs)
+  - [Text completions](#text-completions)
+  - [Tokens](#tokens)
+  - [Assistant prefill](#assistant-prefill)
   - [Media in requests](#media-in-requests)
   - [Word timestamps in chat](#word-timestamps-in-chat)
   - [Transcription and translation](#transcription-and-translation)
@@ -50,7 +55,8 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /v1/chat/completions` | OpenAI chat completions, the main route |
 | `POST /v1/responses` | OpenAI Responses |
 | `POST /v1/messages` | Anthropic Messages. `/v1/messages/count_tokens` counts a body's input tokens. |
-| `POST /v1/completions` | Plain text completion: one string prompt, one choice, no chat template |
+| `POST /v1/completions` | Text completion with no chat template: string or token-id prompts, lists of prompts, echo and logprobs, as [Text completions](#text-completions) shows |
+| `POST /tokenize`, `/detokenize` | A prompt or chat messages as token ids, and token ids as text, as [Tokens](#tokens) shows |
 | `GET /v1/models` | Configured ids and aliases, with markers and [context figures](capacity.md#context-windows-in-the-model-list) |
 | `GET /health` | Liveness, with no API key. `?ready=1` adds readiness, as [Capacity and metrics](capacity.md#readiness-checks) shows. |
 | `GET /v1/metrics` | Live snapshot, or Prometheus text with `?format=prometheus` |
@@ -75,7 +81,9 @@ and `/v1/capacity/plan`.
 
 `GET /v1/models` lists the configured ids, discovered ids and aliases, never
 the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
-`speculative`, `vlm`, `profile` and `default`.
+`speculative`, `vlm`, `profile` and `default`. A chat entry also lists its
+`adapters`, each with the `index`, file `name`, default `strength` and the
+`sha256` of the loaded file, as [Adapters](#adapters) describes.
 
 Each [image model](config.md#image-models) is listed too, with the fields
 that [Routes](image-api.md#routes) describes.
@@ -92,10 +100,7 @@ a JSON body, except the two audio upload routes and image variations, which
 take a form, and image edits and `POST /v1/videos`, which take a form or a
 JSON body.
 
-`/v1/completions` honors the sampling parameters, `seed`, `stop`, `stream`,
-`stream_options` and `profile`. It refuses list prompts, `n` above 1,
-`echo`, `suffix` and `best_of` above 1. It never returns logprobs, and each
-choice carries `"logprobs": null`.
+[Text completions](#text-completions) covers `/v1/completions`.
 
 ## Request features
 
@@ -136,14 +141,16 @@ All generation routes honor `max_tokens` and `max_output_tokens`,
 `temperature`, `top_p`, `top_k`, `min_p`, `top_n_sigma`, `p_less`,
 `typical_p`, `repetition_penalty`, `presence_penalty`, `frequency_penalty`
 and their `*_context_size` companions, `enable_thinking`,
-`thinking_budget`, and the OpenAI `reasoning` and `reasoning_effort`
-controls. The three chat routes ignore `n`, `user`, `parallel_tool_calls`
-and `metadata`: they return one choice, and the template decides how many
-tool calls to make. `presence_penalty` and `frequency_penalty` count every
-token generated so far and never the prompt, as vLLM and SGLang do.
-`presence_context_size` or `frequency_context_size` set to N counts only the
-last N generated tokens, and 0 or no value counts all of them. The other
-fields differ by route:
+`thinking_budget`, `thinking_budget_message`, llama-server's
+`reasoning_budget_tokens` and `reasoning_budget_message`, and the OpenAI
+`reasoning` and `reasoning_effort` controls.
+[Thinking budget](#thinking-budget) shows the budget fields. The three chat
+routes ignore `n`, `user`, `parallel_tool_calls` and `metadata`: they return
+one choice, and the template decides how many tool calls to make.
+`presence_penalty` and `frequency_penalty` count every token generated so
+far and never the prompt, as vLLM and SGLang do. `presence_context_size` or
+`frequency_context_size` set to N counts only the last N generated tokens,
+and 0 or no value counts all of them. The other fields differ by route:
 
 | Parameter | `/v1/chat/completions` | `/v1/responses` | `/v1/messages` | Notes |
 |-----------|------------------------|-----------------|----------------|-------|
@@ -157,12 +164,99 @@ fields differ by route:
 | `timings_per_token` | Honored | Ignored | Ignored | Streamed chunks carry `timings.predicted_n`, the output-token count so far, as in llama.cpp |
 | `response_format` | Honored | Honored | Honored | `json_schema` or `json_object`, as [Structured output](#structured-output) shows |
 | `logprobs` | Honored | Ignored | Ignored | Token logprobs, as [Logprobs](#logprobs) shows |
-| `top_logprobs` | Honored | Ignored | Ignored | Capped by `TOP_LOGPROBS_K` |
+| `top_logprobs` | Honored | Ignored | Ignored | 0 to 100, capped by `TOP_LOGPROBS_K` |
+| `return_tokens_as_token_ids` | Honored | Ignored | Ignored | Names each logprob token as `token_id:<id>` |
+| `return_token_ids` | Honored | Ignored | Ignored | Returns the prompt's token ids and the reply's, as [Tokens](#tokens) shows |
+| `continue_final_message` | Honored | Ignored | Ignored | Continues the last assistant message, as [Assistant prefill](#assistant-prefill) shows |
+| `add_generation_prompt` | Honored | Ignored | Ignored | `false` renders the messages with no generation prompt |
 | `stop` | Honored | Ignored | Ignored | Anthropic clients use `stop_sequences` |
 | `stop_sequences` | Ignored | Ignored | Honored | Anthropic spelling of `stop` |
 | `chat_template_kwargs` | Honored | Honored | Honored | Template variables that override the profile's. `chat_template` itself gets a 400. |
 | `profile` | Honored | Honored | Honored | A [profile](config.md#profiles) by name |
 | `xtc_probability` | Honored | Honored | Honored | XTC sampling, with `xtc_threshold` |
+| `adapters` | Honored | Honored | Honored | Adapter strengths for the request, by path or file name, as [Adapters](#adapters) shows |
+| `lora` | Honored | Honored | Honored | Adapter strengths by index, in the llama-server form, as [Adapters](#adapters) shows |
+
+`/v1/completions` honors the sampling parameters, `seed`, `profile`,
+`adapters` and `lora`, and these fields:
+
+| Parameter | Notes |
+|-----------|-------|
+| `logprobs` | An integer: the alternatives at each position. Above `TOP_LOGPROBS_K`, a 400. `true` gets a 400. |
+| `echo` | Puts the prompt before the completion. With `logprobs`, also scores the prompt, as [Text completions](#text-completions) shows. |
+| `return_tokens_as_token_ids` | Names each logprob token as `token_id:<id>` |
+| `add_special_tokens` | Honored. Default true. A string prompt is tokenized with the flag; a token-id prompt ignores it. |
+| `stop` | Trims the text at the first stop string. The logprob entries keep every generated token. |
+| `stream_options` | `include_usage` adds a final usage chunk |
+
+### Adapters
+
+A model entry with [`adapters`](config.md#modelsadapters) takes a strength
+for each of them in each request. `adapters` names an adapter by its path
+in the config or its file name, and the adapters it does not list keep
+their default. `lora` names an adapter by its index in `/v1/models`, and
+the adapters it does not list run at 0:
+
+```sh
+curl localhost:8080/v1/chat/completions -d '{
+  "model": "qwen3-0.6b-mix",
+  "lora": [{"id": 1, "scale": 0.5}],
+  "messages": [{"role": "user", "content": "Hello"}]
+}'
+```
+
+The chat, completions, Responses and Messages routes take both fields, and
+so do `/v1/systemone` and `/v1/prewarm`. A request that sets both, or names
+an adapter its model does not load, gets a 400.
+[Mixing adapters per request](lora.md#mixing-adapters-per-request) lists the
+rules.
+
+### Thinking budget
+
+`thinking_budget` caps the reasoning tokens of one request. When the budget
+runs out, the server closes the thinking block, and the model writes its
+answer. `thinking_budget_message` sets text that the server puts in the
+thinking block before the close, so the model reads that it must answer now:
+
+```sh
+curl localhost:8080/v1/chat/completions -d '{
+  "model": "qwen3.8-27b-ud-q6",
+  "messages": [{"role": "user", "content": "Plan three days in Kyoto."}],
+  "thinking_budget": 256,
+  "thinking_budget_message": "Time is up, so I will answer now."
+}'
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `thinking_budget` | No budget | Reasoning tokens the model may write. `0` closes the block at once, and `-1` takes the server's budget. |
+| `thinking_budget_message` | None | Text the server writes in the thinking block, then the end marker, when the budget runs out |
+| `reasoning_budget_tokens` | None | llama-server's name for `thinking_budget` |
+| `reasoning_budget_message` | None | llama-server's name for `thinking_budget_message` |
+
+The fields work on `/v1/chat/completions`, `/v1/responses`, `/v1/messages`
+and `/v1/completions`. On `/v1/messages`, `thinking.budget_tokens` also
+sets the budget. A request that sets both names of one field, such as
+`thinking_budget` and `reasoning_budget_tokens`, gets a 400.
+
+A budget of N lets N reasoning tokens through, as llama-server does.
+Reasoning that the prompt already holds after its last start marker counts
+too. `-1` takes the budget of the model's profile or overrides, of
+`gmlx serve --thinking-budget`, or of `MLX_VLM_THINKING_BUDGET`, in that
+order.
+
+Special tokens in the message are read as tokens. Without a message, the
+server writes a newline before the end marker, and on a model with a
+built-in drafter a budget above 0 writes a short sentence that says the
+budget ran out. The message and the end marker are part of
+`reasoning_content`, and they count against `max_tokens`.
+
+The built-in drafters, the MTP heads, DFlash, DFlash2, DSpark and
+LiLiCorr, honor the budget and the message on a request that runs alone.
+The close can come up to one draft round late. A request that runs in a
+batch with other requests, or that is paused and resumed, drops both. A
+drafter that `MLX_VLM_DRAFT_MODEL` loads with a draft kind other than `mtp`
+answers a request's budget with a 400.
 
 ### Structured output
 
@@ -184,7 +278,9 @@ curl localhost:8080/v1/chat/completions -d '{
 `"json_object"` allows any JSON object. An unknown type or a malformed
 schema gets a 400. On `/v1/messages`, an `output_config` of type
 `json_schema` works the same way. On a thinking model the schema applies to
-the answer after the thinking.
+the answer after the thinking. When the prompt neither opens nor closes a
+thinking block, the reply can open one first, and the schema applies after
+the block ends.
 
 A model with MTP speculative decoding keeps speculating under a schema, and
 its output is the same as without speculation. The first structured request
@@ -192,14 +288,207 @@ on a model takes about 1.5 s longer, once per process.
 
 ### Logprobs
 
-`logprobs: true` returns each token's logprob, and `top_logprobs: N` asks
-for the N most likely alternatives. The server caps the alternatives with
-the `TOP_LOGPROBS_K` environment variable, 0 to 20, which is 0 by default.
-Raise it when you start the server, or the lists stay empty:
+`logprobs: true` returns the logprob of each token in the reply, and
+`top_logprobs: N` asks for the N most likely alternatives at each position.
+The server caps the alternatives with the `TOP_LOGPROBS_K` environment
+variable, 0 to 100, which is 20 by default. Chat clamps a larger request to
+the cap, and `/v1/completions` answers 400. To allow more, raise the cap
+when you start the server:
 
 ```sh
-TOP_LOGPROBS_K=5 gmlx serve --config ~/.config/gmlx/gmlx.yaml
+TOP_LOGPROBS_K=50 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ```
+
+The values are the model's own distribution: the log-softmax of its raw
+logits. Logit bias, penalties, XTC, structured output and the profile's
+sampling values change which token the server samples, but not the
+logprobs. A token that the thinking budget forces in reports the logprob
+that the model gave it. The token that ends the reply gets its entry too.
+A logprob below -9999 comes back as -9999.0.
+
+`bytes` holds the token's raw bytes from the vocabulary. A multi-byte
+character can split across tokens, and each of those tokens returns only
+its part. A special token, such as the token that ends the turn, returns
+the UTF-8 of its token text, for example `<|im_end|>`.
+`return_tokens_as_token_ids: true` replaces each `token` string, in the
+entries and in their alternatives, with `token_id:<id>`. The `bytes` do not
+change.
+
+With `logprobs: true` and no `top_logprobs`, a reply has no alternatives, as
+in the OpenAI API.
+
+A model with a [speculative drafter](speculative-decoding.md), such as an
+MTP head or a DFlash, DSpark or LiLiCorr drafter, returns logprobs while it
+speculates. They come from the target model's pass over the drafted tokens,
+and agree with a run without speculation to within bf16 rounding. A
+diffusion model refuses a logprob request with a 400.
+
+While a request with logprobs is in a batch, each step of that batch takes
+longer, because the server also computes the alternatives.
+
+`/v1/completions` also scores a prompt: with `echo` and `logprobs`, it
+returns the logprob of each prompt token given the tokens before it, as
+[Text completions](#text-completions) shows. A scored value is a prefill
+value. It is close to the logprob of the same token while the model
+generated it, but not equal: the two passes round differently in bf16.
+
+### Text completions
+
+`/v1/completions` sends a prompt to the model with no chat template. A
+prompt is a string, a list of strings, a list of token ids, or a list of
+lists of token ids. Each prompt of a list gets its own choice, with its
+`index`, and `usage` adds up the prompts. A list holds at most as many
+prompts as the queue cap, `GMLX_QUEUE_DEPTH_CAP`, or 64 when the cap is
+off.
+
+The server tokenizes a string prompt with the model's tokenizer and adds
+the model's start token when the model has one. `add_special_tokens: false`
+leaves the start token out. A token-id prompt goes to the model as sent,
+with no start token. Each id must be in the vocabulary and must not be a
+media placeholder, or the request gets a 400.
+
+`logprobs: N` returns the OpenAI completions shape: `tokens`,
+`token_logprobs`, `top_logprobs` and `text_offset`. Each `top_logprobs`
+entry holds the N most likely tokens and the chosen token, so it can hold
+N + 1 keys. Two tokens with the same text share one key, so an entry can
+also hold fewer. `return_tokens_as_token_ids: true` names each token
+`token_id:<id>`, which keeps every key apart. `text_offset` adds up the
+length of each token's name.
+
+`echo: true` puts the prompt before the completion. A string prompt comes
+back as sent, and a token-id prompt as the tokenizer decodes it, special
+tokens included.
+
+`echo` with `logprobs` scores the prompt. The entries start with the
+prompt tokens: the first has `null` in `token_logprobs` and `top_logprobs`,
+and entry i holds the logprob of prompt token i given the tokens before
+it. `max_tokens: 0` returns the prompt entries alone, with
+`finish_reason: "length"` and 0 completion tokens. `max_tokens: 0` needs
+`echo`. With `max_tokens` of 1 or more, the completion follows as usual,
+and the server reads the prompt twice: once to score it and once to
+generate.
+
+```sh
+curl localhost:8080/v1/completions -d '{
+  "model": "qwen3.8-27b-ud-q6",
+  "prompt": "The capital of France is Paris.",
+  "echo": true, "logprobs": 0, "max_tokens": 0
+}'
+```
+
+A scoring request:
+
+- Does not stream. `stream` with `echo` and `logprobs` gets a 400.
+- Holds at most 1,048,576 entries: the prompt tokens times `logprobs` + 1.
+  A larger request gets a 400.
+- Runs on a cache of its own at full precision, whatever `KV_BITS` sets.
+  It does not read or fill the [prompt cache](prompt-cache.md).
+- Runs one at a time on each model, between the steps of the chat
+  requests. The others wait in the order they came, and count toward the
+  queue cap.
+- Gets a 400 on a model that reads token ids and embeddings differently,
+  or that does not return logits for each prompt token. The message names
+  the model.
+
+The route refuses `n` and `best_of` above 1, `suffix`, a list of prompts
+with `stream`, and `logprobs: true`. vLLM's `prompt_logprobs` is ignored,
+and the server log names it.
+
+### Tokens
+
+Chat `return_token_ids: true` returns the token ids the model read and
+wrote: `prompt_token_ids` at the top level, and `token_ids` in each choice.
+With `logprobs`, each id has one logprob entry, in the same order. A
+stream sends `prompt_token_ids` in its first chunk and `token_ids` in each
+chunk. The prompt ids of a request with images, audio or video include
+media placeholders, which a token-id prompt cannot send back. A diffusion
+model refuses the field with a 400.
+
+`POST /tokenize` takes vLLM's body and returns
+`{"tokens", "count", "max_model_len"}`:
+
+- `prompt`, a string, tokenizes as `/v1/completions` tokenizes it, with
+  `add_special_tokens` (default true).
+- `messages` renders and tokenizes as `/v1/chat/completions` does, with
+  `add_generation_prompt`, `continue_final_message`, `chat_template_kwargs`
+  and `tools`. Messages with media get a 400.
+- `return_token_strs: true` adds `token_strs`, each token's vocabulary
+  entry.
+
+`max_model_len` is the configured context limit, or the model's trained
+context. `POST /detokenize` takes `{"tokens": [ids]}` and returns
+`{"prompt": text}`.
+
+To score a reply token by token at its exact tokens, generate it on chat
+with `return_token_ids: true`. Keep `prompt_token_ids` as P and the
+choice's `token_ids` as R. For a reply that gmlx did not generate,
+`/tokenize` with the `messages` gives P. Then score P and R in one request:
+
+```sh
+curl localhost:8080/v1/completions -d '{
+  "model": "qwen3.8-27b-ud-q6",
+  "prompt": [P..., R...],
+  "echo": true, "logprobs": 0, "max_tokens": 0,
+  "return_tokens_as_token_ids": true
+}'
+```
+
+`token_logprobs[len(P) + i]` is the logprob of `R[i]` given P and the reply
+tokens before it. The model reads the ids it generated, not a new
+tokenization of the reply's text. With `KV_BITS`, the reply was generated
+on a quantized cache and the score runs on a full-precision one, so the
+two values can differ more than bf16 rounding.
+
+### Assistant prefill
+
+To have the model continue a reply that you started, end `messages` with
+the partial assistant message. Then send `continue_final_message: true`
+with `add_generation_prompt: false`, as for llama-server:
+
+```sh
+curl localhost:8080/v1/chat/completions -d '{
+  "model": "qwen3.8-27b-ud-q6",
+  "messages": [{"role": "user", "content": "Name three rivers."},
+               {"role": "assistant", "content": "1. The Nile\n2."}],
+  "continue_final_message": true,
+  "add_generation_prompt": false
+}'
+```
+
+The reply holds only the new text, in `content` or `reasoning_content`.
+`usage.prompt_tokens` counts the prefill, and `max_tokens`, `logprobs` and
+`stop` apply to the new tokens only.
+
+A continued message is text, and the server tokenizes it again. Its tokens
+can differ from the ones the model generated, for example at a run of
+spaces or newlines. To continue from exact tokens, send them as a token-id
+prompt, as [Tokens](#tokens) shows.
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `continue_final_message` | `false` | `true` continues the content, or the reasoning when the message has only `reasoning_content`. A part name picks it. |
+| `add_generation_prompt` | `true` | `false` renders the messages with no generation prompt. Send it with `continue_final_message`. |
+
+A part name is `"content"` or `"reasoning_content"`. `"content"` closes the
+reasoning before the content. `add_generation_prompt: false` alone renders
+the messages as they are, so a last assistant message stays a finished
+turn.
+
+These chat templates can continue a message, in the prompt that
+llama-server renders for the same messages:
+
+- Qwen3.5 and later Qwen templates, and the other templates that write tool
+  calls in the same `<tool_call>` and `<function=...>` form.
+- Gemma 4.
+- SmolLM2-135M-Instruct.
+
+A request to any other model gets a 400. So does a last message with
+`tool_calls`, or `response_format` with `continue_final_message`. An
+[assistant](assistant.md#served-assistants) without `tools` refuses both
+fields, because its turns build their own prompt.
+
+[Assistant prefill](migrating.md#assistant-prefill) in the migration guide
+lists how gmlx differs from llama-server here.
 
 ### Media in requests
 

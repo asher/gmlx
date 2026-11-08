@@ -111,3 +111,4 @@ def test_bad_magic_raises(tmp_path):
     p.write_bytes(b"NOPE" + b"\x00" * 64)
     with pytest.raises(ValueError, match="bad magic"):
         scan_gguf(str(p))
+

@@ -151,7 +151,9 @@ class TemplateTokens:
     def __init__(self, processor, *, lock=None):
         import contextlib
 
-        self.wrapper = getattr(processor, "_wrapper", processor)
+        from .ar_reader import tokenizer_of
+
+        self.wrapper = tokenizer_of(processor)
         self.lock = lock if lock is not None else contextlib.nullcontext()
         self._ids: dict[str, list[int]] = {}
 
