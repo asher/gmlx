@@ -325,7 +325,8 @@ video_models:
 
 `defaults.attention` is `dense`, the default, or `int8`, which runs the
 DiT's attention in int8 as [Int8 attention](video.md#int8-attention)
-describes. `gmlx serve` and the ComfyUI nodes follow it too.
+describes. A job's `attention` field and the `attention` input of the
+ComfyUI model loader run over it.
 
 ## Profiles
 
