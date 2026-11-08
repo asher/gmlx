@@ -81,6 +81,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
   fused kernel where MLX built the whole score matrix, so Nemotron-H and
   other models with wide query groups draft faster at long context.
+- Requires mlx-kquant 0.5.10.
 
 ### Fixed
 
