@@ -199,7 +199,14 @@ def test_a_streamed_granite_takes_the_split_and_matches_its_full_path(
     got = _score(split, ids)
     assert split.split is not None and split.split[2] is not None
     assert split.plan(len(ids) - 1) == full.plan(len(ids) - 1)
-    assert got == want
+    if mx.default_device() == mx.gpu:
+        assert got == want
+        return
+    # The CPU matmul rounds by row count: the head over a 4-column
+    # sub-chunk and over the 16-column forward differ in the last bit.
+    assert [e[1] for e in got] == [e[1] for e in want]
+    flat = lambda es: mx.array([[e[0], *e[2]] for e in es])  # noqa: E731
+    assert mx.max(mx.abs(flat(got) - flat(want))).item() <= 1e-5
 
 
 def test_a_streamed_minicpm_fails_the_check_and_takes_the_full_path(small):
