@@ -268,6 +268,21 @@ def _ref_quantize_rows(x, *, group_size=None, stream=None):
     return codes.reshape(xf.shape), s.reshape(*lead, k // g)
 
 
+def _int_product(a: mx.array, b: mx.array) -> mx.array:
+    """``a @ b.T`` of int8 codes held in float32. The codes and every sum
+    under 2^24 are exact in float32, and in TF32, which keeps integers to
+    2^11, so the product does not depend on MLX_ENABLE_TF32. Refuses an
+    operand that is not codes, so no reference multiplies a scaled
+    float."""
+    for t in (a, b):
+        if not (mx.all(t == mx.round(t)).item()
+                and mx.max(mx.abs(t)).item() <= 127):
+            raise AssertionError("a reference product takes int8 codes")
+    if a.shape[-1] * 127 * 127 >= 1 << 24:
+        raise AssertionError("a reference product's sums pass 2^24")
+    return a @ b.T
+
+
 def _ref_matmul(x8, x_scales, w8, w_scales, *, group_size=None,
                 out_dtype=mx.bfloat16, stream=None):
     # As mlx-kquant's op: w_scales is float32 [N], one a row.
@@ -278,8 +293,8 @@ def _ref_matmul(x8, x_scales, w8, w_scales, *, group_size=None,
     y = mx.zeros((*x8.shape[:-1], w8.shape[0]), mx.float32)
     for i in range(k // g):
         cols = slice(i * g, (i + 1) * g)
-        acc = (x8[..., cols].astype(mx.float32)
-               @ w8[:, cols].astype(mx.float32).T)
+        acc = _int_product(x8[..., cols].astype(mx.float32),
+                           w8[:, cols].astype(mx.float32))
         y = y + acc * x_scales[..., i:i + 1]
     return (y * w_scales).astype(out_dtype)
 
@@ -394,7 +409,11 @@ def _rel(a, b) -> float:
 
 def _sim_product(x: mx.array, w: mx.array, group: int | None) -> mx.array:
     """The lab sim's h3c product (competitor_product, design 6.2) on the
-    float32 weight ``w``, cast to x's dtype."""
+    float32 weight ``w``, cast to x's dtype. The sim's grouped form,
+    ``(xi * sx) @ wi.T``, multiplies a scaled float, which TF32 rounds to
+    about 1e-3; this takes each group's integer product and scales it
+    after, the same sum in exact arithmetic, in group order as the
+    kernel."""
     xf = x.astype(mx.float32)
     lead, k = xf.shape[:-1], xf.shape[-1]
     wi, sw = _sim_codes(w)
@@ -403,11 +422,31 @@ def _sim_product(x: mx.array, w: mx.array, group: int | None) -> mx.array:
     sx = mx.max(mx.abs(xg), axis=-1, keepdims=True) / 127
     sx = mx.where(sx > 0, sx, 1 / 127)
     xi = mx.clip(mx.round(xg / sx), -127, 127)
-    if g == k:
-        y = (xi.reshape(xf.shape) @ wi.T) * sx.reshape(*lead, 1)
-    else:
-        y = (xi * sx).reshape(xf.shape) @ wi.T
+    y = mx.zeros((*lead, w.shape[0]), mx.float32)
+    for i in range(k // g):
+        y = y + _int_product(xi[..., i, :], wi[:, i * g:(i + 1) * g]) \
+            * sx[..., i, :]
     return (y * sw.reshape(-1)).astype(x.dtype)
+
+
+def test_the_references_multiply_codes_and_match_the_sims_form():
+    """The reference product refuses a scaled operand, and the grouped
+    sim product equals the lab's ``(xi * sx) @ wi.T`` taken in float64,
+    to float32 rounding."""
+    with pytest.raises(AssertionError, match="takes int8 codes"):
+        _int_product(mx.array([[0.5, 1.0]]), mx.array([[1.0, 1.0]]))
+    rng = np.random.default_rng(6)
+    x = rng.standard_normal((5, 2048)).astype(np.float32)
+    w = (rng.standard_normal((32, 2048)) / 16).astype(np.float32)
+    got = _sim_product(mx.array(x), mx.array(w), 1024)
+    xg = x.reshape(5, 2, 1024)
+    sx = np.abs(xg).max(-1, keepdims=True) / np.float32(127)
+    xi = np.clip(np.round(xg / sx), -127, 127).astype(np.float64)
+    sw = np.abs(w).max(-1, keepdims=True) / np.float32(127)
+    wi = np.clip(np.round(w / sw), -127, 127)
+    want = ((xi * sx).reshape(5, 2048) @ wi.T.astype(np.float64)) \
+        * sw.reshape(-1)
+    np.testing.assert_allclose(np.array(got), want, rtol=1e-5, atol=1e-6)
 
 
 # G3's bar for one int8 call against the sim's float32 product rounded
