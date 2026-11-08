@@ -7,6 +7,7 @@ since the evaluation may hold the GIL, and the baseline is the largest
 reading over a quiet moment after the cache is cleared. Metal only."""
 from __future__ import annotations
 
+import gc
 import os
 import subprocess
 import sys
@@ -82,6 +83,9 @@ def test_a_512_decode_stays_under_the_fitted_footprint():
                             itemsize=2)
     sampler = _Sampler()
     try:
+        # Arrays an earlier test left in reference cycles would otherwise
+        # reach the cache at the next collection, inside the measurement.
+        gc.collect()
         mx.synchronize()
         mx.clear_cache()
         before = _limit_now()
