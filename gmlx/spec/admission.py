@@ -102,6 +102,10 @@ def install_continuous_batch_admission() -> None:
         mx.clear_cache()
         return True
 
+    # The tick guard drops a batch whose state a failed command buffer
+    # spoiled through the same release.
+    setattr(SpecBatch, "_kq_release_heavy_state", _release_heavy_state)
+
     def _release_if_finished(self) -> None:
         if _orig_len(self) == 0:
             _release_heavy_state(self)

@@ -79,6 +79,11 @@ class _Forcing:
         out, self.forced_token_id = self.forced_token_id, None
         return out
 
+    def rewind(self, committed):
+        """The state after ``committed``, as a requeue needs."""
+        self.n = len(committed)
+        self.forced_token_id = FORCED if self.n == 3 else None
+
 
 @pytest.fixture
 def engine(monkeypatch):
@@ -219,6 +224,13 @@ def check(make, case, **kw):
     return got
 
 
+@pytest.fixture(params=[MEM, OOM], ids=["mem", "cb-oom"])
+def shot(request):
+    """The injection: an allocator refusal, and again a command buffer OOM,
+    after which nothing the engine holds is valid (G)."""
+    return Shot(request.param)
+
+
 def _arm_at(shot, tick):
     def plan(t, gen, out):
         if t == tick:
@@ -226,9 +238,8 @@ def _arm_at(shot, tick):
     return plan
 
 
-def test_e_generate_entry(engine, monkeypatch):
+def test_e_generate_entry(engine, monkeypatch, shot):
     """E: the prefill arm throws after the decode step of its tick."""
-    shot = Shot()
     orig = ar.PromptProcessingBatch.generate
 
     def generate(self, *a, **k):
@@ -239,17 +250,15 @@ def test_e_generate_entry(engine, monkeypatch):
     check(engine, shot, plan=_arm_at(shot, 4))
 
 
-def test_e_cache_eval(engine, monkeypatch):
+def test_e_cache_eval(engine, monkeypatch, shot):
     """E: the cache eval after the decode step throws."""
-    shot = Shot()
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_next", "_next_after_decode"))
     check(engine, shot, plan=_arm_at(shot, 6), eval_every=1)
 
 
-def test_f_finish_on_a_failed_tick(engine, monkeypatch):
+def test_f_finish_on_a_failed_tick(engine, monkeypatch, shot):
     """F: a row finishes on the tick whose prefill arm throws. Its finish
     was its only close."""
-    shot = Shot()
     orig = ar.PromptProcessingBatch.generate
 
     def generate(self, *a, **k):
@@ -265,10 +274,9 @@ def test_f_finish_on_a_failed_tick(engine, monkeypatch):
     assert got[1][-1].finish_reason == "length"
 
 
-def test_d_filter(engine, monkeypatch):
+def test_d_filter(engine, monkeypatch, shot):
     """D: the filter of a finishing row throws. The finished row leaves
     on the next tick instead of decoding past its stop."""
-    shot = Shot()
     orig = ar.GenerationBatch.filter
 
     def filt(self, keep):
@@ -283,33 +291,29 @@ def test_d_filter(engine, monkeypatch):
     check(engine, shot, plan=plan, b_max=3)
 
 
-def test_d_forced_eval(engine, monkeypatch):
+def test_d_forced_eval(engine, monkeypatch, shot):
     """D: the eval of a forced id throws."""
-    shot = Shot()
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_force_next_tokens"))
     got = check(engine, shot, plan=_arm_at(shot, 1), forcing=True)
     assert FORCED in _tokens(got)[0]
 
 
-def test_c_after_the_sample(engine, monkeypatch):
+def test_c_after_the_sample(engine, monkeypatch, shot):
     """C: the decode step throws after its sample. The next step returns
     the token the failed one owed, without a forward."""
-    shot = Shot()
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_step"))
     check(engine, shot, plan=_arm_at(shot, 6))
 
 
-def test_c_in_the_emit_eval(engine, monkeypatch):
-    shot = Shot()
+def test_c_in_the_emit_eval(engine, monkeypatch, shot):
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_step", "_emit", name="eval"))
     check(engine, shot, plan=_arm_at(shot, 6))
 
 
-def test_a_forced_id_on_the_resume_tick_keeps_its_logprob(engine, monkeypatch):
+def test_a_forced_id_on_the_resume_tick_keeps_its_logprob(engine, monkeypatch, shot):
     """The step that resumes feeds the owed token to the criteria, which
     forces an id. The id reports its own raw logprob, which needs the
     failed step's raw logits."""
-    shot = Shot()
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_step"))
 
     def plan(t, gen, out):
@@ -336,32 +340,28 @@ class _Proc:
         return logits
 
 
-def test_b_in_a_logits_processor(engine):
+def test_b_in_a_logits_processor(engine, shot):
     """B: the step throws between its forward and its sample. Every row of
     the batch is rebuilt, so no KV holds a token twice."""
-    shot = Shot()
     got = check(engine, shot, plan=_arm_at(shot, 6), processors=[_Proc(shot)])
     assert len(got) == 2
 
 
-def test_p_in_generate(engine, monkeypatch):
+def test_p_in_generate(engine, monkeypatch, shot):
     """P: the first eval of the prompt batch's generate throws after its
     forward moved the new row's cache."""
-    shot = Shot()
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "generate"))
     check(engine, shot, plan=_arm_at(shot, 4))
 
 
-def test_p_in_prompt_step(engine, monkeypatch):
+def test_p_in_prompt_step(engine, monkeypatch, shot):
     """P: a chunk of a chunked prefill throws after its forward."""
-    shot = Shot()
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "prompt_step"))
     check(engine, shot, plan=_arm_at(shot, 4), chunked=True)
 
 
-def test_p0_at_the_prompt_batch_constructor(engine, monkeypatch):
+def test_p0_at_the_prompt_batch_constructor(engine, monkeypatch, shot):
     """P0: the rows have left the queue and no prompt batch holds them."""
-    shot = Shot()
     orig = ar.PromptProcessingBatch.__init__
 
     def init(self, *a, **k):
@@ -372,10 +372,9 @@ def test_p0_at_the_prompt_batch_constructor(engine, monkeypatch):
     check(engine, shot, plan=_arm_at(shot, 4))
 
 
-def test_x_before_extend_changes_the_batch(engine, monkeypatch):
+def test_x_before_extend_changes_the_batch(engine, monkeypatch, shot):
     """X: the new batch is lost before it joins; the decode batch is
     whole."""
-    shot = Shot()
     orig = ar.GenerationBatch.extend
 
     def extend(self, other):
@@ -386,10 +385,9 @@ def test_x_before_extend_changes_the_batch(engine, monkeypatch):
     check(engine, shot, plan=_arm_at(shot, 4))
 
 
-def test_x_after_extend_changes_the_batch(engine, monkeypatch):
+def test_x_after_extend_changes_the_batch(engine, monkeypatch, shot):
     """X: extend throws half way, so the decode batch is dropped whole and
     every row is rebuilt."""
-    shot = Shot()
     orig = ar._extend_cache
 
     def extend_cache(*a, **k):

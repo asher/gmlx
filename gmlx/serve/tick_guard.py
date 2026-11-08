@@ -72,11 +72,18 @@ def is_gpu_fault(e: BaseException) -> bool:
             and any(m in str(e) for m in _GPU_MARKS))
 
 
+def is_command_buffer_failure(e: BaseException) -> bool:
+    """A command buffer failed, for memory or any other reason. Its
+    outputs are not valid, and the wait that reports it can come a step
+    after the failed work."""
+    return isinstance(e, RuntimeError) and any(m in str(e) for m in _GPU_MARKS)
+
+
 def is_allocator_refusal(e: BaseException) -> bool:
     """The allocator refused before any work ran. Only then are the
     arrays the tick computed valid. A command buffer that ran out of
     memory reports it at a wait, after its outputs were spoiled."""
-    return is_memory_error(e) and not any(m in str(e) for m in _GPU_MARKS)
+    return is_memory_error(e) and not is_command_buffer_failure(e)
 
 
 def salvage(exc: BaseException, responses, *, ahead: bool = False) -> None:
@@ -439,6 +446,70 @@ def _rebuild_broken(gen, st: _TickState, e: BaseException) -> bool:
     return True
 
 
+def _drop_decode_batch(gen) -> list:
+    """Take the decode batch out of the engine without evaluating or
+    filtering it. Returns the uids it served that had not finished."""
+    gb = gen._generation_batch
+    if hasattr(gb, "_finished") and hasattr(gb, "_all_uids"):
+        uids = [u for u, done in zip(gb._all_uids, gb._finished) if not done]
+        for other in getattr(gb, "_pending_injections", None) or ():
+            uids += list(getattr(other, "_all_uids", ()))
+        gb._pending_injections = []
+        injections = getattr(getattr(gb, "model", None),
+                             "_generator_injections", None)
+        if injections:
+            injections.clear()
+        gb._finished = [True] * len(gb._finished)
+        gb._refresh_uids()
+        release = getattr(gb, "_kq_release_heavy_state", None)
+        if release is not None:
+            release()
+        else:
+            rounds, gb._rounds_iter = getattr(gb, "_rounds_iter", None), None
+            if rounds is not None:
+                try:
+                    rounds.close()
+                except Exception:
+                    _log.warning("[tick-guard] rounds close failed",
+                                 exc_info=True)
+    else:
+        uids = list(getattr(gb, "uids", ()))
+    gen._kq_empty_generation_batch()
+    return uids
+
+
+def _drop_engine(gen, st: _TickState, e: BaseException) -> None:
+    """A command buffer failed: nothing the engine holds is valid, nor
+    what the window's stores wrote. Drop the decode and prompt batches
+    without evaluating them, take back the window's stores, and requeue
+    every row from what it delivered."""
+    from gmlx.cache.snapshot import retirement_blocked
+
+    pb = getattr(gen, "_prompt_batch", None)
+    with retirement_blocked():
+        uids = _drop_decode_batch(gen)
+        if pb is not None:
+            uids += list(getattr(pb, "uids", ()))
+        uids += list(getattr(e, "_kq_prefill_broken", ()))
+        # A row the failed tick finished has left the batch, and its finish
+        # is dropped with the salvage.
+        uids += [r.uid for r in getattr(e, "_kq_salvage", ())
+                 if getattr(r, "uid", None) in st.ledger]
+        _drop_prompt_batch(gen, e)
+    evicted = 0
+    evict = getattr(getattr(gen, "apc_manager", None), "kq_evict", None)
+    if evict is not None:
+        try:
+            evicted = evict(st.ticks - 1, owner=pb)
+        except Exception:
+            _log.warning("[tick-guard] APC window eviction failed",
+                         exc_info=True)
+    done = _rebuild_group(gen, st, uids, str(e))
+    _log.warning("[tick-guard] command buffer failure: requeued %d row(s), "
+                 "evicted %d APC entries stored since tick %d", len(done),
+                 evicted, st.ticks - 1)
+
+
 def _contain_fault(st: _TickState, e: RuntimeError) -> bool:
     """A non-memory command buffer failure. Contain the first one, since a
     driver hiccup should not take the server down, and let a second one
@@ -468,6 +539,9 @@ def _contain(gen, st: _TickState, e: RuntimeError) -> None:
                  st.fail_streak, str(e).splitlines()[0][:200])
     drain_for("engine-tick")
     mx.clear_cache()
+    if is_command_buffer_failure(e):
+        _drop_engine(gen, st, e)
+        return  # every row is requeued; no victim on this strike
     if _rebuild_broken(gen, st, e):
         return  # those rows' memory is freed; no victim on this strike
     if st.fail_streak < 2:
@@ -496,6 +570,26 @@ def _harvest_responses(st: _TickState, generation_responses) -> None:
             st.rebuilt.discard(r.uid)
 
 
+def _install_store_owner(cls) -> None:
+    """A prompt batch's APC stores belong to it, so dropping it after a
+    command buffer failure takes them back whatever their tick."""
+    for name in ("prompt_step", "generate"):
+        orig = getattr(cls, name)
+        if wrapped_with(orig, _INSTALLED_FLAG):
+            continue
+
+        def owned(self, *a, _orig=orig, **k):
+            scope = getattr(getattr(self, "_apc_manager", None), "kq_scope",
+                            None)
+            if scope is None:
+                return _orig(self, *a, **k)
+            with scope(self):
+                return _orig(self, *a, **k)
+
+        setattr(owned, _INSTALLED_FLAG, True)
+        setattr(cls, name, link(owned, orig))
+
+
 def install_tick_guard() -> bool:
     """Wrap BatchGenerator._next outermost. Idempotent."""
     if os.environ.get("GMLX_TICK_GUARD", "1") == "0":
@@ -510,6 +604,9 @@ def install_tick_guard() -> bool:
         st = _state(self)
         st.ticks += 1
         _harvest_pending(self, st)
+        mark = getattr(getattr(self, "apc_manager", None), "kq_mark_tick", None)
+        if mark is not None:
+            mark(st.ticks, getattr(self, "_prompt_batch", None))
         try:
             _maybe_inject(st)
             out = _orig(self, **kwargs)
@@ -517,6 +614,7 @@ def install_tick_guard() -> bool:
             if is_gpu_fault(e):
                 if not _contain_fault(st, e):
                     raise
+                _drop_engine(self, st, e)
                 return [], []
             if not is_memory_error(e):
                 raise
@@ -534,5 +632,6 @@ def install_tick_guard() -> bool:
 
     setattr(_guarded_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = link(_guarded_next, _orig)
+    _install_store_owner(_ar.PromptProcessingBatch)
     _log.info("engine tick guard installed")
     return True

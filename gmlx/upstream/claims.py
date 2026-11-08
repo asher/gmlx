@@ -159,11 +159,12 @@ CLAIMS: tuple[Claim, ...] = (
           "media_spans.install_span_aware_prompt_step (the block step; a "
           "chunk past right-padded row ends rides the _suffix_lens end "
           "clip and the _speculative_prefill.append output); "
-          "prefill_decay (each chunk is sized from the decayed step)",
+          "prefill_decay (each chunk is sized from the decayed step); "
+          "tick_guard (the batch's APC stores belong to it)",
           install="gmlx.gen.media_spans:install_span_aware_prompt_step",
           wrappers=("gmlx.gen.media_spans", "gmlx.gen.prefill_decay",
                     "gmlx.lora_rows", "gmlx.serve.cb_phase",
-                    "gmlx.spec.mtp_prefill")),
+                    "gmlx.serve.tick_guard", "gmlx.spec.mtp_prefill")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar",
           "PromptProcessingBatch.needs_processing",
           "prefill_decay.install_prefill_decay (a batch that hands "
@@ -190,12 +191,13 @@ CLAIMS: tuple[Claim, ...] = (
           "patches.spec_processors (reads each row's processors and "
           "prompt tokens before the prefill clears them, outermost); "
           "patches.context_copy (hangs the prompt indexes on the "
-          "speculative batch)",
+          "speculative batch); tick_guard (the batch's APC stores belong "
+          "to it)",
           wrappers=("gmlx.lora_rows", "gmlx.serve.cb_phase",
                     "gmlx.serve.patches.context_copy",
                     "gmlx.serve.patches.mtp_thinking",
                     "gmlx.serve.patches.spec_processors",
-                    "gmlx.spec.mtp_prefill")),
+                    "gmlx.serve.tick_guard", "gmlx.spec.mtp_prefill")),
     Claim("gmlx._vendor.mlx_vlm.generate.ar",
           "SpeculativeGenerationBatch._start_rounds",
           "patches.spec_processors (stashes the row processors on the first "

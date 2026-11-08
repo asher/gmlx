@@ -579,3 +579,56 @@ def test_a_failure_on_a_second_injected_batch_keeps_the_first_live(
     assert [(r.uid, r.token) for r in out] == [(2, 5)]
     assert host.uids == [0, 1, 2]
     assert host._pending_injections == [second]
+
+
+_CB_OOM = ("[METAL] Command buffer execution failed: Insufficient Memory "
+           "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory).")
+
+
+def test_a_command_buffer_failure_drops_a_speculative_batch(monkeypatch):
+    """A4: the failure reports at a wait after a round. The batch is
+    released without another round or a filter, its rounds generator
+    closes with retirement stores blocked, and every row requeues."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.cache import snapshot
+
+    install_continuous_batch_admission()
+    rounds, closed = [], []
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        try:
+            while True:
+                rounds.append(1)
+                yield [20 + len(rounds), 30 + len(rounds)], None
+        finally:
+            closed.append(snapshot._RETIRE_BLOCKED[0])
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    batch = _make_batch(ar, max_tokens=8, uids=(0, 1))
+    batch.model = type("M", (), {})()
+    batch.model._generator_injections = []
+    gen, tick = _guarded(monkeypatch, batch, {0: [1], 1: [2]})
+    gen._prompt_batch = None
+    gen._kq_empty_generation_batch = lambda: setattr(
+        gen, "_generation_batch", _make_batch(ar, uids=()))
+    assert [(r.uid, r.token) for r in tick() + tick()] == [
+        (0, 5), (1, 5), (0, 21), (1, 31)]
+    step = batch.next
+
+    def reported_late():
+        step()
+        raise RuntimeError(_CB_OOM)
+
+    def no_filter(keep):
+        raise AssertionError("filtered a spoiled batch")
+
+    batch.next = reported_late
+    batch.filter = no_filter
+    assert tick() == []
+    assert len(rounds) == 2                     # no round ran after it
+    assert closed == [1]                        # closed with stores blocked
+    assert getattr(batch, _RELEASED_FLAG) is True
+    assert gen._generation_batch is not batch
+    assert gen.removed == []
+    assert _queue(gen) == [(0, [1, 5, 21]), (1, [2, 5, 31])]
+    assert snapshot._RETIRE_BLOCKED[0] == 0

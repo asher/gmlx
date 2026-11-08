@@ -33,6 +33,9 @@ class FakeGen:
             return True
         return False
 
+    def _kq_empty_generation_batch(self):
+        self._generation_batch = FakeGB([], [])
+
 
 def resp(uid, token, finish=None):
     return types.SimpleNamespace(uid=uid, token=token,
@@ -220,18 +223,19 @@ def test_gpu_fault_streak_resets_on_a_good_tick(wrapped, monkeypatch):
     assert tick(gen) == ([], [])      # contained again after recovery
 
 
-def test_metal_oom_still_takes_the_memory_ladder(wrapped, monkeypatch):
-    """The OOM that arrives as a command buffer failure keeps the old
-    behaviour: contained, then a row retired and requeued."""
+def test_metal_oom_climbs_the_memory_ladder(wrapped, monkeypatch):
+    """The OOM that arrives as a command buffer failure counts as a memory
+    strike. Its outputs are not valid, so every row is requeued, and no
+    victim is picked on top."""
     gen, script, drains = wrapped
     monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
     gen._generation_batch = FakeGB([7, 8], [4, 40])
     script.append(OOM_ERR)
     tick(gen)
+    st = gen._kq_tick_guard
+    assert st.fail_streak == 1 and drains == ["engine-tick"]
     assert gen.removed == []
-    script.append(OOM_ERR)
-    tick(gen)
-    assert gen.removed == [8]         # largest row retired, as before
+    assert [e[0] for e in gen._unprocessed_sequences[:2]] == [7, 8]
 
 
 def test_a_rebuilt_row_penalizes_its_delivered_tokens(wrapped, monkeypatch):
@@ -915,3 +919,104 @@ def test_a_half_extended_decode_batch_is_dropped_whole(wrapped, monkeypatch):
     assert gen._prompt_batch is None
     assert _queue(gen) == [(7, [1, 2, 3, 11], 15),
                            (8, [4, 5, 6, 9, 9, 9], 16)]
+
+
+# A command buffer failure: nothing the engine holds is valid.
+
+
+class _Spoiled(FakeGB):
+    """A decode batch whose state a failed buffer spoiled: evaluating or
+    filtering it is the bug."""
+
+    def _eval_pending_state(self):
+        raise AssertionError("evaluated a spoiled batch")
+
+    def filter(self, keep):
+        raise AssertionError("filtered a spoiled batch")
+
+
+def _droppable(gen, seen):
+    from gmlx.cache import snapshot
+
+    def empty():
+        seen.append(snapshot._RETIRE_BLOCKED[0])
+        gen._generation_batch = FakeGB([], [])
+    gen._kq_empty_generation_batch = empty
+
+
+@pytest.mark.parametrize("err", [OOM_ERR, TIMEOUT_ERR],
+                         ids=["cb-oom", "gpu-fault"])
+def test_a_command_buffer_failure_requeues_every_row(wrapped, monkeypatch, err):
+    gen, script, drains = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    gen._generation_batch = FakeGB([7], [1])
+    _admitted(gen, script, resp(7, 11))
+    gen._generation_batch = _Spoiled([7], [2])
+    pb = gen._prompt_batch = _PromptBatch([8])
+    seen = []
+    _droppable(gen, seen)
+    script.append(_salvaged(err, resp(7, 12)))
+    assert tick(gen) == ([], [])
+    st = gen._kq_tick_guard
+    assert st.ledger[7].committed == [11]           # the salvage is dropped
+    assert gen.removed == [] and seen == [1]        # blocked while dropping
+    assert gen._prompt_batch is None and pb.released == 1
+    assert _queue(gen) == [(7, [1, 2, 3, 11], 15),
+                           (8, [4, 5, 6, 9, 9, 9], 16)]
+    assert st.rebuilt == {7, 8}
+    from gmlx.cache import snapshot
+    assert snapshot._RETIRE_BLOCKED[0] == 0
+    if err is TIMEOUT_ERR:
+        # A second fault still propagates.
+        script.append(TIMEOUT_ERR)
+        with pytest.raises(RuntimeError):
+            tick(gen)
+    else:
+        assert st.fail_streak == 1
+
+
+def test_two_command_buffer_ooms_fail_only_the_largest_rebuilt_row(
+        wrapped, monkeypatch):
+    gen, script, _ = wrapped
+    monkeypatch.setattr(tg.mx, "clear_cache", lambda: None)
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen._generation_batch = FakeGB([7, 8], [1, 1])
+    _admitted(gen, script, resp(7, 11), resp(8, 21))
+    _droppable(gen, [])
+    script.append(OOM_ERR)
+    tick(gen)
+    assert [e[0] for e in gen._unprocessed_sequences] == [7, 8]
+    # Both replay, deliver a token each, and the second failure comes.
+    gen._unprocessed_sequences = []
+    gen._generation_batch = FakeGB([7, 8], [2, 2])
+    script.append(([], [resp(7, 12), resp(8, 22)]))
+    tick(gen)
+    script.append(OOM_ERR)
+    tick(gen)
+    assert failed == [8]                    # 6 + 2 against 3 + 2
+    assert _queue(gen) == [(7, [1, 2, 3, 11, 12], 14)]
+    gen._unprocessed_sequences = []
+    gen._generation_batch = FakeGB([7], [3])
+    script.append(([], [resp(7, 13, finish="stop")]))
+    tick(gen)
+    assert 7 not in gen._kq_tick_guard.ledger
+
+
+def test_retirement_stores_wait_out_the_block():
+    from gmlx.cache import snapshot
+
+    calls = []
+
+    class _Manager:
+        def __getattr__(self, name):
+            calls.append(name)
+            raise AttributeError(name)
+
+    with snapshot.retirement_blocked():
+        with snapshot.retirement_blocked():
+            assert snapshot.retirement_store(
+                _Manager(), "exact", [1, 2, 3], []) == 0
+        assert snapshot._RETIRE_BLOCKED[0] == 1
+    assert snapshot._RETIRE_BLOCKED[0] == 0 and calls == []
