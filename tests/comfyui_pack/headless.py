@@ -619,9 +619,9 @@ class Cases:
         self.check("the clip's latents", {(tuple(e["video_shape"]), tuple(e["audio_shape"]))
                                           for e in steps} == {((1, 24, 7, 4, 4), (1, 32, 2, 37))},
                    [(e["video_shape"], e["audio_shape"]) for e in steps][:1])
-        self.check("each step at the loader's default dense attention",
-                   [e["attention"] for e in steps] == ["dense"] * 2,
-                   [e["attention"] for e in steps])
+        self.check("each step at the loader's default, the entry's int8 setting",
+                   [e["int8"] for e in steps] == [None] * 2,
+                   [e["int8"] for e in steps])
         got = [e["timestep"] for e in steps]
         want = [1000.0, 6 * 0.5 / (1 + 5 * 0.5) * 1000]
         self.check("timesteps of the simple schedule at shift 6", np.allclose(got, want, atol=1e-2),
@@ -635,29 +635,30 @@ class Cases:
                    saved)
 
     async def h3_int8(self):
-        """The MiniMax-H3 example workflow with int8 in the model loader's
-        attention: every step names int8 attention, and the clip is saved."""
+        """The MiniMax-H3 example workflow with int8 attention in the model
+        loader: every step names it, and the clip is saved."""
         wf = workflow("minimax-h3-t2v.json")
-        wf["1"]["inputs"]["attention"] = "int8"
+        wf["1"]["inputs"]["int8"] = "attention"
         wf["6"]["inputs"].update(width=64, height=64, length=22)
         wf["7"]["inputs"]["steps"] = 2
         wf["15"]["inputs"]["filename_prefix"] = "video/h3-int8"
         r = await self.s.run(wf)
         steps = kinds(self.stub.log(), "av_step")
         self.check("success", r["status"] == "success", r.get("error"))
-        self.check("each step at int8 attention", [e["attention"] for e in steps] == ["int8"] * 2,
-                   [e["attention"] for e in steps])
+        self.check("each step at int8 attention",
+                   [e["int8"] for e in steps] == ["attention"] * 2,
+                   [e["int8"] for e in steps])
         d = os.path.join(self.work, "output", "video")
         saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
         self.check("video saved",
                    any(f.startswith("h3-int8_") and f.endswith(".mp4") for f in saved), saved)
 
     async def fasth3_int8(self):
-        """The FastH3 example workflow with int8 in the model loader's
-        attention: the server refuses the first step, and the run stops on
-        the sampler with the server's text."""
+        """The FastH3 example workflow with int8 attention in the model
+        loader: the server refuses the first step, and the run stops on the
+        sampler with the server's text."""
         wf = workflow("fasth3-t2v.json")
-        wf["1"]["inputs"]["attention"] = "int8"
+        wf["1"]["inputs"]["int8"] = "attention"
         wf["6"]["inputs"].update(width=64, height=64, length=22)
         wf["15"]["inputs"]["filename_prefix"] = "video/fasth3-int8"
         r = await self.s.run(wf)

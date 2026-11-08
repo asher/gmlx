@@ -422,49 +422,95 @@ class Sampling(Base):
         self.assertEqual(step["patch_table"], put["id"])
 
 
-class Attention(Base):
-    """The model loader's attention input: each AV step carries it on a
-    server that takes it, an older server runs dense with one warning a
-    model, and the server's refusal shows as the step's error."""
+class Int8(Base):
+    """The model loader's int8 input: entry sends nothing and each other
+    value goes on each AV step of a server that takes it; a value whose
+    linears differ from the entry's is refused at the load when the
+    status names the entry's setting, else at the first step; an older
+    server runs the entry's with one warning a model when the loader asks
+    for a value other than entry or off."""
 
-    def loaded(self, attention, mid=HID):
-        return P.nodes.GmlxModelLoader().load(mid, self.stub.url, False, attention)[0]
+    def setUp(self):
+        super().setUp()
+        self.stub.int8("off")
 
-    def test_the_loaders_attention_reaches_each_step(self):
-        spec = P.nodes.GmlxModelLoader.INPUT_TYPES()["optional"]["attention"]
-        self.assertEqual((spec[0], spec[1]["default"]), (["dense", "int8"], "dense"))
-        for attention in ("dense", "int8"):
-            with self.subTest(attention=attention):
-                self.stub.reset()
-                self.sample(self.loaded(attention), steps=2)
-                self.assertEqual([e["attention"] for e in self.stub.events("av_step")],
-                                 [attention] * 2)
+    def tearDown(self):
+        self.stub.int8("off")
 
-    def test_a_server_without_int8_attention_runs_dense_with_one_warning_a_model(self):
-        caps = self.client.capabilities
-        had = caps["features"]
-        caps["features"] = [f for f in had if f != "int8_attention"]
-        try:
-            with self.assertLogs("gmlx", "WARNING") as logs:
-                for model in (P.model.load_model(self.client, HID, "int8"),
-                              P.model.load_model(self.client, HID, "int8")):
-                    self.sample(model, steps=2)
-                    self.sample(model, steps=1)
-            self.sample(P.model.load_model(self.client, HID), steps=1)
-        finally:
-            caps["features"] = had
-        self.assertEqual([e["attention"] for e in self.stub.events("av_step")], [None] * 7)
-        self.assertEqual(logs.output, [
-            "WARNING:gmlx:gmlx: this gmlx server runs no int8 attention, so 'h3' runs dense "
-            "attention; update it"] * 2)
+    def loaded(self, int8, mid=HID):
+        return P.nodes.GmlxModelLoader().load(mid, self.stub.url, False, int8)[0]
 
-    def test_a_refused_attention_shows_the_servers_text(self):
-        model = _out(H.MiniMaxH3SigmaShift.execute(self.loaded("int8", FID), 10.0, 3.0))[0]
+    def first_step(self, model):
+        model = _out(H.MiniMaxH3SigmaShift.execute(model, 10.0, 3.0))[0]
         sig = P.nodes.GmlxSigmas().get_sigmas(model)[0]
         pos = self.cond()[0]
+        CS.SamplerCustom.execute(model, True, 42, 1.0, pos, pos,
+                                 comfy.samplers.sampler_object("euler"), sig, self.latent())
+
+    def test_the_loaders_int8_defaults_to_the_entrys_and_reaches_each_step(self):
+        spec = P.nodes.GmlxModelLoader.INPUT_TYPES()["optional"]["int8"]
+        self.assertEqual((spec[0], spec[1]["default"]),
+                         (["entry", "off", "attention", "linears", "all"], "entry"))
+        for entry, values in (("off", ("entry", "off", "attention")),
+                              ("linears", ("entry", "linears", "all"))):
+            self.stub.int8(entry)
+            for value in values:
+                with self.subTest(entry=entry, value=value):
+                    self.stub.reset()
+                    self.sample(self.loaded(value), steps=2)
+                    self.assertEqual([e["int8"] for e in self.stub.events("av_step")],
+                                     [None if value == "entry" else value] * 2)
+
+    def test_a_value_whose_linears_differ_is_refused_at_the_load(self):
+        """The status names the entry's setting, so the loader refuses
+        before any step, with the server's text."""
+        for entry, value, a, b in (("off", "linears", "off", "attention"),
+                                   ("off", "all", "off", "attention"),
+                                   ("linears", "off", "linears", "all"),
+                                   ("all", "attention", "linears", "all")):
+            self.stub.int8(entry)
+            with self.subTest(entry=entry, value=value):
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    self.loaded(value)
+                self.assertEqual(str(e.exception), (
+                    f"gmlx: this model's entry loads its DiT at int8 {entry}, so a request "
+                    f"names int8 {a} or {b}, not {value}; set the entry's defaults.int8 to "
+                    f"run {value}"))
+        self.assertEqual(self.stub.events("av_step"), [])
+
+    def test_a_status_without_the_entrys_setting_refuses_at_the_first_step(self):
+        self.stub.int8("off", status=False)
+        model = self.loaded("linears")
         with self.assertRaises(C.GmlxError) as e:
-            CS.SamplerCustom.execute(model, True, 42, 1.0, pos, pos,
-                                     comfy.samplers.sampler_object("euler"), sig, self.latent())
+            self.first_step(model)
+        self.assertEqual(str(e.exception), (
+            "gmlx: the step failed (400): this model's entry loads its DiT at int8 off, so a "
+            "request names int8 off or attention, not linears; set the entry's defaults.int8 "
+            "to run linears"))
+        self.assertEqual(self.stub.events("av_step"), [])
+
+    def test_a_server_without_the_int8_setting_warns_once_a_model_past_entry_and_off(self):
+        caps = self.client.capabilities
+        had = caps["features"]
+        caps["features"] = [f for f in had if f != "int8"]
+        try:
+            with self.assertLogs("gmlx", "WARNING") as logs:
+                for model in (P.model.load_model(self.client, HID, "attention"),
+                              P.model.load_model(self.client, HID, "attention")):
+                    self.sample(model, steps=2)
+                    self.sample(model, steps=1)
+                for value in ("entry", "off"):
+                    self.sample(P.model.load_model(self.client, HID, value), steps=1)
+        finally:
+            caps["features"] = had
+        self.assertEqual([e["int8"] for e in self.stub.events("av_step")], [None] * 8)
+        self.assertEqual(logs.output, [
+            "WARNING:gmlx:gmlx: this gmlx server has no int8 setting, so 'h3' runs as its "
+            "entry says; update it"] * 2)
+
+    def test_a_refused_int8_shows_the_servers_text(self):
+        with self.assertRaises(C.GmlxError) as e:
+            self.first_step(self.loaded("attention", FID))
         self.assertEqual(str(e.exception), "gmlx: the step failed (400): MiniMax-H3 fasth3 runs "
                          "video sparse attention, and int8 attention applies to dense attention "
                          "only")
@@ -472,9 +518,10 @@ class Attention(Base):
 
     def test_int8_on_an_image_model_is_refused_at_the_load(self):
         with self.assertRaises(C.GmlxRefusal) as e:
-            self.loaded("int8", ZID)
+            self.loaded("attention", ZID)
         self.assertEqual(str(e.exception), "gmlx: int8 attention runs on MiniMax-H3, and "
-                         "'z-image-turbo' is an image model; set attention to dense")
+                         "'z-image-turbo' is an image model; set int8 to entry")
+        self.loaded("off", ZID)
 
 
 class Interrupt(Base):

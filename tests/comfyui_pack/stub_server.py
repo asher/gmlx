@@ -208,6 +208,10 @@ class State:
         # limit the capabilities name.
         self.refuse_windows: list = []
         self.max_body = (1 << 30) + (1 << 20)
+        # The int8 setting of each video model's entry, and whether its
+        # status names it, as a server from before the int8 field does not.
+        self.entry_int8 = "off"
+        self.status_int8 = True
         self.runs: dict = {}
         # interrupt_id -> the stop event of an encode in its delay
         self.encodes: dict = {}
@@ -320,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
                              "skip_blocks", "av_step", "anchors", "keyframe_upsampling",
-                             "int8_attention"],
+                             "int8"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
                            "max_body_bytes": st.max_body}})
         if sub == "/models":
@@ -338,6 +342,8 @@ class Handler(BaseHTTPRequestHandler):
             if parts[2] == "status":
                 f = COMFY[fam]
                 extra = {"audio": dict(f["audio"])} if "audio" in f else {}
+                if "audio" in f and st.status_int8:
+                    extra["int8"] = st.entry_int8
                 return self._json(200, {
                     "model": parts[1], "family": fam, "variant": variant, "resident": True,
                     "comfy": {"model_class": f["model_class"], "image_model": f["image_model"]},
@@ -414,6 +420,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {})
         if p == "/stub/lose-table":
             st.lose_table = int(json.loads(self._body())["steps"])
+            return self._json(200, {})
+        if p == "/stub/int8":
+            req = json.loads(self._body())
+            st.entry_int8 = req["entry"]
+            st.status_int8 = bool(req["status"])
             return self._json(200, {})
         if p == "/stub/video-encode":
             req = json.loads(self._body())
@@ -673,14 +684,21 @@ class Handler(BaseHTTPRequestHandler):
         shifts = req.get("shifts")
         if not isinstance(shifts, dict) or set(shifts) != {"video", "audio"}:
             return self._err(400, "an AV step names its shifts, video and audio")
-        # The server's refusals of an attention, before the step runs.
-        attention = req.get("attention")
-        if attention not in (None, "dense", "int8"):
-            return self._err(400, f"attention is dense or int8, not {attention!r}",
-                             param="attention")
-        if attention == "int8" and MODELS[req["model"]][1] == "fasth3":
+        # The server's refusals of an int8 setting, before the step runs.
+        int8 = req.get("int8")
+        lin = {"off": False, "attention": False, "linears": True, "all": True}
+        if int8 is not None and int8 not in lin:
+            return self._err(400, f"int8 is off, attention, linears or all, not {int8!r}",
+                             param="int8")
+        entry = st.entry_int8
+        if int8 is not None and lin[int8] != lin[entry]:
+            a, b = [v for v in lin if lin[v] == lin[entry]]
+            return self._err(400, f"this model's entry loads its DiT at int8 {entry}, so a "
+                             f"request names int8 {a} or {b}, not {int8}; set the entry's "
+                             f"defaults.int8 to run {int8}", param="int8")
+        if int8 in ("attention", "all") and MODELS[req["model"]][1] == "fasth3":
             return self._err(400, "MiniMax-H3 fasth3 runs video sparse attention, and int8 "
-                             "attention applies to dense attention only", param="attention")
+                             "attention applies to dense attention only", param="int8")
         anchors = req.get("anchors") or []
         named = [a[k] for a in anchors for k in ("video", "noise", "audio") if a.get(k)]
         missing = [h for h in [rows[0]["cond"], *named] if h not in st.tensors]
@@ -703,7 +721,7 @@ class Handler(BaseHTTPRequestHandler):
                  video_dtype=v[0], timestep=float(t), shifts=shifts,
                  audio_scale=req.get("audio_scale"), conds=[rows[0]["cond"]],
                  patch_table=req.get("patch_table"), fields=sorted(req), tensors=sorted(tensors),
-                 anchors=anchors, spans=req.get("spans") or [], attention=attention,
+                 anchors=anchors, spans=req.get("spans") or [], int8=int8,
                  anchor_tensors={h: st.tensors[h][2].tolist() for h in named})
         self._send(200, write_body({"video": vv, "audio": va}), ctype=CONTENT_TYPE, headers={
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",

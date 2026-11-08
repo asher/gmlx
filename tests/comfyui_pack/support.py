@@ -69,6 +69,11 @@ class Stub:
         capabilities name ``max_body``."""
         self.call("/stub/video-encode", {"refuse": list(refuse), "max_body": max_body})
 
+    def int8(self, entry: str = "off", status: bool = True):
+        """Video models' entries load at the int8 setting ``entry``, and
+        their status names it when ``status``."""
+        self.call("/stub/int8", {"entry": entry, "status": status})
+
     def close(self):
         self.proc.terminate()
         try:
