@@ -117,8 +117,8 @@ def test_fasth3_with_int8_linears_is_refused(linears_load, monkeypatch):
     with pytest.raises(vfp.VideoModelError) as ei:
         linears_load(fast=True)
     assert str(ei.value) == (
-        "int8 linears are untested on MiniMax-H3 fasth3, and gmlx runs them "
-        "on variants with dense attention only")
+        "MiniMax-H3 fasth3 runs video sparse attention, and int8 linears "
+        "run on variants with dense attention only")
     assert linears_load.loads == []
 
 

@@ -287,8 +287,8 @@ def linears_refusal(fam: VideoFamily, variant: str,
         return f"gmlx runs {fam.title} with its file's linears only"
     row = fam.variant_row(variant)
     if row is not None and row.vsa_sparsity:
-        return (f"int8 linears are untested on {fam.title} {variant}, and "
-                f"gmlx runs them on variants with dense attention only")
+        return (f"{fam.title} {variant} runs video sparse attention, and "
+                f"int8 linears run on variants with dense attention only")
     what = f"{fam.title} {variant} runs with int8 linears"
     if (getattr(kq, "int8_matmul", None) is None
             or getattr(kq, "int8_quantize_rows", None) is None):
