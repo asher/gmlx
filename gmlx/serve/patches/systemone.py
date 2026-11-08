@@ -54,7 +54,6 @@ _ENDPOINT = "/v1/systemone"
 _PREWARM = "/v1/prewarm"
 _RUNTIME_ATTR = "_kq_systemone_runtime"
 _LETTERS_ATTR = "_kq_systemone_letters"
-_DISCONNECT_POLL_S = 0.5
 _NO_IMAGES = "images are not supported: the served model is text-only"
 
 _log = logging.getLogger(__name__)
@@ -269,17 +268,6 @@ def _record_failure(runtime, model, error: str) -> None:
         _log.debug("failure-metrics record raised", exc_info=True)
 
 
-async def _watch_disconnect(http_request: Request, stop: threading.Event):
-    try:
-        while not stop.is_set():
-            if await http_request.is_disconnected():
-                stop.set()
-                return
-            await asyncio.sleep(_DISCONNECT_POLL_S)
-    except asyncio.CancelledError:
-        pass
-
-
 def make_systemone_endpoint(installed):
     async def systemone_endpoint(http_request: Request):
         request_start = time.perf_counter()
@@ -407,7 +395,7 @@ def make_systemone_endpoint(installed):
                 if hold is not None:
                     hold.release()
 
-        watcher = asyncio.create_task(_watch_disconnect(http_request, stop))
+        watcher = asyncio.create_task(job_route.watch_disconnect(http_request, stop))
         try:
             backend, schema, resolved, result, completion_tokens = (
                 await asyncio.to_thread(_run))
@@ -533,7 +521,7 @@ def make_prewarm_endpoint(installed):
                 if hold is not None:
                     hold.release()
 
-        watcher = asyncio.create_task(_watch_disconnect(http_request, stop))
+        watcher = asyncio.create_task(job_route.watch_disconnect(http_request, stop))
         try:
             resolved, prefix = await asyncio.to_thread(_run)
         except HTTPException:

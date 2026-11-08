@@ -5,7 +5,6 @@ and the engine is a ResponseGenerator shell, so no model loads."""
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import importlib
 import logging
@@ -585,16 +584,6 @@ def test_the_route_registers_both_paths_idempotently(app):
     paths = [getattr(r, "path", None) for r in _APP.app.router.routes]
     assert paths.count("/v1/systemone") == 1 and paths.count("/systemone") == 1
     assert paths.count("/v1/prewarm") == 1 and paths.count("/prewarm") == 1
-
-
-def test_a_disconnect_sets_the_stop_event():
-    class _Req:
-        async def is_disconnected(self):
-            return True
-
-    stop = threading.Event()
-    asyncio.run(route._watch_disconnect(_Req(), stop))
-    assert stop.is_set()
 
 
 # the letter readout on a text model

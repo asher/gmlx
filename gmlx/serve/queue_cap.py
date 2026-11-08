@@ -167,9 +167,10 @@ def _cap() -> int:
 
 
 def _waiting_depth(rg) -> int:
-    """Requests waiting for a decode slot: the server request queue plus
-    the batch generator's unadmitted prompt candidates. Both reads are
-    racy by design; the cap needs magnitude, not a barrier."""
+    """Requests waiting for a decode slot: the server request queue, the
+    batch generator's unadmitted prompt candidates, audio encodes and
+    scoring requests waiting for their turn. The reads are racy by design;
+    the cap needs magnitude, not a barrier."""
     # Handlers see the residency proxy's per-request _GenerationGuard,
     # not the entry's ResponseGenerator; the engine registry is keyed by
     # the real object, so unwrap before the identity lookup.
@@ -191,9 +192,11 @@ def _waiting_depth(rg) -> int:
     pending = getattr(gen, "_unprocessed_sequences", None)
     if pending is not None:
         depth += len(pending)
-    # A request counts from the start of its audio encode.
+    # A request counts from the start of its audio encode, and a scoring
+    # request from the start of its wait for the engine's turn.
+    from gmlx.serve.job_route import scoring_waiters
     from gmlx.serve.patches.native_audio import encoding_requests
-    return depth + encoding_requests(rg)
+    return depth + encoding_requests(rg) + scoring_waiters(rg)
 
 
 def _retry_after_s(metrics, depth: int) -> int:
