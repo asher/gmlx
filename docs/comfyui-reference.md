@@ -2,8 +2,8 @@
 
 This page has the details of the gmlx nodes for ComfyUI: what
 `gmlx launch comfyui` does with its options, how the nodes find the server,
-how they share the work with ComfyUI and what they refuse. The guide is
-[ComfyUI](comfyui.md).
+how they share the work with ComfyUI, the model loader's attention and what
+they refuse. The guide is [ComfyUI](comfyui.md).
 
 ## Launch options
 
@@ -103,6 +103,19 @@ custom nodes from the old app's folder, so `gmlx comfyui install` links
 the nodes there. A Desktop build that carries a signed policy file can
 refuse custom nodes that its policy does not list, and `install` says so
 when it finds one.
+
+## The model loader's attention
+
+`gmlx Model Loader` has an `attention` input, `dense` or `int8`, for
+MiniMax-H3, and `dense` is the default. Each step of the model sends it to
+the server, which runs that step at it over the entry's
+[`defaults.attention`](config.md#video_modelsdefaults). `int8` runs as
+[Int8 attention](video.md#int8-attention) describes: it is lossy, needs an
+M5 or newer and does not run with `fasth3`. A server that cannot run it
+refuses the first step with an error that names the attention, and the
+error shows on the sampler. A gmlx server from before int8 attention runs
+dense attention, and ComfyUI's log warns once for each model loaded.
+`int8` on an image model is refused at the loader.
 
 ## What the gmlx nodes refuse
 

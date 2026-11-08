@@ -19,8 +19,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `fasth3` recipe runs FastVideo's FastH3, an 8-step MiniMax-H3 whose
   steps take about half as long as `h3`'s, on an M5 or newer. See
   [FastH3](docs/video.md#fasth3).
-- `gmlx video generate --attention int8` runs MiniMax-H3's attention in int8
-  on an M5 or newer. See [Int8 attention](docs/video.md#int8-attention).
+- `--attention int8` on `gmlx video`, the `attention` field of `POST /v1/videos`
+  and the `attention` input of `gmlx Model Loader` run MiniMax-H3 in int8 on an
+  M5 or newer. See [Int8 attention](docs/video.md#int8-attention).
 - A chat model rewrites MiniMax-H3 prompts in the form of MiniMax's prompt
   guide, which `gmlx video pull` fetches. See
   [Prompt upsampling](docs/video.md#prompt-upsampling).

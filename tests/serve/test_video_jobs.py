@@ -936,6 +936,76 @@ def test_a_job_the_server_cannot_run_is_refused_at_post(routes, body,
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
 
 
+def _post(routes, how: str, fields: dict):
+    if how == "json":
+        return routes.client.post("/v1/videos", json=fields)
+    body, ctype = _form(fields, {})
+    return routes.client.post("/v1/videos", content=body,
+                              headers={"content-type": ctype})
+
+
+@pytest.mark.parametrize("how", ["json", "form"])
+@pytest.mark.parametrize("default, sent, want", [
+    (None, None, "dense"), (None, "int8", "int8"), ("int8", None, "int8"),
+    ("int8", "dense", "dense")])
+def test_a_jobs_attention_is_its_field_then_the_entrys_then_dense(
+        routes, monkeypatch, how, default, sent, want):
+    """The job runs the attention its POST names, else its entry's
+    defaults.attention, else dense, and its record shows it."""
+    from video_fixtures import qk8_kernel
+
+    qk8_kernel(monkeypatch)
+    if default:
+        routes.spec.defaults = {"attention": default}
+    fields = {"prompt": "a cat"} | ({"attention": sent} if sent else {})
+    r = _post(routes, how, fields)
+    assert r.status_code == 200, r.text
+    assert r.json()["gmlx"]["attention"] == want
+    assert routes.store.jobs[r.json()["id"]].params["attention"] == want
+
+
+@pytest.mark.parametrize("how", ["json", "form"])
+def test_an_attention_off_the_list_is_a_400_naming_it(routes, how):
+    r = _post(routes, how, {"prompt": "a cat", "attention": "int4"})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        "attention is dense or int8, not 'int4'", "attention")
+    assert routes.store.jobs == {} and routes.store.pending == {}
+
+
+@pytest.mark.parametrize("case", ["sparse", "kq", "nax"])
+def test_int8_this_server_cannot_run_is_a_400_before_the_job(
+        routes, monkeypatch, case):
+    """The variant with sparse attention, an mlx-kquant with no sdpa_qk8
+    and a GPU with no NAX units are refused at the POST with the run's
+    own text, naming the field, and leave no job."""
+    import mlx_kquant as kq
+
+    from video_fixtures import qk8_kernel
+
+    qk8_kernel(monkeypatch, nax=case != "nax")
+    variant = "fasth3" if case == "sparse" else "fl2va"
+    monkeypatch.setattr(videos, "_entry_plan", lambda s: SimpleNamespace(
+        family="h3", variant=variant))
+    if case == "kq":
+        monkeypatch.setattr(kq, "sdpa_qk8", None)
+    what = f"MiniMax-H3 {variant} runs with int8 attention"
+    want = {"sparse": "MiniMax-H3 fasth3 runs video sparse attention, and "
+            "int8 attention applies to dense attention only",
+            "kq": f"{what}, and the installed mlx-kquant {kq.__version__} "
+            "has no sdpa_qk8; update mlx-kquant to 0.5.10 or later",
+            "nax": f"{what}, whose kernel needs a GPU with NAX units (M5 or "
+            "newer), and this Mac's GPU has none"}[case]
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat",
+                                               "attention": "int8"})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (want, "attention")
+    assert routes.store.jobs == {} and routes.store.pending == {}
+    assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
+
+
 def test_no_ffmpeg_is_a_501_with_the_missing_program_text(routes,
                                                          monkeypatch):
     from gmlx.serve import media_programs
@@ -1006,7 +1076,12 @@ def test_post_takes_no_pool_lock_and_no_acquire(routes, monkeypatch):
 
 def test_the_estimate_refuses_a_clip_past_the_budget_beside_pinned_models(
         routes, monkeypatch):
+    """The clip is priced at the job's attention, which may be int8 on an
+    entry of dense attention."""
     from gmlx.serve import residency, video_service
+    from video_fixtures import qk8_kernel
+
+    qk8_kernel(monkeypatch)
 
     pinned = SimpleNamespace(pinned=True, footprint=60, model_path="/abs/x")
     own = SimpleNamespace(pinned=True, footprint=1000, model_path="/abs/h3"
@@ -1029,11 +1104,13 @@ def test_the_estimate_refuses_a_clip_past_the_budget_beside_pinned_models(
 
     monkeypatch.setattr(video_service, "plan_clip", plan_clip)
     r = routes.client.post("/v1/videos", json={"prompt": "a cat",
-                                               "size": "768x768"})
+                                               "size": "768x768",
+                                               "attention": "int8"})
     assert r.status_code == 413, r.text
     assert r.json()["error"]["message"].endswith(
         "does not fit in memory: denoise 9 GiB; use a smaller size")
-    assert (seen["budget"], seen["text"]) == (40, 12)
+    assert (seen["budget"], seen["text"], seen["attention"]) == (40, 12,
+                                                                 "int8")
 
 
 def test_the_gate_reads_no_video_body(routes, monkeypatch):
@@ -1538,8 +1615,10 @@ def _clip_part_stubs(monkeypatch, order, generate):
     monkeypatch.setattr(run, "decode_and_mux", lambda *a, **k: order.append(
         "decode"))
     monkeypatch.setattr(gpu_share, "pacer", lambda: None)
-    served = SimpleNamespace(pipe=SimpleNamespace(default_table="t0"),
-                             spec=SimpleNamespace(vae="v", audio_vae="a"))
+    served = SimpleNamespace(pipe=SimpleNamespace(
+        default_table="t0", dit=SimpleNamespace(attention="dense")),
+        spec=SimpleNamespace(vae="v", audio_vae="a"),
+        plan=SimpleNamespace(attention="dense"))
     return SimpleNamespace(_entry=SimpleNamespace(pipeline=served))
 
 
@@ -1574,6 +1653,37 @@ def test_the_jobs_turn_runs_after_the_dit_loads_and_settles_in_finally(
         vj._clip_part(job, store, hold, store.clip(job.id))
     assert order == ["check", "ensure_dit", ("turn", None, vj.JOB),
                      "generate", ("settle", vj.JOB)]
+
+
+@pytest.mark.parametrize("entry, left, sent, want", [
+    ("dense", "dense", "int8", "int8"), ("int8", "dense", None, "int8"),
+    ("int8", "int8", "dense", "dense"), ("dense", "int8", None, "dense")])
+def test_the_clip_is_priced_and_runs_at_the_jobs_attention(
+        tmp_path, monkeypatch, entry, left, sent, want):
+    """The worker sets the DiT's attention before each clip, the job's
+    else the entry's, over whatever the last job or step left, and the
+    clip's check prices the job's."""
+    import mlx.core as mx
+
+    from gmlx.serve.patches import image_steps as pis
+
+    ran, checked = [], []
+
+    def generate(pipe, feats, **k):
+        ran.append(pipe.dit.attention)
+        return mx.zeros((1,)), mx.zeros((1,))
+
+    hold = _clip_part_stubs(monkeypatch, [], generate)
+    monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: checked.append(
+        k["attention"]))
+    served = hold._entry.pipeline
+    served.plan.attention, served.pipe.dit.attention = entry, left
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    if sent:
+        job.params["attention"] = sent
+    vj._clip_part(job, store, hold, store.clip(job.id))
+    assert (ran, checked) == ([want], [sent])
 
 
 def test_the_jobs_pacer_reaches_the_sampler_and_stops_the_job(

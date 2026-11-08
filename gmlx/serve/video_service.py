@@ -32,6 +32,12 @@ before the DiT and returns the velocity of the carried variable. A step
 with anchors names each one's frame and the hashes of its latents and of
 the noise of its video rows, the draw of ComfyUI's generator at the
 payload's seed, and the vision spans of its prompt.
+
+A job or a step may name the DiT's attention, dense or int8, over the
+entry's ``defaults.attention``. The choice is a setting of the loaded
+DiT, so it loads nothing: the worker sets it before each denoise and
+each step (``set_attention``), after the load that follows an encode,
+and prices the step at that attention.
 """
 
 from __future__ import annotations
@@ -136,12 +142,13 @@ def clip_defaults(spec, fam, variant: str) -> dict:
 def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
               text: int, budget=None, decode: bool = True,
               audio: int | None = None, live_lora: bool = False,
-              blocks=(), anchors=()):
+              blocks=(), anchors=(), attention: str | None = None):
     """The memory plan of one clip on the entry's files. ``audio`` is the
     audio stream's latents when they are not the clip's, and
     ``live_lora`` prices the step with a LoRA the server was sent.
     ``blocks`` are the vision tokens of the prompt's keyframes, which
-    ``text`` counts, and ``anchors`` the placed ``layout.AnchorRows``."""
+    ``text`` counts, and ``anchors`` the placed ``layout.AnchorRows``.
+    ``attention`` is the request's, else the entry's."""
     from gmlx.video import memfit
     from gmlx.video.registry import get_family
 
@@ -159,7 +166,24 @@ def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
         tower=plan.tower_bytes, blocks=blocks,
         anchor_frames=memfit.anchor_frames(fam, anchors),
         anchor_audio=[a.audio_t for a in anchors if a.audio_t],
-        attention=plan.attention, budget=budget)
+        attention=attention or plan.attention, budget=budget)
+
+
+def parse_attention(value) -> str | None:
+    """A request's ``attention`` field: None when it is not sent, else
+    dense or int8. Raises ValueError for any other value."""
+    from gmlx.video.registry import ATTENTION
+
+    if value is None or value in ATTENTION:
+        return value
+    raise ValueError(f"attention is {' or '.join(ATTENTION)}, not {value!r}")
+
+
+def set_attention(served: ServedVideo, attention: str | None) -> None:
+    """Set the loaded DiT's attention for one job or step: ``attention``,
+    else the entry's. Each job and step sets it, so none runs at the
+    attention the last one left."""
+    served.pipe.dit.attention = attention or served.plan.attention
 
 
 def caption_bytes(hidden: int, rows: int = PRICED_TEXT_ROWS) -> int:
@@ -718,13 +742,15 @@ def anchor_cond(served: ServedVideo, refs, rows, held: dict) -> tuple:
 
 def av_step(served: ServedVideo, video, audio, timestep: float,
             shifts: dict, scale: float, feats, key: str, table: str | None,
-            *, anchors=(), cond=((), ()), spans=()):
+            *, anchors=(), cond=((), ()), spans=(),
+            attention: str | None = None):
     """One step of the pack's MiniMax-H3 model: the video and audio
     velocity f32 of the latents as ComfyUI's sampler carries them, at its
     ``timestep``, with the audio carried at ``scale`` (the payload's
     audio_scale). ``anchors`` are the placed ``layout.AnchorRows`` of the
     anchor rows ``cond`` (``anchor_cond``) and ``spans`` the vision spans
-    of ``feats``. Returns (video, audio, caption cache hit)."""
+    of ``feats``. ``attention`` is the step's, else the entry's. Returns
+    (video, audio, caption cache hit)."""
     import mlx.core as mx
 
     from gmlx.image.lora import install
@@ -732,6 +758,7 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
 
     pipe = served.pipe
     ensure_dit(served)
+    set_attention(served, attention)
     fam = pipe.video_family
     sv, sa = stream_sigmas(timestep, shifts)
     xv = video.astype(mx.float32)

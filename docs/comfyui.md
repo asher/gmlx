@@ -273,6 +273,10 @@ steps, and ComfyUI saves it as `gmlx/minimax-h3_00001_.mp4` in its
 | `Decode the video`, `Decode the sound` | `VAE Decode` and `VAE Decode Audio`. |
 | `Create Video`, `Save Video` | Put the frames and the sound together at 24 frames a second and save the clip. |
 
+On an M5 or newer, `int8` in the `attention` input of `gmlx Model Loader`
+runs the DiT's attention in int8, as [Int8 attention](video.md#int8-attention)
+describes.
+
 For `h3-fast`, pick it in `model_name` on the four loaders and set `steps`
 to 4. For `h3-base`, pick it, set the shifts to 12 and 3 and set `steps`
 to 20. A clip too large for the Mac's memory stops with an error from the

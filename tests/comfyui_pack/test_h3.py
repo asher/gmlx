@@ -2,9 +2,10 @@
 weightless model and the ComfyUI keys its forward reads, a sample of
 ComfyUI's nested video and audio latent through the AV step with the shifts
 and audio scale ComfyUI's forward reads, FastH3 on its trained sigmas, a
-LoRA from the stock loader, the 409 retry and the interrupt of an AV step,
-the video and audio VAE nodes, keyframes and guides from the stock nodes
-through the gmlx CLIP and VAEs to the AV step, and the refusals of what a
+LoRA from the stock loader, the model loader's attention on each AV step,
+the 409 retry and the interrupt of an AV step, the video and audio VAE
+nodes, keyframes and guides from the stock nodes through the gmlx CLIP and
+VAEs to the AV step, and the refusals of what a
 gmlx model does not run: references, FastH3 with keyframes, the noise masks
 and the Fun ControlNet. Every ComfyUI the pack supports has MiniMax-H3,
 which came in v0.30.0.
@@ -419,6 +420,61 @@ class Sampling(Base):
         self.assertEqual((put["entries"], put["strengths"]), (len(stems), [0.8]))
         (step,) = self.stub.events("av_step")
         self.assertEqual(step["patch_table"], put["id"])
+
+
+class Attention(Base):
+    """The model loader's attention input: each AV step carries it on a
+    server that takes it, an older server runs dense with one warning a
+    model, and the server's refusal shows as the step's error."""
+
+    def loaded(self, attention, mid=HID):
+        return P.nodes.GmlxModelLoader().load(mid, self.stub.url, False, attention)[0]
+
+    def test_the_loaders_attention_reaches_each_step(self):
+        spec = P.nodes.GmlxModelLoader.INPUT_TYPES()["optional"]["attention"]
+        self.assertEqual((spec[0], spec[1]["default"]), (["dense", "int8"], "dense"))
+        for attention in ("dense", "int8"):
+            with self.subTest(attention=attention):
+                self.stub.reset()
+                self.sample(self.loaded(attention), steps=2)
+                self.assertEqual([e["attention"] for e in self.stub.events("av_step")],
+                                 [attention] * 2)
+
+    def test_a_server_without_int8_attention_runs_dense_with_one_warning_a_model(self):
+        caps = self.client.capabilities
+        had = caps["features"]
+        caps["features"] = [f for f in had if f != "int8_attention"]
+        try:
+            with self.assertLogs("gmlx", "WARNING") as logs:
+                for model in (P.model.load_model(self.client, HID, "int8"),
+                              P.model.load_model(self.client, HID, "int8")):
+                    self.sample(model, steps=2)
+                    self.sample(model, steps=1)
+            self.sample(P.model.load_model(self.client, HID), steps=1)
+        finally:
+            caps["features"] = had
+        self.assertEqual([e["attention"] for e in self.stub.events("av_step")], [None] * 7)
+        self.assertEqual(logs.output, [
+            "WARNING:gmlx:gmlx: this gmlx server runs no int8 attention, so 'h3' runs dense "
+            "attention; update it"] * 2)
+
+    def test_a_refused_attention_shows_the_servers_text(self):
+        model = _out(H.MiniMaxH3SigmaShift.execute(self.loaded("int8", FID), 10.0, 3.0))[0]
+        sig = P.nodes.GmlxSigmas().get_sigmas(model)[0]
+        pos = self.cond()[0]
+        with self.assertRaises(C.GmlxError) as e:
+            CS.SamplerCustom.execute(model, True, 42, 1.0, pos, pos,
+                                     comfy.samplers.sampler_object("euler"), sig, self.latent())
+        self.assertEqual(str(e.exception), "gmlx: the step failed (400): MiniMax-H3 fasth3 runs "
+                         "video sparse attention, and int8 attention applies to dense attention "
+                         "only")
+        self.assertEqual(self.stub.events("av_step"), [])
+
+    def test_int8_on_an_image_model_is_refused_at_the_load(self):
+        with self.assertRaises(C.GmlxRefusal) as e:
+            self.loaded("int8", ZID)
+        self.assertEqual(str(e.exception), "gmlx: int8 attention runs on MiniMax-H3, and "
+                         "'z-image-turbo' is an image model; set attention to dense")
 
 
 class Interrupt(Base):

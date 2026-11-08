@@ -177,8 +177,12 @@ the VAEs run as before. It needs an M5 or newer, and it does not run
 with `fasth3`.
 
 To run every clip of an entry this way, set `attention: int8` in its
-[`defaults`](config.md#video_modelsdefaults). `gmlx serve` and the
-ComfyUI nodes follow the entry.
+[`defaults`](config.md#video_modelsdefaults). A job of `gmlx serve`
+runs the entry's attention unless its
+[`attention`](video-api.md#request-fields) field names the other, and in
+ComfyUI the `attention` input of
+[`gmlx Model Loader`](comfyui-reference.md#the-model-loaders-attention)
+sets it for each step.
 
 ## Clip length, size and memory
 

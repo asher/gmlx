@@ -319,7 +319,8 @@ class Handler(BaseHTTPRequestHandler):
                 "wire": {"container": "safetensors", "dtypes": ["f32", "f16", "bf16", "u8"]},
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
-                             "skip_blocks", "av_step", "anchors", "keyframe_upsampling"],
+                             "skip_blocks", "av_step", "anchors", "keyframe_upsampling",
+                             "int8_attention"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
                            "max_body_bytes": st.max_body}})
         if sub == "/models":
@@ -672,6 +673,14 @@ class Handler(BaseHTTPRequestHandler):
         shifts = req.get("shifts")
         if not isinstance(shifts, dict) or set(shifts) != {"video", "audio"}:
             return self._err(400, "an AV step names its shifts, video and audio")
+        # The server's refusals of an attention, before the step runs.
+        attention = req.get("attention")
+        if attention not in (None, "dense", "int8"):
+            return self._err(400, f"attention is dense or int8, not {attention!r}",
+                             param="attention")
+        if attention == "int8" and MODELS[req["model"]][1] == "fasth3":
+            return self._err(400, "MiniMax-H3 fasth3 runs video sparse attention, and int8 "
+                             "attention applies to dense attention only", param="attention")
         anchors = req.get("anchors") or []
         named = [a[k] for a in anchors for k in ("video", "noise", "audio") if a.get(k)]
         missing = [h for h in [rows[0]["cond"], *named] if h not in st.tensors]
@@ -694,7 +703,7 @@ class Handler(BaseHTTPRequestHandler):
                  video_dtype=v[0], timestep=float(t), shifts=shifts,
                  audio_scale=req.get("audio_scale"), conds=[rows[0]["cond"]],
                  patch_table=req.get("patch_table"), fields=sorted(req), tensors=sorted(tensors),
-                 anchors=anchors, spans=req.get("spans") or [],
+                 anchors=anchors, spans=req.get("spans") or [], attention=attention,
                  anchor_tensors={h: st.tensors[h][2].tolist() for h in named})
         self._send(200, write_body({"video": vv, "audio": va}), ctype=CONTENT_TYPE, headers={
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",

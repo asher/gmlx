@@ -51,6 +51,7 @@ serves these routes. They need ffmpeg, which writes the MP4, as
 | `last_frame` | An image the clip ends at. |
 | `guides` | Images, videos and sounds anchored at frames of the clip, in a multipart form. |
 | `guide_no_audio` | `true` anchors guide videos without their sound. |
+| `attention` | `dense` or `int8`, the DiT's [attention](video.md#int8-attention). Unset, the entry's `defaults.attention`, else `dense`. |
 
 The steps and the shifts come from the entry, as on the command line. A
 `references` list asks for MiniMax-H3's Ref2VA mode, which the server does
@@ -97,8 +98,9 @@ The job is the OpenAI video object, with a `gmlx` part:
   "size": "768x768",
   "prompt": "waves on a pebble beach at dawn",
   "error": null,
-  "gmlx": {"frames": 124, "seed": 7, "steps": 8, "step": 4,
-           "phase": "denoising", "revised_prompt": null, "eta_s": 210}
+  "gmlx": {"frames": 124, "seed": 7, "steps": 8, "attention": "dense",
+           "step": 4, "phase": "denoising", "revised_prompt": null,
+           "eta_s": 210}
 }
 ```
 
@@ -108,7 +110,8 @@ The job is the OpenAI video object, with a `gmlx` part:
 and the decode after them, and is 100 when the MP4 is written.
 `gmlx.phase` names the work now running, `gmlx.step` the steps done, and
 `gmlx.eta_s` the seconds the job expects to take still. `revised_prompt`
-holds the upsampler's caption.
+holds the upsampler's caption, and `gmlx.attention` the attention the DiT
+runs.
 
 Jobs run one at a time, in order, on a thread of their own, so a clip
 never holds up the image routes. Chat replies keep streaming while a clip
@@ -167,6 +170,7 @@ status 500, and keeps the ones that ended.
 | A guide video that does not fit in the clip from its frame | The job fails with 400 naming the guide |
 | A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide: "... does not fit in memory beside the models now loaded: no window fits; the clip needs NEED, and FREE is free" |
 | `references` | 400 naming Ref2VA |
+| An `attention` other than `dense` or `int8`, or `int8` on `fasth3`, on an mlx-kquant without it or on a Mac older than M5 | 400 naming `attention` |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
 | An unknown or expired job | 404 `not_found` |
 | The content of a job not completed | 409 `not_ready` |

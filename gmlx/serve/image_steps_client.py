@@ -234,7 +234,7 @@ class StepsClient:
     def av_step(self, model: str, run: str | None, video, audio, timestep,
                 row: dict, *, shifts: dict, audio_scale: float = 1.0,
                 patch_table: str | None = None, anchors=None,
-                spans=None) -> tuple:
+                spans=None, attention: str | None = None) -> tuple:
         """The video and audio output of a model with both streams for one
         clip's latents, video (1, C, T, h, w) and audio (1, C, 2, T), as
         ComfyUI's sampler carries them: at ``timestep`` (sigma x 1000) on
@@ -243,7 +243,8 @@ class StepsClient:
         latent, and ``audio_scale`` scales its target. ``anchors`` are
         {"frame", "video", "noise", "audio"} objects naming uploaded
         tensors by hash and ``spans`` the cond's vision spans, as the
-        encode gave them. Records the times of the call."""
+        encode gave them. ``attention``, dense or int8, runs the step at
+        that attention over the entry's. Records the times of the call."""
         fields = {"model": model, "run": run, "patch_table": patch_table,
                   "rows": [row], "audio_scale": float(audio_scale),
                   "shifts": {k: float(v) for k, v in shifts.items()}}
@@ -251,6 +252,8 @@ class StepsClient:
             fields["anchors"] = list(anchors)
         if spans:
             fields["spans"] = [list(sp) for sp in spans]
+        if attention is not None:
+            fields["attention"] = attention
         tensors = {"video": np.ascontiguousarray(video, np.float32),
                    "audio": np.ascontiguousarray(audio, np.float32),
                    "timestep": np.asarray(timestep, np.float32).reshape(-1)}

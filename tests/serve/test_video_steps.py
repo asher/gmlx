@@ -498,6 +498,119 @@ def _plain_need(served, text: int = 6) -> int:
                         text=text, decode=False, budget=1).phases["denoise"]
 
 
+def _int8_calls(monkeypatch) -> list:
+    """The int8 attention calls of the DiT, each run as dense attention,
+    since the CPU has no int8 kernel, on a kq with sdpa_qk8 and NAX."""
+    from video_fixtures import qk8_kernel
+
+    qk8_kernel(monkeypatch)
+    calls = []
+    dense = hm.attend
+
+    def spy(q, k, v, chunk):
+        calls.append(tuple(q.shape))
+        return dense(q, k, v, chunk)
+    monkeypatch.setattr(hm, "attend_int8", spy)
+    return calls
+
+
+def test_a_step_runs_the_attention_it_names_over_the_entrys(request,
+                                                           monkeypatch):
+    """A step's attention field runs that step at it, and a step without
+    one runs at the entry's, whatever the last step left. The DiT loaded
+    again after an encode, at the entry's attention, runs the step's."""
+    import dataclasses
+
+    from gmlx.video import loader
+
+    calls = _int8_calls(monkeypatch)
+    pipe, weights = _own_pipe()
+    served = _served(pipe)
+    _mount(_Host(served), request)
+    monkeypatch.setattr(loader, "load_dit", lambda *a, **k: (
+        _tiny_dit(weights), None))
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+
+    def int8(attention=None) -> bool:
+        calls.clear()
+        c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
+                  audio_scale=SCALE, attention=attention)
+        return bool(calls)
+
+    assert [int8("int8"), int8(), int8("dense")] == [True, False, False]
+    _on_worker(vs.drop_dit, served)
+    assert int8("int8")
+    served.plan = dataclasses.replace(served.plan, attention="int8")
+    assert [int8(), int8("dense"), int8()] == [True, False, True]
+
+
+@pytest.mark.parametrize("case", ["value", "sparse", "kq", "nax"])
+def test_a_step_refuses_an_attention_it_cannot_run_naming_it(
+        host, monkeypatch, case):
+    """A value off the list, and int8 on the variant with sparse
+    attention, on a kq with no sdpa_qk8 or on a GPU with no NAX units, are
+    the step's 400 with the run's own text and the field named."""
+    import dataclasses
+
+    import mlx_kquant as kq
+
+    from video_fixtures import qk8_kernel
+
+    qk8_kernel(monkeypatch, nax=case != "nax")
+    if case == "kq":
+        monkeypatch.setattr(kq, "sdpa_qk8", None)
+    variant = hf.FASTH3 if case == "sparse" else "fl2va"
+    monkeypatch.setattr(host.served, "plan", dataclasses.replace(
+        host.served.plan, variant=variant))
+    what = f"MiniMax-H3 {variant} runs with int8 attention"
+    want = {"value": "attention is dense or int8, not 'int4'",
+            "sparse": "MiniMax-H3 fasth3 runs video sparse attention, and "
+            "int8 attention applies to dense attention only",
+            "kq": f"{what}, and the installed mlx-kquant {kq.__version__} "
+            "has no sdpa_qk8; update mlx-kquant to 0.5.10 or later",
+            "nax": f"{what}, whose kernel needs a GPU with NAX units (M5 or "
+            "newer), and this Mac's GPU has none"}[case]
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    with pytest.raises(StepsClientError) as e:
+        c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
+                  audio_scale=SCALE,
+                  attention="int4" if case == "value" else "int8")
+    assert e.value.status == 400
+    assert e.value.body == {"error": want, "param": "attention"}
+
+
+def test_an_int8_step_on_a_dense_entry_is_priced_at_int8(request,
+                                                        monkeypatch):
+    """The int8 step books 14,784 bytes a packed row past the dense step
+    (``VideoPeaks.int8_attention``). Half that past the dense step's need,
+    the dense step runs and the int8 step is refused."""
+    from gmlx.video import memfit
+
+    calls = _int8_calls(monkeypatch)
+    pipe, _w = _own_pipe()
+    served = _served(pipe)
+    host = _mount(_Host(served), request)
+    rows, _n = memfit.clip_rows(hf.FAMILY, frames=FRAMES, width=SIZE,
+                                height=SIZE, text=6)
+    extra = memfit.PEAKS["h3"].int8_attention * rows
+    host.budget_bytes = _plain_need(served) + int(extra / 2)
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    kw = dict(shifts=SHIFTS, audio_scale=SCALE)
+    c.av_step("h3", None, video, audio, 600.0, row, **kw)
+    with pytest.raises(StepsClientError) as e:
+        c.av_step("h3", None, video, audio, 600.0, row, attention="int8",
+                  **kw)
+    assert e.value.status == 400
+    assert "does not fit in memory" in e.value.body["error"]
+    assert calls == []
+
+
 @pytest.mark.parametrize("held", ["uploads", "pairs", "table"])
 def test_a_step_counts_what_the_server_holds_and_runs_beside_the_dit(
         tmp_path, request, held):
