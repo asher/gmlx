@@ -137,8 +137,10 @@ def convert(model: nn.Module, patterns: dict) -> int:
         scales = scales.reshape(-1)
         mx.eval(codes, scales)
         del w
-        mx.clear_cache()
         _set(model, path, Int8Linear(codes, scales, group))
+        # MLX frees an eval's inputs after mx.eval returns.
+        mx.synchronize()
+        mx.clear_cache()
     del leaves
     mx.clear_cache()
     return len(paths)

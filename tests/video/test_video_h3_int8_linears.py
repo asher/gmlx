@@ -593,12 +593,18 @@ def test_the_conversion_clears_the_cache_after_each_matrix(tiny_gguf,
     clear = mx.clear_cache
     monkeypatch.setattr(mx, "clear_cache", lambda: (
         events.append("clear"), clear())[1])
+    cached, read = [], int8_linear._float_weight
+    monkeypatch.setattr(int8_linear, "_float_weight", lambda *a: (
+        cached.append(mx.get_cache_memory()), read(*a))[1])
     events.clear()
     _load(monkeypatch, tiny_gguf, "int8")
     run = [e for e in events if e in ("quantize", "clear")]
     first = run.index("quantize")
     assert run[first:first + 2 * len(_PATHS)] == (
         ["quantize", "clear"] * len(_PATHS))
+    # The weight is freed before the clear, so each later read starts on
+    # an empty cache.
+    assert cached[1:] == [0] * (len(_PATHS) - 1)
 
 
 def test_an_int8_linear_takes_one_scale_a_row_as_n_not_n_by_1():
