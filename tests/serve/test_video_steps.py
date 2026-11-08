@@ -547,11 +547,12 @@ def test_a_step_runs_the_int8_it_names_over_the_entrys(request,
     assert [int8(), int8("off"), int8()] == [True, False, True]
 
 
-@pytest.mark.parametrize("case", ["value", "linears", "all", "sparse", "kq",
-                                  "nax"])
+@pytest.mark.parametrize("case", ["value", "list", "object", "linears", "all",
+                                  "sparse", "kq", "nax"])
 def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
         host, monkeypatch, case):
-    """A value off the list, linears or all on an entry at off, and int8
+    """A value off the list, a JSON list or object in its place, linears
+    or all on an entry at off, and int8
     attention on the variant with sparse attention, on a kq with no
     sdpa_qk8 or on a GPU with no NAX units, are the step's 400 with the
     run's own text and the field named."""
@@ -571,7 +572,9 @@ def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
     rule = ("this model's entry loads its DiT at int8 off, so a request "
             "names int8 off or attention, not {0}; set the entry's "
             "defaults.int8 to run {0}")
-    want = {"value": "int8 is off, attention, linears or all, not 'int4'",
+    off_list = "int8 is off, attention, linears or all, not {!r}"
+    want = {"value": off_list.format("int4"),
+            "list": off_list.format(["all"]), "object": off_list.format({}),
             "linears": rule.format("linears"), "all": rule.format("all"),
             "sparse": "MiniMax-H3 fasth3 runs video sparse attention, and "
             "int8 attention applies to dense attention only",
@@ -585,8 +588,9 @@ def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
     with pytest.raises(StepsClientError) as e:
         c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
                   audio_scale=SCALE,
-                  int8={"value": "int4", "linears": "linears",
-                        "all": "all"}.get(case, "attention"))
+                  int8={"value": "int4", "list": ["all"], "object": {},
+                        "linears": "linears", "all": "all"}.get(case,
+                                                                "attention"))
     assert e.value.status == 400
     assert e.value.body == {"error": want, "param": "int8"}
 

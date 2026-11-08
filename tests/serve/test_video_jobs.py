@@ -1006,6 +1006,19 @@ def test_an_int8_value_off_the_list_is_a_400_naming_it(routes, how):
     assert routes.store.jobs == {} and routes.store.pending == {}
 
 
+@pytest.mark.parametrize("sent", [["all"], {}, 8, True])
+def test_an_int8_of_another_json_type_is_a_400_naming_it(routes, sent):
+    """A JSON list, object, number or boolean in the int8 field is the
+    field's 400, not a server error."""
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat",
+                                               "int8": sent})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        f"int8 is off, attention, linears or all, not {sent!r}", "int8")
+    assert routes.store.jobs == {} and routes.store.pending == {}
+
+
 @pytest.mark.parametrize("case", ["sparse", "kq", "nax"])
 def test_int8_this_server_cannot_run_is_a_400_before_the_job(
         routes, monkeypatch, case):

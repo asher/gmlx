@@ -178,8 +178,9 @@ _PARTS = {"off": ("dense", "file"), "attention": ("int8", "file"),
 
 def int8_parts(value: str) -> tuple[str, str]:
     """The DiT's (attention, linears) of an int8 setting. Raises
-    ValueError for a value off ``INT8``."""
-    if value not in _PARTS:
+    ValueError for a value off ``INT8``, a request's list or object
+    among them."""
+    if not isinstance(value, str) or value not in _PARTS:
         raise ValueError(f"int8 is {', '.join(INT8[:-1])} or {INT8[-1]}, "
                          f"not {value!r}")
     return _PARTS[value]
