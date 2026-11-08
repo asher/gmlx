@@ -51,7 +51,12 @@ serves these routes. They need ffmpeg, which writes the MP4, as
 | `last_frame` | An image the clip ends at. |
 | `guides` | Images, videos and sounds anchored at frames of the clip, in a multipart form. |
 | `guide_no_audio` | `true` anchors guide videos without their sound. |
-| `int8` | `off`, `attention`, `linears` or `all`, the [int8 setting](video.md#faster-clips-with-int8) the DiT runs at. Unset, the entry's `defaults.int8`, else `off`. The linear layers are part of the loaded DiT, so a job names a value whose linear layers match the entry's: `off` or `attention` on an entry at `off` or `attention`, and `linears` or `all` on an entry at `linears` or `all`. |
+| `int8` | `off`, `attention`, `linears` or `all`, the [int8 setting](video.md#faster-clips-with-int8) of the DiT. Unset, the entry's `defaults.int8`, else `off`. |
+
+The linear layers of `int8` are part of the DiT the entry loads, so a job
+names a value whose linear layers match the entry's: `off` or `attention`
+on an entry at `off` or `attention`, and `linears` or `all` on an entry at
+`linears` or `all`. Any other value is refused with 400.
 
 The steps and the shifts come from the entry, as on the command line. A
 `references` list asks for MiniMax-H3's Ref2VA mode, which the server does
@@ -170,7 +175,7 @@ status 500, and keeps the ones that ended.
 | A guide video that does not fit in the clip from its frame | The job fails with 400 naming the guide |
 | A guide video whose encode does not fit beside the models loaded, even a few seconds at a time | The job fails with 400 naming the guide: "... does not fit in memory beside the models now loaded: no window fits; the clip needs NEED, and FREE is free" |
 | `references` | 400 naming Ref2VA |
-| An `int8` off the list, one whose linear layers differ from the entry's, or one the server cannot run: `attention` or `all` on `fasth3`, an mlx-kquant without the int8 kernels, or a Mac older than M5 | 400 naming `int8`, as [the int8 refusals](troubleshooting.md#int8-refusals) give |
+| An `int8` off the list, one whose linear layers differ from the entry's, or one this Mac or install cannot run | 400 naming `int8`, as in [Int8 refusals](troubleshooting.md#int8-refusals) |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |
 | An unknown or expired job | 404 `not_found` |
 | The content of a job not completed | 409 `not_ready` |

@@ -176,13 +176,17 @@ the products it runs by default. It takes one of four values:
 | `--int8` | What changes |
 |---|---|
 | `off` | Nothing: the DiT runs as its file and the default attention make it. The default. |
-| `attention` | The products of the DiT's attention run in int8. The memory is the same. On a large or long clip, such as 1344x768 for 5 s or 672x384 for 12 s, a step takes less time; on a short, small clip, such as 672x384 for 5 s, the gain is small. |
+| `attention` | The products of the DiT's attention run in int8. The memory is the same. |
 | `linears` | The four linear layers of each DiT block run with int8 weights, which gmlx makes from the file's weights as the DiT loads. The DiT holds 7.86 GiB more memory. |
 | `all` | Both: the attention and the linear layers run in int8, with 7.86 GiB more memory. |
 
+With `attention`, a step takes less time on a large or long clip, such
+as 1344x768 for 5 s or 672x384 for 12 s; on a short, small clip, such as
+672x384 for 5 s, the gain is small.
+
 Every value but `off` is lossy: the clip differs from the one that `off`
 makes from the same seed. The text encoder and the VAEs run as before.
-Each value is opt-in, needs an M5 or newer, and does not run with
+These values are opt-in, need an M5 or newer, and do not run with
 `fasth3`. `attention` holds no more memory than `off`. `linears` and
 `all` switch more of the DiT's products to int8, and the memory check of
 [Clip length, size and memory](#clip-length-size-and-memory) counts

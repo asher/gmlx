@@ -189,7 +189,8 @@ def int8_served(entry: str) -> tuple[str, str]:
     """The int8 values a request may name on an entry at ``entry``: the
     two whose linears match its loaded DiT's."""
     linears = int8_parts(entry)[1]
-    return tuple(v for v in INT8 if _PARTS[v][1] == linears)
+    a, b = (v for v in INT8 if _PARTS[v][1] == linears)
+    return a, b
 
 
 def int8_request_refusal(entry: str, value: str) -> str | None:
