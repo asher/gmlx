@@ -7,7 +7,6 @@ import os
 
 from .residency_footprint import (_decode_feeder_of, _drafter_bytes,
                                   _plain_footprint, _prefill_ring_of,
-                                  _refuse_streamed_fused_adapter,
                                   _stamp_apc_mode, _stamp_boot_kv_costs,
                                   _streamed_shares, text_adapter_bytes)
 from .residency_types import _Entry, _Scratch, _build_scratch, _log
@@ -217,7 +216,6 @@ class _ChatBuild:
             if for_memory:
                 # Priced and gated as a stream build; the install streams
                 # the experts without trying the wire.
-                _refuse_streamed_fused_adapter(model_path, build_spec, env)
                 stream_experts_for_memory(model_path, for_memory)
                 force_table_stream(True)
                 shares = predicted_stream_bytes(str(model_path), env)

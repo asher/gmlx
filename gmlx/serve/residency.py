@@ -73,7 +73,6 @@ from .residency_footprint import (  # noqa: F401 - re-exported
     _plain_footprint,
     _prefill_feeder_of,
     _prefill_ring_of,
-    _refuse_streamed_fused_adapter,
     _ring_room,
     _stamp_apc_mode,
     _stamp_boot_kv_costs,

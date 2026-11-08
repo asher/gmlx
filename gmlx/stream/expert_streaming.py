@@ -572,6 +572,19 @@ def _release_unmapped_credit(model, freed: float) -> None:
             freed, getattr(model, "_kq_weights_key", None), "experts")
 
 
+def expert_adapter_bytes(layers) -> int:
+    """The resident bytes of the expert adapters stamped in ``layers``. Their
+    tables sit outside the parameter tree, so the weight total misses them,
+    and they stay in memory beside the arena."""
+    from gmlx.load.adapter import adapter_resident_bytes
+
+    from .feeder_common import _expert_loras
+
+    stamps = {id(lo): lo for layer in layers for m in layer.modules()
+              for lo in _expert_loras(getattr(m, "down_proj", None))}
+    return adapter_resident_bytes(sum(lo.nbytes for lo in stamps.values()))
+
+
 def install_expert_streaming(
     model,
     n_layers: int | None = None,
@@ -614,7 +627,6 @@ def install_expert_streaming(
     """
     from gmlx.load.modules import (
         glu_unsorted_call,
-        refuse_streamed_fused_expert_lora,
         stock_glu_calls,
         switch_layer_types,
     )
@@ -679,8 +691,6 @@ def install_expert_streaming(
     plan = stream_plan(ladder_bytes, tables, budget,
                        force_stream=force_stream,
                        latched=tables_for_memory(gguf_path))
-    if force_stream or plan.experts:
-        refuse_streamed_fused_expert_lora(model)
     compose = plan.tables and plan.experts
     table_only = plan.tables and not plan.experts
     if plan.table_kept and table_bytes(model):
@@ -704,7 +714,6 @@ def install_expert_streaming(
             skip_ids=frozenset(streamed_table_array_ids(model)),
             keep=wire_keep)
         if not early_wired:
-            refuse_streamed_fused_expert_lora(model)
             table_only = False
             compose = bool(plan.tables)
             force_stream = fell_back = True
@@ -1462,12 +1471,14 @@ def install_expert_streaming(
     dfeeder = None
     room = arena = None
     host_bytes = 0
+    lora_bytes = 0
     arena_kw: dict = {}
     if streaming and prefetcher is not None and moe_modules:
         from gmlx.stream.budget import host_overhead_bytes, kv_room_bytes
         from gmlx.stream.table_stream import streamed_table_bytes
 
         pin = getattr(model, "_kq_weights_pin", None)
+        lora_bytes = expert_adapter_bytes(layers)
         room = kv_room_bytes(gguf_path, step=prefill_step)
         host_bytes = host_overhead_bytes(_physical_ram())
         arena_kw = dict(
@@ -1500,11 +1511,11 @@ def install_expert_streaming(
             avail0 = unwired_ram_bytes()
         else:
             held = _decode_arena_bytes(
-                total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
+                total_bytes + lora_bytes, prefetcher.offsets, budget, ring_bytes=ring,
                 **arena_kw)
     if arena_kw and not env_arena:
         arena = _decode_arena_bytes(
-            total_bytes, prefetcher.offsets, budget, **arena_kw)
+            total_bytes + lora_bytes, prefetcher.offsets, budget, **arena_kw)
     if (
         streaming
         and prefetcher is not None
@@ -1536,7 +1547,7 @@ def install_expert_streaming(
             ring = 0
         if env_arena:
             arena = _decode_arena_bytes(
-                total_bytes, prefetcher.offsets, budget, ring_bytes=ring,
+                total_bytes + lora_bytes, prefetcher.offsets, budget, ring_bytes=ring,
                 avail_bytes=avail0, **arena_kw)
         if feeder is not None:
             n_cov = sum(feeder.covers(li) for li in moe_modules)
@@ -1642,11 +1653,13 @@ def install_expert_streaming(
             # they are out of the every-token term the arena is sized
             # against (arena_kw carries the same figure).
             tbytes = int(arena_kw.get("streamable_bytes", 0))
-            every = total_bytes - expert_bytes - tbytes
+            every = total_bytes + lora_bytes - expert_bytes - tbytes
             tables = f"tables {tbytes / 1e9:.1f} off-disk, " if tbytes else ""
+            lora = (f" (adapter tables {lora_bytes / 1e9:.1f})"
+                    if lora_bytes else "")
             print(
                 f"[stream] memory budget: ceiling {ceiling / 1e9:.1f} GB = "
-                f"every-token {every / 1e9:.1f} + "
+                f"every-token {every / 1e9:.1f}{lora} + "
                 f"arena {dfeeder.nominal_bytes / 1e9:.1f} + ring "
                 f"{(ring - ring_share) / 1e9:.1f}"
                 + (f" ({ring_share / 1e9:.1f} more lent from the arena at "

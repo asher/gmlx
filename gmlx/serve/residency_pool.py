@@ -146,9 +146,7 @@ class _PoolCore:
             from gmlx.load.adapter import adapter_load_refusal
             effective = getattr(build_spec, "effective_adapters", None)
             adapter_load_refusal(
-                model_path, effective() if callable(effective) else (), env,
-                stream=getattr(build_spec, "stream", None),
-                mtp=bool(getattr(build_spec, "speculative", False)))
+                model_path, effective() if callable(effective) else ())
         # Image pipelines a post-build refit evicts. The worker reservation
         # was decided before the build, which may have seen them busy, so
         # they are released after the build lock drops: a reservation taken

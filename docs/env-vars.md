@@ -64,7 +64,7 @@ is internal and may change between releases.
 | `GMLX_CACHE_LIMIT_GB` | Sized from the weights | MLX buffer cache limit of `serve`, `run` and `chat` in GiB, over `server.cache_limit_gb` in `serve`. `0` disables it, and `unlimited` lifts the limit. |
 | `GMLX_DECODE_ARENA_GB` | What the memory ceiling leaves | Size of a streamed model's expert [arena](glossary.md#arena) in GiB. Lower it to keep a second model loaded. |
 | `GMLX_FUSED_MOE` | `1` | `0` loads every MoE block unfused, which is slower. An expert adapter on gpt-oss or a native-FP expert stack needs it. |
-| `GMLX_FUSED_MOE_BLOCK` | `1` | `0` loads the fused MoE blocks of models such as Qwen3.5 MoE and Gemma 4 unfused, which is slower. An expert adapter then loads while the experts stream. |
+| `GMLX_FUSED_MOE_BLOCK` | `1` | `0` loads the fused MoE blocks of models such as Qwen3.5 MoE and Gemma 4 unfused, which is slower. |
 | `GMLX_GOVERNOR` | `1` | `0` turns off the [governor](glossary.md#governor) that sheds requests when memory runs out. |
 | `GMLX_SPARSE_ATTN` | `0` | `1` turns on top-k sparse attention for deep decode, which is lossy. |
 | `GMLX_SPARSE_K` | `2048` | Tokens that sparse attention reads in each step. |

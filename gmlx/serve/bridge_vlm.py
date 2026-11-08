@@ -1087,8 +1087,7 @@ def install_gguf_server_bridge() -> None:
                 # is never built, degraded and rebuilt only to fail again. A
                 # VLM base refuses every adapter on its own.
                 from gmlx.load.adapter import adapter_load_refusal
-                adapter_load_refusal(model_path, adapter_gguf, stream=stream,
-                                     mtp=mtp is not None)
+                adapter_load_refusal(model_path, adapter_gguf)
             if vlm is not None and mtp is not None:
                 # VLM x MTP: a resident VLM whose text-only requests speculate. Arm
                 # the drafter-load block (keyed to this GGUF -> the patched

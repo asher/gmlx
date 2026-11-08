@@ -2327,5 +2327,4 @@ def test_an_adapter_the_base_cannot_take_evicts_nothing(monkeypatch, tmp_path):
         pool.acquire(base, None, "auto", build_spec=spec)
     assert resident(pool) == {"A"} and teardowns == []
     ((args, kw),) = calls
-    assert args[:2] == (base, (ad,))
-    assert kw == {"stream": None, "mtp": True}
+    assert args == (base, (ad,)) and kw == {}

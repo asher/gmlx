@@ -155,8 +155,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- An adapter that changes expert weights works on a model whose experts
-  stream from disk. Every request failed with an mlx-kquant shape error.
+- An adapter that changes expert weights loads and runs on a model whose
+  experts stream from disk, Qwen3.6 MoE and Gemma 4 included. Before, the
+  load refused it or every request failed.
 - `gmlx serve` frees the prompt memory of a request that ends at a stop
   string or a client disconnect while other requests run. A request
   cancelled during a shared prefill now stops instead of running to its

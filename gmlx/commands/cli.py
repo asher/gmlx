@@ -1397,7 +1397,7 @@ def _run_bench_depths(args) -> int:
     check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
                   streaming=getattr(args, "stream_experts", False))
     drafter = None
-    _check_cli_adapter(args, mtp=bool(speculative))
+    _check_cli_adapter(args)
     if speculative:
         with loadlog.load_ui(args.verbose, args.gguf):
             model, drafter, _config, tok = load_mtp_model(
@@ -1488,21 +1488,17 @@ def _run_bench_depths(args) -> int:
     return 0
 
 
-def _check_cli_adapter(args, *, mtp: bool = False) -> None:
+def _check_cli_adapter(args) -> None:
     """``--adapter`` on the run/chat/bench trunks: refuse, from the base and
     adapter headers and before the load, an adapter the base cannot take
-    (an embedding adapter on a tied model, say, or expert LoRA on a fused
-    MoE block that streams its experts). ``mtp`` is the load's MTP choice.
-    Exits with the reason."""
+    (an embedding adapter on a tied model, say). Exits with the reason."""
     if not getattr(args, "adapter", None):
         return
     from gmlx.load.adapter import adapter_load_refusal
 
-    stream = ("experts" if getattr(args, "stream_experts", False)
-              else "cpu" if getattr(args, "stream_cpu", False) else None)
     paths = [os.path.abspath(os.path.expanduser(p)) for p, _ in args.adapter]
     try:
-        adapter_load_refusal(args.gguf, paths, stream=stream, mtp=mtp)
+        adapter_load_refusal(args.gguf, paths)
     except ValueError as e:
         raise SystemExit(f"error: {e}") from None
 
@@ -1541,33 +1537,6 @@ def _apply_cli_adapter(args, model, config, *, fold: bool = True) -> None:
         loadlog.note(f"[adapter] applied {n}-module GGUF LoRA from {adapter} "
                      f"at strength {strength:g}")
     object.__setattr__(trunk, "_kq_cli_adapter", paths)
-
-
-def _streamed_mtp(args) -> bool:
-    """Whether a streamed run takes the MTP path, as ``resolve_speculative``
-    decides it, without its side effects. Streaming turns auto MTP off, so
-    only an explicit choice counts."""
-    if getattr(args, "no_speculative", False):
-        return False
-    if getattr(args, "native_mtp", False) or getattr(args, "speculative", None):
-        return True
-    return bool(getattr(args, "draft_gguf", None)
-                and not getattr(args, "draft_gguf_auto", False))
-
-
-def _streamed_adapter_refusal(args, mtp: bool | None = None) -> str | None:
-    """Why ``--adapter`` cannot load with the requested expert streaming,
-    from the headers alone, or None. ``mtp`` is the caller's MTP choice,
-    when it has made one."""
-    if not getattr(args, "adapter", None) or not (
-            getattr(args, "stream_experts", False)
-            or getattr(args, "stream_cpu", False)):
-        return None
-    from gmlx.load.adapter import fused_expert_lora_refusal
-
-    return fused_expert_lora_refusal(
-        args.gguf, [os.path.expanduser(p) for p, _ in args.adapter],
-        mtp=_streamed_mtp(args) if mtp is None else mtp)
 
 
 def _cli_adapter_hook(args, *, fold: bool = True):
@@ -1748,7 +1717,7 @@ def _run_generate(args) -> int:
         from gmlx.gen.generation import generate_speculative
         from gmlx.spec.mtp_load import load_mtp_model
 
-        _check_cli_adapter(args, mtp=True)
+        _check_cli_adapter(args)
         with loadlog.load_ui(args.verbose, args.gguf):
             model, drafter, _config, tok = load_mtp_model(
                 args.gguf,
@@ -3158,10 +3127,6 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     apply_transcription_defaults(args, parser, argv)
     # After the config/family overlays: either may have seeded a cap.
     resolve_max_tokens(args)
-    why = _streamed_adapter_refusal(args)
-    if why:
-        print(f"error: --adapter: {why}", file=sys.stderr)
-        return 2
     from gmlx.load.arch_table import UnsupportedArchError
     from gmlx.load.preflight import UnsupportedCodecError
 

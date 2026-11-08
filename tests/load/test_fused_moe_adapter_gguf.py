@@ -16,14 +16,13 @@ same step's gap with the slot off plus half the move, so it fails when the
 delta is skipped, but not when one adapted layer is.
 
 ``integration``; skips unless ``KQUANT_TEST_GGUF_DIR`` holds a qwen35moe
-GGUF, or the Qwen3.8-Flash-Next UD-IQ4_XS shards for the qwen4exp row.
+GGUF, or a qwen4exp GGUF (Qwen3.8-Flash-Next) for the qwen4exp row.
 """
 
 from __future__ import annotations
 
 import gc
 import os
-from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
@@ -58,8 +57,6 @@ MIN_MOVE = 0.05
 # block, verify against plain, at the verify input: measured 0.0045.
 VERIFY_TOL = 0.05
 
-FLASH_NEXT = "Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf"
-FLASH_NEXT_BYTES = 93_682_584_224
 
 
 @pytest.fixture(autouse=True)
@@ -76,16 +73,17 @@ def _qwen35moe(gguf_index):
     return paths[0]
 
 
-def _flash_next(gguf_index):
-    hit = [p for p in gguf_index.get("qwen4exp", ()) if Path(p).name == FLASH_NEXT]
-    if not hit:
-        pytest.skip(f"no {FLASH_NEXT} under KQUANT_TEST_GGUF_DIR")
-    shards = [Path(hit[0]).with_name(FLASH_NEXT.replace("00001-of", f"0000{i}-of"))
-              for i in (1, 2, 3)]
-    if not all(p.is_file() for p in shards) or \
-            sum(p.stat().st_size for p in shards) != FLASH_NEXT_BYTES:
-        pytest.skip("the Flash-Next UD-IQ4_XS shards are missing or of another size")
-    return hit[0]
+def _qwen4exp(gguf_index):
+    """A qwen4exp GGUF (Qwen3.8-Flash-Next) whose shards are all present."""
+    from gmlx.load.preflight import find_split_shards
+
+    for path in gguf_index.get("qwen4exp", ()):
+        try:
+            find_split_shards(path)
+        except FileNotFoundError:
+            continue
+        return path
+    pytest.skip("no complete 'qwen4exp' GGUF under KQUANT_TEST_GGUF_DIR")
 
 
 def _mint(gguf, tmp_path):
@@ -206,7 +204,6 @@ def _fused_block_check(gguf, tmp_path, monkeypatch):
         apply_gguf_adapter(raw, config, adapter_path, base_arch=arch)
         adapted = [b for b in blocks if b.__dict__.get("_kq_lora_slots")]
         assert len(adapted) == len(LAYERS)
-        assert all(b._kq_expert_lora for b in adapted)
         for b in blocks:
             assert (type(b), b.__dict__.get("_kq_shexp_fold", True)) == before[id(b)]
         folds = _fold_calls(monkeypatch)
@@ -259,9 +256,9 @@ def test_qwen35moe_plain_load_folds_off_and_matches_unfused_on(
     _fused_block_check(_qwen35moe(gguf_index), tmp_path, monkeypatch)
 
 
-def test_flash_next_folds_off_and_matches_unfused_on(gguf_index, tmp_path,
-                                                     monkeypatch):
-    _fused_block_check(_flash_next(gguf_index), tmp_path, monkeypatch)
+def test_qwen4exp_folds_off_and_matches_unfused_on(gguf_index, tmp_path,
+                                                    monkeypatch):
+    _fused_block_check(_qwen4exp(gguf_index), tmp_path, monkeypatch)
 
 
 def test_qwen35moe_mtp_verify_applies_the_expert_adapter(gguf_index, tmp_path,

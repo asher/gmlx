@@ -3236,7 +3236,7 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
                                    _cli_adapter_hook)
     from gmlx.spec.mtp_load import load_mtp_model
 
-    _check_cli_adapter(args, mtp=True)
+    _check_cli_adapter(args)
     b = _ChatBackend()
     with loadlog.load_ui(args.verbose, args.gguf):
         b.model, b.drafter, b.config, b.tok = load_mtp_model(
@@ -3761,12 +3761,6 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
                 f"error: {which} on an MTP base is not supported{hint}.",
                 file=sys.stderr,
             )
-            return 2
-        from gmlx.commands.cli import _streamed_adapter_refusal
-
-        why = _streamed_adapter_refusal(args, mtp=speculative)
-        if why:
-            print(f"error: --adapter: {why}", file=sys.stderr)
             return 2
         if speculative or vlm_mtp:
             dropped = mtp_dropped_chat_flags(args)
