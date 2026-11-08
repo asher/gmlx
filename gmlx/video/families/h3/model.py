@@ -436,6 +436,15 @@ class H3Transformer(nn.Module):
         (``gmlx.image.ops.int8_linear``)."""
         return self._linears
 
+    def convert_linears(self, patterns: dict) -> int:
+        """Convert the block linears that ``patterns`` names to int8
+        (``gmlx.image.ops.int8_linear.convert``). Returns the count."""
+        from gmlx.image.ops import int8_linear
+
+        n = int8_linear.convert(self, patterns)
+        self._linears = "int8"
+        return n
+
     def caption(self, feats: mx.array, taps: dict | None = None) -> mx.array:
         """The text rows (1, L, dim) of encoder features (1, L, text dim):
         the condition projection, the refiner blocks and its final norm."""

@@ -95,12 +95,9 @@ def load_dit(path: str, *, family: str | None = None,
     if attention != "dense":
         model.attention = attention
     if linears == "int8":
-        from gmlx.image.ops.int8_linear import convert
-
         try:
-            n = convert(model, fam.int8_linears)
+            n = model.convert_linears(fam.int8_linears)
         except ValueError as e:
             raise VideoModelError(str(e)) from e
-        model._linears = "int8"
         log(f"[video] {fam.title}: {n} linears converted to int8")
     return model, vid

@@ -45,7 +45,10 @@ def linears_load(monkeypatch):
 
     def load(*a, **k):
         loads.append(k)
-        return types.SimpleNamespace(attention="dense", _linears="file"), None
+        model = types.SimpleNamespace(attention="dense", _linears="file")
+        model.convert_linears = types.MethodType(
+            hm.H3Transformer.convert_linears, model)
+        return model, None
 
     monkeypatch.setattr(iloader, "load_dit", load)
     monkeypatch.setattr(int8_linear, "convert", lambda model, patterns: (
