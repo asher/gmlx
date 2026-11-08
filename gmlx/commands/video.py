@@ -260,8 +260,8 @@ def _attention_flag(p: argparse.ArgumentParser) -> None:
 
     p.add_argument("--attention", choices=ATTENTION, default=None,
                    help="The DiT's attention. int8 runs on an M5 or newer, "
-                        "faster at full size and lossy (default: the "
-                        "entry's, else dense).")
+                        "faster on large or long clips and lossy (default: "
+                        "the entry's, else dense).")
 
 
 def _attention(a) -> str:
