@@ -251,6 +251,31 @@ def test_the_widths():
     assert dict(steps)[65_536] == 256
 
 
+def test_a_halving_inside_the_prompt_is_priced_at_the_wider_forward():
+    steps = sr.plan(512, 65_536, 32, 16e9)
+    assert steps[-1][1] == 256
+    final = 32 * 256 * (65_536 + 256) * 2.0
+    wide = max(32 * w * (d + w) * 2.0 for d, w in steps if w == 512)
+    assert sr.attention_bytes(steps, 32) == wide > final
+    assert wide == pytest.approx(2.0e9, rel=0.01)
+
+
+def test_the_price_before_the_reader_is_the_larger_itemsize(monkeypatch):
+    v = 248_320
+    model = SimpleNamespace(config=SimpleNamespace(
+        vocab_size=v, num_attention_heads=16, num_hidden_layers=2,
+        num_key_value_heads=4, head_dim=256))
+    monkeypatch.setattr("gmlx.stream.expert_streaming.experts_streamed",
+                        lambda m: False)
+    each = {size: sr.transient_bytes(
+        2048, vocab=v, itemsize=size, width=sr.logits_width(v, size, 5.7e9),
+        reduce=64, split=False, heads=16, ws=5.7e9) for size in (2, 4)}
+    assert sr.price_bytes(model, 2048, None, ws=5.7e9) == max(each.values())
+    reader = SimpleNamespace(built=True, vocab=v, itemsize=4, width=256,
+                             reduce=64, split=None, heads=16, ws=5.7e9)
+    assert sr.price_bytes(model, 2048, reader) == each[4]  # type: ignore[arg-type]
+
+
 def test_the_reader_records_the_logits_dtype_when_built(monkeypatch):
     monkeypatch.setattr(sr, "LOGITS_CAP", 100_000)
     model = _llama(dtype=mx.float32)

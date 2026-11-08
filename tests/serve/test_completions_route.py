@@ -487,3 +487,351 @@ def test_a_diffusion_model_refuses_logprobs(monkeypatch):
                                              "logprobs": 0})
     assert r.status_code == 400 and "diffusion" in r.json()["detail"]
     assert not rg.calls
+
+
+# Scoring: echo with logprobs. The engine job is stubbed; the reader's
+# entries are fixed, so these tests read the route, not the model.
+
+class _Hold:
+    def __init__(self):
+        self.released = 0
+
+    def release(self):
+        self.released += 1
+
+
+def _entry(i, k):
+    lp = -0.1 * i
+    top = [[40 + j for j in range(k)], [lp - 0.01 * j for j in range(k)]] if k else [None, None]
+    return (lp, top[0], top[1])
+
+
+class _Reader:
+    def __init__(self, refusal=None, raises=None):
+        self.built = True
+        self.refusal = refusal
+        self.raises = raises
+        self.scored = []
+
+    def score(self, ids, k, rows_scope=None, should_stop=None):
+        if self.raises is not None:
+            raise self.raises
+        self.scored.append(list(ids))
+        yield
+        return [_entry(i, k) for i in range(1, len(ids))]
+
+
+@pytest.fixture
+def scoring(monkeypatch):
+    """The scoring route's engine side stubbed: a fixed reader, a
+    run_on_engine that drives the job's steps on this thread, and a
+    preflight that records its calls."""
+    from gmlx.gen import score_reader
+    from gmlx.serve import engine_jobs, mem_preflight
+
+    state = types.SimpleNamespace(reader=_Reader(), runs=[], priced=[],
+                                  kept=None)
+    monkeypatch.setattr(score_reader, "reader_of", lambda rg: state.reader)
+    monkeypatch.setattr(score_reader, "reader_for", lambda rg: state.kept)
+
+    def run(rg, job, *, stop, stepwise=False, **kw):
+        state.runs.append(kw)
+        steps = job(rg, stop.is_set)
+        try:
+            while True:
+                next(steps)
+        except StopIteration as e:
+            return e.value
+
+    monkeypatch.setattr(engine_jobs, "run_on_engine", run)
+    monkeypatch.setattr(mem_preflight, "preflight_scoring",
+                        lambda rg, n, reader=None: state.priced.append(n))
+    return state
+
+
+def test_echo_with_logprobs_scores_the_prompt(scoring):
+    client, rg = _client()
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5, 6, 7], "echo": True, "logprobs": 1,
+        "max_tokens": 0, "return_tokens_as_token_ids": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    choice = body["choices"][0]
+    lp = choice["logprobs"]
+    assert lp["tokens"] == ["token_id:5", "token_id:6", "token_id:7"]
+    assert lp["token_logprobs"] == [None, -0.1, -0.2]
+    assert lp["top_logprobs"] == [None, {"token_id:6": -0.1, "token_id:40": -0.1},
+                                  {"token_id:7": -0.2, "token_id:40": -0.2}]
+    assert lp["text_offset"] == [0, 10, 20]
+    assert choice["finish_reason"] == "length"
+    assert choice["text"] == rg.processor.tokenizer.decode([5, 6, 7])
+    assert body["usage"] == {"prompt_tokens": 3, "completion_tokens": 0,
+                             "total_tokens": 3}
+    assert scoring.reader.scored == [[5, 6, 7]]
+    assert scoring.priced == [3]
+    assert not rg.calls
+
+
+def test_a_scored_string_prompt_names_its_tokens(scoring):
+    client, rg = _client()
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": "hi", "echo": True, "logprobs": 0,
+        "max_tokens": 0})
+    assert r.status_code == 200, r.text
+    ids = [_BOS] + _encode("hi", special=False)
+    assert scoring.reader.scored == [ids]
+    lp = r.json()["choices"][0]["logprobs"]
+    tok = rg.processor.tokenizer
+    assert lp["tokens"] == [tok.decode([t]) for t in ids]
+    assert lp["top_logprobs"][1] == {tok.decode([ids[1]]): -0.1}
+
+
+def test_scoring_then_generating_continues_the_entries(scoring):
+    client, rg = _client(_LP_TOKS)
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5, 6], "echo": True, "logprobs": 0,
+        "max_tokens": 1, "return_tokens_as_token_ids": True})
+    assert r.status_code == 200, r.text
+    choice = r.json()["choices"][0]
+    lp = choice["logprobs"]
+    assert lp["tokens"] == ["token_id:5", "token_id:6", "token_id:40",
+                            "token_id:41", "token_id:1"]
+    assert lp["token_logprobs"][:3] == [None, -0.1, -0.5]
+    assert lp["text_offset"] == [0, 10, 20, 31, 42]
+    assert choice["text"].startswith(rg.processor.tokenizer.decode([5, 6]))
+    assert rg.calls[0][0] == [5, 6]
+
+
+def test_a_list_of_prompts_is_scored_in_one_job(scoring):
+    client, _ = _client()
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [[5, 6], [7, 8, 9]], "echo": True,
+        "logprobs": 0, "max_tokens": 0})
+    assert r.status_code == 200, r.text
+    assert len(scoring.runs) == 1
+    assert scoring.reader.scored == [[5, 6], [7, 8, 9]]
+    assert scoring.priced == [3]
+    lps = [c["logprobs"]["token_logprobs"] for c in r.json()["choices"]]
+    assert lps == [[None, -0.1], [None, -0.1, -0.2]]
+
+
+def test_a_one_token_prompt_scores_nothing(scoring):
+    client, _ = _client()
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5], "echo": True, "logprobs": 0,
+        "max_tokens": 0})
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["logprobs"]["token_logprobs"] == [None]
+
+
+def test_an_answer_over_the_entry_cap_is_refused(scoring, monkeypatch):
+    from gmlx.serve.patches import completions
+
+    monkeypatch.setattr(completions, "ENTRY_CAP", 7)
+    client, _ = _client()
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5, 6, 7, 8], "echo": True, "logprobs": 1,
+        "max_tokens": 0})
+    assert r.status_code == 400
+    assert "4 prompt positions" in r.json()["detail"]
+    assert not scoring.runs
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5, 6, 7, 8], "echo": True, "logprobs": 0,
+        "max_tokens": 0})
+    assert r.status_code == 200, r.text
+
+
+def test_the_logprobs_cap_holds_on_a_scoring_request(scoring):
+    client, _ = _client()
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5, 6], "echo": True, "logprobs": 20,
+        "max_tokens": 0})
+    assert r.status_code == 200, r.text
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5, 6], "echo": True, "logprobs": 21,
+        "max_tokens": 0})
+    assert r.status_code == 400 and "cap 20" in r.json()["detail"]
+
+
+def test_a_refused_model_gets_a_400_that_names_it(scoring):
+    from gmlx.gen import score_reader
+
+    scoring.reader = _Reader(raises=score_reader.ScoringRefused(
+        score_reader.EMBEDS_DIFFER))
+    client, _ = _client()
+    body = {"model": "m", "prompt": [5, 6], "echo": True, "logprobs": 0,
+            "max_tokens": 0}
+    r = client.post("/v1/completions", json=body)
+    assert r.status_code == 400
+    assert r.json()["detail"].startswith("model 'm' reads token ids")
+    # A kept refusal answers before the request queues.
+    scoring.kept = _Reader(refusal=score_reader.NO_COLUMNS)
+    scoring.runs.clear()
+    scoring.priced.clear()
+    r = client.post("/v1/completions", json=body)
+    assert r.status_code == 400
+    assert r.json()["detail"] == score_reader.NO_COLUMNS
+    assert not scoring.runs and not scoring.priced
+
+
+def test_scoring_failures_map_to_http_errors(scoring, monkeypatch):
+    from gmlx.serve import engine_jobs, mem_preflight
+
+    client, _ = _client()
+    body = {"model": "m", "prompt": [5, 6], "echo": True, "logprobs": 0,
+            "max_tokens": 0}
+
+    def too_long(rg, n, reader=None):
+        raise _GEN.PromptTooLongError("prompt is too long for the memory")
+
+    monkeypatch.setattr(mem_preflight, "preflight_scoring", too_long)
+    r = client.post("/v1/completions", json=body)
+    assert r.status_code == 400 and "too long" in r.json()["detail"]
+    assert not scoring.runs
+    monkeypatch.setattr(mem_preflight, "preflight_scoring",
+                        lambda rg, n, reader=None: None)
+
+    def timeout(rg, job, **kw):
+        raise engine_jobs.JobTimeout("the scoring job did not finish")
+
+    monkeypatch.setattr(engine_jobs, "run_on_engine", timeout)
+    r = client.post("/v1/completions", json=body)
+    assert r.status_code == 504
+    r = client.post("/v1/completions", json={**body, "lora": "x"})
+    assert r.status_code == 400
+
+
+def test_a_diffusion_model_refuses_scoring(scoring, monkeypatch):
+    import gmlx.gen.diffusion as diffusion
+
+    monkeypatch.setattr(diffusion, "is_diffusion_model", lambda model: True)
+    client, _ = _client()
+    r = client.post("/v1/completions", json={
+        "model": "m", "prompt": [5, 6], "echo": True, "logprobs": 0,
+        "max_tokens": 0})
+    assert r.status_code == 400 and "diffusion" in r.json()["detail"]
+    assert not scoring.runs
+
+
+def test_scoring_requests_take_turns_and_a_leaver_gets_499(scoring, monkeypatch):
+    """Three scoring requests on one engine over one event loop. The first
+    runs; the second waits on the loop, counted in the queue depth, with
+    no job started; the third disconnects while waiting and gets 499; the
+    second runs when the first returns. Each request holds its model from
+    before the wait to the end, the leaver included."""
+    import asyncio
+
+    import httpx
+
+    import gmlx.serve.queue_cap as qc
+    from gmlx.serve import engine_jobs, job_route
+
+    _client()
+    rg = _RUNTIME.response_generator
+    hold = _Hold()
+    _RUNTIME.response_generator = types.SimpleNamespace(_rg=rg, _hold=hold)
+    monkeypatch.setattr(qc, "_GEN_REF", lambda: None)
+    started, release = [], {5: threading.Event(), 6: threading.Event()}
+    first_running = threading.Event()
+
+    def run(engine, job, *, stop, **kw):
+        steps = job(engine, stop.is_set)
+        first = None
+        try:
+            while True:
+                next(steps)
+                if first is None:
+                    first = scoring.reader.scored[-1][0]
+                    started.append(first)
+                    if first == 5:
+                        first_running.set()
+                    release[first].wait()
+        except StopIteration as e:
+            return e.value
+
+    monkeypatch.setattr(engine_jobs, "run_on_engine", run)
+    queued: list = []
+
+    class SignalTurn(job_route._Turn):
+        def __init__(self):
+            super().__init__()
+            outer = self
+
+            class Lock(asyncio.Lock):
+                async def acquire(self):
+                    if self.locked():
+                        queued.append(outer.waiters)
+                        signal.set()
+                    return await super().acquire()
+
+            self.lock = Lock()
+
+    monkeypatch.setattr(job_route, "_Turn", SignalTurn)
+    leave = {}
+
+    async def watch(http_request, stop):
+        gone = leave.get(http_request.headers.get("x-request"))
+        try:
+            if gone is not None:
+                await gone.wait()
+                stop.set()
+                return
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+
+    monkeypatch.setattr(job_route, "watch_disconnect", watch)
+    signal = None
+
+    async def main():
+        nonlocal signal
+        signal = asyncio.Event()
+        leave["c"] = asyncio.Event()
+        transport = httpx.ASGITransport(app=_APP.app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as client:
+            def post(first, name):
+                return asyncio.create_task(client.post(
+                    "/v1/completions", headers={"x-request": name}, json={
+                        "model": "m", "prompt": [first, 7], "echo": True,
+                        "logprobs": 0, "max_tokens": 0}))
+
+            a = post(5, "a")
+            running = asyncio.ensure_future(asyncio.to_thread(first_running.wait))
+            await asyncio.wait({a, running}, return_when=asyncio.FIRST_COMPLETED)
+            assert first_running.is_set(), "the first request ran no job"
+            b = post(6, "b")
+            await signal.wait()
+            signal.clear()
+            assert job_route.scoring_waiters(rg) == 1
+            assert qc._waiting_depth(rg) == 1
+            assert started == [5]
+            c = post(6, "c")
+            await signal.wait()
+            assert job_route.scoring_waiters(rg) == 2
+            assert hold.released == 0
+            leave["c"].set()
+            rc = await c
+            assert rc.status_code == 499
+            assert job_route.scoring_waiters(rg) == 1
+            assert hold.released == 1
+            release[5].set()
+            release[6].set()
+            ra, rb = await asyncio.gather(a, b)
+            return ra.status_code, rb.status_code
+
+    async def guarded():
+        try:
+            return await main()
+        finally:
+            # A failed check must not leave a thread waiting at shutdown.
+            first_running.set()
+            for event in release.values():
+                event.set()
+
+    codes = asyncio.run(guarded())
+    assert codes == (200, 200)
+    assert started == [5, 6]
+    assert queued == [1, 2]
+    assert hold.released == 3
+    assert job_route._TURNS == {}

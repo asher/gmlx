@@ -7,8 +7,10 @@ binding, with ``add_special_tokens`` (default true), and a list of ids as
 sent. Each prompt becomes its own engine row, and ``_build_gen_args``
 applies the same sampling defaults, profiles, XTC and adapters as on
 ``/v1/chat/completions``. ``logprobs: N`` returns the OpenAI completions
-shape. ``echo`` puts the prompt before the completion. Out of scope (400):
-``n > 1``, ``suffix``, ``best_of > 1``, a streamed list of prompts."""
+shape. ``echo`` puts the prompt before the completion; ``echo`` with
+``logprobs`` also scores every prompt token, in an engine job of its own
+(``score_reader``). Out of scope (400): ``n > 1``, ``suffix``,
+``best_of > 1``, a streamed list of prompts, streamed scoring."""
 
 from __future__ import annotations
 
@@ -37,6 +39,8 @@ from .chat_behavior import _request_stop_sequences
 _COMPLETIONS_PATHS = ("/completions", "/v1/completions")
 # Prompts one request may carry when the queue depth cap is off.
 MAX_PROMPTS = 64
+# Entries one scoring answer may hold: prompt positions times (logprobs + 1).
+ENTRY_CAP = 1_048_576
 _SHAPE = ("a prompt is a string, a list of strings, a list of token ids or a "
           "list of such lists")
 
@@ -517,6 +521,9 @@ async def completions_endpoint(request: CompletionRequest,
     if request.stream:
         return await _stream_completion(
             request, runtime, gen_mod, _prep, stops, request_start)
+    if request.echo and request.logprobs is not None:
+        return await _scoring_completion(
+            request, http_request, runtime, gen_mod, _prep, stops, request_start)
     return await _blocking_completion(
         request, runtime, gen_mod, _prep, stops, request_start)
 
@@ -574,14 +581,14 @@ def _generate_rows(request, prep: _Prepared, stops, gen_mod, scored=None):
 
 
 async def _blocking_completion(request, runtime, gen_mod, prep_fn, stops,
-                               request_start, scored=None):
+                               request_start):
     runtime.metrics.begin_request(endpoint="/v1/completions",
                                   model=request.model, stream=False)
 
     def _run():
         prep = prep_fn()
         try:
-            return _generate_rows(request, prep, stops, gen_mod, scored)
+            return _generate_rows(request, prep, stops, gen_mod)
         finally:
             prep.release()
 
@@ -589,7 +596,10 @@ async def _blocking_completion(request, runtime, gen_mod, prep_fn, stops,
         rows = await asyncio.to_thread(_run)
     except Exception as e:
         raise _failure(runtime, request, False, e, gen_mod) from None
+    return _completion_response(request, runtime, gen_mod, rows, request_start)
 
+
+def _completion_response(request, runtime, gen_mod, rows, request_start):
     choices, prompt_tokens, output_tokens = [], 0, 0
     first_metrics = None
     for i, (_row, text, p_tok, n_out, finish, metrics, entries) in enumerate(rows):
@@ -614,6 +624,116 @@ async def _blocking_completion(request, runtime, gen_mod, prep_fn, stops,
             prompt_tokens=prompt_tokens,
             completion_tokens=output_tokens,
             total_tokens=prompt_tokens + output_tokens))
+
+
+def _score_entries(prep: _Prepared, request, scores) -> list:
+    """The prompt part of each row's ``logprobs``: a null first entry, then
+    the job's entry for every later position."""
+    k = int(request.logprobs)
+    out = []
+    for row, entries in zip(prep.rows, scores):
+        lp = _Logprobs(prep, k, request.return_tokens_as_token_ids)
+        lp.add(row.ids[0], None)
+        for tid, (value, top_ids, top_vals) in zip(row.ids[1:], entries):
+            lp.add(tid, value, list(zip(top_ids, top_vals))
+                   if top_ids is not None and top_vals is not None else None)
+        out.append(lp)
+    return out
+
+
+async def _scoring_completion(request, http_request, runtime, gen_mod,
+                              prep_fn, stops, request_start):
+    """``echo`` with ``logprobs``: score every prompt in one engine job, then
+    generate when ``max_tokens`` is 1 or more. The request holds its model
+    from before its turn to its end. The turn is awaited on the loop, so a
+    waiting request holds no worker thread."""
+    import threading
+
+    from gmlx import lora_rows
+    from gmlx.gen import score_reader
+    from gmlx.serve import engine_jobs, job_route, mem_preflight
+
+    import gmlx.serve.bridge_vlm as serving
+
+    runtime.metrics.begin_request(endpoint="/v1/completions",
+                                  model=request.model, stream=False)
+    k = int(request.logprobs)
+    stop = threading.Event()
+
+    def _held():
+        prep = prep_fn()
+        try:
+            lora = job_route.salted(
+                job_route.request_lora(serving.get_active_spec(), request), prep.rg)
+            positions = sum(len(row.ids) for row in prep.rows)
+            if positions * (k + 1) > ENTRY_CAP:
+                raise _bad(f"{positions} prompt positions with logprobs {k} give "
+                           f"{positions * (k + 1):,} entries, above the limit "
+                           f"{ENTRY_CAP:,}; lower logprobs or split the request")
+            kept = score_reader.reader_for(prep.rg)
+            if kept is not None and kept.refusal is not None:
+                raise score_reader.ScoringRefused(kept.refusal)
+        except BaseException:
+            prep.release()
+            raise
+        return prep, lora
+
+    def _score(prep: _Prepared, lora):
+        longest = max(len(row.ids) for row in prep.rows)
+        if longest < 2:
+            return [[] for _ in prep.rows]
+        mem_preflight.preflight_scoring(
+            prep.rg, longest, score_reader.reader_for(prep.rg))
+        scope = lora_rows.rows_scope(lora.scales)
+        rows = [row.ids for row in prep.rows]
+
+        def job(engine_rg, should_stop):
+            reader = score_reader.reader_of(engine_rg)
+            if not reader.built:
+                yield from reader.build(scope)
+            out = []
+            for ids in rows:
+                out.append((yield from reader.score(ids, k, scope, should_stop))
+                           if len(ids) > 1 else [])
+            return out
+
+        return engine_jobs.run_on_engine(
+            prep.rg, job, request_id=f"cmpl-score-{uuid.uuid4()}",
+            prompt_tokens=sum(len(ids) for ids in rows), stop=stop,
+            timeout_s=gen_mod.get_token_queue_timeout(), stepwise=True,
+            what="the scoring job")
+
+    def _generate(prep: _Prepared, scored):
+        return _generate_rows(request, prep, stops, gen_mod, scored)
+
+    watcher = asyncio.create_task(job_route.watch_disconnect(http_request, stop))
+    prep = None
+    try:
+        prep, lora = await asyncio.to_thread(_held)
+        async with job_route.scoring_turn(prep.rg, watcher):
+            scores = await asyncio.to_thread(_score, prep, lora)
+        scored = _score_entries(prep, request, scores)
+        rows = await asyncio.to_thread(_generate, prep, scored)
+    except engine_jobs.JobCancelled:
+        _record_failure(runtime, request.model, False, "client disconnected")
+        from starlette.responses import Response
+
+        return Response(status_code=499)
+    except engine_jobs.JobTimeout as e:
+        _record_failure(runtime, request.model, False, str(e))
+        raise HTTPException(status_code=504, detail=str(e)) from None
+    except score_reader.ScoringRefused as e:
+        detail = str(e).format(model=request.model)
+        _record_failure(runtime, request.model, False, detail)
+        raise HTTPException(status_code=400, detail=detail) from None
+    except Exception as e:
+        raise _failure(runtime, request, False, e, gen_mod) from None
+    finally:
+        stop.set()
+        watcher.cancel()
+        if prep is not None:
+            prep.release()
+    return _completion_response(request, runtime, gen_mod, rows, request_start)
 
 
 async def _stream_completion(request, runtime, gen_mod, prep_fn, stops,

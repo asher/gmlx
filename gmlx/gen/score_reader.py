@@ -108,6 +108,50 @@ def attention_bytes(steps: list[tuple[int, int]], heads: int) -> float:
     return max((heads * w * (d + w) * 2.0 for d, w in steps), default=0.0)
 
 
+def transient_bytes(tokens: int, *, vocab: int, itemsize: int, width: int,
+                    reduce: int, split: bool, heads: int,
+                    ws: Optional[float]) -> float:
+    """The transient of scoring ``tokens`` positions at these widths: the
+    logits of one forward (of one head sub-chunk on the split path), the
+    float32 reductions of one sub-chunk, and the largest attention score
+    transient over the plan."""
+    tokens = max(1, int(tokens))
+    logits = min(reduce if split else width, tokens) * vocab * itemsize
+    reduce_bytes = min(reduce, width, tokens) * vocab * BYTES_PER_V_ELEMENT
+    attn = attention_bytes(plan(width, tokens, heads, ws), heads)
+    return float(logits + reduce_bytes + attn)
+
+
+def price_bytes(model, tokens: int, reader: Optional["ScoreReader"] = None,
+                ws: Optional[float] = None) -> Optional[float]:
+    """The transient of a scoring job of ``tokens`` positions on ``model``.
+    With a built reader, at its widths. Before that the logits dtype and the
+    path are not known, so the price is the largest over both itemsizes
+    and, on a streamed model, both paths. None when the vocabulary size
+    cannot be read."""
+    if reader is not None and reader.built and reader.vocab:
+        return transient_bytes(
+            tokens, vocab=reader.vocab, itemsize=reader.itemsize,
+            width=reader.width, reduce=reader.reduce,
+            split=reader.split is not None, heads=reader.heads, ws=reader.ws)
+    from gmlx.stream.expert_streaming import experts_streamed
+
+    vocab = config_value(model, "vocab_size")
+    if not isinstance(vocab, int) or vocab <= 0:
+        return None
+    if ws is None:
+        ws = working_set()
+    heads = attention_heads(model)
+    reduce = reduce_width(vocab, ws)
+    shapes = [(size, logits_width(vocab, size, ws), False) for size in (2, 4)]
+    if experts_streamed(model):
+        shapes += [(size, adopted_step(model), True) for size in (2, 4)]
+    return max(
+        transient_bytes(tokens, vocab=vocab, itemsize=size, width=width,
+                        reduce=reduce, split=split, heads=heads, ws=ws)
+        for size, width, split in shapes)
+
+
 def config_value(model, name: str, default=None):
     from gmlx.serve.mem_preflight import _get, _lm_config
 
