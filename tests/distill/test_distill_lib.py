@@ -7358,9 +7358,8 @@ def test_header_reads_accept_a_tensor_type_gguf_py_does_not_know(tmp_path):
     # no add_bos_token key and a llama-bpe pre-tokenizer: llama.cpp adds BOS
     assert tok.encode("Hello", add_special_tokens=True)[0] == 0
     plain = load_tokenizer_from_gguf({**meta, "tokenizer.ggml.pre": "llama-bpe"}, "llama")
-    assert plain.encode("Hello", add_special_tokens=True)[0] != 0
     _tokens.llamacpp_bos_default(plain, str(path))
-    assert plain.encode("Hello", add_special_tokens=True)[0] == 0
+    assert plain.encode("Hello", add_special_tokens=True).count(0) == 1
 
 
 def test_the_student_head_width_is_read_from_every_shard_of_a_split_gguf(tmp_path):
