@@ -21,7 +21,7 @@ import wave
 import numpy as np
 import pytest
 from video_fixtures import (H3_HEADER, fixture_view, gguf_tokenizer,
-                            qk8_kernel, vsa_kernel, wait_for)
+                            int8_kernel, vsa_kernel, wait_for)
 
 from gmlx.commands import video as cmd
 from gmlx.video import catalog
@@ -126,21 +126,29 @@ def test_flags_win_over_the_entry_and_the_entry_over_the_variant():
 
 
 @pytest.mark.parametrize("flags,entry,want", [
-    ([], {}, "dense"),
-    ([], {"attention": "int8"}, "int8"),
-    (["--attention", "int8"], {"attention": "dense"}, "int8"),
-    (["--attention", "dense"], {"attention": "int8"}, "dense"),
+    ([], {}, "off"),
+    ([], {"int8": "all"}, "all"),
+    (["--int8", "linears"], {"int8": "off"}, "linears"),
+    (["--int8", "off"], {"int8": "attention"}, "off"),
 ])
-def test_the_attention_flag_beats_the_entry_and_the_entry_dense(flags,
-                                                                entry, want):
-    assert cmd._attention(_args(*flags, defaults=entry)) == want
+def test_the_int8_flag_beats_the_entry_and_the_entry_off(flags, entry,
+                                                         want):
+    assert cmd._int8(_args(*flags, defaults=entry)) == want
 
 
-def test_an_attention_of_no_kind_is_refused_at_parse(capsys):
+@pytest.mark.parametrize("argv, err", [
+    (["--int8", "int4"], "invalid choice: 'int4'"),
+    (["--int8"], "expected one argument"),
+    (["--attention", "int8"], "unrecognized arguments: --attention"),
+])
+def test_an_int8_of_no_kind_bare_or_the_old_flag_is_refused_at_parse(
+        capsys, argv, err):
+    """--int8 takes one of its four values, with no bare form, and
+    --attention is gone (design 10.4, R7)."""
     with pytest.raises(SystemExit) as ei:
-        _args("--attention", "int4")
+        _args(*argv)
     assert ei.value.code == 2
-    assert "invalid choice: 'int4'" in capsys.readouterr().err
+    assert err in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("seconds", [20.0, 1e308])
@@ -474,34 +482,45 @@ def test_a_run_writes_the_mp4_and_the_frames(stubbed, tmp_path, capsys):
     assert sorted(p.name for p in frames.iterdir()) == [
         "audio.wav", *(f"frame_{i:06d}.png" for i in range(1, 6))]
     assert stubbed.loads == [{"variant": "fl2va", "attention": "dense",
+                              "linears": "file",
                               "log": stubbed.loads[0]["log"]}]
     rec = json.loads(capsys.readouterr().out)
     assert (rec["output"], rec["variant"], rec["frames"],
-            rec["attention"]) == (str(out), "fl2va", 5, "dense")
+            rec["int8"]) == (str(out), "fl2va", 5, "off")
 
 
-def test_the_attention_reaches_the_refusal_the_plan_and_the_load(
-        stubbed, monkeypatch, tmp_path, capsys):
-    """--attention int8 is what the refusal checks, the memory plan
-    prices, the DiT loads with and the record holds."""
+@pytest.mark.parametrize("int8, parts", [
+    ("attention", ("int8", "file")), ("linears", ("dense", "int8")),
+    ("all", ("int8", "int8"))])
+def test_the_int8_setting_reaches_the_refusal_the_plan_and_the_load(
+        stubbed, monkeypatch, tmp_path, capsys, int8, parts):
+    """--int8 is what the refusal checks; its attention and linears are
+    what the memory plan prices and the DiT loads with, and the record
+    holds the setting."""
     from gmlx.video import memfit, registry
 
-    qk8_kernel(monkeypatch)
+    int8_kernel(monkeypatch)
     refused, planned = [], []
     refusal, plan_run = registry.run_refusal, memfit.plan_run
 
-    def run_refusal(fam, variant, attention="dense"):
-        refused.append(attention)
-        return refusal(fam, variant, attention)
+    def run_refusal(fam, variant, int8="off"):
+        refused.append(int8)
+        return refusal(fam, variant, int8)
 
     monkeypatch.setattr(registry, "run_refusal", run_refusal)
+    # The stubbed DiT has no header: its int8 delta is a stand-in.
+    monkeypatch.setattr(memfit, "int8_delta", lambda fam, view: 1)
+    monkeypatch.setattr(memfit, "dit_bytes", lambda fam, path, linears: (
+        memfit.file_bytes(path) + (linears == "int8")))
     monkeypatch.setattr(memfit, "plan_run", lambda fam, **kw: (
-        planned.append(kw["attention"]) or plan_run(fam, **kw)))
-    assert stubbed("--attention", "int8", "--frames-dir",
+        planned.append((kw["attention"], kw["linears"]))
+        or plan_run(fam, **kw)))
+    assert stubbed("--int8", int8, "--frames-dir",
                    str(tmp_path / "frames"), "--json") == 0
-    assert refused == ["int8"] and set(planned) == {"int8"}
-    assert [kw["attention"] for kw in stubbed.loads] == ["int8"]
-    assert json.loads(capsys.readouterr().out)["attention"] == "int8"
+    assert refused == [int8] and set(planned) == {parts}
+    assert [(kw["attention"], kw["linears"])
+            for kw in stubbed.loads] == [parts]
+    assert json.loads(capsys.readouterr().out)["int8"] == int8
 
 
 def test_a_shorter_clip_leaves_no_frames_of_the_one_before(stubbed,
