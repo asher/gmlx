@@ -21,6 +21,8 @@ JSON_FLOOR = -9999.0
 
 # The most alternatives per token that TOP_LOGPROBS_K can ask for.
 TOP_LOGPROBS_CEILING = 100
+# TOP_LOGPROBS_K when it is not set, vLLM's max_logprobs default.
+TOP_LOGPROBS_DEFAULT = 20
 
 
 def raw_logprobs(logits: mx.array) -> mx.array:

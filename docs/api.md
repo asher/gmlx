@@ -278,11 +278,11 @@ on a model takes about 1.5 s longer, once per process.
 `logprobs: true` returns the logprob of each token in the reply, and
 `top_logprobs: N` asks for the N most likely alternatives at each position.
 The server caps the alternatives with the `TOP_LOGPROBS_K` environment
-variable, 0 to 100, which is 0 by default. Raise it when you start the
-server, or the lists stay empty:
+variable, 0 to 100, which is 20 by default. Chat clamps a larger request to
+the cap. To allow more, raise the cap when you start the server:
 
 ```sh
-TOP_LOGPROBS_K=20 gmlx serve --config ~/.config/gmlx/gmlx.yaml
+TOP_LOGPROBS_K=50 gmlx serve --config ~/.config/gmlx/gmlx.yaml
 ```
 
 The values are the model's own distribution: the log-softmax of its raw

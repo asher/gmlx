@@ -289,11 +289,27 @@ def test_top_logprobs_above_cap_warns(monkeypatch):
         client = _client_with("/v1/chat/completions", _chat_stub({}))
         r = client.post("/v1/chat/completions", json={
             "model": "m", "messages": [{"role": "user", "content": "x"}],
-            "logprobs": True, "top_logprobs": 5})
+            "logprobs": True, "top_logprobs": 25})
         assert r.status_code == 200
         warns = [m for m in records if "TOP_LOGPROBS_K" in m]
         assert len(warns) == 1
-        assert "top_logprobs=5" in warns[0]
+        assert "top_logprobs=25" in warns[0]
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_the_default_cap_is_20(monkeypatch):
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    monkeypatch.delenv("TOP_LOGPROBS_K", raising=False)
+    assert gen.get_top_logprobs_k() == 20
+    records, handler, logger = _capture_warnings()
+    try:
+        client = _client_with("/v1/chat/completions", _chat_stub({}))
+        r = client.post("/v1/chat/completions", json={
+            "model": "m", "messages": [{"role": "user", "content": "x"}],
+            "logprobs": True, "top_logprobs": 5})
+        assert r.status_code == 200
+        assert not [m for m in records if "TOP_LOGPROBS_K" in m]
     finally:
         logger.removeHandler(handler)
 

@@ -136,6 +136,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   false` that the template does not turn off (GLM-5, K2 Horizon, Kimi K2.5 and
   K3, and gpt-oss, Beam and Muse with `family_defaults: false`) gets the
   schema after the reasoning, where the schema constrained the reasoning.
+- `TOP_LOGPROBS_K` defaults to 20, so `top_logprobs` returns alternatives
+  without setup.
 
 ### Fixed
 

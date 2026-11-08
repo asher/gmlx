@@ -16,7 +16,7 @@ import logging
 import os
 
 import gmlx.serve.bridge_vlm as serving
-from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING
+from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING, TOP_LOGPROBS_DEFAULT
 from gmlx.systemone.extensions import GMLX_EXTENSIONS
 from gmlx.systemone.schema import JEV_EXTENSIONS
 from gmlx.upstream.patching import link, under, wrapped_with
@@ -258,13 +258,13 @@ def _maybe_warn_unfulfilled_tool_choice(path: str, tc, result) -> None:
 
 def _maybe_warn_top_logprobs(path: str, request) -> None:
     """Warn when a request asks for more logprob alternatives than the
-    server-side ``TOP_LOGPROBS_K`` cap allows (default 0): the response
+    server-side ``TOP_LOGPROBS_K`` cap allows (default 20): the response
     silently carries empty/truncated alternatives otherwise."""
     want = getattr(request, "top_logprobs", None)
     if not want:
         return
     try:
-        cap = int(os.environ.get("TOP_LOGPROBS_K", 0) or 0)
+        cap = int(os.environ.get("TOP_LOGPROBS_K", TOP_LOGPROBS_DEFAULT) or 0)
     except ValueError:
         cap = 0
     # Mirror the engine's effective cap (get_top_logprobs_k clamps to 100):

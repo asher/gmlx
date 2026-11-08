@@ -311,13 +311,14 @@ def get_quantized_kv_start():
 def get_top_logprobs_k():
     """Max per-token top_logprobs honored by the server (0 = disabled).
 
-    Set via TOP_LOGPROBS_K env var. gmlx: capped at TOP_LOGPROBS_CEILING,
-    100 (OpenAI caps at 20). When 0, requests with top_logprobs>0 still
-    succeed but the top_logprobs list stays empty.
+    Set via TOP_LOGPROBS_K env var. gmlx: 20 by default, vLLM's
+    max_logprobs default, and capped at TOP_LOGPROBS_CEILING, 100. When 0,
+    requests with top_logprobs>0 still succeed but the top_logprobs list
+    stays empty.
     """
-    from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING
+    from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING, TOP_LOGPROBS_DEFAULT
 
-    k = int(os.environ.get("TOP_LOGPROBS_K", 0))
+    k = int(os.environ.get("TOP_LOGPROBS_K", TOP_LOGPROBS_DEFAULT))
     return max(0, min(k, TOP_LOGPROBS_CEILING))
 
 
