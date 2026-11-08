@@ -203,12 +203,10 @@ def _fail_row_permanently(gen, st: _TickState, uid, err: str) -> None:
 def _resumed_processors(lp, committed):
     """The row's processors for its replay. The replay's prompt ends with
     the delivered tokens, so the presence and frequency penalties start
-    afresh from them."""
-    from gmlx.gen.penalties import OutputPenalty
-
+    afresh from them, and a grammar resumes after them."""
     if not lp:
         return lp
-    return [p.resumed(committed) if isinstance(p, OutputPenalty) else p
+    return [p.resumed(committed) if hasattr(p, "resumed") else p
             for p in lp]
 
 

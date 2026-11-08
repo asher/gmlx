@@ -277,6 +277,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   apply NFC, and an unknown or empty pre-tokenizer name prints a warning.
 - `/v1/completions` adds BOS to a raw prompt on Gemma 3 and 4, as
   llama-server does.
+- A `response_format` request that `gmlx serve` cuts off to free memory now
+  resumes on its schema, where it could fail every running request.
 
 ## [0.5.4] - 2026-10-29
 

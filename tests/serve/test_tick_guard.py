@@ -369,3 +369,32 @@ def test_a_rebuilt_adapted_row_keeps_its_scales(monkeypatch, engine_seams):
     finally:
         lora_rows.configure("static", 1)
         engine_seams.restore(seams)
+
+
+def test_resumed_processors_resume_every_processor_that_can():
+    """A grammar processor and its thinking wrapper resume from the
+    delivered tokens, as the penalties do; any other processor is kept."""
+    from gmlx._vendor.mlx_vlm.structured import (
+        LLGuidanceLogitsProcessor,
+        ThinkingAwareLogitsProcessor,
+    )
+
+    seen = []
+
+    class _Resumable:
+        def __init__(self, name):
+            self.name = name
+
+        def resumed(self, committed):
+            seen.append((self.name, list(committed)))
+            return self.name + "'"
+
+    def plain(tokens, logits):
+        return logits
+
+    assert hasattr(LLGuidanceLogitsProcessor, "resumed")
+    assert hasattr(ThinkingAwareLogitsProcessor, "resumed")
+    lp = [_Resumable("grammar"), plain, _Resumable("wrapper")]
+    out = tg._resumed_processors(lp, [5, 6])
+    assert out == ["grammar'", plain, "wrapper'"]
+    assert seen == [("grammar", [5, 6]), ("wrapper", [5, 6])]

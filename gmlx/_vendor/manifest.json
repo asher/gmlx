@@ -1612,7 +1612,7 @@
   "mlx_vlm/speculative/ops/linear.py": {"status": "verbatim", "upstream": "02a8c23259882c4476e682dd574accd9714450ff5e7a6fdc6819d174f24dedfa"},
   "mlx_vlm/speculative/utils.py": {"sha256": "6a414135c6d07ad34d87efc52b162705debd80afddef30004d3135912a535478", "status": "edited", "upstream": "93d2ed29ac7b7c378536bf09d22eb570d5abb1f2d338dc550e59a84468b6a9ff"},
   "mlx_vlm/split_mtp.py": {"status": "verbatim", "upstream": "936952e5a3e0cec46a2082837705f2c1618a0f9d11cefcc87583401346054cef"},
-  "mlx_vlm/structured.py": {"sha256": "4789ef8ff8434ec0e313e16bca279a39672919597cde57e4cab70d8bf823827b", "status": "edited", "upstream": "942436d150bd35232f1e0ae5ef656433ea8d41bf9bf667c2b9b6b4191e6cf30d"},
+  "mlx_vlm/structured.py": {"sha256": "02f8791649a4ce449dd480ca69d52d48d168c99e65d1fb1eefabbf3a9580b939", "status": "edited", "upstream": "942436d150bd35232f1e0ae5ef656433ea8d41bf9bf667c2b9b6b4191e6cf30d"},
   "mlx_vlm/token_classification.py": {"status": "verbatim", "upstream": "9192b8d698f56dcce01d8d9670ac8fbbfe1f4cfb1c53618e92bd296e0fecd417"},
   "mlx_vlm/tokenizer_utils.py": {"status": "verbatim", "upstream": "7fb64819e0577e7e960c8b8eb247644b4a70046c117fa5eb4a00d30c0f9c645f"},
   "mlx_vlm/tools/__init__.py": {"status": "verbatim", "upstream": "b6d5884993f30f097d5e06131c062552b6a1b74176daad075fe171bf306c911d"},

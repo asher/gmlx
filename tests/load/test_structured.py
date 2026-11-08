@@ -149,3 +149,61 @@ def test_tokenizer_at_a_used_id_gets_its_own_llg_tokenizer(monkeypatch):
     del new
     gc.collect()
     assert structured._llg_tokenizer_cache == {}
+
+
+_REPLY = '{"title": "Hello world", "year": 1999}'
+
+
+def _mask(proc):
+    import llguidance.numpy
+
+    vocab = proc.llg_tokenizer.vocab_size
+    bm = llguidance.numpy.allocate_token_bitmask(1, vocab)
+    llguidance.numpy.fill_next_token_bitmask(proc.ll_matchers[0], bm, 0)
+    return bm.copy()
+
+
+@pytest.mark.parametrize("tail_only", [False, True], ids=["full", "apc-tail"])
+def test_a_resumed_grammar_masks_as_the_live_one_at_every_cut(
+        monkeypatch, tail_only):
+    """A requeued row replays its prompt plus the tokens it delivered. Live,
+    the matcher consumed every delivered token; the replay's first call
+    consumes the last one, so the resumed processor holds the rest. The cut
+    after '{"title":' made the matcher refuse ':' when the replay fed it a
+    second time."""
+    pytest.importorskip("llguidance")
+    import mlx.core as mx
+    import numpy as np
+
+    from gmlx._vendor.mlx_vlm import structured
+
+    # Only the matcher state matters; the Metal mask kernel is not run.
+    monkeypatch.setattr(structured, "_apply_llguidance_mask",
+                        lambda logits, mask: logits)
+    tok = _synth_tokenizer()
+    prompt = tok.encode("Give JSON", add_special_tokens=False)
+    reply = tok.encode(_REPLY, add_special_tokens=False)
+    cuts = list(range(1, len(reply)))
+    assert tok.encode('{"title":', add_special_tokens=False) == reply[:9]
+    for cut in cuts:
+        committed = reply[:cut]
+        live = structured.build_json_schema_logits_processor(tok, SCHEMA)
+        logits = mx.zeros((1, live.llg_tokenizer.vocab_size))
+        live(mx.array(prompt), logits)
+        for t in committed:
+            live.process_last_token(t, logits)
+        replay = live.resumed(committed)
+        ctx = committed[-1:] if tail_only else prompt + committed
+        replay(mx.array(ctx), logits)
+        assert np.array_equal(_mask(replay), _mask(live)), cut
+
+
+def test_a_resumed_grammar_with_nothing_delivered_starts_afresh():
+    pytest.importorskip("llguidance")
+    from gmlx._vendor.mlx_vlm.structured import (
+        build_json_schema_logits_processor,
+    )
+
+    proc = build_json_schema_logits_processor(_synth_tokenizer(), SCHEMA)
+    fresh = proc.resumed([])
+    assert fresh is not proc and fresh.is_first_token

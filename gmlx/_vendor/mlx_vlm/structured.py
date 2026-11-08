@@ -37,6 +37,10 @@ def _apply_llguidance_mask(logits: mx.array, mask: mx.array) -> mx.array:
     )[0]
 
 
+# gmlx: a replayed maybe step's mask row; the decision asks the matcher.
+_ACCEPTS = object()
+
+
 def _allocate_shared_bitmask(batch_size: int, vocab_size: int):
     """Allocate a CPU-writable mask backed by MLX shared memory."""
     mask = mx.full(
@@ -71,6 +75,29 @@ class LLGuidanceLogitsProcessor:
 
     def clone(self) -> "LLGuidanceLogitsProcessor":
         return LLGuidanceLogitsProcessor(self.grammar, self.llg_tokenizer)
+
+    # gmlx: a requeued row replays its prompt plus the tokens it delivered.
+    def resumed(self, committed) -> "LLGuidanceLogitsProcessor":
+        """A processor for a row replayed as its prompt plus ``committed``.
+        Live, each decode step consumes the token it was given, so after n
+        delivered tokens the matcher has consumed all n. The replay's first
+        call consumes the last one, so this one consumes the rest."""
+        out = self.clone()
+        committed = [int(t) for t in committed]
+        if not committed:
+            return out
+        out._start()
+        for t in committed[:-1]:
+            out._consume_tokens([t])
+        return out
+
+    def _start(self) -> None:
+        self._setup(1)
+        self.is_first_token = False
+
+    def _accepts(self, token: int) -> bool:
+        """Whether the matcher allows ``token`` next, without consuming it."""
+        return self.ll_matchers[0].validate_tokens([int(token)]) == 1
 
     def reset(self):
         self.is_first_token = True
@@ -208,6 +235,7 @@ class ThinkingAwareLogitsProcessor:
             bool(self._prompt_ids) and self.answer_gate.opened()
         )
         self._start_maybe()
+        self._resume_last = False
 
     def _start_maybe(self) -> None:
         # "first" until the first step, then "pending" until the first
@@ -243,8 +271,78 @@ class ThinkingAwareLogitsProcessor:
         )
         self._start_maybe()
         self._active_context = []
+        self._resume_last = False
         if hasattr(self.processor, "reset"):
             self.processor.reset()
+
+    # gmlx: a requeued row replays its prompt plus the tokens it delivered.
+    def resumed(self, committed) -> "ThinkingAwareLogitsProcessor":
+        """A processor for a row replayed as its prompt plus ``committed``.
+        It replays the prefill call and the decode steps of all but the last
+        delivered token, without logits. The replay's first call is then the
+        decode step of the last one, whatever context it gets."""
+        out = self.clone()
+        committed = [int(t) for t in committed]
+        if not committed:
+            return out
+        out._replay_prefill()
+        for t in committed[:-1]:
+            out._replay_step(t)
+        out._resume_last = True
+        return out
+
+    def _replay_inner(self, token: int) -> None:
+        """What ``_delegate_process_last_token`` does to the inner state."""
+        inner = self.processor
+        if isinstance(inner, LLGuidanceLogitsProcessor):
+            if inner.is_first_token:
+                inner._start()
+            else:
+                inner._consume_tokens([token])
+        elif not hasattr(inner, "process_last_token"):
+            self._active_context.append(token)
+
+    def _replay_prefill(self) -> None:
+        """The prefill call on the prompt. The gate holds the prompt's tail
+        already."""
+        grammar = isinstance(self.processor, LLGuidanceLogitsProcessor)
+        if self._active:
+            if grammar:
+                self.processor._start()
+        elif self._maybe == "first":
+            self._maybe = "pending"
+            if grammar:
+                self.processor._start()
+                self._grammar_row = _ACCEPTS
+        elif self.answer_gate.opened():
+            self._activate()
+            if grammar:
+                self.processor._start()
+
+    def _replay_step(self, token: int) -> None:
+        """``process_last_token`` without logits."""
+        if self._maybe == "first":
+            self.answer_gate.feed(token)
+            self._maybe = "pending"
+            if self._is_grammar():
+                self._replay_inner(token)
+                self._grammar_row = _ACCEPTS
+            return
+        if self._maybe == "pending":
+            self.answer_gate.feed(token)
+            if not self._decide(token):
+                self._activate()
+                self._replay_inner(token)
+            return
+        if not self._active:
+            if self._force:
+                self._after_forced(token)
+                self.answer_gate.feed(token)
+                return
+            if not self.answer_gate.feed(token):
+                return
+            self._activate()
+        self._replay_inner(token)
 
     def _activate(self) -> None:
         self._active = True
@@ -278,7 +376,11 @@ class ThinkingAwareLogitsProcessor:
         a block."""
         self._maybe = None
         row, self._grammar_row = self._grammar_row, None
-        if row is not None:
+        if row is _ACCEPTS:
+            # A replayed step has no mask row: ask the matcher.
+            if self.processor._accepts(token):
+                return False
+        elif row is not None:
             flat = row.reshape(-1, row.shape[-1])[0]
             if bool(mx.isfinite(flat[token]).item()):
                 return False
@@ -347,6 +449,14 @@ class ThinkingAwareLogitsProcessor:
         return gate.advance(new) is not None
 
     def __call__(self, input_ids: mx.array, logits: mx.array) -> mx.array:
+        if self._resume_last:
+            # gmlx: the replay's first call. With an APC hit its context is
+            # only the uncached tail, which still ends with the last
+            # delivered token.
+            self._resume_last = False
+            return self.process_last_token(
+                int(input_ids.reshape(-1)[-1].item()), logits
+            )
         if self._active:
             return self.processor(input_ids, logits)
 
