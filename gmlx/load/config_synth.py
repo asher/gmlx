@@ -232,17 +232,7 @@ def _supported() -> frozenset:
 # the instant a fixed file appears; the value is the reason the gate reports.
 # `supported_arches()` subtracts them, so coverage and the no-override load
 # path never count them as usable.
-DISABLED_ARCHES: dict[str, str] = {
-    "gemma3n": (
-        "no correctly-converted GGUF is known to exist: the laurel low-rank "
-        "residual weights are written as a degenerate +/-2.0 constant during "
-        "conversion (laurel is never quantized, so every quant level is "
-        "affected), which makes the model emit NaN / garbage output under any "
-        "runtime, including llama.cpp itself. The arch is otherwise fully "
-        "implemented and re-enables automatically once a correctly-converted "
-        "file is available."
-    ),
-}
+DISABLED_ARCHES: dict[str, str] = {}
 
 
 def supported_arches() -> frozenset:

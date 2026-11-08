@@ -8,6 +8,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Gemma 3n GGUFs load and serve, such as ggml-org's gemma-3n-E2B-it, where
+  gmlx refused every Gemma 3n file.
 - `gmlx pull --verify` checks each file's sha256 against Hugging Face and
   downloads again any file that differs.
 - `gmlx video` makes clips of up to 15 seconds with sound from a text prompt
@@ -211,9 +213,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Flint holds its residual stream in float32 in a bfloat16 graph too, as
   llama.cpp does, so a request in a batch no longer answers differently
   from the same request alone.
-- `gmlx serve` reads a Gemma 3n prompt at the embedding scale it decodes
-  at, where it read the prompt unscaled and answered from a damaged
-  context.
 - Nemotron-H and Granite 4 hybrid models answer each request in a batch of
   prompts of different lengths as they answer it alone, where a short
   prompt lost its Mamba state to the padding.
