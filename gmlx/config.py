@@ -167,7 +167,7 @@ _VIDEO_MODEL_KEYS = frozenset({"path", "variant", "encoder", "encoder_mmproj",
                                "defaults", "upsampler", "upsample",
                                "upsample_prompt"})
 _VIDEO_DEFAULTS_KEYS = frozenset({"steps", "shift", "size", "seconds",
-                                  "attention"})
+                                  "int8"})
 IMAGE_SAMPLERS = ("euler", "uni_pc_bh2")
 IMAGE_ENCODER_RELEASE = ("auto", "always", "never")
 _SYSTEMONE_KEYS = frozenset({"model", "canvas", "constrained", "max_questions",
@@ -1340,14 +1340,14 @@ class ResolvedVideoModel:
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
-        adapter list, the DiT's attention, and the size, length and
-        caption rows its memory is priced at, the last set by whether it
-        names an upsampler."""
+        adapter list, the int8 setting, and the size, length and caption
+        rows its memory is priced at, the last set by whether it names an
+        upsampler."""
         d = self.defaults or {}
         return (self.path, self.variant, self.encoder, self.encoder_mmproj,
                 self.vae, self.audio_vae, tuple(self.adapters),
                 d.get("size"), d.get("seconds"), self.upsampler is not None,
-                d.get("attention") or "dense")
+                d.get("int8") or "off")
 
 
 # Path resolution
@@ -2945,18 +2945,25 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
 
 def _parse_video_defaults(where: str, raw) -> dict:
     raw = _section_mapping(where, raw)
+    from gmlx.video.registry import INT8
+
+    for key in ("attention", "linears"):
+        if key in raw:
+            raise ConfigError(f"{where}.{key}: the int8 setting replaces it; "
+                              f"set int8 to one of {', '.join(INT8)}")
     _warn_unknown_keys(where, raw, _VIDEO_DEFAULTS_KEYS, strict=True)
     out: dict = {}
     if raw.get("size") is not None:
         out["size"] = _video_size(f"{where}.size", raw["size"])
-    attention = raw.get("attention")
-    if attention is not None:
-        from gmlx.video.registry import ATTENTION
-
-        if attention not in ATTENTION:
-            raise ConfigError(f"{where}.attention: expected one of "
-                              f"{', '.join(ATTENTION)}, got {attention!r}")
-        out["attention"] = attention
+    int8 = raw.get("int8")
+    if int8 is not None:
+        # YAML reads a bare off as false.
+        if int8 is False:
+            int8 = "off"
+        if int8 not in INT8:
+            raise ConfigError(f"{where}.int8: expected one of "
+                              f"{', '.join(INT8)}, got {int8!r}")
+        out["int8"] = int8
     for key in ("steps", "seconds", "shift"):
         v = _coerce_num(key, raw.get(key), float, where=where)
         if v is None:

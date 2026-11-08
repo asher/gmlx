@@ -1156,7 +1156,7 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
                 text: int, phase: str, what: str, table: str | None = None,
                 audio: int | None = None, decodes: bool = False,
                 anchors=(), shown: str | None = None,
-                attention: str | None = None) -> None:
+                int8: str | None = None) -> None:
     """Refuse a step or a decode of a clip that does not fit beside the
     models loaded. The DiT stays loaded through each, and each is priced
     as the image routes price theirs: the DiT, the larger of its
@@ -1167,14 +1167,14 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
     and the clip's two decodes, so a clip that cannot decode stops before
     its first step. ``anchors`` are the clip's placed
     ``layout.AnchorRows``, and an anchors phase prices their encodes;
-    ``shown`` names what is priced in the refusal. ``attention`` is the
-    request's, else the entry's."""
+    ``shown`` names what is priced in the refusal. ``int8`` is the
+    request's int8 setting, else the entry's."""
     from ..image_steps import StepError
 
     got = _clip_terms(hold, served, frames=frames, width=width,
                       height=height, text=text, phase=phase, table=table,
                       audio=audio, decodes=decodes, anchors=anchors,
-                      attention=attention)
+                      int8=int8)
     if got is None:
         return
     held, work, budget = got
@@ -1188,7 +1188,7 @@ def _check_clip(hold, served, *, frames: int, width: int, height: int,
 def _clip_terms(hold, served, *, frames: int, width: int, height: int,
                 text: int, phase: str, table: str | None = None,
                 audio: int | None = None, decodes: bool = False,
-                anchors=(), attention: str | None = None
+                anchors=(), int8: str | None = None
                 ) -> tuple[int, int, int] | None:
     """``(held, work, budget)`` bytes of a phase as ``_check_clip`` prices
     it, or None when the host sets no budget."""
@@ -1208,7 +1208,7 @@ def _clip_terms(hold, served, *, frames: int, width: int, height: int,
                      text=text, budget=budget,
                      decode=phase != "denoise" or decodes, audio=audio,
                      live_lora=live and phase == "denoise", anchors=anchors,
-                     attention=attention)
+                     int8=int8)
     adapters, caches = held_bytes(served)
     held = (plan.terms["denoise"]["dit"]
             + max(plan.terms["denoise"]["lora"], adapters) + caches)
@@ -1253,7 +1253,7 @@ async def _av_step(t0, tensors, fields, run):
     """A step of a model with a video and an audio stream (``AV_FAMILIES``):
     the latents as ComfyUI's sampler carries them, one row, with the
     anchors and vision spans it names (``video_service.step_anchors``),
-    at the ``attention`` it names, else the entry's."""
+    at the ``int8`` setting it names, else the entry's."""
     import numpy as np
 
     from gmlx.video import layout
@@ -1285,9 +1285,9 @@ async def _av_step(t0, tensors, fields, run):
     shifts = {k: _number(shifts, k) for k in ("video", "audio")}
     scale = _number(fields, "audio_scale", 1.0)
     try:
-        attention = vs.parse_attention(fields.get("attention"))
+        sent = vs.parse_int8(fields.get("int8"))
     except ValueError as e:
-        raise StepError(400, str(e), param="attention") from None
+        raise StepError(400, str(e), param="int8") from None
     try:
         refs, spans = vs.step_anchors(fields)
     except ValueError as e:
@@ -1308,13 +1308,11 @@ async def _av_step(t0, tensors, fields, run):
         why = vs.anchor_refusal(served, len(refs) or len(spans))
         if why:
             raise StepError(400, why)
-        if attention is not None:
-            from gmlx.video.registry import attention_refusal
-
-            why = attention_refusal(served.pipe.video_family,
-                                    served.plan.variant, attention)
-            if why:
-                raise StepError(400, why, param="attention")
+        try:
+            int8 = vs.request_int8(served.plan, served.pipe.video_family,
+                                   sent)
+        except ValueError as e:
+            raise StepError(400, str(e), param="int8") from None
         table = None
         # The matrices the step may define its table again from stay in
         # the store from its check to its turn's end.
@@ -1345,7 +1343,7 @@ async def _av_step(t0, tensors, fields, run):
         _check_clip(hold, served, frames=frames, width=width, height=height,
                     text=n_text, phase="denoise", table=table, decodes=first,
                     what="a clip" if first else "a step", anchors=placed,
-                    attention=attention)
+                    int8=int8)
         ts = float(np.asarray(t_w.numpy(), np.float32).reshape(-1)[0])
         gen = run.gen if run is not None else 0
         tid = fields.get("patch_table")
@@ -1411,7 +1409,7 @@ async def _av_step(t0, tensors, fields, run):
                 vv, va, hit = vs.av_step(
                     served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
                     _cond_key(hashes[0]), core, anchors=placed, cond=cond,
-                    spans=spans, attention=attention)
+                    spans=spans, int8=int8)
                 mx.eval(vv, va)
             if run is not None and (run.gen != gen or run.ended):
                 raise StepInterrupted()

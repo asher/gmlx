@@ -879,7 +879,8 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
                                     "hidden_size": 5376}))
     if fast:
         monkeypatch.setattr(registry, "run_refusal",
-                            lambda fam, v, attention="dense": None)
+                            lambda fam, v, attention="dense",
+                            linears="file": None)
     files = {**_H3_FILES, "extra": extra}
     monkeypatch.setattr(memfit, "file_bytes", lambda p: files[p])
     monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")

@@ -255,18 +255,19 @@ def _size_hint(frames: int, width: int, height: int, plan_at,
             f"of it")
 
 
-def _attention_flag(p: argparse.ArgumentParser) -> None:
-    from gmlx.video.registry import ATTENTION
+def _int8_flag(p: argparse.ArgumentParser) -> None:
+    from gmlx.video.registry import INT8
 
-    p.add_argument("--attention", choices=ATTENTION, default=None,
-                   help="The DiT's attention. int8 runs on an M5 or newer, "
-                        "faster on large or long clips and lossy (default: "
-                        "the entry's, else dense).")
+    p.add_argument("--int8", choices=INT8, default=None,
+                   help="Run the DiT's attention, its linears or all of "
+                        "them in int8, on an M5 or newer. Lossy; linears "
+                        "and all hold more memory (default: the entry's, "
+                        "else off).")
 
 
-def _attention(a) -> str:
-    """The DiT's attention: the flag, then the entry's, then dense."""
-    return a.attention or a.entry_defaults.get("attention") or "dense"
+def _int8(a) -> str:
+    """The int8 setting: the flag, then the entry's, then off."""
+    return a.int8 or a.entry_defaults.get("int8") or "off"
 
 
 def _generate_parser(prog: str) -> argparse.ArgumentParser:
@@ -285,7 +286,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p.add_argument("--variant", default=None, metavar="NAME",
                    help="Run the DiT as this variant, such as fl2va-turbo4 "
                         "for a merged Turbo file gmlx does not know.")
-    _attention_flag(p)
+    _int8_flag(p)
     src = p.add_mutually_exclusive_group()
     src.add_argument("--prompt", default=None, help="The prompt.")
     src.add_argument("--prompt-file", default=None, metavar="FILE",
@@ -653,7 +654,7 @@ def _generate(a) -> int:
     from gmlx.video import encoder as video_encoder
     from gmlx.video import catalog, io, memfit, pipeline, run
     from gmlx.video.loader import identify_dit
-    from gmlx.video.registry import run_refusal
+    from gmlx.video.registry import int8_parts, run_refusal
     from gmlx.video.vae.h3_audio import SAMPLE_RATE
     from gmlx.video.vae.reader import load_vae
 
@@ -673,8 +674,9 @@ def _generate(a) -> int:
         ffmpeg = io.probe()
     vid = identify_dit(os.path.expanduser(a.model), variant=a.variant)
     fam = vid.family
-    attention = _attention(a)
-    why = run_refusal(fam, vid.variant, attention)
+    int8 = _int8(a)
+    attention, linears = int8_parts(int8)
+    why = run_refusal(fam, vid.variant, int8)
     if why:
         raise RuntimeError(why)
     row = fam.variant_row(vid.variant)
@@ -726,7 +728,8 @@ def _generate(a) -> int:
             text=text_at(width, height),
             mmproj=a.mmproj if keyframes else None,
             blocks=memfit.keyframe_blocks(fam, sizes) if sizes else (),
-            anchors=rows, anchor_vae=anchor_vae, attention=attention)
+            anchors=rows, anchor_vae=anchor_vae, attention=attention,
+            linears=linears)
     # BASE_RECIPE is new to a run of another DiT or with an entry LoRA.
     base = (vid.variant != catalog.RECIPES[BASE_RECIPE].variant
             or bool(a.entry_adapters))
@@ -775,7 +778,7 @@ def _generate(a) -> int:
 
     t0 = time.perf_counter()
     pipe = pipeline.load(os.path.expanduser(a.model), variant=a.variant,
-                         attention=attention, log=log)
+                         attention=attention, linears=linears, log=log)
     table = pipeline.adapter_table(
         pipe, [(os.path.expanduser(p), st) for p, st in adapters])
     xv, xa = pipeline.generate(
@@ -803,7 +806,7 @@ def _generate(a) -> int:
                                    dtype=mx.float16)))
     rec = {"output": out, "frames_dir": a.frames_dir, "prompt": typed,
            "revised_prompt": caption,
-           "variant": vid.variant, "attention": attention, **s,
+           "variant": vid.variant, "int8": int8, **s,
            "times": times,
            "adapters": [[p, st] for p, st in adapters],
            "anchors": [{"flag": t.flag, "path": t.path,

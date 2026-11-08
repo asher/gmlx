@@ -116,6 +116,9 @@ class VideoFamily:
     # system prompt of a clip of that length with those keyframes.
     upsample: object = None
     upsample_system: Callable | None = None
+    # Path patterns (fnmatch) of the DiT linears that int8 linears convert,
+    # each to the columns of one activation scale: None for the whole row.
+    int8_linears: dict = field(default_factory=dict)
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in (*self.variants.values(),
@@ -160,9 +163,45 @@ class VideoFamily:
         return row.rungs
 
 
-# The kinds of DiT attention a run takes: ``--attention`` and an entry's
-# ``defaults.attention``.
+# The DiT's two int8 properties: its attention, a setting of the loaded
+# DiT, and the form of its block linears, a property of its weights that
+# a load sets (``file`` runs them as the GGUF stores them).
 ATTENTION = ("dense", "int8")
+LINEARS = ("file", "int8")
+# The one int8 setting a run takes: ``--int8``, an entry's
+# ``defaults.int8``, and the ``int8`` field of a job or a step. Each value
+# maps to the two properties (``int8_parts``).
+INT8 = ("off", "attention", "linears", "all")
+_PARTS = {"off": ("dense", "file"), "attention": ("int8", "file"),
+          "linears": ("dense", "int8"), "all": ("int8", "int8")}
+
+
+def int8_parts(value: str) -> tuple[str, str]:
+    """The DiT's (attention, linears) of an int8 setting. Raises
+    ValueError for a value off ``INT8``."""
+    if value not in _PARTS:
+        raise ValueError(f"int8 is {', '.join(INT8[:-1])} or {INT8[-1]}, "
+                         f"not {value!r}")
+    return _PARTS[value]
+
+
+def int8_served(entry: str) -> tuple[str, str]:
+    """The int8 values a request may name on an entry at ``entry``: the
+    two whose linears match its loaded DiT's."""
+    linears = int8_parts(entry)[1]
+    return tuple(v for v in INT8 if _PARTS[v][1] == linears)
+
+
+def int8_request_refusal(entry: str, value: str) -> str | None:
+    """Why a job or a step naming int8 ``value`` does not run on an entry
+    loaded at ``entry``, or None. The linears are a property of the loaded
+    DiT, so a request may change the attention alone."""
+    allowed = int8_served(entry)
+    if value in allowed:
+        return None
+    return (f"this model's entry loads its DiT at int8 {entry}, so a "
+            f"request names int8 {allowed[0]} or {allowed[1]}, not "
+            f"{value}; set the entry's defaults.int8 to run {value}")
 
 
 @functools.lru_cache(maxsize=1)
@@ -232,18 +271,53 @@ def attention_refusal(fam: VideoFamily, variant: str,
     return None
 
 
+def linears_refusal(fam: VideoFamily, variant: str,
+                    linears: str) -> str | None:
+    """Why this install or Mac does not run ``variant`` with ``linears``,
+    or None. mlx-kquant's ``int8_quantize_rows`` and ``int8_matmul`` run
+    int8 linears, the matmul on a GPU with NAX units (M5 and later). A
+    variant with video sparse attention does not take them."""
+    if linears == "file":
+        return None
+    import mlx_kquant as kq
+
+    if not fam.int8_linears:
+        return f"gmlx runs {fam.title} with its file's linears only"
+    row = fam.variant_row(variant)
+    if row is not None and row.vsa_sparsity:
+        return (f"int8 linears are untested on {fam.title} {variant}, and "
+                f"gmlx runs them on variants with dense attention only")
+    what = f"{fam.title} {variant} runs with int8 linears"
+    if (getattr(kq, "int8_matmul", None) is None
+            or getattr(kq, "int8_quantize_rows", None) is None):
+        return (f"{what}, and the installed mlx-kquant {kq.__version__} "
+                f"has no int8_matmul; update mlx-kquant to 0.5.11 or later")
+    if not kq.nax_available():
+        return (f"{what}, whose kernel needs a GPU with NAX units (M5 or "
+                f"newer), and this Mac's GPU has none")
+    return None
+
+
+def int8_refusal(fam: VideoFamily, variant: str, int8: str) -> str | None:
+    """Why this install or Mac does not run ``variant`` at the int8
+    setting ``int8``, or None: its attention, then its linears."""
+    attention, linears = int8_parts(int8)
+    return (attention_refusal(fam, variant, attention)
+            or linears_refusal(fam, variant, linears))
+
+
 def run_refusal(fam: VideoFamily, variant: str,
-                attention: str = "dense") -> str | None:
-    """Why this Mac or install does not run ``variant`` of ``fam`` with
-    ``attention``, or None: its chip, then for a VSA variant the kernel,
-    then the attention. A run or a pull checks it before it loads or
-    downloads anything."""
+                int8: str = "off") -> str | None:
+    """Why this Mac or install does not run ``variant`` of ``fam`` at the
+    int8 setting ``int8``, or None: its chip, then for a VSA variant the
+    kernel, then the int8 setting. A run or a pull checks it before it
+    loads or downloads anything."""
     why = chip_refusal(fam)
     row = fam.variant_row(variant)
     if why is None and row is not None and row.vsa_sparsity:
         why = vsa_refusal(fam, variant)
     if why is None:
-        why = attention_refusal(fam, variant, attention)
+        why = int8_refusal(fam, variant, int8)
     return why
 
 

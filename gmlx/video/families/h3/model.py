@@ -18,6 +18,10 @@ sparse attention (``vsa``), with the gate of each block's
 With ``attention`` set to ``"int8"``, the DiT blocks run their dense
 attention as mlx-kquant's ``sdpa_qk8``: int8 Q K^T and bfloat16 P V. The
 token refiner keeps dense attention.
+
+A DiT loaded with int8 linears (``linears``) runs the four linears of
+each block as ``Int8Linear`` leaves; the token refiner, the adaLN
+projections, the patch projections and the heads keep the file's.
 """
 
 from __future__ import annotations
@@ -391,6 +395,7 @@ class H3Transformer(nn.Module):
         self.cfg = cfg
         self.act_dtype = mx.bfloat16
         self.attention = "dense"
+        self._linears = "file"
         self.video_patch_proj = nn.Linear(cfg.patch_dim, cfg.dim)
         self.audio_patch_proj = nn.Linear(cfg.audio, cfg.dim)
         self.condition_proj = nn.Linear(cfg.text_dim, cfg.dim)
@@ -423,6 +428,13 @@ class H3Transformer(nn.Module):
             raise ValueError(f"{fam.TITLE} runs {' or '.join(ATTENTION)} "
                              f"attention, not {kind!r}")
         self._attention = kind
+
+    @property
+    def linears(self) -> str:
+        """The form of the block linears: ``"file"`` as the GGUF stores
+        them, or ``"int8"`` once the loader converted them
+        (``gmlx.image.ops.int8_linear``)."""
+        return self._linears
 
     def caption(self, feats: mx.array, taps: dict | None = None) -> mx.array:
         """The text rows (1, L, dim) of encoder features (1, L, text dim):

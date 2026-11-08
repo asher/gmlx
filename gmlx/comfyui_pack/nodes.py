@@ -69,9 +69,9 @@ class GmlxModelLoader(_Loader):
     def INPUT_TYPES(cls):
         return discovery.model_loader_inputs()
 
-    def load(self, model_name, server_url="", start_server=True, attention="dense"):
+    def load(self, model_name, server_url="", start_server=True, int8="entry"):
         client, name = connect(model_name, server_url, start_server)
-        return (load_model(client, name, attention),)
+        return (load_model(client, name, int8),)
 
 
 class GmlxCLIPLoader(_Loader):

@@ -33,11 +33,16 @@ with anchors names each one's frame and the hashes of its latents and of
 the noise of its video rows, the draw of ComfyUI's generator at the
 payload's seed, and the vision spans of its prompt.
 
-A job or a step may name the DiT's attention, dense or int8, over the
-entry's ``defaults.attention``. The choice is a setting of the loaded
-DiT, so it loads nothing: the worker sets it before each denoise and
-each step (``set_attention``), after the load that follows an encode,
-and prices the step at that attention.
+An entry's ``defaults.int8`` (``entry_int8``) sets the DiT's two int8
+properties (``registry.int8_parts``). The linears are a property of the
+loaded weights: int8 linears convert the block linears at each load, the
+first and the one after each encode, and the entry's plan counts the int8
+DiT in its ``dit_bytes``. The attention is a setting of the loaded DiT.
+A job or a step may name an int8 value whose linears match the entry's
+(``registry.int8_request_refusal``), so it changes the attention alone
+and loads nothing: the worker sets it before each denoise and each step
+(``set_int8``), after the load that follows an encode, and prices the
+step at it.
 """
 
 from __future__ import annotations
@@ -88,7 +93,21 @@ class VideoEntryPlan:
     mmproj_bytes: int = 0           # the encoder's mmproj file, for keyframes
     tower_bytes: int = 0            # its vision tower once attached
     text_rows: int = PRICED_TEXT_ROWS  # the rows its encode is priced at
-    attention: str = "dense"        # the DiT's, from the entry's defaults
+    int8: str = "off"               # the entry's defaults.int8
+
+    @property
+    def attention(self) -> str:
+        """The DiT's attention at the entry's int8 setting."""
+        from gmlx.video.registry import int8_parts
+
+        return int8_parts(self.int8)[0]
+
+    @property
+    def linears(self) -> str:
+        """The block linears the entry's DiT loads with."""
+        from gmlx.video.registry import int8_parts
+
+        return int8_parts(self.int8)[1]
 
 
 @dataclass(eq=False)
@@ -142,17 +161,19 @@ def clip_defaults(spec, fam, variant: str) -> dict:
 def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
               text: int, budget=None, decode: bool = True,
               audio: int | None = None, live_lora: bool = False,
-              blocks=(), anchors=(), attention: str | None = None):
+              blocks=(), anchors=(), int8: str | None = None):
     """The memory plan of one clip on the entry's files. ``audio`` is the
     audio stream's latents when they are not the clip's, and
     ``live_lora`` prices the step with a LoRA the server was sent.
     ``blocks`` are the vision tokens of the prompt's keyframes, which
     ``text`` counts, and ``anchors`` the placed ``layout.AnchorRows``.
-    ``attention`` is the request's, else the entry's."""
+    ``int8`` is the request's int8 setting, else the entry's; its
+    linears are the entry's (``registry.int8_request_refusal``)."""
     from gmlx.video import memfit
-    from gmlx.video.registry import get_family
+    from gmlx.video.registry import get_family, int8_parts
 
     fam = get_family(plan.family)
+    attention = int8_parts(int8 or plan.int8)[0]
     rows, n_audio = memfit.clip_rows(fam, frames=frames, width=width,
                                      height=height, text=text,
                                      anchors=anchors)
@@ -166,24 +187,46 @@ def plan_clip(plan: VideoEntryPlan, *, frames: int, width: int, height: int,
         tower=plan.tower_bytes, blocks=blocks,
         anchor_frames=memfit.anchor_frames(fam, anchors),
         anchor_audio=[a.audio_t for a in anchors if a.audio_t],
-        attention=attention or plan.attention, budget=budget)
+        attention=attention, linears=plan.linears, budget=budget)
 
 
-def parse_attention(value) -> str | None:
-    """A request's ``attention`` field: None when it is not sent, else
-    dense or int8. Raises ValueError for any other value."""
-    from gmlx.video.registry import ATTENTION
+def parse_int8(value) -> str | None:
+    """A request's ``int8`` field: None when it is not sent, else one of
+    ``registry.INT8``. Raises ValueError for any other value."""
+    from gmlx.video.registry import int8_parts
 
-    if value is None or value in ATTENTION:
-        return value
-    raise ValueError(f"attention is {' or '.join(ATTENTION)}, not {value!r}")
+    if value is not None:
+        int8_parts(value)
+    return value
 
 
-def set_attention(served: ServedVideo, attention: str | None) -> None:
-    """Set the loaded DiT's attention for one job or step: ``attention``,
-    else the entry's. Each job and step sets it, so none runs at the
-    attention the last one left."""
-    served.pipe.dit.attention = attention or served.plan.attention
+def request_int8(plan: VideoEntryPlan, fam, sent: str | None) -> str:
+    """The int8 setting a job or a step runs: ``sent``, else the entry's.
+    Raises ValueError for a value whose linears differ from the entry's,
+    or that this install, Mac or variant does not run."""
+    from gmlx.video.registry import int8_refusal, int8_request_refusal
+
+    if sent is None:
+        return plan.int8
+    why = (int8_request_refusal(plan.int8, sent)
+           or int8_refusal(fam, plan.variant, sent))
+    if why:
+        raise ValueError(why)
+    return sent
+
+
+def set_int8(served: ServedVideo, int8: str | None) -> None:
+    """Set the loaded DiT's attention for one job or step from ``int8``,
+    else the entry's setting. Each job and step sets it, so none runs at
+    the attention the last one left."""
+    from gmlx.video.registry import int8_parts
+
+    served.pipe.dit.attention = int8_parts(int8 or served.plan.int8)[0]
+
+
+def entry_int8(spec) -> str:
+    """An entry's int8 setting: its ``defaults.int8``, else off."""
+    return (spec.defaults or {}).get("int8") or "off"
 
 
 def caption_bytes(hidden: int, rows: int = PRICED_TEXT_ROWS) -> int:
@@ -239,7 +282,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     from gmlx.video import memfit, pipeline
     from gmlx.video.fingerprint import VideoModelError
     from gmlx.video.loader import identify_dit
-    from gmlx.video.registry import run_refusal
+    from gmlx.video.registry import int8_parts, run_refusal
 
     from .capacity import overcommit, working_budget_bytes
     from .image_service import _CACHE_BYTES, cache_bytes, fit_floored
@@ -249,8 +292,9 @@ def entry_plan(spec) -> VideoEntryPlan:
     except VideoModelError as e:
         raise VideoModelError(f"video model {spec.id!r}: {e}") from None
     fam = ident.family
-    attention = (spec.defaults or {}).get("attention", "dense")
-    why = run_refusal(fam, ident.variant, attention)
+    int8 = entry_int8(spec)
+    linears = int8_parts(int8)[1]
+    why = run_refusal(fam, ident.variant, int8)
     if why:
         raise VideoModelError(f"video model {spec.id!r}: {why}")
     for path, _st in spec.adapters:
@@ -264,14 +308,15 @@ def entry_plan(spec) -> VideoEntryPlan:
     base = VideoEntryPlan(
         footprint=0, family=fam.name, variant=ident.variant, size=d["size"],
         frames=d["frames"], steps=d["steps"], shifts=d["shifts"],
-        dit_bytes=memfit.file_bytes(spec.path),
+        dit_bytes=memfit.file_bytes(spec.path) + (
+            memfit.int8_delta(fam, ident.view) if linears == "int8" else 0),
         encoder_bytes=memfit.file_bytes(spec.encoder),
         vae_bytes=memfit.file_bytes(spec.vae),
         audio_vae_bytes=memfit.file_bytes(spec.audio_vae), loras=loras,
         lora_dtypes=tuple(memfit.lora_dtype(p) for p, _ in spec.adapters),
         mmproj_bytes=memfit.file_bytes(mmproj) if mmproj else 0,
         tower_bytes=memfit.tower_bytes(mmproj) if mmproj else 0,
-        attention=attention)
+        int8=int8)
     width, height = d["size"]
     budget = working_budget_bytes()
     rows = priced_rows(spec, fam)
@@ -311,8 +356,10 @@ def entry_plan(spec) -> VideoEntryPlan:
             f"video model {spec.id!r} needs {memfit.gib(price(0.0), True)} "
             f"GiB for one {width}x{height} clip of {d['frames']} frames, over "
             f"the working budget of {memfit.gib(budget, False)} GiB. Set a "
-            "smaller defaults.size or defaults.seconds. GMLX_OVERCOMMIT=1 "
-            "overrides.")
+            "smaller defaults.size or defaults.seconds"
+            + (", or defaults.int8 off or attention" if linears == "int8"
+               else "")
+            + ". GMLX_OVERCOMMIT=1 overrides.")
     footprint, share = got
     return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint),
                              "cache_share": share,
@@ -331,7 +378,8 @@ def _load(spec) -> ServedVideo:
 
     plan = entry_plan(spec)
     pipe = pipeline.load(spec.path, variant=spec.variant,
-                         attention=plan.attention, log=_log_line)
+                         attention=plan.attention, linears=plan.linears,
+                         log=_log_line)
     served = ServedVideo(pipe=pipe, spec=spec, plan=plan)
     try:
         for path, _st in spec.adapters:
@@ -467,7 +515,8 @@ def ensure_dit(served: ServedVideo) -> None:
     from gmlx.video.loader import load_dit
 
     pipe.dit, _ = load_dit(str(served.spec.path), variant=served.spec.variant,
-                           attention=served.plan.attention, log=_log_line)
+                           attention=served.plan.attention,
+                           linears=served.plan.linears, log=_log_line)
     try:
         install.rewrap(pipe)
         _load_adapters(served)
@@ -743,13 +792,13 @@ def anchor_cond(served: ServedVideo, refs, rows, held: dict) -> tuple:
 def av_step(served: ServedVideo, video, audio, timestep: float,
             shifts: dict, scale: float, feats, key: str, table: str | None,
             *, anchors=(), cond=((), ()), spans=(),
-            attention: str | None = None):
+            int8: str | None = None):
     """One step of the pack's MiniMax-H3 model: the video and audio
     velocity f32 of the latents as ComfyUI's sampler carries them, at its
     ``timestep``, with the audio carried at ``scale`` (the payload's
     audio_scale). ``anchors`` are the placed ``layout.AnchorRows`` of the
     anchor rows ``cond`` (``anchor_cond``) and ``spans`` the vision spans
-    of ``feats``. ``attention`` is the step's, else the entry's. Returns
+    of ``feats``. ``int8`` is the step's setting, else the entry's. Returns
     (video, audio, caption cache hit)."""
     import mlx.core as mx
 
@@ -758,7 +807,7 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
 
     pipe = served.pipe
     ensure_dit(served)
-    set_attention(served, attention)
+    set_int8(served, int8)
     fam = pipe.video_family
     sv, sa = stream_sigmas(timestep, shifts)
     xv = video.astype(mx.float32)

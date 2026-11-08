@@ -307,17 +307,35 @@ def loader_inputs() -> dict:
             "default": True, "tooltip": "Run gmlx serve when no server answers."})}}
 
 
-# The attention a MiniMax-H3 model's steps run, from the model loader.
-ATTENTION = ("dense", "int8")
+# The int8 setting a MiniMax-H3 model's steps run, from the model loader:
+# the entry's, or one of the server's values.
+INT8 = ("entry", "off", "attention", "linears", "all")
+# The linears of each value: a property of the loaded DiT, which a step
+# cannot change.
+INT8_LINEARS = {"off": False, "attention": False, "linears": True, "all": True}
 
 
 def model_loader_inputs() -> dict:
-    """The INPUT_TYPES of the model loader: the loaders', and the attention
-    of a MiniMax-H3 model's steps."""
-    return {**loader_inputs(), "optional": {"attention": (list(ATTENTION), {
-        "default": ATTENTION[0],
-        "tooltip": "The attention of each MiniMax-H3 step. int8 is lossy, needs an M5 "
-                   "or newer and does not run with fasth3."})}}
+    """The INPUT_TYPES of the model loader: the loaders', and the int8
+    setting of a MiniMax-H3 model's steps."""
+    return {**loader_inputs(), "optional": {"int8": (list(INT8), {
+        "default": INT8[0],
+        "tooltip": "The int8 setting of each MiniMax-H3 step: the entry's, or off, "
+                   "attention, linears or all. Lossy, on an M5 or newer; the linears "
+                   "part must match the entry's."})}}
+
+
+def int8_refusal(entry: str, value: str) -> str | None:
+    """Why the loader's int8 ``value`` does not run on a model whose entry
+    loads at ``entry``, or None: a step changes the attention alone."""
+    if value == "entry" or entry not in INT8_LINEARS or value not in INT8_LINEARS:
+        return None
+    if INT8_LINEARS[value] == INT8_LINEARS[entry]:
+        return None
+    allowed = [v for v, lin in INT8_LINEARS.items() if lin == INT8_LINEARS[entry]]
+    return (f"this model's entry loads its DiT at int8 {entry}, so a request names "
+            f"int8 {allowed[0]} or {allowed[1]}, not {value}; set the entry's "
+            f"defaults.int8 to run {value}")
 
 
 def validate(model_name) -> bool | str:
