@@ -107,10 +107,12 @@ def test_each_name_selects_its_patterns_and_flags(names, patterns,
                                                          add_bos), name
 
 
-def test_an_unknown_name_falls_back_to_the_qwen2_split():
-    entry = pre_tokenizer("some-future-pre")
+@pytest.mark.parametrize("name", ["some-future-pre", ""])
+def test_an_unknown_name_falls_back_to_the_qwen2_split(name):
+    entry = pre_tokenizer(name)
     assert entry.patterns == (QWEN2_PATTERN,)
-    assert (entry.ignore_merges, entry.add_bos) == (False, None)
+    assert (entry.ignore_merges, entry.add_bos, entry.nfc) == (False, None,
+                                                               False)
 
 
 def test_every_llama_cpp_name_is_listed_or_unlisted_with_a_reason():
@@ -211,16 +213,33 @@ def test_ignore_merges_emits_a_whole_vocab_word_as_one_id(pre, ids):
     assert tok.decode(out) == "hello"
 
 
-@pytest.mark.parametrize("pre", sorted(PRE_TOKENIZERS))
-def test_nfc_runs_for_every_pre_but_kimi_and_flint(pre):
+# Names whose reference tokenizer.json declares an NFC normalizer.
+NFC_PRES = {"qwen2", "qwen3", "qwen35", "qwen35moe", "deepseek-r1-qwen",
+            "k2-horizon"}
+
+
+@pytest.mark.parametrize("pre", sorted(PRE_TOKENIZERS) + ["", "unknown"])
+def test_nfc_runs_only_where_the_entry_sets_it(pre):
+    assert pre_tokenizer(pre).nfc is (pre in NFC_PRES)
     built = tk._build_bytelevel_bpe(["a", "b"], [], pre_id=pre)
-    assert (built.normalizer is None) is (pre in {"kimi-k2", "flint"})
+    assert (built.normalizer is not None) is (pre in NFC_PRES)
 
 
-def test_an_unknown_name_warns_once(capsys):
-    load_tokenizer_from_gguf(_meta("some-future-pre"), "llama")
+@pytest.mark.parametrize("pre,nfc", [("llama-bpe", False), ("qwen35", True)])
+def test_a_decomposed_accent_keeps_its_ids_without_nfc(pre, nfc):
+    tok = load_tokenizer_from_gguf(_meta(pre), "llama")
+    decomposed = tok.encode("e\u0301", add_special_tokens=False)
+    composed = tok.encode("\u00e9", add_special_tokens=False)
+    assert (decomposed == composed) is nfc
+    assert tok.decode(decomposed) == ("\u00e9" if nfc else "e\u0301")
+
+
+@pytest.mark.parametrize("pre", ["some-future-pre", ""])
+def test_an_unknown_or_empty_name_warns_once(pre, capsys):
+    load_tokenizer_from_gguf(_meta(pre), "llama")
     err = capsys.readouterr().err
-    assert err.count("some-future-pre") == 1
+    assert err.count("unknown pre-tokenizer") == 1
+    assert err.count(repr(pre)) == 1
 
 
 @pytest.mark.parametrize("pre", sorted(PRE_TOKENIZERS))

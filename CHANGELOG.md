@@ -151,7 +151,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Byte-level GGUF tokenizers split words as llama.cpp does for Qwen 3.5,
   MiniCPM-V 4, SmolLM, GPT-2, Llama 3 and Tekken (Nemotron 3.5, Mistral)
   vocabs, so Hindi, Thai, blank lines and indented code get llama.cpp's ids.
-  An unknown pre-tokenizer name now prints a warning.
+  Only Qwen and K2-Horizon vocabs, whose `tokenizer.json` declares it, still
+  apply NFC, and an unknown or empty pre-tokenizer name prints a warning.
 - `/v1/completions` adds BOS to a raw prompt on Gemma 3 and 4, as
   llama-server does.
 

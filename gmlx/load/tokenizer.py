@@ -21,8 +21,8 @@ prescription was wrong; gemma-4 also exports BPE with byte_fallback):
           HF's LlamaTokenizerFast bit-for-bit.
 
   - ByteLevel BPE      (qwen35, qwen3, llama3, gpt2):
-      NFC normalizer; pre-tokenize via the regex split that PRE_TOKENIZERS
-      gives the GGUF's pre name + ByteLevel; ByteLevel decoder +
+      NFC normalizer where PRE_TOKENIZERS says so; pre-tokenize via the
+      regex split it gives the GGUF's pre name + ByteLevel; ByteLevel decoder +
       post-processor. byte_fallback=False.
 
 No transformers monkey-patching, no vendored converters. Built directly
@@ -216,16 +216,20 @@ class PreTokenizer:
     ``ignore_merges`` emits a pre-token that is a whole vocab entry as one
     id, without running the merges. ``add_bos`` is the default for
     `tokenizer.ggml.add_bos_token` when the GGUF lacks the key; None keeps
-    the key's own default.
+    the key's own default. ``nfc`` applies NFC before the split. llama.cpp
+    never normalizes; set it only where the reference tokenizer.json
+    declares NFC, so those names match Hugging Face.
     """
     patterns: tuple[str, ...]
     ignore_merges: bool = False
     add_bos: bool | None = None
+    nfc: bool = False
 
 
-def _entry(pattern, *, ignore_merges=False, add_bos=None) -> PreTokenizer:
+def _entry(pattern, *, ignore_merges=False, add_bos=None,
+           nfc=False) -> PreTokenizer:
     patterns = pattern if isinstance(pattern, tuple) else (pattern,)
-    return PreTokenizer(patterns, ignore_merges, add_bos)
+    return PreTokenizer(patterns, ignore_merges, add_bos, nfc)
 
 
 def _group(names: str, entry: PreTokenizer) -> dict[str, PreTokenizer]:
@@ -237,11 +241,13 @@ def _group(names: str, entry: PreTokenizer) -> dict[str, PreTokenizer]:
 # holds a snapshot of that table, and a test keeps the two in step. Line
 # numbers below are at the snapshot's commit. qwen3, qwen35moe and hyv4 are
 # names llama.cpp does not list; gmlx keeps them for GGUFs already written
-# with them.
+# with them. nfc is set per name: the Qwen tokenizer.json files and
+# K2-Horizon's declare NFC.
 PRE_TOKENIZERS: dict[str, PreTokenizer] = {
-    **_group("qwen2 qwen3 deepseek-r1-qwen f2llmv2 kormo megrez "
-             "grok-2 hunyuan solar-open stablelm2", _entry(QWEN2_PATTERN)),
-    **_group("qwen35 qwen35moe", _entry(QWEN35_PATTERN)),
+    **_group("qwen2 qwen3 deepseek-r1-qwen", _entry(QWEN2_PATTERN, nfc=True)),
+    **_group("f2llmv2 kormo megrez grok-2 hunyuan solar-open stablelm2",
+             _entry(QWEN2_PATTERN)),
+    **_group("qwen35 qwen35moe", _entry(QWEN35_PATTERN, nfc=True)),
     # llama-vocab.cpp:2481-2496 sets ignore_merges and add_bos.
     **_group("llama-bpe llama3 llama-v3 falcon3 falcon-h1 midm-2.0 "
              "jina-v5-nano lfm2",
@@ -264,16 +270,10 @@ PRE_TOKENIZERS: dict[str, PreTokenizer] = {
     **_group("deepseek-v3 joyai-llm hunyuan-dense hy_v4 hyv4",
              _entry(_DEEPSEEK3_PATTERNS)),
     "kimi-k2": _entry(KIMI_K2_PATTERN),
-    "k2-horizon": _entry(K2_HORIZON_PATTERN),
+    "k2-horizon": _entry(K2_HORIZON_PATTERN, nfc=True),
     "flint": _entry(_FLINT_PATTERNS),
 }
 _FALLBACK = _entry(QWEN2_PATTERN)
-
-# Pres that split raw codepoints: their reference tokenizers apply no
-# unicode normalization, and NFC would merge decomposed combining marks
-# (e + U+0301 -> e-acute) and shift the split boundaries. kimi-k2 is
-# tiktoken-family; flint's tokenizer.json has a null normalizer.
-_NO_NFC_PRES = frozenset({"kimi-k2", "flint"})
 
 
 def pre_tokenizer(pre_id: str) -> PreTokenizer:
@@ -415,7 +415,7 @@ def load_tokenizer_from_gguf(
                       has_merges=bool(raw_merges), has_scores=bool(scores))
     if style == "bytelevel":
         tok = _build_bytelevel_bpe(tokens, raw_merges, pre_id=pre_id)
-        if pre_id and pre_id not in PRE_TOKENIZERS:
+        if pre_id not in PRE_TOKENIZERS:
             loadlog.warn(
                 f"[tokenizer] unknown pre-tokenizer {pre_id!r}: splitting "
                 "words with the generic pattern, so token ids can differ "
@@ -687,7 +687,7 @@ def _build_bytelevel_bpe(tokens: list[str], raw_merges: list[str],
         vocab=vocab, merges=merges,
         byte_fallback=False, fuse_unk=False,
         ignore_merges=entry.ignore_merges))
-    if pre_id not in _NO_NFC_PRES:
+    if entry.nfc:
         tok.normalizer = normalizers.NFC()
     tok.pre_tokenizer = pre_tokenizers.Sequence([
         pre_tokenizers.Split(Regex(p), behavior="isolated", invert=False)

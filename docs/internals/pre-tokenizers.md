@@ -8,13 +8,14 @@ gets the same token ids in both.
 ## The table
 
 `PRE_TOKENIZERS` in `gmlx/load/tokenizer.py` maps each name to an entry with
-three columns:
+four columns:
 
 | Column | Meaning |
 |--------|---------|
 | `patterns` | The split regexes, applied in sequence. Each regex splits every piece that the one before it made. |
 | `ignore_merges` | A word that is a whole vocab entry becomes one id, and the merges do not run on it. |
 | `add_bos` | The BOS default for a GGUF without `tokenizer.ggml.add_bos_token`. |
+| `nfc` | Apply the NFC normalizer before the split. |
 
 The regexes are llama.cpp's. Where llama.cpp keeps the regex of the original
 `tokenizer.json` in a comment, the table uses that spelling. The tokenizers
@@ -32,24 +33,52 @@ llama.cpp turns BOS on for the Llama 3 and Tekken groups. The GGUF key
 does the same: a missing key takes the entry's `add_bos`, and a present key
 wins. Every other entry leaves a missing key as off.
 
+The table does not model llama.cpp's `null_bos` flag, which `chatglm-bpe`
+sets.
+
 ## Unknown names
 
-A name that the table does not list falls back to the Qwen 2 split. The
-load prints a warning that names the pre-tokenizer, because token ids can
-then differ from llama.cpp. An SPM vocab, such as Gemma's, has no word split
+A name that the table does not list, or an empty name, falls back to the
+Qwen 2 split with no NFC. The load prints one warning that names the
+pre-tokenizer, because token ids can then differ from llama.cpp. An SPM vocab, such as Gemma's, has no word split
 and gets no warning.
 
 ## Unicode normalization
 
-gmlx applies NFC to every byte-level vocab except `kimi-k2` and `flint`.
-llama.cpp applies no normalization to a BPE vocab. The ids therefore differ
-for text that is not already in NFC, such as an `e` followed by a combining
-accent.
+llama.cpp applies no normalization to a BPE vocab. The `nfc` column is off
+by default, so an entry matches llama.cpp unless it sets the column. An entry
+sets it only where the reference `tokenizer.json` declares an NFC
+normalizer: `qwen2`, `qwen3`, `qwen35`, `qwen35moe`, `deepseek-r1-qwen` and
+`k2-horizon`. These entries match Hugging Face, and differ from llama.cpp on
+text that is not in NFC, such as an `e` followed by a combining accent.
+Every other entry matches llama.cpp. Each of those whose reference file was
+read declares no normalizer, so it matches Hugging Face too.
 
-This is a known defect. The reference for each family is its
-`tokenizer.json`. Qwen declares an NFC normalizer, so gmlx is right there.
-Llama 3, Tekken, GPT-2 and SmolLM declare none, so gmlx is wrong there on
-decomposed text.
+The normalizer field was read from the reference file of these entries:
+
+| Entry | Reference repository | Normalizer |
+|-------|----------------------|------------|
+| `qwen2` | `Qwen/Qwen2.5-0.5B-Instruct` | NFC |
+| `qwen3` | `Qwen/Qwen3-0.6B` | NFC |
+| `qwen35` | `Qwen/Qwen3.5-9B` | NFC |
+| `qwen35moe` | `Qwen/Qwen3.5-35B-A3B` | NFC |
+| `deepseek-r1-qwen` | `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` | NFC |
+| `k2-horizon` | `IFM/K2-Horizon-7B` | NFC |
+| `llama-bpe` | `nvidia/Llama-3.1-Nemotron-Nano-8B-v1` | none |
+| `falcon3` | `tiiuae/Falcon3-1B-Instruct` | none |
+| `falcon-h1` | `tiiuae/Falcon-H1-0.5B-Instruct` | none |
+| `lfm2` | `LiquidAI/LFM2-350M` | none |
+| `glm4`, `glm5` | `zai-org/GLM-5` | none |
+| `gpt-2` | `openai-community/gpt2` | none |
+| `phi-2` | `microsoft/phi-2` | none |
+| `dbrx` | `allenai/OLMo-2-0425-1B` | none |
+| `smaug-bpe` | `HuggingFaceTB/SmolLM3-3B` | none |
+| `starcoder` | `bigcode/starcoder2-3b` | none |
+| `tekken` | `mistralai/Mistral-Nemo-Base-2407` | none |
+| `tekken-num3` | `mistralai/Mistral-Large-4-1T-A52B` | none |
+
+`flint` has a `tokenizer.json` with no normalizer. `kimi-k2` uses a
+tiktoken vocab with no normalizer. The other entries take the default.
 
 ## The snapshot test
 
@@ -67,6 +96,9 @@ snapshot is in the table or in the test's `UNLISTED_PRES`, with a reason.
 It checks that each entry has the snapshot's flags, and the snapshot's
 regexes once both spellings are put in one form. When llama.cpp adds a
 name, refresh the snapshot and the test shows the new name.
+
+Parity is measured against the snapshot's llama.cpp commit, `e8df20d23`.
+Older llama.cpp builds split Indic, Thai and Arabic text differently.
 
 ## Raw prompts and BOS
 

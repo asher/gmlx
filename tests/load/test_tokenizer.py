@@ -214,11 +214,11 @@ def test_kimi_k2_pre_skips_nfc_normalizer():
 
     kimi = _build_bytelevel_bpe(["a", "b"], [], pre_id="kimi-k2")
     assert kimi.normalizer is None
-    default = _build_bytelevel_bpe(["a", "b"], [], pre_id="")
-    assert default.normalizer is not None
+    qwen = _build_bytelevel_bpe(["a", "b"], [], pre_id="qwen2")
+    assert qwen.normalizer is not None
     decomposed = "e\u0301clair"
-    norm = default.normalizer.normalize_str(decomposed)
-    assert norm == "\u00e9clair"          # NFC merges the mark elsewhere...
+    norm = qwen.normalizer.normalize_str(decomposed)
+    assert norm == "\u00e9clair"          # NFC merges the mark for qwen2...
     assert kimi.normalizer is None        # ...but kimi-k2 must keep it raw
 
 
@@ -965,7 +965,7 @@ def test_k2_horizon_pre_full_pattern_override():
 
 
 def test_k2_horizon_pre_keeps_nfc():
-    # The HF tokenizer.json normalizes NFC, so the pre keeps the default.
+    # The HF tokenizer.json normalizes NFC, so the entry sets nfc.
     from gmlx.load.tokenizer import _build_bytelevel_bpe
 
     tok = _build_bytelevel_bpe(["a", "b"], [], pre_id="k2-horizon")
