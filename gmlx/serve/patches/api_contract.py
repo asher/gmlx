@@ -118,12 +118,13 @@ ANTHROPIC_CONSUMED = (_GEN_ARGS_CONSUMED - _LOGPROB_FIELDS) | _GMLX_CONSUMED \
     })
 
 # /v1/completions (gmlx's own route, server_patches/completions.py).
-# ``logprobs`` is excluded: the field is neutralized there (token logprobs
-# are never returned on the text-completions shape), so it warns.
+# ``logprobs`` is the completions integer, read by the route; the chat
+# ``top_logprobs`` is unread there, so it warns.
 COMPLETIONS_CONSUMED = (
     (_GEN_ARGS_CONSUMED - _LOGPROB_FIELDS) | _GMLX_CONSUMED | frozenset({
         "model", "prompt", "stream", "stream_options", "stop",
-        "echo", "suffix", "n", "best_of",
+        "echo", "suffix", "n", "best_of", "logprobs",
+        "return_tokens_as_token_ids", "add_special_tokens",
     })
 )
 

@@ -264,6 +264,7 @@ include = [
     "gmlx/serve/gpu_share.py",
     "gmlx/serve/live_requests.py",
     "gmlx/serve/media_decode.py",
+    "gmlx/serve/patches/completions.py",
     "gmlx/serve/patches/context_copy.py",
     "gmlx/serve/patches/mtp_thinking.py",
     "gmlx/serve/patches/prefill.py",

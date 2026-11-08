@@ -102,6 +102,9 @@ class _FakeResponseGenerator:
     def validate_context_budget(self, prompt, images, audio, args):
         self._check_budget("validate", args)
 
+    def _preprocess_request(self, prompt, images=None, audio=None, videos=None):
+        return {"input_ids": [self.tokenizer.encode(prompt)]}
+
     def generate(self, prompt=None, images=None, audio=None, args=None):
         self.calls.append({"prompt": prompt, "args": args})
         self._check_budget("generate", args)
@@ -466,8 +469,8 @@ def test_messages_streaming_event_types(wire):
     assert said == DEFAULT_TEXT
 
 
-# 4. /v1/completions - the gmlx-installed minimal text route (single string
-#    prompt, n=1), driving the same engine seam without a chat template.
+# 4. /v1/completions - the gmlx-installed text route (string or token-id
+#    prompts, n=1), driving the same engine seam without a chat template.
 def test_completions_route_shape(wire):
     r = wire.client.post("/v1/completions", json={
         "model": MODEL_ID, "prompt": "hi", "max_tokens": 8})
@@ -479,8 +482,8 @@ def test_completions_route_shape(wire):
     assert body["choices"][0]["finish_reason"] == "stop"
     assert body["usage"]["prompt_tokens"] == 7
     assert body["usage"]["completion_tokens"] == 3
-    # the raw prompt reached the engine untouched - no chat template applied
-    assert wire.gen.calls[-1]["prompt"] == "hi"
+    # the raw prompt reached the engine as its ids - no chat template applied
+    assert wire.gen.calls[-1]["prompt"] == [1]
 
 
 def test_completions_stream_shape(wire):
@@ -498,7 +501,7 @@ def test_completions_stream_shape(wire):
 
 def test_completions_rejects_out_of_scope(wire):
     r = wire.client.post("/v1/completions", json={
-        "model": MODEL_ID, "prompt": ["a", "b"]})
+        "model": MODEL_ID, "prompt": ["a", 1]})
     assert r.status_code == 400
     r = wire.client.post("/v1/completions", json={
         "model": MODEL_ID, "prompt": "hi", "n": 2})

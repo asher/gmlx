@@ -265,10 +265,11 @@ def test_chat_consumed_fields_never_warn():
         logger.removeHandler(handler)
 
 
-def test_return_tokens_as_token_ids_is_read_only_on_chat():
+def test_return_tokens_as_token_ids_is_read_on_chat_and_completions():
     assert "return_tokens_as_token_ids" in sp_api.CHAT_CONSUMED
+    assert "return_tokens_as_token_ids" in sp_api.COMPLETIONS_CONSUMED
     for consumed in (sp_api.RESPONSES_CONSUMED, sp_api.ANTHROPIC_CONSUMED,
-                     sp_api.COMPLETIONS_CONSUMED, sp_api.SYSTEMONE_CONSUMED):
+                     sp_api.SYSTEMONE_CONSUMED):
         assert "return_tokens_as_token_ids" not in consumed
     records, handler, logger = _capture_warnings()
     try:

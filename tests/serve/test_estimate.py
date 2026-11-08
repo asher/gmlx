@@ -365,7 +365,7 @@ def _outer_chat_wrappers(monkeypatch):
     The assistant chat wrapper calls the route below it by position."""
     from gmlx.assistant import serve as aserve
 
-    monkeypatch.setattr(qc, "check_queue_depth", lambda: None)
+    monkeypatch.setattr(qc, "check_queue_depth", lambda incoming=1: None)
     monkeypatch.setattr(qc, "_cap", lambda: 8)
     monkeypatch.setattr(qc, "_install_census", lambda: None)
     qc.install_queue_depth_cap()

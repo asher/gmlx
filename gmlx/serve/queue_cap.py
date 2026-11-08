@@ -209,19 +209,35 @@ def _retry_after_s(metrics, depth: int) -> int:
     return int(min(max(est, _RETRY_MIN_S), _RETRY_MAX_S))
 
 
-def check_queue_depth():
-    """Return a 503 JSONResponse when the waiting queue is at the cap,
-    else None. Read-only; a probe failure admits."""
+def incoming_requests(values) -> int:
+    """Engine rows a request adds: one per prompt of a ``/v1/completions``
+    list of prompts, else one."""
+    for v in values:
+        if not hasattr(v, "model_fields_set"):
+            continue
+        prompt = getattr(v, "prompt", None)
+        if (isinstance(prompt, list) and prompt
+                and all(isinstance(p, (str, list)) for p in prompt)):
+            return len(prompt)
+    return 1
+
+
+def check_queue_depth(incoming: int = 1):
+    """Return a 503 JSONResponse when ``incoming`` more requests would push
+    the waiting queue past the cap, else None. Read-only; a probe failure
+    admits."""
     try:
         cap = _cap()
         if cap <= 0:
             return None
+        # A request with more prompts than the cap gets the route's 400.
+        incoming = max(1, min(int(incoming), cap))
         runtime = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
         # Pool-wide census (every resident engine), the same figure
         # /v1/metrics and readiness report; without a pool, the runtime's
         # engine. No engine at all: nothing can be waiting.
         depth = _waiting_depth_all()
-        if depth < cap:
+        if depth + incoming <= cap:
             return None
         retry = _retry_after_s(getattr(runtime, "metrics", None), depth)
         global _REJECTIONS, _LAST_REJECT
@@ -288,7 +304,8 @@ def install_queue_depth_cap() -> None:
 
     def _make(original):
         async def endpoint(*args, **kwargs):
-            rejected = check_queue_depth()
+            rejected = check_queue_depth(
+                incoming_requests(list(args) + list(kwargs.values())))
             if rejected is not None:
                 return rejected
             return await original(*args, **kwargs)
