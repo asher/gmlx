@@ -23,7 +23,7 @@ newer.
 - [Make your first clip](#make-your-first-clip)
 - [Choose a recipe](#choose-a-recipe)
 - [FastH3](#fasth3)
-- [Int8 attention](#int8-attention)
+- [Faster clips with int8](#faster-clips-with-int8)
 - [Clip length, size and memory](#clip-length-size-and-memory)
 - [Dialogue](#dialogue)
 - [Keyframes and guides](#keyframes-and-guides)
@@ -164,27 +164,53 @@ error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel needs a GPU w
 In ComfyUI, the gmlx nodes run FastH3 through the `fasth3-t2v` workflow,
 as [FastH3 in ComfyUI](comfyui.md#fasth3) shows.
 
-## Int8 attention
+## Faster clips with int8
 
 ```sh
-gmlx video generate h3 --attention int8 --prompt "..."
+gmlx video generate h3 --int8 attention --prompt "..."
 ```
 
-`--attention int8` runs the attention of MiniMax-H3's DiT with int8
-products. It is opt-in and lossy: the clip differs from the one that the
-default dense attention makes from the same seed. The text encoder and
-the VAEs run as before. It needs an M5 or newer, and it does not run
-with `fasth3`. On a large or long clip, such as 1344x768 for 5 s or
-672x384 for 12 s, a step takes less time than with dense attention. On a
-short, small clip, such as 672x384 for 5 s, the gain is small.
+`--int8` runs parts of MiniMax-H3's DiT with int8 products in place of
+the products it runs by default. It takes one of four values:
 
-To run every clip of an entry this way, set `attention: int8` in its
-[`defaults`](config.md#video_modelsdefaults). A job of `gmlx serve`
-runs the entry's attention unless its
-[`attention`](video-api.md#request-fields) field names the other, and in
-ComfyUI the `attention` input of
-[`gmlx Model Loader`](comfyui-reference.md#the-model-loaders-attention)
-sets it for each step.
+| `--int8` | What changes |
+|---|---|
+| `off` | Nothing: the DiT runs as its file and the default attention make it. The default. |
+| `attention` | The products of the DiT's attention run in int8. The memory is the same. On a large or long clip, such as 1344x768 for 5 s or 672x384 for 12 s, a step takes less time; on a short, small clip, such as 672x384 for 5 s, the gain is small. |
+| `linears` | The four linear layers of each DiT block run with int8 weights, which gmlx makes from the file's weights as the DiT loads. The DiT holds 7.86 GiB more memory. |
+| `all` | Both: the attention and the linear layers run in int8, with 7.86 GiB more memory. |
+
+Every value but `off` is lossy: the clip differs from the one that `off`
+makes from the same seed. The text encoder and the VAEs run as before.
+Each value is opt-in, needs an M5 or newer, and does not run with
+`fasth3`. `attention` holds no more memory than `off`. `linears` and
+`all` switch more of the DiT's products to int8, and the memory check of
+[Clip length, size and memory](#clip-length-size-and-memory) counts
+their int8 weights, so a clip that fits at `off` can be too large at
+`linears`. Pick them on a Mac with 7.86 GiB to spare beside the clip.
+
+To run every clip of an entry at one value, set `int8` in its
+[`defaults`](config.md#video_modelsdefaults). Two entries on the same
+files make two profiles, one at `off` and one at `all`:
+
+```yaml
+video_models:
+  h3:
+    # ... the files of the h3 entry
+  h3-int8:
+    # ... the same files
+    defaults: {int8: all}
+```
+
+The two entries load apart, each with its own DiT, and with both in use
+`gmlx serve` holds both DiTs until it lets one go as it lets any model
+go.
+
+A job of `gmlx serve` runs its entry's value unless its
+[`int8`](video-api.md#request-fields) field names another that keeps the
+entry's linear layers. In ComfyUI the `int8` input of
+[`gmlx Model Loader`](comfyui-reference.md#the-model-loaders-int8) sets
+it for each step.
 
 ## Clip length, size and memory
 

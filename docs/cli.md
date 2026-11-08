@@ -1430,7 +1430,7 @@ time.
 | `MODEL`, positional | Required | Generate with the `video_models` entry of this id, or this DiT GGUF. |
 | `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
 | `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant, such as `fl2va-turbo4` for a merged Turbo file gmlx does not know. |
-| `--attention {dense,int8}` | The entry's, else `dense` | The DiT's attention. `int8` needs an M5 or newer, is faster on large or long clips and is lossy, as [Int8 attention](video.md#int8-attention) says. |
+| `--int8 {off,attention,linears,all}` | The entry's, else `off` | Run the DiT's attention, its linear layers or both in int8, as [Faster clips with int8](video.md#faster-clips-with-int8) says. Lossy, on an M5 or newer; `linears` and `all` hold 7.86 GiB more memory. |
 | `--prompt TEXT` | Required, or `--prompt-file` | Generate from this prompt. |
 | `--prompt-file FILE` | None | Read the prompt from this file. |
 | `--seconds S` | The entry's, else `5` | Make a clip this long, rounded up to whole frames as above. |
@@ -1495,7 +1495,7 @@ shapes that ran still get their records, each with an `error` field.
 | `MODEL`, positional | Required | Bench the `video_models` entry of this id, or this DiT GGUF. |
 | `--config FILE` | The first default location | Read the `video_models` entry that `MODEL` names from this config. |
 | `--variant NAME` | The entry's `variant`, else from the weights | Run the DiT as this variant. |
-| `--attention {dense,int8}` | The entry's, else `dense` | Run the DiT's attention as this kind, as `generate` does. |
+| `--int8 {off,attention,linears,all}` | The entry's, else `off` | Run the DiT at this int8 setting, as `generate` does. |
 | `--shapes LIST` | `512x512x22,768x768x124,1344x768x124` | Bench these shapes, each `WxHxF` with F frames. |
 | `--steps N` | `3` | Sample each shape for N steps. |
 | `--seed N` | `0` | Seed every shape. |

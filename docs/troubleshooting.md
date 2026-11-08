@@ -520,6 +520,37 @@ The frames a guide video keeps, which
 the clip from the guide's frame on. Move the guide to an earlier frame,
 make the clip longer, or cut the video shorter.
 
+### Int8 refusals
+
+[`--int8`](video.md#faster-clips-with-int8), an entry's `defaults.int8`,
+a job's `int8` field and the ComfyUI loader's `int8` input are refused
+before any weight loads:
+
+- `MiniMax-H3 fl2va runs with int8 attention, whose kernel needs a GPU
+  with NAX units (M5 or newer), and this Mac's GPU has none`, or the same
+  with `int8 linears`: every value but `off` needs an M5 or newer. Run at
+  `off`.
+- `..., and the installed mlx-kquant X has no sdpa_qk8; update mlx-kquant
+  to 0.5.10 or later`, or `... has no int8_matmul; update mlx-kquant to
+  0.5.11 or later`: the installed mlx-kquant has no int8 kernel. Update
+  gmlx, which brings the mlx-kquant it needs.
+- `MiniMax-H3 fasth3 runs video sparse attention, and int8 attention
+  applies to dense attention only`, or `int8 linears are untested on
+  MiniMax-H3 fasth3, and gmlx runs them on variants with dense attention
+  only`: run `fasth3` at `off`, or the clip on `h3`.
+- `this model's entry loads its DiT at int8 off, so a request names int8
+  off or attention, not linears; set the entry's defaults.int8 to run
+  linears`: the linear layers are converted as the DiT loads, so a job or
+  a ComfyUI loader can change the attention only. Set `defaults.int8` on
+  the entry, or add a second entry on the same files at the value you
+  want.
+- `defaults.attention: the int8 setting replaces it; set int8 to one of
+  off, attention, linears, all`: an entry written for an earlier build.
+  Replace `attention: int8` with `int8: attention`.
+- `... Run with int8 off or attention, which keep the file's linears, or
+  try a smaller size or a shorter clip`: the clip does not fit with the
+  int8 weights of `linears` or `all`, 7.86 GiB more than the file's.
+
 ### Video jobs
 
 These are the answers and job errors of

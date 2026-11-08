@@ -19,9 +19,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `fasth3` recipe runs FastVideo's FastH3, an 8-step MiniMax-H3 whose
   steps take about half as long as `h3`'s, on an M5 or newer. See
   [FastH3](docs/video.md#fasth3).
-- `--attention int8` on `gmlx video`, the video API's `attention` field and the
-  `attention` input of `gmlx Model Loader` run MiniMax-H3's attention in int8 on
-  an M5 or newer. See [Int8 attention](docs/video.md#int8-attention).
+- `--int8 attention`, `linears` or `all` runs MiniMax-H3's attention, its block
+  linears or both in int8 on an M5 or newer; linears cost 7.86 GiB more memory.
+  See [Faster clips with int8](docs/video.md#faster-clips-with-int8).
 - A chat model rewrites MiniMax-H3 prompts in the form of MiniMax's prompt
   guide, which `gmlx video pull` fetches. See
   [Prompt upsampling](docs/video.md#prompt-upsampling).
@@ -81,7 +81,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
   fused kernel where MLX built the whole score matrix, so Nemotron-H and
   other models with wide query groups draft faster at long context.
-- Requires mlx-kquant 0.5.10.
+- Requires mlx-kquant 0.5.11.
 
 ### Fixed
 
