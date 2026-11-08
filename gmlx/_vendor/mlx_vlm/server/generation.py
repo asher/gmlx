@@ -1270,7 +1270,13 @@ class ResponseGenerator:
         )
 
     def _cpu_preprocess(self, prompt, images=None, audio=None, videos=None) -> dict:
-        """CPU-only: tokenize text, load/resize images. Thread-safe."""
+        """CPU-only: tokenize text, load/resize images. Thread-safe.
+
+        gmlx: a list of token ids is the prompt as sent; no tokenizer runs."""
+        # gmlx: a token-id prompt (/v1/completions) reaches the engine as is.
+        if isinstance(prompt, list) and not images and not audio and not videos:
+            ids = mx.array([[int(t) for t in prompt]], dtype=mx.int32)
+            return {"input_ids": ids, "attention_mask": mx.ones(ids.shape, dtype=mx.int32)}
         add_special_tokens = (
             getattr(self.processor, "chat_template", None) is None
             if self.model.config.model_type

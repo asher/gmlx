@@ -629,3 +629,12 @@ def test_available_drained_charges_live_arena(monkeypatch):
     arena = _Arena(30e9)
     installs.record_arena(arena)
     assert mp.available_drained_bytes() == pytest.approx(58e9)
+
+
+def test_an_id_prompt_is_priced_by_its_length(tight):
+    rg = _rg(DENSE)
+    with pytest.raises(PromptTooLongError) as e:
+        mp.preflight_prompt_memory(rg, [5] * 100_000)
+    assert "prompt_tokens=100000" in str(e.value)
+    mp.preflight_prompt_memory(rg, [5] * 50_000)
+    assert not rg._pre_calls

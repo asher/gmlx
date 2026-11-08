@@ -497,6 +497,14 @@ def _audio_cost(model, audio) -> tuple[int, int] | None:
     return hook(audio)
 
 
+def _token_ids(prompt) -> list | None:
+    """``prompt`` when it is a list of token ids, else None."""
+    if isinstance(prompt, list) and all(
+            isinstance(t, int) and not isinstance(t, bool) for t in prompt):
+        return prompt
+    return None
+
+
 def preflight_prompt_memory(rg, prompt, images=None, audio=None,
                             videos=None, args=None, held_bytes: int = 0) -> None:
     """Raise MemoryPreflightError when the prompt cannot fit. Best
@@ -509,7 +517,8 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
         if images or videos:
             return
         model = getattr(rg, "model", None)
-        if model is None or not isinstance(prompt, str):
+        ids = _token_ids(prompt)
+        if model is None or not (isinstance(prompt, str) or ids is not None):
             return
         cost = _audio_cost(model, audio)
         if cost is None:
@@ -533,7 +542,9 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
             if not pinned or _need_bytes(
                     model, costs, bound, pinned) <= avail:
                 return
-        if audio:
+        if ids is not None:
+            tokens = len(ids) + audio_tokens
+        elif audio:
             tok = getattr(rg, "tokenizer", None)
             tokens = len(tok.encode(prompt)) + audio_tokens
         else:
@@ -564,7 +575,7 @@ def preflight_prompt_memory(rg, prompt, images=None, audio=None,
         _log.warning("memory preflight failed; admitting", exc_info=True)
 
 
-def _check_request_fit(rg, model, prompt: str, audio_tokens: int,
+def _check_request_fit(rg, model, prompt, audio_tokens: int,
                        encode_bytes: int, others: int, args) -> bool:
     """The check for an arch that prices its prefill rows: what the
     request holds at its full length plus one chunk at its request step
@@ -594,7 +605,10 @@ def _check_request_fit(rg, model, prompt: str, audio_tokens: int,
     if ok:
         return True
     tok = getattr(rg, "tokenizer", None)
-    text = len(tok.encode(prompt)) if tok is not None else len(prompt)
+    if _token_ids(prompt) is not None or tok is None:
+        text = len(prompt)
+    else:
+        text = len(tok.encode(prompt))
     tokens = text + int(audio_tokens)
     ok, need, avail = fits(tokens)
     if ok:
