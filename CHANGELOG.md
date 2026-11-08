@@ -91,6 +91,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `gmlx serve` reads a Gemma 3n prompt at the embedding scale it decodes
   at, where it read the prompt unscaled and answered from a damaged
   context.
+- Nemotron-H and Granite 4 hybrid models answer each request in a batch of
+  prompts of different lengths as they answer it alone, where a short
+  prompt lost its Mamba state to the padding.
 - Served and VLM chat prompts render on transformers 5.22.2, where a request
   that set no thinking control failed with "'enable_thinking' is undefined".
 - A fraction in a config key that takes a whole number, such as `port` or

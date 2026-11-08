@@ -187,6 +187,9 @@ class GraniteMoeHybridMamba2Mixer(nn.Module):
             state,
             self.time_step_limit,
             mask,
+            # gmlx: a right-padded batch ends each row's state at its length,
+            # as mamba2 and falcon_h1 do.
+            lengths,
         )
         if cache:
             cache[1] = state
