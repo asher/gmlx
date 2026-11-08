@@ -1,0 +1,935 @@
+{
+ "llama_cpp_commit": "e8df20d23",
+ "source": "src/llama-vocab.cpp",
+ "names": {
+  "a.x-4.0": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "afmoe": {
+   "pre_type": "AFMOE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "bailingmoe": {
+   "pre_type": "BAILINGMOE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "bailingmoe2": {
+   "pre_type": "BAILINGMOE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "bloom": {
+   "pre_type": "BLOOM",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "chameleon": {
+   "pre_type": "CHAMELEON",
+   "ignore_merges": false,
+   "add_bos": true,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "chatglm-bpe": {
+   "pre_type": "CHATGLM4",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": true
+  },
+  "codeshell": {
+   "pre_type": "CODESHELL",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "cohere2moe": {
+   "pre_type": "TINY_AYA",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "command-r": {
+   "pre_type": "COMMAND_R",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "dbrx": {
+   "pre_type": "DBRX",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "deepseek-coder": {
+   "pre_type": "DEEPSEEK_CODER",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "deepseek-llm": {
+   "pre_type": "DEEPSEEK_LLM",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "deepseek-r1-qwen": {
+   "pre_type": "QWEN2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "deepseek-v3": {
+   "pre_type": "DEEPSEEK3_LLM",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "default": {
+   "pre_type": "DEFAULT",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "domyn-small": {
+   "pre_type": "DOMYN_SMALL",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "exaone": {
+   "pre_type": "EXAONE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "exaone-moe": {
+   "pre_type": "EXAONE_MOE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "exaone4": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "f2llmv2": {
+   "pre_type": "QWEN2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "falcon": {
+   "pre_type": "FALCON",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "falcon-h1": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "falcon3": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "flint": {
+   "pre_type": "FLINT",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "gemma4": {
+   "pre_type": "GEMMA4",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "gigachat": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "glm4": {
+   "pre_type": "CHATGLM4",
+   "ignore_merges": true,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": true
+  },
+  "glm5": {
+   "pre_type": "CHATGLM4",
+   "ignore_merges": true,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": true
+  },
+  "gpt-2": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "gpt-4o": {
+   "pre_type": "GPT4O",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "gpt3-finnish": {
+   "pre_type": "GPT3_FINNISH",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "granite-docling": {
+   "pre_type": "GRANITE_DOCLING",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "granite-embed-multi-311m": {
+   "pre_type": "GEMMA4",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "granite-embed-multi-97m": {
+   "pre_type": "GRANITE_EMB_MULTI",
+   "ignore_merges": true,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "grok-2": {
+   "pre_type": "GROK_2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "hunyuan": {
+   "pre_type": "HUNYUAN",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "hunyuan-dense": {
+   "pre_type": "HUNYUAN_DENSE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "hy_v4": {
+   "pre_type": "HY_V4",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "jais": {
+   "pre_type": "JAIS",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jais-2": {
+   "pre_type": "JAIS2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jina-de": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jina-es": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jina-v1-en": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jina-v2-code": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jina-v2-de": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jina-v2-es": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "jina-v5-nano": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "joyai-llm": {
+   "pre_type": "JOYAI_LLM",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "k2-horizon": {
+   "pre_type": "K2_HORIZON",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "kanana2": {
+   "pre_type": "GPT4O",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "kimi-k2": {
+   "pre_type": "KIMI_K2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "kormo": {
+   "pre_type": "QWEN2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "laguna": {
+   "pre_type": "LAGUNA",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "lfm2": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "llada-moe": {
+   "pre_type": "BAILINGMOE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "llama-bpe": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "llama-v3": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "llama3": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "llama4": {
+   "pre_type": "GPT4O",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "megrez": {
+   "pre_type": "QWEN2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "mellum": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "mellum2": {
+   "pre_type": "MELLUM2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "midm-2.0": {
+   "pre_type": "LLAMA3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "minerva-7b": {
+   "pre_type": "MINERVA",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "minicpm5": {
+   "pre_type": "MINICPM5",
+   "ignore_merges": true,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "minimax-m2": {
+   "pre_type": "MINIMAX_M2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "mmbert": {
+   "pre_type": "MMBERT",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "modern-bert": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "mpt": {
+   "pre_type": "MPT",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "nemotron-3.5-embed": {
+   "pre_type": "NEMOTRON_3_5_EMBD",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "olmo": {
+   "pre_type": "OLMO",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "phi-2": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "pixtral": {
+   "pre_type": "TEKKEN",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "poro-chat": {
+   "pre_type": "PORO",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "qwen2": {
+   "pre_type": "QWEN2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "qwen35": {
+   "pre_type": "QWEN35",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "refact": {
+   "pre_type": "REFACT",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "roberta-bpe": {
+   "pre_type": "GPT2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "sarvam-moe": {
+   "pre_type": "SARVAM_MOE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "seed-coder": {
+   "pre_type": "SEED_CODER",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "smaug-bpe": {
+   "pre_type": "SMAUG",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "smollm": {
+   "pre_type": "SMOLLM",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "solar-open": {
+   "pre_type": "SOLAR_OPEN",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "soprano": {
+   "pre_type": "SOPRANO",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "spark2_5": {
+   "pre_type": "SPARK2_5",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "stablelm2": {
+   "pre_type": "STABLELM2",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "starcoder": {
+   "pre_type": "STARCODER",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "superbpe": {
+   "pre_type": "SUPERBPE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "talkie": {
+   "pre_type": "GPT4O",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "tekken": {
+   "pre_type": "TEKKEN",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "tekken-num3": {
+   "pre_type": "TEKKEN_NUM3",
+   "ignore_merges": true,
+   "add_bos": true,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "tiny_aya": {
+   "pre_type": "TINY_AYA",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "trillion": {
+   "pre_type": "TRILLION",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "ufakzeka": {
+   "pre_type": "UFAKZEKA",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "viking": {
+   "pre_type": "VIKING",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  },
+  "whitespace": {
+   "pre_type": "WHITESPACE",
+   "ignore_merges": false,
+   "add_bos": false,
+   "clean_spaces": true,
+   "null_bos": false
+  },
+  "youtu": {
+   "pre_type": "YOUTU",
+   "ignore_merges": true,
+   "add_bos": false,
+   "clean_spaces": false,
+   "null_bos": false
+  }
+ },
+ "regex": {
+  "AFMOE": [
+   "\\p{AFMoE_digits}",
+   "[\u4e00-\u9fff\u3400-\u4dbf\u8c48-\ufaff\u3040-\u309f\u30a0-\u30ff\uff65-\uff9f\u2f00-\u2fdf\u0e40-\u0e7f\u0e80-\u0eff\u1780-\u17ff\u1000-\u109f\uaa60-\uaa7f\ua9e0-\ua9ff\uac00-\ud7af\u1100-\u11ff]+",
+   "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "BAILINGMOE": [
+   "'(?:[sSdDmMtT]|[lL][lL]|[vV][eE]|[rR][eE])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+"
+  ],
+  "BLOOM": [
+   " ?[^(\\s|.,!?\u2026\u3002\uff0c\u3001\u0964\u06d4\u060c)]+"
+  ],
+  "CHAMELEON": [
+   "<sentinel:[0-9]+>",
+   "(IMGIMG)((A|B|C|D|E|F|G|H|I){1,4})Z",
+   "([\\t\\n]|    |  )",
+   "\\p{N}",
+   "[\\p{P}!-/:-@\\[-`{-~]",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "CHATGLM4": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "CODESHELL": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "COMMAND_R": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "DBRX": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "DEEPSEEK3_LLM": [
+   "\\p{N}{1,3}",
+   "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+   "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "DEEPSEEK_CODER": [
+   "[\r\n]",
+   "\\s?\\p{L}+",
+   "\\s?\\p{P}+",
+   "[\u4e00-\u9fa5\u0800-\u4e00\uac00-\ud7ff]+",
+   "\\p{N}"
+  ],
+  "DEEPSEEK_LLM": [
+   "[\r\n]",
+   "\\s?[A-Za-z\u00b5\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u01ba\u01bc-\u01bf\u01c4-\u0293\u0295-\u02af\u0370-\u0373\u0376\u0377\u037b-\u037d\u037f\u0386\u0388-\u038a\u038c\u038e-\u03a1\u03a3-\u03f5\u03f7-\u0481\u048a-\u052f\u0531-\u0556\u10a0-\u10c5\u13a0-\u13f5\u13f8-\u13fd\u1c90-\u1cba\u1cbd-\u1cbf\u1d00-\u1d2b\u1d6b-\u1d77\u1d79-\u1d9a\u1e00-\u1f15\u1f18-\u1f1d\u1f20-\u1f45\u1f48-\u1f4d\u1f50-\u1f57\u1f59\u1f5b\u1f5d\u1f5f-\u1f7d\u1f80-\u1fb4\u1fb6-\u1fbc\u1fbe\u1fc2-\u1fc4\u1fc6-\u1fcc\u1fd0-\u1fd3\u1fd6-\u1fdb\u1fe0-\u1fec\u1ff2-\u1ff4\u1ff6-\u1ffc\u2102\u2107\u210a-\u2113\u2115\u2119-\u211d\u2124\u2126\u2128\u212a-\u212d\u212f-\u2134\u2139\u213c-\u213f\u2145-\u2149\u214e\u2183\u2184\u2c00-\u2c7b\u2c7e-\u2ce4\u2ceb-\u2cee\u2cf2\u2cf3\ua640-\ua66d\ua680-\ua69b\ua722-\ua76f\ua771-\ua787\ua78b-\ua78e\uab70-\uabbf\ufb00-\ufb06\ufb13-\ufb17\uff21-\uff3a\uff41-\uff5a\ud801\udc00-\ud801\udc4f\ud801\udcb0-\ud801\udcd3\ud801\udcd8-\ud801\udcfb\ud803\udc80-\ud803\udcb2\ud803\udcc0-\ud803\udcf2\ud806\udca0-\ud806\udcdf\ud83a\udd00-\ud83a\udd43]+",
+   "\\s?[!-/:-~\uff01-\uff0f\uff1a-\uff5e\u2018-\u201f\u3000-\u3002]+",
+   "\\s+$",
+   "[\u4e00-\u9fa5\u0800-\u4e00\uac00-\ud7ff]+",
+   "\\p{N}+"
+  ],
+  "DEFAULT": [
+   "[\\p{P}\\$\\+<=>\\^~\\|]+",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
+   "\\p{N}+",
+   "[0-9][0-9][0-9]"
+  ],
+  "DOMYN_SMALL": [
+   "[^\\n]+|[\\n]+"
+  ],
+  "EXAONE": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "EXAONE_MOE": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}\\p{M}*(?: \\p{L}\\p{M}*)*)+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]?|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+"
+  ],
+  "FALCON": [
+   "[\\p{P}\\$\\+<=>\\^~\\|`]+",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
+   "[0-9][0-9][0-9]"
+  ],
+  "FLINT": [
+   "\\p{N}{1,3}",
+   "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+   "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "GEMMA4": [
+   "[^\\n]+|[\\n]+"
+  ],
+  "GPT2": [
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "GPT3_FINNISH": [
+   " ?[^(\\s|.,!?\u2026\u3002\uff0c\u3001\u0964\u06d4\u060c)]+"
+  ],
+  "GPT4O": [
+   "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "GRANITE_DOCLING": [
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "GRANITE_EMB_MULTI": [
+   "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "GROK_2": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "HUNYUAN": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "HUNYUAN_DENSE": [
+   "\\p{N}{1,3}",
+   "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+   "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "HY_V4": [
+   "\\p{N}{1,3}",
+   "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+   "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "JAIS": [
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "JAIS2": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s{512}(?!\\S)|\\s{256}(?!\\S)|\\s{128}(?!\\S)|\\s{64}(?!\\S)|\\s{32}(?!\\S)|\\s{16}(?!\\S)|\\s{8}(?!\\S)|\\s{4}(?!\\S)|\\s{1,2}(?!\\S)|\\s{1}"
+  ],
+  "JOYAI_LLM": [
+   "\\p{N}{1,3}",
+   "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+   "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "K2_HORIZON": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?(?:\\p{L}|\\p{M}|\\u200C|\\u200D)+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "KIMI_K2": [
+   "\\p{Han}+"
+  ],
+  "LAGUNA": [
+   "[^\\n]+|[\\n]+",
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "LLAMA3": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "MELLUM2": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "MINERVA": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "MINICPM5": [
+   "\\p{N}{1,3}",
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}+| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "MINIMAX_M2": [
+   "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "MMBERT": [
+   "[^\\n]+|[\\n]+"
+  ],
+  "MPT": [
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "NEMOTRON_3_5_EMBD": [
+   "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "OLMO": [
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "PORO": [
+   " ?[^(\\s|.,!?\u2026\u3002\uff0c\u3001\u0964\u06d4\u060c)]+"
+  ],
+  "QWEN2": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "QWEN35": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "REFACT": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "SARVAM_MOE": [
+   "[^\\n]+|[\\n]+"
+  ],
+  "SEED_CODER": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1}| ?[^\\s\\p{L}\\p{N}\\r\\n]+|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "SMAUG": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "SMOLLM": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "SOLAR_OPEN": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "SOPRANO": [
+   "\\p{N}",
+   "\\s+|[\\p{L}\\p{N}_]+|[^\\p{L}\\p{N}_\\s]+"
+  ],
+  "SPARK2_5": [
+   "\\p{N}{1,3}",
+   "[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+   "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+|[\r\n]|\\s+(?!\\S)|\\s+",
+   "\\p{N}"
+  ],
+  "STABLELM2": [
+   "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "STARCODER": [
+   "\\p{N}",
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "SUPERBPE": [
+   "\\p{N}+",
+   "(?=(\\d{3})+(?!\\d))"
+  ],
+  "TEKKEN": [
+   "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "TEKKEN_NUM3": [
+   "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))*((?=[\\p{L}\\p{M}])([^A-Z]))+|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}\\p{M}])([^a-z]))+((?=[\\p{L}\\p{M}])([^A-Z]))*|\\p{N}{1,3}(?=(?:\\p{N}{3})*(?!\\p{N}))|\\p{N}{1,2}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "TINY_AYA": [
+   "\\d{1,3}(?=(?:\\d{3})*\\b)",
+   "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "TRILLION": [
+   "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)"
+  ],
+  "UFAKZEKA": [
+   "[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ],
+  "VIKING": [
+   " ?[^(\\s|.,!?\u2026\u3002\uff0c\u3001\u0964\u06d4\u060c)]+",
+   "\\p{N}"
+  ],
+  "WHITESPACE": [
+   "\\S+"
+  ],
+  "YOUTU": [
+   "[\uac00-\ud7a3\u3131-\u318e]+|[\uff01\u2026\u201c\u201d\u2018\u2019\u2014\uff1a\uff1b\uff0c\u3001-\u303f\ufe30-\ufe4f]+|[\u3105-\u312f]+|[\u4e00-\u9fa5\u3040-\u309f\u30a0-\u30ff]+",
+   "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+  ]
+ }
+}

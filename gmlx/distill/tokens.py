@@ -43,22 +43,17 @@ def llamacpp_bos_default(tokenizer, gguf) -> None:
     """Apply llama.cpp's add_bos default to a tokenizer synthesized from a
     GGUF that carries no tokenizer.ggml.add_bos_token key. gguf is a path,
     a KV dict or an open GGUFReader. Every distill entry point that takes
-    a GGUF tokenizer from gmlx passes through here."""
+    a GGUF tokenizer from gmlx passes through here. The GGUF tokenizer
+    loader applies the same default from its pre-tokenizer table, so this
+    changes only a tokenizer built some other way."""
     from gmlx.load.gguf_meta import as_kv_dict, read_string
+    from gmlx.load.tokenizer import pre_tokenizer
     kv = _gguf_kv(gguf) if isinstance(gguf, (str, Path)) else as_kv_dict(gguf)
     if "tokenizer.ggml.add_bos_token" in kv:
         return
     pre = read_string(kv, "tokenizer.ggml.pre") or ""
-    if pre in _LLAMA3_PRE_ADD_BOS:
+    if pre_tokenizer(pre).add_bos:
         _prepend_bos(hf_inner(tokenizer))
-
-
-# llama.cpp (llama-vocab.cpp) defaults add_bos to true for these
-# pre-tokenizers when the GGUF carries no tokenizer.ggml.add_bos_token key;
-# gmlx's synthesizer reads the key only, so a Llama-3 GGUF without it would
-# feed the student BOS-less rows that llama.cpp would prefix.
-_LLAMA3_PRE_ADD_BOS = frozenset({"llama3", "llama-v3", "llama-bpe", "falcon3", "falcon-h1",
-                                 "pixtral", "midm-2.0", "lfm2", "jina-v5-nano"})
 
 
 def _prepend_bos(fast) -> None:
