@@ -319,3 +319,30 @@ def test_a_row_without_adapter_scales_fails_only_its_request(monkeypatch, rows_m
         assert rq.get(timeout=5) is None
     finally:
         _stop(rg, thread)
+
+
+def test_the_context_carries_the_ids_the_worker_inserted(monkeypatch):
+    rg = _response_generator(monkeypatch)
+    inserted = []
+    insert = _Batch.insert
+
+    def recording(self, prompts, **kw):
+        inserted.append(list(prompts[0]))
+        return insert(self, prompts, **kw)
+
+    monkeypatch.setattr(_Batch, "insert", recording)
+    rg._gpu_embed = lambda raw, images, apc_semantic_hash=None, row_settings=None: (
+        mx.array([[7, 8, 9]]), {})
+    thread = threading.Thread(target=rg._run_impl, daemon=True)
+    thread.start()
+    try:
+        rq: queue.Queue = queue.Queue()
+        rg.requests.put(_GEN.QueuedGenerationRequest(
+            rqueue=rq, raw_inputs={"input_ids": None}, prompt_tokens=3,
+            args=_GEN.GenerationArguments(max_tokens=1)))
+        ctx = rq.get(timeout=5)
+        assert rq.get(timeout=5) is None
+    finally:
+        _stop(rg, thread)
+    assert inserted == [[7, 8, 9]]
+    assert ctx.prompt_ids == [7, 8, 9]

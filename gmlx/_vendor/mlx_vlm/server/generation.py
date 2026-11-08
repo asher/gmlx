@@ -750,6 +750,8 @@ class GenerationContext:
 
     uid: int
     prompt_tokens: int
+    # gmlx: the ids the worker inserted (chat ``return_token_ids``).
+    prompt_ids: Optional[List[int]] = None
 
 
 @dataclass
@@ -2005,8 +2007,9 @@ class ResponseGenerator:
 
                     try:
                         thinking_budget_criteria = request.thinking_budget_criteria
+                        prompt_ids = input_ids.squeeze(0).tolist()
                         (uid,) = batch_gen.insert(
-                            [input_ids.squeeze(0).tolist()],
+                            [prompt_ids],
                             max_tokens=args.max_tokens,
                             prompt_kwargs=[gen_kwargs],
                             logits_processors=[
@@ -2020,7 +2023,12 @@ class ResponseGenerator:
                         rqueue.put(e)
                         continue
 
-                    rqueue.put(GenerationContext(uid=uid, prompt_tokens=prompt_tokens))
+                    rqueue.put(
+                        GenerationContext(
+                            uid=uid, prompt_tokens=prompt_tokens, prompt_ids=prompt_ids
+                        )
+                    )
+                    prompt_ids = None
                     active[uid] = {
                         "rqueue": rqueue,
                         "streamer": _ServerTokenStreamer(

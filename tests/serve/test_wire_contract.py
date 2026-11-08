@@ -110,7 +110,9 @@ class _FakeResponseGenerator:
         self._check_budget("generate", args)
         if self.raise_on_generate is not None:
             raise self.raise_on_generate
-        ctx = _GEN.GenerationContext(uid=1, prompt_tokens=self.prompt_tokens)
+        ctx = _GEN.GenerationContext(
+            uid=1, prompt_tokens=self.prompt_tokens,
+            prompt_ids=list(range(1, self.prompt_tokens + 1)))
 
         def _iter():
             try:
@@ -423,6 +425,39 @@ def test_chat_nonstream_wire_shape(wire):
     assert choice["message"]["reasoning"] is None
     _assert_no_nulls(usage, "$.usage")
     _assert_no_nulls(body["timings"], "$.timings")
+
+
+def test_chat_returns_token_ids_when_asked(wire):
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        return_token_ids=True, logprobs=True))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["prompt_token_ids"] == [1, 2, 3, 4, 5, 6, 7]
+    choice = body["choices"][0]
+    assert choice["token_ids"] == [100, 101, 102]
+    assert len(choice["logprobs"]["content"]) == len(choice["token_ids"])
+
+
+def test_chat_token_ids_stream_with_the_prompt_ids_first(wire):
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        stream=True, return_token_ids=True))
+    assert r.status_code == 200, r.text
+    chunks = [json.loads(p) for p in _sse_data_lines(r.text)[:-1]]
+    for chunk in chunks:
+        _assert_no_nulls(chunk)
+    assert chunks[0]["prompt_token_ids"] == [1, 2, 3, 4, 5, 6, 7]
+    assert all("prompt_token_ids" not in c for c in chunks[1:])
+    ids = [t for c in chunks for ch in c["choices"] for t in ch.get("token_ids", [])]
+    assert ids == [100, 101, 102]
+
+
+def test_a_diffusion_model_refuses_return_token_ids(wire, monkeypatch):
+    diffusion = importlib.import_module("gmlx._vendor.mlx_vlm.generate.diffusion")
+    monkeypatch.setattr(diffusion, "is_diffusion_model", lambda model: True)
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        return_token_ids=True))
+    assert r.status_code == 400
+    assert "return_token_ids" in r.text and not wire.gen.calls
 
 
 # 3. Anthropic surface (docs/internals/serving-architecture.md - ANTHROPIC_BASE_URL

@@ -85,7 +85,7 @@ _GMLX_CONSUMED = frozenset({
 CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
     "resize_shape", "tools", "tool_choice", "tool_parser",
-    "stop", "timings_per_token", "return_tokens_as_token_ids",
+    "stop", "timings_per_token", "return_tokens_as_token_ids", "return_token_ids",
     # OpenAI's chat spelling of the output cap (sampling.py alias transform)
     "max_completion_tokens",
     # Word timestamps on a model that hears audio (word_timestamps.py).
