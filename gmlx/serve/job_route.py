@@ -73,8 +73,6 @@ def resolve_engine(pick: Callable[[], str], profile, runtime):
     return rg, hold, spec, model_str
 
 
-# -- one scoring job per engine at a time ------------------------------------
-
 _DISCONNECT_POLL_S = 0.5
 
 

@@ -223,8 +223,6 @@ class ScoreReader:
         self.built = False
         self.forwards = 0
 
-    # -- widths --------------------------------------------------------------
-
     @property
     def itemsize(self) -> int:
         return int(self.dtype.size) if self.dtype is not None else 4
@@ -242,8 +240,6 @@ class ScoreReader:
 
     def plan(self, tokens: int) -> list[tuple[int, int]]:
         return plan(self.width, tokens, self.heads, self.ws)
-
-    # -- model calls ---------------------------------------------------------
 
     def make_cache(self):
         from gmlx.cache.kv_cache import make_prompt_cache
