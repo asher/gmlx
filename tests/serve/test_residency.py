@@ -2234,3 +2234,98 @@ def test_a_chat_cold_load_completes_while_an_image_job_runs(monkeypatch):
     img.join(5.0)
     assert not img.is_alive() and loads == ["/dit.safetensors"]
     assert resident(pool) == {"A.gguf", "/dit.safetensors"}
+
+
+def _adapter_spec(tmp_path, sizes):
+    paths = []
+    for i, n in enumerate(sizes):
+        p = tmp_path / f"a{i}.gguf"
+        p.write_bytes(b"x" * n)
+        paths.append(str(p))
+    return SimpleNamespace(effective_adapters=lambda: tuple(paths), stream=None,
+                           mmproj=None)
+
+
+def test_text_adapters_price_twice_their_files_in_every_figure(monkeypatch,
+                                                                tmp_path):
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency as residency
+    from gmlx.stream import budget as bmod
+
+    add = 2 * (1000 + 3000)
+    spec = _adapter_spec(tmp_path, (1000, 3000))
+    bare = SimpleNamespace(effective_adapters=lambda: (), stream=None, mmproj=None)
+    assert residency.text_adapter_bytes(spec) == add
+    assert residency.text_adapter_bytes(bare) == 0
+    gates, tables = [], []
+    monkeypatch.setattr(cap, "preload_gate",
+                        lambda w, m, **k: gates.append(int(w)))
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: tables.append(int(b)))
+    for mod in ("residency_pool", "residency_build"):
+        monkeypatch.setattr(f"gmlx.serve.{mod}._plain_footprint",
+                            lambda p, f, env=None: f)
+    _proxy, pool, _ = make_pool(64, {"m": 10, "n": 10})
+    base = 10 * GB
+    assert pool._price("m", "auto", spec, None, 0) == (base, base + add)
+    assert pool._price("m", "auto", bare, None, 0) == (base, base)
+    assert pool.load_entry("m", spec).footprint == base + add
+    entry = pool.acquire("m", None, "auto", build_spec=spec)
+    pool.release(entry)
+    assert gates == [base + add] and tables[0] == base + add
+    assert entry.footprint == base + add
+    entry = pool.acquire("n", None, "auto", build_spec=bare)
+    pool.release(entry)
+    assert gates[-1] == base and entry.footprint == base
+
+    seen = {}
+    monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 1)
+    monkeypatch.setattr("gmlx.load.discovery.text_tensor_bytes", lambda p: 5 * GB)
+    monkeypatch.setattr(cap, "deferred_table_bytes", lambda p, env=None: 0)
+    monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 0)
+    monkeypatch.setattr(bmod, "kv_room_bytes",
+                        lambda p, env=None, resident=True: SimpleNamespace(bytes=0))
+
+    def check(text, tables, drafter, **k):
+        seen["text"] = text
+        return SimpleNamespace(fits=True)
+
+    monkeypatch.setattr(bmod, "check_wire_with_tables", check)
+    monkeypatch.setattr(bmod, "settled_wire_check", lambda f: f())
+    pool._keep_check("m", build_spec=spec)
+    assert seen["text"] == 5 * GB + add
+    pool._keep_check("m", build_spec=bare)
+    assert seen["text"] == 5 * GB
+
+
+def test_an_adapter_the_base_cannot_take_evicts_nothing(monkeypatch, tmp_path):
+    """The cold path refuses a tied base's embedding adapter from the
+    headers, beside the preflight, before any eviction or build."""
+    import dataclasses
+
+    pytest.importorskip("gguf")
+    from gmlx.config import ResolvedModel
+    from gmlx.load import adapter as adapter_mod
+    from lora_gguf import mint_adapter, mint_base
+
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    spec = dataclasses.replace(
+        ResolvedModel(id="t", path=base, sampling={}, load={}, cache={}, system=None,
+                      speculative=True, mmproj=None, draft_gguf=None, pin=False,
+                      ttl_s=None),
+        adapters=(ad,))
+    _proxy, pool, teardowns = make_pool(15, {"A": 10, base: 10})
+    acquire(pool, "A")
+    calls = []
+    real = adapter_mod.adapter_load_refusal
+    monkeypatch.setattr(adapter_mod, "adapter_load_refusal",
+                        lambda *a, **k: (calls.append((a, k)), real(*a, **k)))
+    monkeypatch.setattr(pool, "_evict_for_room",
+                        lambda *a, **k: pytest.fail("evicted for a refused adapter"))
+    with pytest.raises(ValueError, match="output head"):
+        pool.acquire(base, None, "auto", build_spec=spec)
+    assert resident(pool) == {"A"} and teardowns == []
+    ((args, kw),) = calls
+    assert args[:2] == (base, (ad,))
+    assert kw == {"stream": None, "mtp": True}

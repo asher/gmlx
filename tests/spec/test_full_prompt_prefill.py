@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import re
 import warnings
@@ -1664,3 +1665,174 @@ def test_apc_hit_on_injected_request(mtp_model):
         model, ids_second, ref_second, toks_second[0],
         "injected APC-hit request B (APC-restored cache offset misaligned "
         "after BatchKVCache.extend injection)")
+
+
+# ---------------------------------------------------------------------------
+# Logprobs from the verify logits
+# ---------------------------------------------------------------------------
+
+_LP_K = 20
+# A verify block and a one-token decode step differ in GEMM width, and the
+# logits are bf16, whose step is 0.125 between 16 and 32.
+_LP_TOL = 0.25
+_LP_PROB_TOL = 0.02
+
+
+def _run_lp(model, drafter, tokenizer, ids_list, n):
+    """Greedy rows that want logprobs: (tokens, entries) per row, every
+    response included. ``drafter`` None runs plain decode."""
+    from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
+    from gmlx.serve.row_sampling import RowSettings
+
+    _install_patches()
+    gen = BatchGenerator(
+        model, _make_processor(tokenizer), sampler=GREEDY,
+        draft_model=drafter, draft_kind="mtp" if drafter is not None else None,
+        greedy_sampling=True, max_tokens=n, prefill_step_size=_ENGINE_STEP,
+        logprobs_cap=_LP_K)
+    rs = RowSettings(logprobs=True, top_k=_LP_K)
+    uids = gen.insert(ids_list, [n] * len(ids_list),
+                      prompt_kwargs=_embed_prompts(model, ids_list),
+                      row_settings=[rs] * len(ids_list))
+    out = {u: ([], []) for u in uids}
+    while gen.has_work:
+        _p, resps = gen.next()
+        for r in resps:
+            if r.token is None:
+                continue
+            out[r.uid][0].append(int(r.token))
+            out[r.uid][1].append((r.token_logprob, r.top_logprobs))
+    gen.close()
+    return [out[u] for u in uids]
+
+
+@pytest.mark.parametrize("rows", [1, 2])
+def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
+    """Every MTP token carries its entry, and on the shared greedy tokens
+    the values match a run without speculation."""
+    model, drafter, _config, tokenizer = mtp_model
+    ids_list = [_build_prompt(tokenizer, 120 + 40 * i) for i in range(rows)]
+    spec = _run_lp(model, drafter, tokenizer, ids_list, 24)
+    plain = _run_lp(model, None, tokenizer, ids_list, 24)
+    for (s_toks, s_lps), (p_toks, p_lps) in zip(spec, plain):
+        assert len(s_toks) == 24
+        assert all(lp is not None and len(top) == _LP_K for lp, top in s_lps)
+        k = _first_divergence(s_toks, p_toks)
+        n = len(s_toks) if k is None else k
+        assert n >= 4, (s_toks, p_toks)
+        # At the first divergence the emitted tokens differ, but the
+        # alternatives still describe the same position.
+        for i, ((s_lp, s_top), (p_lp, p_top)) in enumerate(
+                zip(s_lps[:n + 1], p_lps[:n + 1])):
+            if i < n:
+                assert abs(s_lp - p_lp) <= _LP_TOL
+            # An alternative gets the chosen token's bound in nats. Deep in
+            # the tail a bf16 step is a large move in nats but no move in
+            # probability, so it may pass on probability instead.
+            s_d, p_d = dict(s_top), dict(p_top)
+            for t in s_d.keys() & p_d.keys():
+                assert (abs(s_d[t] - p_d[t]) <= _LP_TOL
+                        or abs(math.exp(s_d[t]) - math.exp(p_d[t]))
+                        <= _LP_PROB_TOL), t
+
+
+def _first_divergence(a, b):
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return i
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Thinking-budget message on the MTP rounds
+# ---------------------------------------------------------------------------
+
+_BUDGET_MESSAGE = "\n\nI am out of time, so I will answer now."
+
+
+@pytest.mark.parametrize("budget", [8, 0])
+def test_mtp_budget_message_then_end_marker(mtp_model, budget):
+    """A lone greedy MTP row with a budget and a message: the message's ids
+    and the end marker land whole, within one draft block of the budget, and
+    the reasoning ends with the message. A budget of 0 on a prompt that
+    opens the block lets no thinking token through."""
+    from types import SimpleNamespace
+
+    from gmlx._vendor.mlx_vlm.generate.ar import (
+        BatchGenerator,
+        PromptProcessingBatch,
+    )
+    from gmlx._vendor.mlx_vlm.server.generation import GenerationArguments
+    from gmlx.gen.thinking_budget import budget_message_ids
+    from gmlx.serve.patches import mtp_thinking
+    from gmlx.spec.helpers import _resolve_block_total
+
+    model, drafter, _config, tokenizer = mtp_model
+    _install_patches()
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Explain why the sky is blue."}],
+        add_generation_prompt=True, tokenize=False, enable_thinking=True)
+    think = prompt.rfind("<think>")
+    if think != -1 and "</think>" in prompt[think:]:
+        # A template that closes the block at once: open it, so the model
+        # thinks.
+        prompt = prompt[:think] + "<think>\n"
+    ids = list(tokenizer.encode(prompt, add_special_tokens=False))
+    args = GenerationArguments(max_tokens=64, thinking_budget=budget,
+                               thinking_budget_message=_BUDGET_MESSAGE)
+    hook = mtp_thinking._build_hook(SimpleNamespace(tokenizer=tokenizer), args,
+                                    mx.array([ids]))
+    if hook is None:
+        pytest.skip("no thinking markers resolve for this model")
+    forced = list(hook.forced_ids)
+    assert forced[:len(budget_message_ids(tokenizer, _BUDGET_MESSAGE))] == list(
+        budget_message_ids(tokenizer, _BUDGET_MESSAGE))
+    seed, prompt_open = hook.count, hook.in_thinking
+    carrier = mtp_thinking._HookCarrier()
+    carrier._kq_mtp_hook = hook
+
+    saved = PromptProcessingBatch.generate
+    try:
+        mtp_thinking._install_transport(PromptProcessingBatch)
+        gen = BatchGenerator(
+            model, _make_processor(tokenizer), sampler=GREEDY,
+            draft_model=drafter, draft_kind="mtp", greedy_sampling=True,
+            max_tokens=64, prefill_step_size=_ENGINE_STEP)
+        (uid,) = gen.insert([ids], [64],
+                            prompt_kwargs=_embed_prompts(model, [ids]),
+                            thinking_budget_criteria=[carrier])
+        out = []
+        while gen.has_work:
+            _p, resps = gen.next()
+            out += [int(r.token) for r in resps
+                    if r.uid == uid and r.token is not None]
+        gen.close()
+    finally:
+        PromptProcessingBatch.generate = saved
+
+    at = next((i for i in range(len(out))
+               if out[i:i + len(forced)] == forced), None)
+    if not prompt_open and hook.start_seq:
+        start = len(hook.start_seq)
+        opened = next((i + start for i in range(len(out))
+                       if tuple(out[i:i + start]) == hook.start_seq), None)
+        if opened is None:
+            assert at is None, tokenizer.decode(out)
+            pytest.skip("the model opened no thinking block")
+    else:
+        opened = 0
+    block = _resolve_block_total(drafter, None)
+    if at is None:
+        end = list(hook.end_seq)
+        close = next((i for i in range(opened, len(out))
+                      if out[i:i + len(end)] == end), None)
+        if close is not None and close - opened + seed <= budget + block:
+            pytest.skip("the model closed its thinking inside the budget")
+    assert at is not None, tokenizer.decode(out)
+    if budget == 0 and prompt_open:
+        assert at == 0, tokenizer.decode(out)
+    thought = at - opened + seed
+    assert budget <= thought <= budget + block, (thought, block)
+    reasoning = tokenizer.decode(out[:at + len(forced)])
+    assert reasoning.endswith(_BUDGET_MESSAGE + tokenizer.decode(
+        list(hook.end_seq)))

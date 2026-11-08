@@ -401,20 +401,22 @@ def _user_audio(messages) -> list:
 _OUTPUT_TAG = re.compile(r"<(?:spk:\d+|ev:[^<>]*|sty:[^<>]*)>")
 # The template's audio marker: the processor reads it as a clip.
 _AUDIO_MARKER = "<|audio|>"
-# id(tokenizer) -> (tokenizer, pattern of its control tokens).
+# id(tokenizer) -> (weak ref to it, pattern of its control tokens).
 _CONTROL: dict[int, tuple] = {}
 
 
 def _control_pattern(tokenizer):
-    hit = _CONTROL.get(id(tokenizer))
-    if hit is not None and hit[0] is tokenizer:
+    key = id(tokenizer)
+    hit = _CONTROL.get(key)
+    if hit is not None and hit[0]() is tokenizer:
         return hit[1]
     get: Callable[[], dict] | None = getattr(tokenizer, "get_added_vocab", None)
     names = {n for n in (get() if callable(get) else {})
              if len(n) > 1 and not _OUTPUT_TAG.fullmatch(n)} | {_AUDIO_MARKER}
     pattern = re.compile("|".join(
         re.escape(n) for n in sorted(names, key=len, reverse=True)))
-    _CONTROL[id(tokenizer)] = (tokenizer, pattern)
+    ref = weakref.ref(tokenizer, lambda _, key=key: _CONTROL.pop(key, None))
+    _CONTROL[key] = (ref, pattern)
     return pattern
 
 

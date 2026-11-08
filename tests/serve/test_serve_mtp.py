@@ -166,13 +166,17 @@ def fake_load_mtp_model(monkeypatch):
     calls = []
     drafter = object()
 
-    def _fake(gguf_path, *, draft_gguf_path=None, chat_template=None, verbose=True):
+    def _fake(gguf_path, *, draft_gguf_path=None, chat_template=None, verbose=True,
+              before_wire=None):
         calls.append(
             {"gguf": gguf_path, "draft_gguf_path": draft_gguf_path,
              "chat_template": chat_template, "verbose": verbose}
         )
+        target = _FakeTarget()
+        if before_wire is not None:
+            before_wire(target.language_model, {"model_type": "qwen3_5_moe"})
         tok = types.SimpleNamespace(eos_token_ids={1})
-        return _FakeTarget(), drafter, {"model_type": "qwen3_5_moe"}, tok
+        return target, drafter, {"model_type": "qwen3_5_moe"}, tok
 
     mtp_load = types.ModuleType("gmlx.spec.mtp_load")
     mtp_load.load_mtp_model = _fake
@@ -602,10 +606,10 @@ def test_adapter_threads_into_serveable_via_build_spec(installed_bridge):
     chat_template) and reaches the text loader as the 7th serveable arg."""
     patched, _, serveable_calls = installed_bridge
     serving.set_build_spec(
-        types.SimpleNamespace(chat_template=None, adapter="/m/ad.lora.gguf"))
+        types.SimpleNamespace(chat_template=None, adapters=("/m/ad.lora.gguf",)))
     patched("/m/text.gguf")
     assert serveable_calls == [
-        ("/m/text.gguf", None, None, False, None, None, "/m/ad.lora.gguf")]
+        ("/m/text.gguf", None, None, False, None, None, ("/m/ad.lora.gguf",))]
 
 
 def test_moe_expert_mass_threads_into_serveable_via_build_spec(
@@ -622,7 +626,7 @@ def test_moe_expert_mass_threads_into_serveable_via_build_spec(
 
     monkeypatch.setattr(serving, "load_serveable_model", recorder)
     serving.set_build_spec(types.SimpleNamespace(
-        chat_template=None, adapter=None, stream="experts",
+        chat_template=None, adapters=(), stream="experts",
         moe_expert_mass=0.9))
     patched("/m/text.gguf")
     assert seen["stream"] == "experts"
@@ -636,9 +640,9 @@ def test_adapter_rides_build_spec_not_active_spec_across_thread(installed_bridge
     patched, _, serveable_calls = installed_bridge
     serving._active_spec.set(
         types.SimpleNamespace(speculative=False, chat_template=None,
-                              adapter="WRONG-FROM-CONTEXTVAR"))
+                              adapters=("WRONG-FROM-CONTEXTVAR",)))
     serving.set_build_spec(
-        types.SimpleNamespace(chat_template=None, adapter="/m/right.lora.gguf"))
+        types.SimpleNamespace(chat_template=None, adapters=("/m/right.lora.gguf",)))
     seen = {}
 
     def worker():
@@ -650,7 +654,7 @@ def test_adapter_rides_build_spec_not_active_spec_across_thread(installed_bridge
     t.join()
     assert seen["active_spec"] is None
     assert serveable_calls == [
-        ("/m/text.gguf", None, None, False, None, None, "/m/right.lora.gguf")]
+        ("/m/text.gguf", None, None, False, None, None, ("/m/right.lora.gguf",))]
 
 
 def test_text_branch_applies_adapter(fake_load_mtp_model, monkeypatch):
@@ -668,7 +672,7 @@ def test_text_branch_applies_adapter(fake_load_mtp_model, monkeypatch):
     monkeypatch.setattr(
         serving, "_apply_gguf_adapter",
         lambda r, cfg, ad, base_gguf_path=None:
-        applied.append((r, cfg, ad, base_gguf_path)))
+        applied.append((r, cfg, ad, base_gguf_path)) or ())
     serving.load_serveable_model("/m/text.gguf", adapter_gguf="/m/ad.lora.gguf")
     # base_gguf_path rides along so the adapter's arch is gated against the
     # base's before install (clean mismatch error, not missing-targets).
@@ -706,15 +710,17 @@ def test_serveable_mtp_applies_adapter_to_language_model(monkeypatch):
             self.config = {"model_type": "deepseek_v4"}
 
     target = _Target()
-    monkeypatch.setattr(
-        "gmlx.spec.mtp_load.load_mtp_model",
-        lambda path, **kw: (target, "DRAFTER", {"model_type": "deepseek_v4"},
-                            object()))
+
+    def load(path, before_wire=None, **kw):
+        before_wire(target.language_model, {"model_type": "deepseek_v4"})
+        return target, "DRAFTER", {"model_type": "deepseek_v4"}, object()
+
+    monkeypatch.setattr("gmlx.spec.mtp_load.load_mtp_model", load)
     applied = []
     monkeypatch.setattr(
         serving, "_apply_gguf_adapter",
         lambda r, cfg, ad, base_gguf_path=None:
-        applied.append((r, ad, base_gguf_path)))
+        applied.append((r, ad, base_gguf_path)) or ())
     monkeypatch.setattr(serving, "_ensure_inner_config", lambda m, c: None)
     monkeypatch.setattr(serving, "_make_text_processor", lambda tok: "PROC")
     serving._load_serveable_mtp("/m/t.gguf", adapter_gguf="/m/ad.lora.gguf")
@@ -875,3 +881,22 @@ def test_the_mtp_loaders_wire_their_target_only_after_the_table_install():
     assert calls["_wire_big_model"] == {("mtp_load.py", "_wire_target")}
     assert calls["_wire_target"] == {("mtp_load.py", "load_mtp_model"),
                                      ("mtp_load.py", "load_vlm_mtp_model")}
+
+
+def test_an_embedding_adapter_on_a_tied_mtp_base_is_refused_before_any_build(
+        installed_bridge, tmp_path, monkeypatch):
+    """The header check runs before the MTP branch, so a tied base is never
+    built, degraded and rebuilt plain to fail again."""
+    pytest.importorskip("gguf")
+    from lora_gguf import mint_adapter, mint_base
+
+    patched, _, serveable_calls = installed_bridge
+    base = mint_base(tmp_path / "tied.gguf", tied=True)
+    ad = mint_adapter(tmp_path / "embd.gguf")
+    serving.register_gguf_mtp(base)
+    degraded = []
+    monkeypatch.setattr(serving, "_degrade_failed_mtp", lambda *a: degraded.append(a))
+    serving.set_build_spec(_resolved_stub(path=base, speculative=True, adapters=(ad,)))
+    with pytest.raises(ValueError, match="output head"):
+        patched(base)
+    assert serveable_calls == [] and degraded == []

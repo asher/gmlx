@@ -43,6 +43,7 @@ _UTILS = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
 _RUNTIME = importlib.import_module("gmlx._vendor.mlx_vlm.server.runtime").runtime
 
 MODEL_ID = "stub"
+MIX_ID = "stub-mix"   # the same file, with two adapters
 MODEL_PATH = "/abs/wire-stub.gguf"  # absolute path: resolver skips the stat
 DEFAULT_TEXT = "Hello world."
 
@@ -87,6 +88,8 @@ class _FakeResponseGenerator:
         self.prefill_delay_s = 0.0  # models prefill: first next() blocks
         self.iter_closed = False
         self.overflow_on = ()       # seams that run the context check
+        self.raise_on_generate = None  # an engine error generate raises
+        self.token_script = None    # list[StreamingToken kwargs] override
 
     def _tokens(self):
         return self.script or [("Hello", None), (" world", None), (".", "stop")]
@@ -99,10 +102,17 @@ class _FakeResponseGenerator:
     def validate_context_budget(self, prompt, images, audio, args):
         self._check_budget("validate", args)
 
+    def _preprocess_request(self, prompt, images=None, audio=None, videos=None):
+        return {"input_ids": [self.tokenizer.encode(prompt)]}
+
     def generate(self, prompt=None, images=None, audio=None, args=None):
         self.calls.append({"prompt": prompt, "args": args})
         self._check_budget("generate", args)
-        ctx = _GEN.GenerationContext(uid=1, prompt_tokens=self.prompt_tokens)
+        if self.raise_on_generate is not None:
+            raise self.raise_on_generate
+        ctx = _GEN.GenerationContext(
+            uid=1, prompt_tokens=self.prompt_tokens,
+            prompt_ids=list(range(1, self.prompt_tokens + 1)))
 
         def _iter():
             try:
@@ -110,6 +120,10 @@ class _FakeResponseGenerator:
                     # runs under asyncio.to_thread, so the event loop stays
                     # free to emit keepalives while this blocks
                     time.sleep(self.prefill_delay_s)
+                if self.token_script is not None:
+                    for kw in self.token_script:
+                        yield _GEN.StreamingToken(prompt_tps=250.0, **kw)
+                    return
                 for i, (text, fin) in enumerate(self._tokens()):
                     yield _GEN.StreamingToken(
                         text=text, token=100 + i, logprobs=-0.1,
@@ -159,7 +173,7 @@ _CONFIG = _WireConfig()
 # -- fixture: real routes + full patch set over the fakes ----------------------
 
 @pytest.fixture(scope="module")
-def wire_app(module_engine_seams):
+def wire_app(module_engine_seams, tmp_path_factory):
     # module_engine_seams restores the engine classes after this teardown,
     # ResponseGenerator._make_logits_processors among them.
     fastapi_app = _APP.app
@@ -215,11 +229,17 @@ def wire_app(module_engine_seams):
     }
 
     serving.clear_resolved_models()
+    adapters = tmp_path_factory.mktemp("adapters")
+    for name in ("a.gguf", "b.gguf"):
+        (adapters / name).write_bytes(b"GGUF")
     cfg = build_config({
         "server": {"host": "127.0.0.1", "port": 8080,
                    "stt": "mlx-community/whisper-large-v3-turbo"},
         "profiles": {"fast": {"sampling": {"temperature": 0.15}}},
-        "models": {MODEL_ID: {"path": MODEL_PATH}},
+        "models": {MODEL_ID: {"path": MODEL_PATH},
+                   MIX_ID: {"path": MODEL_PATH, "adapters": [
+                       {"path": str(adapters / "a.gguf"), "strength": 0},
+                       str(adapters / "b.gguf")]}},
     })
     serving.register_resolved_models(cfg)
     sp.install_server_patches(cfg, reload_fn=None)   # exactly the serve path
@@ -407,6 +427,77 @@ def test_chat_nonstream_wire_shape(wire):
     _assert_no_nulls(body["timings"], "$.timings")
 
 
+def test_chat_returns_token_ids_when_asked(wire):
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        return_token_ids=True, logprobs=True))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["prompt_token_ids"] == [1, 2, 3, 4, 5, 6, 7]
+    choice = body["choices"][0]
+    assert choice["token_ids"] == [100, 101, 102]
+    assert len(choice["logprobs"]["content"]) == len(choice["token_ids"])
+
+
+def test_chat_token_ids_stream_with_the_prompt_ids_first(wire):
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        stream=True, return_token_ids=True))
+    assert r.status_code == 200, r.text
+    chunks = [json.loads(p) for p in _sse_data_lines(r.text)[:-1]]
+    for chunk in chunks:
+        _assert_no_nulls(chunk)
+    assert chunks[0]["prompt_token_ids"] == [1, 2, 3, 4, 5, 6, 7]
+    assert all("prompt_token_ids" not in c for c in chunks[1:])
+    ids = [t for c in chunks for ch in c["choices"] for t in ch.get("token_ids", [])]
+    assert ids == [100, 101, 102]
+
+
+def test_a_diffusion_model_refuses_return_token_ids(wire, monkeypatch):
+    diffusion = importlib.import_module("gmlx._vendor.mlx_vlm.generate.diffusion")
+    monkeypatch.setattr(diffusion, "is_diffusion_model", lambda model: True)
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(
+        return_token_ids=True))
+    assert r.status_code == 400
+    assert "return_token_ids" in r.text and not wire.gen.calls
+
+
+def test_tokenize_messages_gives_the_chat_routes_ids(wire):
+    body = _chat_body(messages=[
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "hi"}])
+    r = wire.client.post("/v1/chat/completions", json=body)
+    assert r.status_code == 200, r.text
+    prompt = wire.gen.calls[-1]["prompt"]
+    chat_ids = list(wire.gen._preprocess_request(prompt)["input_ids"][0])
+    r = wire.client.post("/tokenize", json={**body, "return_token_strs": True})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["tokens"] == chat_ids
+    assert out["count"] == len(chat_ids)
+    assert "max_model_len" in out
+    assert len(out["token_strs"]) == len(chat_ids)
+
+
+def test_tokenize_refuses_media_and_bad_bodies(wire):
+    import base64
+    import io
+
+    from PIL import Image
+
+    png = io.BytesIO()
+    Image.new("RGB", (2, 2)).save(png, format="PNG")
+    image = {"type": "image_url", "image_url": {
+        "url": "data:image/png;base64," + base64.b64encode(png.getvalue()).decode()}}
+    for body, fragment in (
+            ({"messages": [{"role": "user", "content": [image]}]}, "text messages only"),
+            ({"prompt": "a", "messages": [{"role": "user", "content": "a"}]}, "one of"),
+            ({}, "one of"),
+            ({"prompt": ["a"]}, "non-empty string"),
+            ({"prompt": "a", "add_special_tokens": "no"}, "true or false")):
+        r = wire.client.post("/v1/tokenize", json={"model": MODEL_ID, **body})
+        assert r.status_code == 400, (body, r.text)
+        assert fragment in r.text
+
+
 # 3. Anthropic surface (docs/internals/serving-architecture.md - ANTHROPIC_BASE_URL
 #    / Claude Code target /v1/messages)
 def test_messages_wire_shape(wire):
@@ -451,8 +542,8 @@ def test_messages_streaming_event_types(wire):
     assert said == DEFAULT_TEXT
 
 
-# 4. /v1/completions - the gmlx-installed minimal text route (single string
-#    prompt, n=1), driving the same engine seam without a chat template.
+# 4. /v1/completions - the gmlx-installed text route (string or token-id
+#    prompts, n=1), driving the same engine seam without a chat template.
 def test_completions_route_shape(wire):
     r = wire.client.post("/v1/completions", json={
         "model": MODEL_ID, "prompt": "hi", "max_tokens": 8})
@@ -464,8 +555,8 @@ def test_completions_route_shape(wire):
     assert body["choices"][0]["finish_reason"] == "stop"
     assert body["usage"]["prompt_tokens"] == 7
     assert body["usage"]["completion_tokens"] == 3
-    # the raw prompt reached the engine untouched - no chat template applied
-    assert wire.gen.calls[-1]["prompt"] == "hi"
+    # the raw prompt reached the engine as its ids - no chat template applied
+    assert wire.gen.calls[-1]["prompt"] == [1]
 
 
 def test_completions_stream_shape(wire):
@@ -483,11 +574,104 @@ def test_completions_stream_shape(wire):
 
 def test_completions_rejects_out_of_scope(wire):
     r = wire.client.post("/v1/completions", json={
-        "model": MODEL_ID, "prompt": ["a", "b"]})
+        "model": MODEL_ID, "prompt": ["a", 1]})
     assert r.status_code == 400
     r = wire.client.post("/v1/completions", json={
         "model": MODEL_ID, "prompt": "hi", "n": 2})
     assert r.status_code == 400
+
+
+# 4a. thinking-budget fields (sampling): llama-server's names reach the
+#     engine, and a bad field is a 400 in each route's error body.
+_BUDGET_ROUTES = {
+    "chat": ("/v1/chat/completions", lambda **kw: _chat_body(**kw)),
+    "responses": ("/v1/responses",
+                  lambda **kw: {"model": MODEL_ID, "input": "hi", **kw}),
+    "messages": ("/v1/messages", lambda **kw: {
+        "model": MODEL_ID, "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}], **kw}),
+    "completions": ("/v1/completions",
+                    lambda **kw: {"model": MODEL_ID, "prompt": "hi", **kw}),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_BUDGET_ROUTES))
+def test_llama_server_budget_names_reach_the_engine(wire, route):
+    path, body = _BUDGET_ROUTES[route]
+    r = wire.client.post(path, json=body(reasoning_budget_tokens=32,
+                                         reasoning_budget_message="Go."))
+    assert r.status_code == 200, r.text
+    args = wire.gen.calls[-1]["args"]
+    assert (args.thinking_budget, args.thinking_budget_message) == (32, "Go.")
+
+
+def _error_message(r):
+    body = r.json()
+    return body["error"]["message"]
+
+
+@pytest.mark.parametrize("route", sorted(_BUDGET_ROUTES))
+@pytest.mark.parametrize("fields,message", [
+    ({"thinking_budget": 8, "reasoning_budget_tokens": 8},
+     "Set thinking_budget or reasoning_budget_tokens, not both."),
+    ({"thinking_budget_message": "a", "reasoning_budget_message": "b"},
+     "Set thinking_budget_message or reasoning_budget_message, not both."),
+    ({"reasoning_budget_tokens": "5"},
+     "reasoning_budget_tokens must be an integer of -1 or more."),
+    ({"thinking_budget": -2},
+     "thinking_budget must be an integer of -1 or more."),
+    ({"reasoning_budget_message": 7},
+     "reasoning_budget_message must be a string."),
+])
+def test_budget_field_errors_are_400(wire, route, fields, message):
+    path, body = _BUDGET_ROUTES[route]
+    r = wire.client.post(path, json=body(**fields))
+    assert r.status_code == 400, r.text
+    assert _error_message(r) == message
+    if route == "messages":
+        assert r.json()["type"] == "error"
+    assert not wire.gen.calls
+
+
+def test_messages_budget_tokens_conflict_names_its_field(wire):
+    path, body = _BUDGET_ROUTES["messages"]
+    r = wire.client.post(path, json=body(
+        thinking={"type": "enabled", "budget_tokens": 64},
+        reasoning_budget_tokens=32))
+    assert r.status_code == 400, r.text
+    assert _error_message(r) == (
+        "Set thinking.budget_tokens or reasoning_budget_tokens, not both.")
+
+
+@pytest.mark.parametrize("route", sorted(_BUDGET_ROUTES))
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_budget_on_a_stock_drafter_is_400_before_the_reply(
+        wire, monkeypatch, route, stream):
+    monkeypatch.setattr(wire.gen, "draft_model", object(), raising=False)
+    monkeypatch.setattr(wire.gen, "draft_kind", "eagle3", raising=False)
+    path, body = _BUDGET_ROUTES[route]
+    r = wire.client.post(path, json=body(reasoning_budget_tokens=16,
+                                         stream=stream))
+    assert r.status_code == 400, r.text
+    assert _error_message(r) == (
+        "This model cannot run a thinking budget while it speculates with "
+        "draft kind 'eagle3'. Remove reasoning_budget_tokens, or serve the "
+        "model without the drafter.")
+    assert not wire.gen.calls
+
+
+def test_a_count_with_a_budget_on_a_stock_drafter_still_counts(
+        wire, monkeypatch):
+    monkeypatch.setattr(wire.gen, "draft_model", object(), raising=False)
+    monkeypatch.setattr(wire.gen, "draft_kind", "eagle3", raising=False)
+    monkeypatch.setattr(
+        wire.gen, "_cpu_preprocess",
+        lambda prompt, images, audio: {"input_ids": [[1, 2, 3]]}, raising=False)
+    r = wire.client.post("/v1/messages/count_tokens", json={
+        "model": MODEL_ID, "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_budget_tokens": 16})
+    assert r.status_code == 200, r.text
+    assert "input_tokens" in r.json()
 
 
 # 4b. tool_choice "none" enforcement (api_contract): tools are dropped before
@@ -1260,7 +1444,7 @@ def test_metrics_resident_models_and_timings(wire):
     assert m.status_code == 200, m.text
     payload = m.json()
     entry = payload["server"]["resident_models"][0]
-    assert entry["ids"] == [MODEL_ID]
+    assert entry["ids"] == [MODEL_ID, MIX_ID]   # one copy: same file, adapter union
     assert entry["pinned"] is True
     assert entry["idle_s"] == 4.6                    # rounded to 0.1
     assert entry["ttl_s"] == 900
@@ -1521,3 +1705,218 @@ def test_the_stock_image_handlers_are_unreachable(wire, monkeypatch):
     for path in ("/v1/images/generations", "/images/edits"):
         r = wire.client.post(path, json={"prompt": "x", "model": "/tmp/m"})
         assert r.status_code in (400, 404), r.text
+
+
+# -- logprobs -------------------------------------------------------------------
+
+_RAW_BYTES = {100: b"\xe2", 101: b"\x82", 102: b"</s>", 7: b"\xac", 8: b"q"}
+
+
+@pytest.fixture()
+def lp_wire(wire, monkeypatch):
+    import gmlx.load.tokenizer as tok_mod
+
+    monkeypatch.setattr(
+        tok_mod, "token_bytes_for",
+        lambda tokenizer, ids, *, lock=None: [_RAW_BYTES[int(i)] for i in ids])
+    wire.gen.token_script = [
+        dict(text="a", token=100, logprobs=-0.5,
+             top_logprobs=[(100, -0.5), (7, -1e6), (8, float("-inf"))],
+             finish_reason=None),
+        dict(text="b", token=101, logprobs=-1.25,
+             top_logprobs=[(7, -0.2), (101, -1.25), (8, -3.0)],
+             finish_reason=None),
+        dict(text="", token=102, logprobs=-0.01,
+             top_logprobs=[(102, -0.01), (7, -5.0), (8, -6.0)],
+             finish_reason="stop"),
+    ]
+    return wire
+
+
+def _stream_entries(text):
+    out = []
+    for p in _sse_data_lines(text):
+        if p == "[DONE]":
+            continue
+        for ch in json.loads(p).get("choices", []):
+            out += (ch.get("logprobs") or {}).get("content", [])
+    return out
+
+
+def _entries(client, stream, **kw):
+    r = client.post("/v1/chat/completions", json=_chat_body(
+        stream=stream, logprobs=True, **kw))
+    assert r.status_code == 200, r.text
+    if stream:
+        return _stream_entries(r.text)
+    return r.json()["choices"][0]["logprobs"]["content"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_logprob_entries_carry_raw_bytes_and_keep_the_stop_token(lp_wire, stream):
+    got = _entries(lp_wire.client, stream, top_logprobs=2)
+    assert [e["logprob"] for e in got] == [-0.5, -1.25, -0.01]
+    assert [e["bytes"] for e in got] == [[0xE2], [0x82], list(b"</s>")]
+    assert [e["token"] for e in got] == ["x", "x", "x"]
+    # Below -9999 and non-finite values clamp to -9999.0.
+    assert [t["logprob"] for t in got[0]["top_logprobs"]] == [-0.5, -9999.0]
+    assert got[0]["top_logprobs"][1]["bytes"] == [0xAC]
+    assert all(len(e["top_logprobs"]) == 2 for e in got)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_return_tokens_as_token_ids_names_every_token_by_id(lp_wire, stream):
+    got = _entries(lp_wire.client, stream, top_logprobs=3,
+                   return_tokens_as_token_ids=True)
+    assert [e["token"] for e in got] == ["token_id:100", "token_id:101",
+                                         "token_id:102"]
+    assert [t["token"] for t in got[1]["top_logprobs"]] == [
+        "token_id:7", "token_id:101", "token_id:8"]
+    assert got[2]["top_logprobs"][2]["logprob"] == -6.0
+    for e in got:
+        assert "id" not in e and all("id" not in t for t in e["top_logprobs"])
+    assert got[0]["bytes"] == [0xE2]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_row_with_no_token_adds_no_entry(lp_wire, stream):
+    lp_wire.gen.token_script[-1] = dict(
+        text="", token=0, logprobs=None, finish_reason="stop", token_count=0)
+    got = _entries(lp_wire.client, stream)
+    assert [e["logprob"] for e in got] == [-0.5, -1.25]
+
+
+def test_a_missing_logprob_entry_is_an_error_never_zero(lp_wire):
+    lp_wire.gen.token_script[1]["logprobs"] = None
+    r = lp_wire.client.post("/v1/chat/completions",
+                            json=_chat_body(logprobs=True))
+    assert r.status_code == 500, r.text
+    assert "no logprob entry for token 101" in r.text
+    r = lp_wire.client.post("/v1/chat/completions",
+                            json=_chat_body(logprobs=True, stream=True))
+    errors = [json.loads(p)["error"] for p in _sse_data_lines(r.text)
+              if p != "[DONE]" and "error" in json.loads(p)]
+    assert errors == ["no logprob entry for token 101"]
+    # A request without logprobs never looks.
+    r = lp_wire.client.post("/v1/chat/completions", json=_chat_body())
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("field,value,msg", [
+    ("return_tokens_as_token_ids", "yes please", "valid boolean"),
+    ("top_logprobs", -1, "greater than or equal to 0"),
+])
+def test_logprob_fields_are_typed(wire, field, value, msg):
+    r = wire.client.post("/v1/chat/completions",
+                         json=_chat_body(logprobs=True, **{field: value}))
+    assert r.status_code == 422, r.text
+    assert msg in r.text
+
+
+def test_a_diffusion_model_refuses_logprobs(wire, monkeypatch):
+    diffusion = importlib.import_module("gmlx._vendor.mlx_vlm.generate.diffusion")
+    monkeypatch.setattr(diffusion, "is_diffusion_model", lambda m, kw=None: True)
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(logprobs=True))
+    assert r.status_code == 400, r.text
+    assert f"logprobs are not available on diffusion model '{MODEL_ID}'" in r.text
+    assert not wire.gen.calls
+    r = wire.client.post("/v1/chat/completions", json=_chat_body())
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("draft_model,kind,status", [
+    (object(), "eagle", 400),
+    (object(), "mtp", 200),
+    (None, "eagle", 200),       # a kind alone is not a drafter
+    (object(), None, 200),
+])
+def test_a_stock_drafter_refuses_logprobs(wire, monkeypatch, draft_model, kind,
+                                          status):
+    monkeypatch.setattr(wire.gen, "draft_model", draft_model, raising=False)
+    monkeypatch.setattr(wire.gen, "draft_kind", kind, raising=False)
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(logprobs=True))
+    assert r.status_code == status, r.text
+    if status == 400:
+        assert (f"logprobs are not available while model '{MODEL_ID}' speculates "
+                "with draft kind 'eagle'; set speculative: false on the entry"
+                ) in r.text
+
+
+# adapters and lora: every route on the gen-args seam refuses a bad field
+# with the same 400, and passes a good one through as the row's scales.
+
+_ADAPTER_ROUTES = {
+    "chat": ("/v1/chat/completions", lambda m, **kw: _chat_body(model=m, **kw)),
+    "responses": ("/v1/responses", lambda m, **kw: {"model": m, "input": "hi", **kw}),
+    "responses_input_tokens": ("/v1/responses/input_tokens",
+                               lambda m, **kw: {"model": m, "input": "hi", **kw}),
+    "messages": ("/v1/messages", lambda m, **kw: {
+        "model": m, "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}], **kw}),
+    "count_tokens": ("/v1/messages/count_tokens", lambda m, **kw: {
+        "model": m, "messages": [{"role": "user", "content": "hi"}], **kw}),
+    "completions": ("/v1/completions", lambda m, **kw: {
+        "model": m, "prompt": "hi", "max_tokens": 4, **kw}),
+    "estimate": ("/v1/estimate", lambda m, **kw: _chat_body(model=m, **kw)),
+}
+
+
+def _error_text(r):
+    body = r.json()
+    err = body.get("error", body)
+    if isinstance(err, dict):
+        return err.get("message") or str(err.get("detail") or "")
+    return str(body.get("detail", err))
+
+
+@pytest.mark.parametrize("route", sorted(_ADAPTER_ROUTES))
+@pytest.mark.parametrize("model,fields,message", [
+    (MIX_ID, {"adapters": ["c.gguf"]},
+     "adapter 'c.gguf' is not an adapter of model 'stub-mix'; a request sets "
+     "the strength of the adapters its model entry loads (see /v1/models)"),
+    (MIX_ID, {"adapters": [], "lora": []}, "Set adapters or lora, not both."),
+    (MIX_ID, {"lora": [{"id": 2, "scale": 1}]},
+     "lora id 2 is out of range; model 'stub-mix' has 2 adapters (ids 0 to 1)"),
+    (MODEL_ID, {"lora": [{"id": 0, "scale": 1}]},
+     "model 'stub' loads no adapters; adapters and lora apply only to a model "
+     "entry with adapters"),
+])
+def test_a_bad_adapter_field_is_a_400_on_every_route(wire, route, model, fields,
+                                                     message):
+    path, body = _ADAPTER_ROUTES[route]
+    r = wire.client.post(path, json=body(model, **fields))
+    assert r.status_code == 400, r.text
+    assert message in _error_text(r)
+    assert not wire.gen.calls
+
+
+@pytest.mark.parametrize("fields,scales", [
+    ({}, (0.0, 1.0)),
+    ({"adapters": [{"id": "a.gguf", "strength": 0.5}]}, (0.5, 1.0)),
+    ({"lora": [{"id": 0, "scale": 0.25}]}, (0.25, 0.0)),
+])
+def test_an_adapter_field_reaches_the_row(wire, fields, scales):
+    r = wire.client.post("/v1/chat/completions", json=_chat_body(model=MIX_ID,
+                                                                 **fields))
+    assert r.status_code == 200, r.text
+    assert wire.gen.calls[-1]["args"]._kq_lora.scales == scales
+
+
+@pytest.mark.parametrize("route,status,shown", [
+    ("chat", 500, "no loaded adapter identities"),
+    ("responses", 500, "no loaded adapter identities"),
+    ("messages", 500, "no loaded adapter identities"),
+    ("completions", 500, "generation failed (AdapterIdentityMissing)"),
+])
+def test_a_missing_adapter_identity_is_a_server_error(wire, route, status, shown):
+    """The engine raises it from the row's insert, and generate raises it:
+    a server defect, never reported as the client's 400. Completions names
+    the type and leaves the message to the server log."""
+    from gmlx.serve.lora_request import AdapterIdentityMissing
+
+    wire.gen.raise_on_generate = AdapterIdentityMissing(
+        "model 'stub-mix' has no loaded adapter identities; this is a gmlx defect")
+    path, body = _ADAPTER_ROUTES[route]
+    r = wire.client.post(path, json=body(MIX_ID))
+    assert r.status_code == status, r.text
+    assert shown in r.text

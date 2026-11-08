@@ -89,7 +89,7 @@ def _generate(monkeypatch, tok, script, after, *, prompt=_PROMPT, budget=3):
 def test_budget_caps_the_reasoning_block(monkeypatch, template):
     tok, text = _generate(monkeypatch, at.AtemTokenizer(template),
                           _REASON + _ANSWER, _ANSWER)
-    assert text == " to=self<|message|>Thinking hard about\n<|eom|>" + _ANSWER
+    assert text == " to=self<|message|>Thinking hard\n<|eom|>" + _ANSWER
     assert not tok.thinking_budget_criteria.in_thinking
 
 
@@ -97,11 +97,11 @@ def test_budget_leaves_commentary_and_the_answer_alone(monkeypatch):
     head = " to=commentary<|message|>Hello world foo bar<|eom|><|start|>assistant"
     tok, text = _generate(monkeypatch, at.AtemTokenizer(),
                           head + _REASON + _ANSWER, _ANSWER)
-    assert text == (head + " to=self<|message|>Thinking hard about\n<|eom|>"
+    assert text == (head + " to=self<|message|>Thinking hard\n<|eom|>"
                     + _ANSWER)
-    # The reasoning tokens up to the cap and the forced newline. The
-    # commentary counts for nothing.
-    assert tok.thinking_budget_criteria.thinking_token_count == 5
+    # The reasoning tokens up to the cap. The commentary and the forced
+    # tokens count for nothing.
+    assert tok.thinking_budget_criteria.thinking_token_count == 3
 
 
 def test_a_prompt_with_closed_reasoning_does_not_start_inside(monkeypatch):
@@ -119,4 +119,21 @@ def test_a_prompt_that_opens_reasoning_counts_from_the_start(monkeypatch):
     tok, text = _generate(monkeypatch, at.AtemTokenizer(),
                           "Thinking hard about it now.<|eom|>" + _ANSWER,
                           _ANSWER, prompt=prompt)
-    assert text == "Thinking hard about\n<|eom|>" + _ANSWER
+    assert text == "Thinking hard\n<|eom|>" + _ANSWER
+
+
+def test_prompt_reasoning_after_the_start_marker_counts(monkeypatch):
+    # "Th" and "inking" in the prompt spend two of the three tokens.
+    prompt = _PROMPT + " to=self<|message|>Thinking"
+    tok, text = _generate(monkeypatch, at.AtemTokenizer(),
+                          " hard about it now.<|eom|>" + _ANSWER,
+                          _ANSWER, prompt=prompt)
+    assert text == " hard\n<|eom|>" + _ANSWER
+    assert tok.thinking_budget_criteria.thinking_token_count == 3
+
+
+def test_budget_minus_one_sets_no_budget(monkeypatch):
+    tok, text = _generate(monkeypatch, at.AtemTokenizer(),
+                          _REASON + _ANSWER, "", budget=-1)
+    assert text == _REASON + _ANSWER
+    assert tok.thinking_budget_criteria is None

@@ -111,6 +111,9 @@ def _models_payload() -> dict:
             # compaction from.
             "context_length": _context_length(spec or rm),
             "max_context_at_width_1": _capacity.max_context_at_width_1(rm.path),
+            # Index (the lora id), file name, default strength and the
+            # sha256 of the loaded bytes; never a path.
+            "adapters": serving.adapter_listing(spec or rm, pool),
             **({"alias_of": alias_of} if alias_of else {}),
         }
 

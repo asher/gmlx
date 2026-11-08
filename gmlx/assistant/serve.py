@@ -542,6 +542,15 @@ def _wrap_chat_routes(app, state) -> None:
                     message += (f", or send the dry run with the model "
                                 f"{alias.model!r} to estimate the messages alone")
                 return _openai_error(400, message + ".", "invalid_request_error")
+            extra = getattr(request, "model_extra", None) or {}
+            if ("continue_final_message" in extra
+                    or "add_generation_prompt" in extra):
+                # The turns build their own prompt, so neither field could
+                # reach it.
+                return _openai_error(400, (
+                    "continue_final_message and add_generation_prompt are not "
+                    f"available for the assistant model {alias_id!r}, because "
+                    "its turns build their own prompt."), "invalid_request_error")
             headers = http_request.headers
             return await _assistant_completion(
                 state, alias_id, alias, registry, request, session=session,

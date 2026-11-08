@@ -113,6 +113,11 @@ def test_gmlx_extras_allowlist_matches_patch_reads():
         "xtc_probability",      # sampling XTC
         "xtc_threshold",
         "thinking",             # chat_behavior: z.ai {"type": en/disabled} spelling
+        "adapters",             # lora_request: per-request adapter strengths
+        "lora",                 # lora_request: llama-server spelling, by index
+        "thinking_budget_message",   # sampling: the thinking-budget fields
+        "reasoning_budget_tokens",
+        "reasoning_budget_message",
     }
 
 
@@ -126,6 +131,16 @@ def test_known_ignored_params_do_warn():
     assert "stop" not in sp_api.RESPONSES_CONSUMED
     # output_config IS read (json_schema -> response_format): never warn
     assert "output_config" in sp_api.ANTHROPIC_CONSUMED
+
+
+def test_prefill_fields_are_chat_only():
+    """The chat route reads the prefill fields; Responses and Messages warn
+    on them."""
+    for name in ("continue_final_message", "add_generation_prompt"):
+        assert name in sp_api.CHAT_CONSUMED
+        assert name not in sp_api.RESPONSES_CONSUMED
+        assert name not in sp_api.ANTHROPIC_CONSUMED
+        assert f"| `{name}` | Honored | Ignored | Ignored |" in _DOCS.read_text()
 
 
 def test_doc_table_rows_match_allowlists():
@@ -250,6 +265,31 @@ def test_chat_consumed_fields_never_warn():
         logger.removeHandler(handler)
 
 
+def test_return_token_ids_is_read_on_chat_only():
+    assert "return_token_ids" in sp_api.CHAT_CONSUMED
+    for consumed in (sp_api.COMPLETIONS_CONSUMED, sp_api.RESPONSES_CONSUMED,
+                     sp_api.ANTHROPIC_CONSUMED, sp_api.SYSTEMONE_CONSUMED):
+        assert "return_token_ids" not in consumed
+
+
+def test_return_tokens_as_token_ids_is_read_on_chat_and_completions():
+    assert "return_tokens_as_token_ids" in sp_api.CHAT_CONSUMED
+    assert "return_tokens_as_token_ids" in sp_api.COMPLETIONS_CONSUMED
+    for consumed in (sp_api.RESPONSES_CONSUMED, sp_api.ANTHROPIC_CONSUMED,
+                     sp_api.SYSTEMONE_CONSUMED):
+        assert "return_tokens_as_token_ids" not in consumed
+    records, handler, logger = _capture_warnings()
+    try:
+        client = _client_with("/v1/chat/completions", _chat_stub({}))
+        r = client.post("/v1/chat/completions", json={
+            "model": "m", "messages": [{"role": "user", "content": "x"}],
+            "logprobs": True, "return_tokens_as_token_ids": True})
+        assert r.status_code == 200
+        assert not [m for m in records if "ignoring unsupported" in m]
+    finally:
+        logger.removeHandler(handler)
+
+
 def test_top_logprobs_above_cap_warns(monkeypatch):
     monkeypatch.delenv("TOP_LOGPROBS_K", raising=False)
     records, handler, logger = _capture_warnings()
@@ -257,11 +297,27 @@ def test_top_logprobs_above_cap_warns(monkeypatch):
         client = _client_with("/v1/chat/completions", _chat_stub({}))
         r = client.post("/v1/chat/completions", json={
             "model": "m", "messages": [{"role": "user", "content": "x"}],
-            "logprobs": True, "top_logprobs": 5})
+            "logprobs": True, "top_logprobs": 25})
         assert r.status_code == 200
         warns = [m for m in records if "TOP_LOGPROBS_K" in m]
         assert len(warns) == 1
-        assert "top_logprobs=5" in warns[0]
+        assert "top_logprobs=25" in warns[0]
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_the_default_cap_is_20(monkeypatch):
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    monkeypatch.delenv("TOP_LOGPROBS_K", raising=False)
+    assert gen.get_top_logprobs_k() == 20
+    records, handler, logger = _capture_warnings()
+    try:
+        client = _client_with("/v1/chat/completions", _chat_stub({}))
+        r = client.post("/v1/chat/completions", json={
+            "model": "m", "messages": [{"role": "user", "content": "x"}],
+            "logprobs": True, "top_logprobs": 5})
+        assert r.status_code == 200
+        assert not [m for m in records if "TOP_LOGPROBS_K" in m]
     finally:
         logger.removeHandler(handler)
 
@@ -552,16 +608,16 @@ def test_stream_watch_skips_non_forced_and_non_streams():
 def test_top_logprobs_cap_clamped_to_engine_max(caplog, monkeypatch):
     import types
 
-    monkeypatch.setenv("TOP_LOGPROBS_K", "50")
-    req = types.SimpleNamespace(top_logprobs=30)
+    monkeypatch.setenv("TOP_LOGPROBS_K", "500")
+    req = types.SimpleNamespace(top_logprobs=150)
     with caplog.at_level(logging.WARNING, logger=sp_api.__name__):
         sp_api._maybe_warn_top_logprobs("/v1/chat/completions", req)
-    # the engine clamps the effective cap to 20, so 30 must warn even though
-    # the raw env value says 50
-    assert any("top_logprobs=30 exceeds the server cap 20" in r.message
+    # the engine clamps the effective cap to 100, so 150 must warn even
+    # though the raw env value says 500
+    assert any("top_logprobs=150 exceeds the server cap 100" in r.message
                for r in caplog.records)
     caplog.clear()
-    req = types.SimpleNamespace(top_logprobs=15)
+    req = types.SimpleNamespace(top_logprobs=50)
     with caplog.at_level(logging.WARNING, logger=sp_api.__name__):
         sp_api._maybe_warn_top_logprobs("/v1/chat/completions", req)
     assert not caplog.records                     # within the effective cap

@@ -39,9 +39,53 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx run`, chat and `gmlx serve`, and answers `/v1/audio/transcriptions`
   and `/v1/audio/translations` itself, with word times and speakers.
   `gmlx pull nemotron-3.5-transcribe` downloads the model with its encoder.
+- A chat model entry loads several LoRA adapters with `adapters:`, each at a
+  default strength, and a request sets their strengths for itself with
+  `adapters` or llama-server's `lora` field. `/v1/models` lists each entry's
+  adapters with the sha256 of the loaded file. See
+  [Mixing adapters per request](docs/lora.md#mixing-adapters-per-request).
+- `gmlx serve`, `run`, `chat`, `capture` and `kld` take
+  `--adapter PATH[:STRENGTH]` as `gmlx image` does, and repeat it for more
+  adapters. In chat, `/adapter S` sets an absolute strength. See
+  [Use the adapter](docs/lora.md#use-the-adapter).
+- `gmlx capture` records the residual stream after each decoder block over
+  sets of prompts, into a safetensors file. See
+  [gmlx capture](docs/cli.md#gmlx-capture).
+- `gmlx kld` reports the KL divergence over a text from a reference GGUF to a
+  model, as `llama-perplexity --kl-divergence` does, and scores adapters at
+  several strengths in one run. See [gmlx kld](docs/cli.md#gmlx-kld).
+- `/v1/chat/completions` continues a partial last assistant message with
+  `continue_final_message` and `add_generation_prompt: false`, in the prompt
+  llama-server renders. See [Assistant prefill](docs/api.md#assistant-prefill).
+- A request's `thinking_budget_message` puts its text in the thinking block
+  before the end marker when the budget runs out. llama-server's
+  `reasoning_budget_tokens` and `reasoning_budget_message` work too. See
+  [Thinking budget](docs/api.md#thinking-budget).
+- `return_tokens_as_token_ids: true` names each logprob token
+  `token_id:<id>`, as vLLM does. See [Logprobs](docs/api.md#logprobs).
+- A LoRA adapter with a `token_embd.weight` pair, such as a PEFT adapter that
+  trains `embed_tokens`, loads on a model with its own output head. See
+  [Limitations](docs/lora.md#limitations).
+- An adapter that changes expert weights loads on models whose MoE blocks
+  run fused, such as Qwen3.5 and Qwen3.6 MoE, when they run in memory. In
+  `gmlx serve` a block leaves its fused path only in a step where a request
+  has one of its adapters on.
+- `/v1/completions` takes token-id prompts, lists of prompts and
+  `add_special_tokens`, and returns `logprobs` in the OpenAI completions
+  shape. See [Text completions](docs/api.md#text-completions).
+- `echo` with `logprobs` on `/v1/completions` returns the logprob of every
+  prompt token, and `max_tokens: 0` scores a prompt without generating.
+- `return_token_ids` on chat returns the prompt and reply token ids, and
+  `/tokenize` and `/detokenize` serve vLLM's shapes. See
+  [Tokens](docs/api.md#tokens).
 
 ### Changed
 
+- `gmlx run`, `gmlx chat` and `gmlx train` now follow the chat template's
+  thinking default, as `gmlx serve` does. Models whose template thinks only
+  when asked, such as Gemma 4, Qwen3.5-9B, MiniCPM-V 4.6 and
+  Nemotron-3.5-Bolt-E4B without an mmproj, no longer think unless asked, and
+  `gmlx train` no longer adds a thinking system turn to their chat records.
 - gmlx needs Python 3.11.1 or newer: 3.11.0 can stall image and video uploads.
 - `gmlx pull <name>` downloads each file from the latest commit of its
   repository, so a quant its publisher updates reaches you without a new gmlx
@@ -81,10 +125,83 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Speculative decoding verifies 2 to 8 drafted tokens at head dim 128 on a
   fused kernel where MLX built the whole score matrix, so Nemotron-H and
   other models with wide query groups draft faster at long context.
+- Logprobs are the log-softmax of the raw logits, before logit bias,
+  penalties and the other processors, as in llama.cpp and vLLM. A profile's
+  sampling values and the GGUF's sampling keys no longer change them.
+- `TOP_LOGPROBS_K` defaults to 20 and allows up to 100, so `top_logprobs`
+  returns alternatives without setup. Before, it defaulted to 0 and stopped
+  at 20.
+- A thinking budget of N lets N reasoning tokens through, as llama-server
+  does, where it let N+1 through, and the prompt's reasoning after its last
+  start marker counts against it.
+- A thinking budget of -1 takes the server's budget, and a negative budget in
+  the config or the environment means no budget, where it closed thinking at
+  once.
+- An adapter with no alpha, or an alpha of 0, applies at its strength with no
+  alpha scaling, as llama.cpp applies it, where gmlx refused it or applied
+  none of it.
+- `run`, chat and `gmlx serve` refuse an embedding adapter that the model
+  cannot take before the model loads, so `gmlx serve` unloads no model for
+  it.
+- With a `response_format` schema or XTC on `gmlx serve`, a reply on Qwen3,
+  MiniMax-M3, Flint, Ripple, Hy3 or HY4 starts with a thinking block or with
+  the schema, where its first token was free. A top-level `enable_thinking:
+  false` that the template does not turn off (GLM-5, K2 Horizon, Kimi K2.5 and
+  K3, and gpt-oss, Beam and Muse with `family_defaults: false`) gets the
+  schema after the reasoning, where the schema constrained the reasoning.
+- `max_tokens: 0` on `/v1/completions` needs `echo`; before, it generated a
+  reply of the default length.
 - Requires mlx-kquant 0.5.10.
 
 ### Fixed
 
+- `gmlx serve` frees the prompt memory of a request that ends at a stop
+  string or a client disconnect while other requests run. A request
+  cancelled during a shared prefill now stops instead of running to its
+  token limit.
+- A client that disconnects or stops at a stop string just after its
+  request finishes no longer ends another client's request.
+- The systemone reader no longer reads the rope positions of a live image or
+  video chat request, and reads a kept prefix at its own positions.
+- `/v1/systemone` answers on a vision model served with its mmproj, where
+  it failed with a server error because the processor has no `encode`.
+- A `response_format` grammar uses the vocabulary of the loaded tokenizer,
+  and an unloaded model's grammar vocabulary is freed. After a model reload,
+  it could mask tokens with the old model's vocabulary.
+- A reloaded model on `gmlx serve` logs its own `no boot KV costs stamped`
+  warning, which a reload could skip.
+- A model with a speculative drafter returns logprobs, from the target
+  model's verify pass, where the lists came back empty.
+- A greedy request that joins a batch of sampled requests decodes greedily,
+  and a request that asks for logprobs gets them in any batch.
+- A logprob's `bytes` hold the token's raw bytes from the vocabulary, where a
+  token that held part of a character came back as U+FFFD.
+- A rank-1 LoRA adapter written by llama.cpp's tools now loads. gmlx refused
+  it with "share no dimension - cannot infer rank".
+- An adapter that changes the gate or up projections of experts is refused
+  before the model loads, with a message that names the adapter and tensor.
+- Speculative decoding on a Qwen3.5 or Qwen3.6 MoE model with an adapter that
+  changes expert weights now verifies drafts against the adapted experts,
+  where it skipped them on drafts of two or more tokens.
+- An MTP load with an adapter that changes expert weights no longer fails
+  when the load reads a lookup table from the file, or when it streams experts
+  that run unfused.
+- A request on a text model with an adapter no longer reuses prompt cache
+  that another adapter file or a rewrite of the file wrote under the same id.
+- Two models with adapters that decode at once on one server no longer
+  take each other's adapter rows, and a long-running request keeps its
+  adapter when many requests finish around it.
+- An adapter file rewritten while the server runs no longer changes the
+  loaded model, since the server keeps its own copy of the weights.
+- A request during a config reload no longer sees a model list from both
+  the old and the new config.
+- A speculative drafter's head and an image model that borrows a chat model
+  as its text encoder run without the chat model's adapters, where both
+  failed in a server with adapters.
+- The server counts the memory of a chat model's adapters when it checks
+  whether the model fits.
+- An image request that names a file name two of the model's adapters share
+  gets a 400, where the server picked one of them.
 - Flint holds its residual stream in float32 in a bfloat16 graph too, as
   llama.cpp does, so a request in a batch no longer answers differently
   from the same request alone.
@@ -153,14 +270,41 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installs the safe KV quantization.
 - `gmlx serve` frees a finished request's images and audio at once. It kept
   the last request's inputs in memory until the next request arrived.
+- A request's thinking budget on a model whose stock drafter is not of kind
+  `mtp` gets a 400, where it got a 500, and a budget from the config there is
+  dropped with a warning.
+- The image and video prompt upsampler no longer takes the thinking budget of
+  the chat model's profile.
 - `gmlx serve` no longer unloads a chat model at its idle TTL while an image
   request rewrites its prompt or encodes its text through it.
 - The ComfyUI nodes show the server's 413 for a step body past its limit,
   where they said the server did not answer.
 - A chat, Responses, Messages or images request with a lone surrogate
   escape gets a 400 naming the field, where it returned a 500.
+- A thinking budget on Gemma 4 closes the thinking block at the budget, where
+  the budget never ran: `thinking_budget` on `gmlx serve`, and on `gmlx run`
+  and `gmlx chat` with an mmproj, and a Messages `thinking.budget_tokens`.
+- A `response_format` schema and XTC now apply on `gmlx serve` to models that
+  do not think, to Gemma 4, to Kimi K3 with thinking on or off, to
+  Nemotron-3.5-Bolt-E4B with thinking off, and to gpt-oss, Beam, MiniMax-M3,
+  Hy3 and HY4 with `family_defaults: false`. Before, they waited for a
+  `</think>` that these models never write, or refused the answer header that
+  Kimi K3 writes after its reasoning.
+- On Kimi K3, the schema and XTC apply after the `<|open|>response<|sep|>`
+  header, and a thinking budget that closes the reasoning writes that header.
+  An MLX-format Kimi K3 checkpoint gets the same schema, XTC, budget and
+  reasoning split as the GGUF.
+- Streamed Kimi K3 replies on `gmlx serve` no longer show the
+  `<|open|>response<|sep|>` header or the response and message closers in the
+  content, and trim whitespace as non-streamed replies do.
+- A system or developer message on a Gemma 4 model with vision (`mmproj:`,
+  `--mmproj` or an MLX-format checkpoint) renders as on the text model. It got
+  an extra space before the end of its turn, one more per video, a video
+  marker, or on older templates a Python list.
 - Cancel in ComfyUI stops the server's prompt upsampling for a text encode,
   where the server went on writing the caption and encoding it.
+- On a model with a built-in drafter, a thinking-budget close now lands whole
+  when another request joins, where its end was lost.
 - Byte-level GGUF tokenizers split words as llama.cpp does for Qwen 3.5,
   MiniCPM-V 4, SmolLM, GPT-2, Llama 3 and Tekken (Nemotron 3.5, Mistral)
   vocabs, so Hindi, Thai, blank lines and indented code get llama.cpp's ids.
@@ -168,6 +312,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   apply NFC, and an unknown or empty pre-tokenizer name prints a warning.
 - `/v1/completions` adds BOS to a raw prompt on Gemma 3 and 4, as
   llama-server does.
+- A `response_format` request that `gmlx serve` cuts off to free memory now
+  resumes on its schema, where it could fail every running request.
+- A thinking-budget close that `gmlx serve` cuts off to free memory now
+  finishes when the request resumes, where the model could think on past
+  its budget.
+- When `gmlx serve` retires a request to free memory and resumes it, the
+  reply now goes on from where it stopped. Before, it could repeat or skip
+  text, or end every running request with an error.
+- When `gmlx serve` recovers from a memory error, replies no longer lose a
+  token, answer from a prompt the model read twice, run past their stop,
+  or stay open until the queue timeout. MTP replies resume instead of
+  ending early with "length".
 
 ## [0.5.4] - 2026-10-29
 

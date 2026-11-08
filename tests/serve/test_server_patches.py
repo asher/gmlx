@@ -82,12 +82,15 @@ def test_install_gen_args_idempotent():
 def test_gen_arg_keys_exist_upstream():
     """Drift guard: every injection key must be a declared GenerationArguments
     field and every request-field alias a declared field on some mlx-vlm request
-    schema - a rename upstream turns a silent injection no-op into a red X."""
+    schema or a request extra a gmlx patch reads (``_GMLX_CONSUMED``) - a
+    rename upstream turns a silent injection no-op into a red X."""
     import dataclasses
+
+    from gmlx.serve.patches import api_contract
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
     ga_fields = {f.name for f in dataclasses.fields(gen.GenerationArguments)}
-    request_fields = set()
+    request_fields = set(api_contract._GMLX_CONSUMED)
     for cls in (schemas.ChatRequest, schemas.AnthropicRequest,
                 schemas.OpenAIRequest):
         request_fields |= set(cls.model_fields)
@@ -96,7 +99,7 @@ def test_gen_arg_keys_exist_upstream():
             f"{key!r} is not a GenerationArguments field anymore"
         for name in req_names:
             assert name in request_fields, \
-                f"{name!r} is not declared on any mlx-vlm request schema"
+                f"{name!r} is neither a request schema field nor a gmlx extra"
 
 
 def test_inject_profile_sampling_on_real_gen_args():
@@ -660,6 +663,7 @@ def test_a_second_install_of_the_render_wraps_adds_no_layer(monkeypatch):
     did not added a second layer: a doubled faithful-history layer counts
     a tool-result image out twice, and the prompt loses its placeholder."""
     from gmlx.serve.patches.apc import install_retire_render_capture
+    from gmlx.serve.patches.prefill import install_assistant_prefill
     from gmlx.serve.patches.render import install_chat_image_placement, install_faithful_history
     from gmlx.upstream.patching import root
 
@@ -672,8 +676,9 @@ def test_a_second_install_of_the_render_wraps_adds_no_layer(monkeypatch):
         monkeypatch.setattr(obj, attr, getattr(obj, attr))
     sp.install_server_patches(build_config({"server": {}}), reload_fn=lambda *a, **k: None)
     installed = [getattr(obj, attr) for obj, attr in seams]
-    for install in (install_faithful_history, install_chat_image_placement, install_retire_render_capture,
-                    sp_chat.install_stream_thinking_seed, sp_chat.install_role_normalization):
+    for install in (install_faithful_history, install_chat_image_placement, install_assistant_prefill,
+                    install_retire_render_capture, sp_chat.install_stream_thinking_seed,
+                    sp_chat.install_role_normalization):
         install()
     assert [getattr(obj, attr) for obj, attr in seams] == installed
     for obj, attr in renders:

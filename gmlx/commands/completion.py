@@ -43,7 +43,9 @@ _VERB_DESC = {
     "profiles": "show per-family sampling defaults + @intents",
     "doctor": "check the runtime, config, models, and services",
     "train": "finetune a LoRA adapter on a GGUF base",
+    "capture": "record the residual stream after each block",
     "distill": "offline distillation: gen, filter, cache, align, train, eval, census",
+    "kld": "KL divergence over a text from a reference GGUF to a model",
     "image": "generate images from GGUF diffusion models",
     "video": "generate clips with sound from GGUF diffusion models",
     "comfyui": "put the gmlx node pack into ComfyUI",
@@ -51,7 +53,7 @@ _VERB_DESC = {
 }
 
 # Verbs whose first positional is a model (config id/alias or a path on disk).
-_MODEL_POSITIONAL_VERBS = frozenset({"run", "chat", "serve", "rm"})
+_MODEL_POSITIONAL_VERBS = frozenset({"run", "chat", "serve", "rm", "capture", "kld"})
 # Verbs whose first positional is a path / remote ref (no config lookup).
 _FILE_POSITIONAL_VERBS = frozenset({"validate", "pull", "systemone"})
 _SERVICE_ACTIONS = ("install", "uninstall", "status")

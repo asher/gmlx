@@ -173,15 +173,70 @@ def test_pin_flag_and_mmproj_passthrough():
     assert r.mmproj == "/abs/mmproj.gguf"
 
 
-# adapter - a companion GGUF LoRA path, resolved + load-affecting
-def test_adapter_parsed_and_resolved():
+# adapter / adapters - companion GGUF LoRA paths, resolved + load-affecting
+def test_adapter_shorthand_is_one_item_at_strength_one():
     doc = _doc()
     doc["models"]["m-lora"] = {"path": "/abs/base.gguf",
                                "adapter": "/abs/pirate.lora.gguf"}
     cfg = build_config(doc)
-    assert cfg.models["m-lora"].adapter == "/abs/pirate.lora.gguf"
-    assert resolve_model("m-lora", cfg).adapter == "/abs/pirate.lora.gguf"
-    assert resolve_model("m-named", cfg).adapter is None     # default when absent
+    assert cfg.models["m-lora"].adapters == (("/abs/pirate.lora.gguf", 1.0),)
+    assert cfg.models["m-lora"].adapter_paths() == ("/abs/pirate.lora.gguf",)
+    rm = resolve_model("m-lora", cfg)
+    assert rm.adapter_list == (cfgmod.AdapterRef(
+        "/abs/pirate.lora.gguf", "/abs/pirate.lora.gguf", 1.0),)
+    assert resolve_model("m-named", cfg).adapter_list == ()     # absent
+
+
+def test_adapters_take_paths_and_mappings_with_strengths(tmp_path):
+    root = tmp_path / "ggufs"
+    (root / "parts").mkdir(parents=True)
+    for name in ("a.gguf", "b.gguf"):
+        (root / "parts" / name).write_text("x")
+    doc = _doc()
+    doc["server"]["model_dirs"] = [str(root)]
+    doc["models"]["m"] = {"path": "/abs/base.gguf", "adapters": [
+        {"path": "parts/a.gguf", "strength": 0}, "parts/b.gguf"]}
+    cfg = build_config(doc)
+    assert cfg.models["m"].adapters == (("parts/a.gguf", 0.0), ("parts/b.gguf", 1.0))
+    rm = resolve_model("m", cfg)
+    assert [(r.written, r.path, r.strength) for r in rm.adapter_list] == [
+        ("parts/a.gguf", str(root / "parts" / "a.gguf"), 0.0),
+        ("parts/b.gguf", str(root / "parts" / "b.gguf"), 1.0)]
+    assert rm.effective_adapters() == tuple(sorted(r.path for r in rm.adapter_list))
+
+
+@pytest.mark.parametrize("entry,match", [
+    ({"adapter": "/a.gguf", "adapters": ["/b.gguf"]},
+     "model 'm': set adapter or adapters, not both"),
+    ({"adapters": ["/a.gguf", "parts/s.gguf", "/b.gguf", "parts/./s.gguf"]},
+     r"model 'm'.adapters\[3\]: path 'parts/./s.gguf' is listed twice"),
+    ({"adapters": [{"path": "/a.gguf", "strength": "inf"}]},
+     "expected a finite number"),
+    ({"adapters": [{"path": "/a.gguf", "scale": 1}]}, "scale"),
+])
+def test_text_adapter_config_errors(entry, match):
+    doc = _doc()
+    doc["models"]["m"] = {"path": "/abs/base.gguf", **entry}
+    with pytest.raises(ConfigError, match=match):
+        build_config(doc)
+
+
+def test_two_spellings_of_one_file_are_refused_at_resolve(tmp_path):
+    (tmp_path / "a.gguf").write_text("x")
+    (tmp_path / "link.gguf").symlink_to(tmp_path / "a.gguf")
+    doc = _doc()
+    doc["server"]["model_dirs"] = [str(tmp_path)]
+    doc["models"]["m"] = {"path": "/abs/base.gguf", "adapters": [
+        "a.gguf", "/x.gguf", "link.gguf"]}
+    cfg = build_config(doc)
+    with pytest.raises(ConfigError,
+                       match="model 'm': adapters\\[0\\] and adapters\\[2\\] name the same file"):
+        resolve_model("m", cfg)
+
+
+def test_image_and_video_entries_still_take_a_path_twice():
+    cfg = build_config(_video_doc(adapters=["/a.safetensors", "/a.safetensors"]))
+    assert len(cfg.video_models["h3"].adapters) == 2
 
 
 def test_adapter_resolves_through_model_dirs(tmp_path):
@@ -192,21 +247,53 @@ def test_adapter_resolves_through_model_dirs(tmp_path):
     doc["server"]["model_dirs"] = [str(root)]
     doc["models"]["m-lora"] = {"path": "/abs/base.gguf", "adapter": "ad.lora.gguf"}
     cfg = build_config(doc)
-    assert resolve_model("m-lora", cfg).adapter == str(root / "ad.lora.gguf")
+    assert resolve_model("m-lora", cfg).adapter_list[0].path == str(root / "ad.lora.gguf")
 
 
-def test_adapter_folds_into_load_signature():
-    """Two ids on one GGUF differing only in adapter are distinct resident entries
-    (the adapter is wrapped over the model leaves at load); same adapter collapses."""
+def _refs(*items):
+    return tuple(cfgmod.AdapterRef(p, p, st) for p, st in items)
+
+
+def test_adapters_fold_into_load_signature_and_strengths_do_not():
+    """Two ids on one GGUF differing only in adapters are distinct resident
+    entries (the adapters are wrapped over the model leaves at load); the
+    same adapters collapse, whatever their default strengths."""
     common = dict(path="/p", load={}, cache={}, system=None, speculative=False,
                   mmproj=None, draft_gguf=None, pin=False, ttl_s=None)
-    a = cfgmod.ResolvedModel(id="a", sampling={}, adapter="/abs/A.lora.gguf", **common)
-    b = cfgmod.ResolvedModel(id="b", sampling={}, adapter="/abs/B.lora.gguf", **common)
-    c = cfgmod.ResolvedModel(id="c", sampling={}, adapter="/abs/A.lora.gguf", **common)
-    bare = cfgmod.ResolvedModel(id="d", sampling={}, adapter=None, **common)
+    a = cfgmod.ResolvedModel(id="a", sampling={},
+                             adapter_list=_refs(("/abs/A.lora.gguf", 1.0)), **common)
+    b = cfgmod.ResolvedModel(id="b", sampling={},
+                             adapter_list=_refs(("/abs/B.lora.gguf", 1.0)), **common)
+    c = cfgmod.ResolvedModel(id="c", sampling={},
+                             adapter_list=_refs(("/abs/A.lora.gguf", 0.0)), **common)
+    bare = cfgmod.ResolvedModel(id="d", sampling={}, **common)
     assert a.load_signature() != b.load_signature()    # different adapter => split
-    assert a.load_signature() == c.load_signature()    # same adapter => shared entry
+    assert a.load_signature() == c.load_signature()    # strength => shared entry
     assert a.load_signature() != bare.load_signature()  # adapter vs bare base => split
+
+
+def test_adapters_round_trip_through_print_config():
+    import yaml
+
+    from gmlx.serve import server as srv
+    doc = _doc()
+    doc["models"]["m"] = {"path": "/abs/base.gguf", "adapters": [
+        {"path": "/abs/a.gguf", "strength": 0.0}, "/abs/b.gguf"]}
+    cfg = build_config(doc)
+    dumped = yaml.safe_load(srv._dump_cfg_yaml(cfg))
+    assert dumped["models"]["m"]["adapters"] == [
+        {"path": "/abs/a.gguf", "strength": 0.0},
+        {"path": "/abs/b.gguf", "strength": 1.0}]
+    assert build_config(dumped).models["m"].adapters == cfg.models["m"].adapters
+
+
+def test_an_encoder_with_its_own_adapters_is_refused_at_any_strength():
+    doc = {"models": {"chat": {"path": "/m/chat.gguf",
+                               "adapters": [{"path": "/m/a.gguf", "strength": 0}]}},
+           "image_models": {"zit": {"path": "/m/zit.gguf", "encoder": "chat",
+                                    "vae": "/m/vae.safetensors"}}}
+    with pytest.raises(ConfigError, match="loads adapters"):
+        build_config(doc)
 
 
 def test_adapter_typo_key_errors():
@@ -358,7 +445,7 @@ def test_moe_expert_mass_folds_into_load_signature():
     """Two ids on one GGUF differing only in moe_expert_mass are distinct
     resident entries (the filter is installed over the routers at load)."""
     common = dict(path="/p", load={}, cache={}, system=None, speculative=False,
-                  mmproj=None, draft_gguf=None, adapter=None, stream="experts",
+                  mmproj=None, draft_gguf=None, stream="experts",
                   pin=False, ttl_s=None)
     a = cfgmod.ResolvedModel(id="a", sampling={}, moe_expert_mass=0.9, **common)
     b = cfgmod.ResolvedModel(id="b", sampling={}, moe_expert_mass=0.8, **common)
@@ -2060,6 +2147,37 @@ def test_sampling_stop_validated_at_load():
         assert "stop must be a string or a list of strings" in str(e.value)
     ok = build_config({"profiles": {"p": {"sampling": {"stop": ["END"]}}}})
     assert ok.profiles["p"].sampling["stop"] == ["END"]
+
+
+def _sampling_docs(sampling):
+    return [
+        {"profiles": {"p": {"sampling": sampling}}},
+        {"models": {"m": {"path": "/x.gguf",
+                          "overrides": {"sampling": sampling}}}},
+        {"models": {"m": {"path": "/x.gguf",
+                          "profiles": {"q": {"sampling": sampling}}}}},
+    ]
+
+
+def test_profile_budget_message_must_be_string():
+    for doc in _sampling_docs({"thinking_budget_message": 5}):
+        with pytest.raises(ConfigError) as e:
+            build_config(doc)
+        assert "thinking_budget_message must be a string" in str(e.value)
+    ok = build_config({"profiles": {"p": {"sampling": {
+        "thinking_budget_message": ""}}}})
+    assert ok.profiles["p"].sampling["thinking_budget_message"] == ""
+
+
+def test_profile_budget_below_minus_one_is_rejected():
+    for bad in (-2, True, "64", 1.5):
+        for doc in _sampling_docs({"thinking_budget": bad}):
+            with pytest.raises(ConfigError) as e:
+                build_config(doc)
+            assert "thinking_budget must be an integer of -1 or more" in str(
+                e.value)
+    ok = build_config({"profiles": {"p": {"sampling": {"thinking_budget": -1}}}})
+    assert ok.profiles["p"].sampling["thinking_budget"] == -1
 
 
 def test_config_path_directory_and_binary_are_named_errors(tmp_path):

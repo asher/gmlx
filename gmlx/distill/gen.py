@@ -377,6 +377,9 @@ def _sampling(opts: GenOptions, seed: int) -> dict:
         body["min_p"] = opts.min_p
     if opts.thinking_budget:
         body["thinking_budget"] = opts.thinking_budget
+        # A server's profile message would replace the wrap phrase that
+        # finds a cut trace.
+        body["thinking_budget_message"] = None
     # a server gen did not start (--base-url) only sees what the request
     # carries, so the thinking switch and the template kwargs ride along.
     # The switch is serve's own thinking control, which it maps onto the

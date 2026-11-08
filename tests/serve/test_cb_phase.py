@@ -594,6 +594,28 @@ def test_a_placement_lift_goes_through_the_caps_record(monkeypatch, fake_kq):
                        cb_phase.STREAMED_DECODE]
 
 
+def test_relift_lifts_a_second_streamed_load_after_the_cli_lift(fake_kq):
+    """The CLI lift covers the first streamed load, and its install ends
+    it. A second streamed load in the process (gmlx kld) lifts again, and
+    its install ends that lift too."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    cb_phase.note_lift()
+    cb_phase.relift()                 # the CLI lift still holds
+    cb_phase.end_lift()
+    cb_phase.relift()
+    cb_phase.end_lift()
+    assert fake_kq == [cb_phase.FINE, cb_phase.COARSE, cb_phase.FINE]
+
+
+def test_relift_keeps_the_user_pin(monkeypatch, fake_kq):
+    import gmlx.serve.cb_phase as cb_phase
+
+    monkeypatch.setenv("MLX_MAX_OPS_PER_BUFFER", "200")
+    cb_phase.relift()
+    assert fake_kq == []
+
+
 @pytest.mark.parametrize("on_language_model", [True, False])
 @pytest.mark.parametrize("streamed", [True, False])
 def test_the_depth_bench_plain_arm_decodes_on_the_caps_of_the_mtp_arm(

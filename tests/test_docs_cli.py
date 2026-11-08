@@ -78,6 +78,9 @@ def _entry(verb):
     if verb == "train":
         from gmlx.commands.train import cmd_train
         return cmd_train, [], set()
+    if verb == "capture":
+        from gmlx.commands.capture import cmd_capture
+        return cmd_capture, [], set()
     if verb == "doctor":
         from gmlx.commands.doctor import cmd_doctor
         return cmd_doctor, [], set()
@@ -90,6 +93,9 @@ def _entry(verb):
     if verb == "systemone":
         from gmlx.commands.systemone import cmd_systemone
         return cmd_systemone, [], set()
+    if verb == "kld":
+        from gmlx.commands.kld import cmd_kld
+        return cmd_kld, [], set()
     from gmlx.commands import manage
     return getattr(manage, f"cmd_{verb}"), [], set()
 

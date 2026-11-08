@@ -131,8 +131,10 @@ def install_retire_render_capture() -> None:
     if os.environ.get("GMLX_APC_RETIRE_LCP") == "0":
         return
     import gmlx.cache.retire_key as retire_key
+    from gmlx.gen.thinking_budget import resolve_think_markers
 
     from ._common import _render_target_modules
+    from .prefill import CONTINUE_KEY
     gen_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 
     def _make_capture(orig_render):
@@ -140,10 +142,28 @@ def install_retire_render_capture() -> None:
             out = orig_render(processor, config, prompt, *a, **kw)
             try:
                 if isinstance(out, str) and isinstance(prompt, list):
+                    msgs, ctx_kw, prefill = prompt, dict(kw), False
+                    if (ctx_kw.get(CONTINUE_KEY) is not None
+                            or ctx_kw.get("add_generation_prompt") is False):
+                        # A prefill render: no next-turn prediction, but
+                        # the system-prefix anchor still renders from the
+                        # history without the continued message.
+                        if ctx_kw.get(CONTINUE_KEY) is not None:
+                            msgs = prompt[:-1]
+                        ctx_kw.pop(CONTINUE_KEY, None)
+                        ctx_kw.pop("add_generation_prompt", None)
+                        prefill = True
                     retire_key.register_render(out, {
-                        "messages": [dict(m) for m in prompt
+                        "messages": [dict(m) for m in msgs
                                      if isinstance(m, dict)],
-                        "kw": dict(kw),
+                        "kw": ctx_kw,
+                        # The pair the reply split takes when the request
+                        # sets no markers, resolved as the render seam does.
+                        "think": resolve_think_markers(
+                            ctx_kw.get("thinking_start_token"),
+                            ctx_kw.get("thinking_end_token"),
+                            processor, out).pair,
+                        "prefill": prefill,
                         "processor": processor,
                         "config": config,
                         "render": orig_render,

@@ -318,6 +318,8 @@ _PROFILE_CAPTURE_FLAG = "_kq_gguf_request_profile_capture"
 _PROFILE_CAPTURE_PATHS = _CHAT_PATHS + ("/messages", "/v1/messages",
                                         "/responses", "/v1/responses",
                                         "/completions", "/v1/completions",
+                                        "/tokenize", "/v1/tokenize",
+                                        "/detokenize", "/v1/detokenize",
                                         "/systemone", "/v1/systemone",
                                         "/prewarm", "/v1/prewarm")
 

@@ -22,7 +22,8 @@ import shutil
 import sys
 import time
 
-from .image import _adapter, latent_target, save_npz
+from .adapter_flag import parse_adapter as _adapter
+from .image import latent_target, save_npz
 
 _ACTIONS = ("generate", "bench", "pull")
 _ACTION_DESC = {

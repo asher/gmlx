@@ -1618,10 +1618,12 @@ def _request_rows(served: ServedImage, rows: list, model_dirs) -> tuple:
     model folder. A configured adapter the request names takes its
     strength in the table rows; any other is an (id, path, strength) of
     ``extra``, read into the table by ``_adapter_table``."""
-    named = {}
-    for ad, _st in served.adapters:
-        named[os.path.basename(ad.path)] = ad.path
-        named[os.path.splitext(os.path.basename(ad.path))[0]] = ad.path
+    named: dict = {}
+    for i, (ad, _st) in enumerate(served.adapters):
+        for name in (os.path.basename(ad.path),
+                     os.path.splitext(os.path.basename(ad.path))[0]):
+            named.setdefault(name, {}).setdefault(os.path.realpath(ad.path),
+                                                  (i, ad.path))
     table_rows = list(served.adapters)
     # A request that names a configured adapter sets its strength on the
     # DiT for the request, in place of the entry's, and never adds it twice.
@@ -1629,9 +1631,12 @@ def _request_rows(served: ServedImage, rows: list, model_dirs) -> tuple:
                   for i, (ad, _st) in enumerate(served.adapters)}
     shown, extra = [], []
     for aid, strength in rows:
-        path = named.get(aid)
-        if path is None:
-            path = _adapter_under_roots(aid, model_dirs)
+        hits = sorted((named.get(aid) or {}).values())
+        if len(hits) > 1:
+            raise _bad(f"adapter {aid!r} matches adapters {hits[0][0]} and "
+                       f"{hits[1][0]} of model {served.spec.id!r}; name it by "
+                       "its path in a model folder", "adapters")
+        path = hits[0][1] if hits else _adapter_under_roots(aid, model_dirs)
         at = configured.get(os.path.realpath(path))
         if at is not None:
             table_rows[at] = (table_rows[at][0], strength)

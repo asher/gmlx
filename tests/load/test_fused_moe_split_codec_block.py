@@ -41,6 +41,16 @@ def _block(sgate="iq4_xs", sup="iq3_s", sdown="iq4_nl", seed=0):
 
     from gmlx.models.qwen4_exp.model import SparseMoeBlock
 
+    def encode(w, codec):
+        # The IQ and q2_0 encoders run on the CPU stream and can take
+        # seconds on a busy machine. In an eval that also holds GPU arrays,
+        # a GPU command buffer waits for them, and Metal fails a command
+        # buffer that waits more than about 5 s. So each encode is
+        # evaluated alone.
+        out = kq.quantize(w, codec)
+        mx.eval(out)
+        return out
+
     mx.random.seed(seed)
     rng = np.random.default_rng(seed)
     block = SparseMoeBlock(SimpleNamespace(
@@ -53,11 +63,11 @@ def _block(sgate="iq4_xs", sup="iq3_s", sdown="iq4_nl", seed=0):
             ("down_proj", (D, INTER), "q2_0", sdown)):
         leaf = KQuantSwitchLinear(E, o, i, False, codec)
         w = mx.array((rng.standard_normal((E, o, i)) * 0.05).astype(np.float32))
-        leaf.weight, leaf.scales = kq.quantize(w, codec)
+        leaf.weight, leaf.scales = encode(w, codec)
         setattr(block.switch_mlp, name, leaf)
         dense = KQuantLinear(i, o, False, scodec)
         w = mx.array((rng.standard_normal((o, i)) * 0.05).astype(np.float32))
-        dense.weight, dense.scales = kq.quantize(w, scodec)
+        dense.weight, dense.scales = encode(w, scodec)
         setattr(block.shared_expert, name, dense)
     block.shared_expert_gate.set_dtype(mx.bfloat16)
     block.eval()

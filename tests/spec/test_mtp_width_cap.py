@@ -821,12 +821,14 @@ def test_gated_round_publishes_lora_rows():
 
     lora_rows.configure("rows", 1)
     try:
-        lora_rows.register_uid("u0", (1.0,))
-        lora_rows.register_uid("u2", (1.0,))
-        model = SimpleNamespace(_kq_row_uids=["u0", "u1", "u2"])
-        lm = _RowsLM()
-        out, _, _ = _drive(_StrictDrafter(cap=2), B=3, max_tokens=3,
-                           model=model, lm=lm)
+        with lora_rows.bind(lora_rows.UidRegistry()):
+            lora_rows.register_uid("u0", (1.0,))
+            lora_rows.register_uid("u1", None)
+            lora_rows.register_uid("u2", (1.0,))
+            model = SimpleNamespace(_kq_row_uids=["u0", "u1", "u2"])
+            lm = _RowsLM()
+            out, _, _ = _drive(_StrictDrafter(cap=2), B=3, max_tokens=3,
+                               model=model, lm=lm)
         assert out[0][0] == [3, 4, 5]
         assert lm.rows and all(r == [1.0, 0.0, 1.0] for r in lm.rows)
         with pytest.raises(lora_rows.LoraRowsError):

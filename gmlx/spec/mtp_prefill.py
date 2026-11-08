@@ -88,7 +88,7 @@ def _l0_salt(batch):
     the row's APC salt (`_apc_extra_hash`: the server's image hash, the
     tenant and the gmlx LoRA salt). Without a cold meta the server hashed
     no image, so a prompt that carries media skips L0. The row's adapter
-    scales and tenant join the key either way, since lora_rows salts and
+    salt and tenant join the key either way, since the row channel salts and
     the server hashes the tenant only when an APC manager is set. A row
     its generator's tenant rows no longer hold skips L0.
     """
@@ -100,14 +100,14 @@ def _l0_salt(batch):
     else:
         stock = 0
     uids = getattr(batch, "uids", None) or ()
-    scales = lora_rows.scales_for(uids[0]) if uids else None
+    salt = lora_rows.salt_for(uids[0]) if uids else None
     rows = _step_tenants.get()
     tenant = None
     if rows is not None and uids:
         if uids[0] not in rows:
             return None
         tenant = rows[uids[0]]
-    return (stock, tuple(scales) if scales and any(scales) else None, tenant)
+    return (stock, salt or None, tenant)
 
 
 # Each row's tenant, for the L0 key. Without an APC manager the server
@@ -699,7 +699,8 @@ def install_full_prompt_mtp_prefill() -> None:
         return n
 
     def _mtp_generate(
-        self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0
+        self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0,
+        rows=None,
     ):
         if self.draft_kind == "mtp":
             # A one-column prompt never enters prompt_step, so the APC
@@ -711,6 +712,7 @@ def install_full_prompt_mtp_prefill() -> None:
             stop_criteria,
             compute_logprobs=compute_logprobs,
             top_logprobs_k=top_logprobs_k,
+            rows=rows,
         )
         from gmlx._vendor.mlx_vlm.generate.ar import SpeculativeGenerationBatch
 

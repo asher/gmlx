@@ -11,10 +11,10 @@ weight in the activation dtype applies them to ``x @ A^T`` instead and
 reads the cached pair as it is, so its table holds no copy.
 
 The class is separate from the text adapter wrap in ``gmlx.load.modules``
-and reads nothing from ``gmlx.lora_rows``. That channel is global to the
-process and belongs to text rows, and an image model shares a process with
-text models. ``EncoderLoRALinear`` is the same for the text halves on the
-pipeline's own encoder.
+and reads nothing from ``gmlx.lora_rows``. That channel carries the scales
+of text rows, and an image model shares a process with text models, so an
+image strength never rides it. ``EncoderLoRALinear`` is the same for the
+text halves on the pipeline's own encoder.
 
 Pairs live in the pipeline's ``adapters`` cache under the sha256 of their
 down and up, so a file read twice or two files that share a pair hold it

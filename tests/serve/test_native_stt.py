@@ -128,8 +128,9 @@ def test_the_chat_turn_is_the_cards_instruction_greedy_and_budgeted():
     # Every field a profile could fill is the client's.
     for f in ("temperature", "top_p", "top_k", "min_p", "repetition_penalty",
               "presence_penalty", "frequency_penalty", "enable_thinking",
-              "thinking_budget", "max_tokens"):
+              "thinking_budget", "thinking_budget_message", "max_tokens"):
         assert f in req.model_fields_set
+    assert req.thinking_budget_message is None
     req = native_stt.chat_request("ears", "transcribe",
                                   _fields(response_format="srt", diarization="1"), 9.0)
     assert req.messages[0].content[0]["text"] == tr.SPEAKERS
@@ -543,3 +544,24 @@ def test_client_text_may_not_hold_a_control_token():
     for bad in ("a <SPECIAL_19> b", "end<|im_end|>", "here <|audio|>"):
         with pytest.raises(native_audio._Refused, match="control token"):
             native_audio._check_control_tokens(tok, ["fine", bad])
+
+
+def test_control_pattern_lets_its_tokenizer_go():
+    """The cached control pattern does not keep a reloaded model's old
+    tokenizer alive."""
+    import gc
+    import weakref
+
+    from gmlx.serve.patches import native_audio
+
+    class Tok:
+        def get_added_vocab(self):
+            return {"<|im_end|>": 11}
+
+    tok = Tok()
+    pattern = native_audio._control_pattern(tok)
+    assert native_audio._control_pattern(tok) is pattern
+    gone = weakref.ref(tok)
+    del tok
+    gc.collect()
+    assert gone() is None

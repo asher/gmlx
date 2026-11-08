@@ -212,3 +212,16 @@ def test_base_tensor_names_reads_every_shard(tmp_path):
         w.close()
     assert adapter.base_tensor_names(str(tmp_path / "m-00001-of-00002.gguf")) == [
         "blk.0.attn_q.weight", "blk.1.attn_q.weight", "output.weight"]
+
+
+@pytest.mark.parametrize("base_names", [None, ["token_embd.weight", "blk.0.attn_q.weight"]])
+def test_an_embedding_module_is_not_exported(tmp_path, base_names):
+    out = tmp_path / "a.gguf"
+    qa, qb = _ab(Q_OUT, IN, R, seed=1)
+    ea, eb = _ab(IN, 64, R, seed=7)
+    modules = [("model.layers.0.self_attn.q_proj", qa, qb), ("model.embed_tokens", ea, eb)]
+    with pytest.raises(ValueError, match="model.embed_tokens \\(embedding pairs are not exported\\)"):
+        adapter.save_lora_adapter(
+            str(out), modules, alpha=ALPHA, base_arch="llama", n_head=N_HEAD,
+            n_head_kv=N_HEAD_KV, n_layers=2, base_names=base_names)
+    assert not out.exists()

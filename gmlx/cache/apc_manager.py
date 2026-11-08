@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from gmlx._vendor.mlx_vlm import apc as _apc
@@ -120,6 +121,98 @@ class GmlxAPCManager(_apc.APCManager):
             self.exact_cache_guard_tokens = 16
         if not os.environ.get("APC_CHECKPOINT_INTERVAL_TOKENS"):
             self.checkpoint_interval_tokens = 0
+        # What each store created, by engine tick and owner, so a command
+        # buffer failure can take back what its window stored.
+        self._kq_tick = 0
+        self._kq_owner = None
+        self._kq_stores: list = []
+        self._kq_dropped: dict = {}
+
+    # The failure window. A command buffer failure reports at a wait that
+    # can come a tick after the failed work, so the tick guard evicts what
+    # the reporting tick and the tick before it stored, and every store of
+    # the prompt batch it drops. Only what a store created is recorded: a
+    # block reused through _acquire_existing was written before the window.
+
+    def kq_mark_tick(self, tick: int, live_owner=None) -> None:
+        """Start engine tick ``tick``. Records older than the window go,
+        except those of ``live_owner``, the prompt batch still running."""
+        with self.lock:
+            self._kq_tick = int(tick)
+            self._kq_stores = [
+                r for r in self._kq_stores
+                if r[0] >= tick - 1
+                or (r[1] is not None and r[1] is live_owner)]
+
+    @contextmanager
+    def kq_scope(self, owner):
+        """Stores in the scope belong to ``owner``, a prompt batch."""
+        held = self._kq_owner
+        self._kq_owner = owner
+        try:
+            yield
+        finally:
+            self._kq_owner = held
+
+    def kq_record(self, kind: str, key, block=None) -> None:
+        with self.lock:
+            self._kq_stores.append(
+                (self._kq_tick, self._kq_owner, kind, key, block))
+
+    def kq_evict(self, since_tick: int, owner=None) -> int:
+        """Take back every store recorded at ``since_tick`` or later, and
+        every store of ``owner``: from the pool, the exact entries, the
+        sidecar index and the disk tier. Returns the count."""
+        n, disk = 0, []
+        with self.lock:
+            keep = []
+            for rec in self._kq_stores:
+                tick, own, kind, key, block = rec
+                if tick >= since_tick or (owner is not None and own is owner):
+                    n += self._kq_take_back(kind, key, block, disk)
+                else:
+                    keep.append(rec)
+            self._kq_stores = keep
+        if disk and self.disk is not None:
+            drop = getattr(self.disk, "drop_hashes", None)
+            if drop is not None:
+                drop(disk)
+        return n
+
+    def _kq_take_back(self, kind, key, block, disk) -> int:
+        if kind == "block":
+            if block.block_hash != key:
+                return 0            # evicted and reused since
+            if self.hash_table.get(key) is block:
+                del self.hash_table[key]
+            if block.ref_cnt <= 0:
+                self._kq_free(block)
+            else:
+                # Held by a live row or a prompt batch: no lookup finds it
+                # now, and its last release frees it.
+                self._kq_dropped[id(block)] = block
+            return 1
+        if kind == "exact":
+            disk.append(key)
+            return int(self._exact_cache.pop(key, None) is not None)
+        if kind == "sidecar":
+            idx = getattr(self, "_kq_sidecar_cache", None)
+            return int(idx is not None and idx.pop(key, None) is not None)
+        if kind == "disk":
+            disk.append(key)
+            return 1
+        return 0
+
+    @staticmethod
+    def _kq_free(block) -> None:
+        block.block_hash = None
+        block.token_ids = ()
+        block.release_components()
+
+    def _release_one(self, b) -> None:
+        super()._release_one(b)
+        if b.ref_cnt == 0 and self._kq_dropped.pop(id(b), None) is not None:
+            self._kq_free(b)
 
     # The stock manager sizes a reserve for the prefill in flight at every
     # prepare, observe, lookup and store, and `_make_room` evicts idle
@@ -317,6 +410,8 @@ class GmlxAPCManager(_apc.APCManager):
         with self.lock:
             super().clear()
             ckpt_reset(self)
+            self._kq_stores = []
+            self._kq_dropped = {}
         # Outside the manager lock: the spec prefix cache has its own
         # lifetime and its pinned snapshots must not survive a reset.
         clear_all_spec_prefix_caches()
@@ -419,10 +514,12 @@ class GmlxAPCManager(_apc.APCManager):
         return None, 0
 
     def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0):
+        salt = salt_at(extra_hash, len(token_ids)) ^ self._exact_extra_salt
         out = super().store_exact_cache(
-            token_ids, prompt_cache,
-            extra_hash=(salt_at(extra_hash, len(token_ids))
-                        ^ self._exact_extra_salt))
+            token_ids, prompt_cache, extra_hash=salt)
+        if out:
+            self.kq_record("exact", _apc._sequence_hash(
+                tuple(int(t) for t in token_ids), salt, self.block_size))
         self._trim_exact_to_budget()
         return out
 
@@ -690,6 +787,7 @@ class GmlxAPCManager(_apc.APCManager):
                     while len(self._exact_cache) > self._exact_cache_max:
                         self._exact_cache.popitem(last=False)
                     self.stats.exact_stores += 1
+                    self.kq_record("exact", key)
                     layer_major_stored = True
                     # Inline exact entry: enforce the byte budget here
                     # too, not just in store_exact_cache (lock is an
@@ -727,6 +825,7 @@ class GmlxAPCManager(_apc.APCManager):
                 block_salt = salt_at(extra_hash, (i + 1) * self.block_size)
                 h2 = _hash_tokens(parent, chunk, block_salt)
                 if allow_disk and not self.disk.has(h2):
+                    self.kq_record("disk", int(h2))
                     disk_blocks.append(
                         _disk_block_cls(
                             block_hash=int(h2),
@@ -803,6 +902,7 @@ class GmlxAPCManager(_apc.APCManager):
                 b.set_kv(k_slabs, v_slabs)
                 b.ref_cnt = 1
                 self.hash_table[h2] = b
+                self.kq_record("block", h2, b)
                 memory_slots -= 1
                 new_blocks.append(b)
                 self.stats.stores += 1

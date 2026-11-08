@@ -21,6 +21,7 @@ from gmlx._vendor.mlx_vlm.models.diffusion_gemma.language import _cache_state
 
 from gmlx.gen.generation import encode_prompt
 
+from .ar_reader import tokenizer_of
 from .denoise import DenoiseConfig, denoise_pass, host_list, slot_reads, unembed
 from .reads import (
     Cancelled,
@@ -250,7 +251,7 @@ class ChatTokens:
     def __init__(self, processor, state_text: str = "", *, lock=None):
         self.processor = processor
         self.state_text = state_text
-        self.wrapper = getattr(processor, "_wrapper", processor)
+        self.wrapper = tokenizer_of(processor)
         self.lock = lock if lock is not None else contextlib.nullcontext()
 
     def enc(self, text: str) -> list[int]:

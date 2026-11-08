@@ -122,6 +122,24 @@ def test_check_at_cap_rejects(monkeypatch):
     assert resp.headers["retry-after"] == str(qc._RETRY_DEFAULT_S)
 
 
+def test_a_request_counts_its_prompts(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "4")
+    _census(monkeypatch, rg_qsize=1, pending=1)
+    monkeypatch.setattr(_RUNTIME, "metrics", _metrics(), raising=False)
+    body = SimpleNamespace(model_fields_set={"prompt"}, prompt=[[1], [2], [3]])
+    assert qc.incoming_requests([body]) == 3
+    assert qc.check_queue_depth(qc.incoming_requests([body])).status_code == 503
+    body.prompt = [[1], [2]]
+    assert qc.check_queue_depth(qc.incoming_requests([body])) is None
+    body.prompt = [1, 2, 3]
+    assert qc.incoming_requests([body]) == 1
+    # More prompts than the cap reach the route, which answers 400.
+    _census(monkeypatch, rg_qsize=0, pending=0)
+    assert qc.check_queue_depth(9) is None
+
+
 def test_check_disabled_by_zero(monkeypatch):
     monkeypatch.setenv("GMLX_QUEUE_DEPTH_CAP", "0")
     _census(monkeypatch, rg_qsize=999, pending=0)

@@ -20,6 +20,7 @@ so generalizing architecture coverage never touches this file.
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -561,17 +562,26 @@ def _down_scale_kw(down, shexp_down=None):
     return kw
 
 
-def _kq_member_projs(*owners):
+def _kq_member_projs(*owners, off=False):
     """The gate, up and down projections of ``owners`` that a fused path
     reads in place of calling them, or None when any is not a quantized
     leaf. An adapter wraps a member in a module without ``kquant_type``,
-    and that member has to run its own forward to apply the adapter."""
-    projs = tuple(getattr(o, n, None) for o in owners
-                  for n in ("gate_proj", "up_proj", "down_proj"))
-    for p in projs:
-        if getattr(p, "kquant_type", None) is None:
-            return None
-    return projs
+    or stamps an expert leaf with ``_kq_lora``, and that member has to run
+    its own forward to apply the adapter. With ``off`` every adapter slot
+    is off for this forward: a wrapper hands over its base, and a stamped
+    leaf its own bytes."""
+    projs = []
+    for o in owners:
+        for n in ("gate_proj", "up_proj", "down_proj"):
+            p = getattr(o, n, None)
+            if isinstance(p, LoRAKQuantLinear) and off:
+                p = p.base
+            elif getattr(p, "_kq_lora", None) is not None and not off:
+                return None
+            if getattr(p, "kquant_type", None) is None:
+                return None
+            projs.append(p)
+    return tuple(projs)
 
 
 # Regime 1: gpt-oss packed-mxfp4 SwitchGLU (biased NativeFPSwitchLinear)
@@ -1362,6 +1372,21 @@ def _make_fused_block(base_cls, caps):
         gathers and the shared expert run as the members' own forwards and
         the mix stays in the activation dtype."""
 
+        # The children whose projections the fold reads in place of
+        # calling them. An adapter install records its slots on the block.
+        _kq_lora_gate = ("switch_mlp", "shared_expert")
+
+        def _kq_fold_projs(self):
+            """The six projections the fold reads, or None when an adapted
+            member has a slot on in this forward."""
+            slots = self.__dict__.get("_kq_lora_slots")
+            if slots is None:
+                return _kq_member_projs(self.switch_mlp, self.shared_expert)
+            if not lora_rows.all_off(slots):
+                return None
+            return _kq_member_projs(
+                self.switch_mlp, self.shared_expert, off=True)
+
         def _kq_router(self):
             """The router + shared-gate weight for the one-dispatch router,
             or None when it is off or the block's router does not qualify.
@@ -1406,10 +1431,10 @@ def _make_fused_block(base_cls, caps):
                 and _kq_fused_device_ok(self, self.switch_mlp)
             ):
                 if fold:
-                    # An adapted member sends the block down the stock path.
-                    projs = _kq_member_projs(
-                        self.switch_mlp, self.shared_expert)
-                else:
+                    projs = self._kq_fold_projs()
+                if projs is None:
+                    # An adapted member with a slot on runs its own
+                    # forward behind the fused router.
                     router_only = self._kq_router() is not None
             if projs is None and not router_only:
                 if expert_ctl:
@@ -1760,10 +1785,24 @@ def _make_fused_gemma_experts(base_cls, caps):
                 self._kq_glu_ok_cached = ok
             return ok
 
+        _kq_lora_gate = ("switch_glu",)
+
+        def _kq_lora_on(self):
+            """Whether an adapted ``switch_glu`` has a slot on in this
+            forward. A stamped down leaf with no slots on record counts as
+            on."""
+            slots = self.__dict__.get("_kq_lora_slots")
+            if slots is None:
+                return getattr(self.switch_glu.down_proj, "_kq_lora",
+                               None) is not None
+            return not lora_rows.all_off(slots)
+
         def __call__(self, x, top_k_indices, top_k_weights):
             d = x.shape[-1]
             t = x.size // d
             k = top_k_indices.shape[-1]
+            if self._kq_lora_on():
+                return super().__call__(x, top_k_indices, top_k_weights)
             if not (
                 _FUSED_MOE_ENABLED
                 and _FUSED_MOE_BLOCK_ENABLED
@@ -2389,6 +2428,118 @@ class LoRAKQuantLinear(nn.Module):
         return r
 
 
+def _owned_f32(x: mx.array) -> mx.array:
+    """An f32 copy of ``x`` in fresh memory: never a view of a loaded
+    array or of the adapter file."""
+    return mx.array(np.array(x.astype(mx.float32), dtype=np.float32))
+
+
+class LoRAKQuantEmbedding(nn.Module):
+    """A token embedding (kquant, float or MLX quantized) with a LoRA delta
+    applied live, where llama.cpp adds it: after the lookup and before any
+    embedding multiplier the model applies.
+
+    Forward: ``base(ids) + scale * A[ids] @ B.T``, where ``A`` is
+    ``(n_vocab, rank)`` and ``B`` is ``(n_embd, rank)``, the GGUF layout of
+    a ``token_embd`` pair. ``A`` is held as an f32 copy, so the gather is
+    exact and a rewrite of the adapter file cannot reach it. ``B`` is kept
+    only as its transposed table at the base's output dtype, with no scale
+    in it: the static scale and the published row factor multiply the f32
+    rank-r gather, which is cast once before the ``addmm``. The output
+    dtype is the base's, so the graph's dtype is unchanged.
+
+    Attributes the wrapper does not own read through to the base
+    (``weight``, ``scales``, ``as_linear`` and the rest), so ``hasattr``
+    answers as it does on the base.
+    """
+
+    _lora_bt: dict
+    _kq_extra: list
+    _out_dtype: mx.Dtype
+
+    def __init__(self, base: nn.Module, a: mx.array, b: mx.array, scale: float,
+                 slot: int = 0):
+        super().__init__()
+        self.base = base
+        self.lora_a = _owned_f32(a)                 # (n_vocab, rank)
+        self.scale = float(scale)
+        self.slot = int(slot)
+        dtype = base(mx.array([0], dtype=mx.uint32)).dtype
+        object.__setattr__(self, "_out_dtype", dtype)
+        # (rank, n_embd) per slot; outside the parameter tree, and not
+        # _kq_tables, which distill clears: no B is kept to rebuild it.
+        object.__setattr__(self, "_lora_bt", {self.slot: self._bt(b)})
+        # Further adapters on the same table: (a, scale, slot) each.
+        object.__setattr__(self, "_kq_extra", [])
+        mx.eval(self.lora_a, self._lora_bt[self.slot])
+        self.freeze()
+
+    def __getattr__(self, key):
+        try:
+            return super().__getattr__(key)
+        except AttributeError:
+            pass
+        base = self.get("base")
+        if base is None:
+            raise AttributeError(key)
+        return getattr(base, key)
+
+    def _bt(self, b: mx.array) -> mx.array:
+        return mx.array(np.ascontiguousarray(
+            np.array(b.astype(mx.float32), dtype=np.float32).T)).astype(self._out_dtype)
+
+    def add_slot(self, a: mx.array, b: mx.array, scale: float, slot: int) -> None:
+        """Install another adapter (``a (n_vocab, rank)``, ``b (n_embd,
+        rank)``) on this table under row-channel ``slot``."""
+        if slot in self.slots:
+            raise ValueError(f"LoRA slot {slot} already installed on this target")
+        a_c, t = _owned_f32(a), self._bt(b)
+        mx.eval(a_c, t)
+        self._lora_bt[int(slot)] = t
+        self._kq_extra.append((a_c, float(scale), int(slot)))
+
+    @property
+    def slots(self) -> tuple:
+        return (self.slot,) + tuple(e[2] for e in self._kq_extra)
+
+    def _delta(self, y, ids, a, scale, slot):
+        t = self._lora_bt[slot]
+        if t.dtype != y.dtype:
+            t = t.astype(y.dtype)
+        z = a[ids]                                   # (..., rank) f32
+        f = lora_rows.dense_row_factor(slot, z.shape[:-1], mx.float32)
+        z = z * scale
+        if f is not None:
+            z = z * f
+        z = z.astype(y.dtype)
+        if z.ndim < 2:
+            return y + z @ t
+        return mlx_guards.addmm(y, z, t)
+
+    def __call__(self, ids):
+        y = self.base(ids)
+        if not lora_rows.slot_off(self.slot):
+            y = self._delta(y, ids, self["lora_a"], self.scale, self.slot)
+        for a, scale, slot in self._kq_extra:
+            if not lora_rows.slot_off(slot):
+                y = self._delta(y, ids, a, scale, slot)
+        return y
+
+    def _extra_repr(self):
+        r = (f"rank={self['lora_a'].shape[-1]}, scale={self.scale:g}, "
+             f"base={type(self['base']).__name__}")
+        if self._kq_extra:
+            r += f", slots={self.slots}"
+        return r
+
+
+def lora_base(m):
+    """The base module of a LoRA-wrapped linear or embedding, else ``m``
+    itself. A drafter binds the target's head and embedding through it:
+    its draft calls publish no row vector."""
+    return m.base if isinstance(m, (LoRAKQuantLinear, LoRAKQuantEmbedding)) else m
+
+
 class ExpertLoRA:
     """Stamped on an expert-stack leaf (``object.__setattr__``, outside the
     parameter tree): the per-expert factors in gather_mm orientation,
@@ -2553,10 +2704,34 @@ def _extra_expert_delta(extra, h_rows, idx, indices, dtype, order=None):
     and owner table; ``None`` when there are none."""
     d = None
     for lo2 in extra:
+        if lora_rows.slot_off(lo2.slot):
+            continue
         ef, mask = lora_expert_ids(lo2, idx.reshape(-1))
         s_rows = _mask_rows(
             _lora_flat_row_scales(lo2.slot, indices, dtype, order), mask)
         d2 = expert_delta(lo2, h_rows, ef, s_rows)
+        d = d2 if d is None else d + d2
+    return d
+
+
+def expert_lora_delta(down, h, idx, indices, order=None):
+    """The summed delta of every expert stamp on ``down`` whose slot is
+    on, as ``(R, 1, out)`` at ``h``'s dtype, or None when there is none.
+    ``h`` holds one row per routed id in ``idx``, in ``idx``'s order;
+    ``indices`` are the ``(B, ..., k)`` ids the published row factor
+    follows, and ``order`` the sort that took them to ``idx``."""
+    lo = getattr(down, "_kq_lora", None)
+    if lo is None:
+        return None
+    h_rows = h.reshape(idx.size, 1, h.shape[-1])
+    d = None
+    for e in (lo,) + tuple(getattr(down, "_kq_lora_extra", None) or ()):
+        if lora_rows.slot_off(e.slot):
+            continue
+        ef, mask = lora_expert_ids(e, idx.reshape(-1))
+        s_rows = _mask_rows(
+            _lora_flat_row_scales(e.slot, indices, h.dtype, order), mask)
+        d2 = expert_delta(e, h_rows, ef, s_rows)
         d = d2 if d is None else d + d2
     return d
 
@@ -2614,13 +2789,16 @@ def _make_lora_switch_glu(base_cls, caps=None):
         def __call__(self, x, indices, scores=None):
             lo = getattr(self.down_proj, "_kq_lora", None)
             extra = getattr(self.down_proj, "_kq_lora_extra", None) or ()
-            # Stamp removed, or every row of this forward at scale 0 in
-            # every slot: plain base behaviour.
-            if lo is None or lora_rows.all_off(
-                    (lo.slot,) + tuple(e.slot for e in extra)):
+            # Only the slots some row of this forward has on do work; the
+            # first of them is the primary the epilogue serves. Stamp
+            # removed, or every slot off: plain base behaviour.
+            stamps = (lo,) + tuple(extra) if lo is not None else ()
+            on = [e for e in stamps if not lora_rows.slot_off(e.slot)]
+            if not on:
                 return super().__call__(x, indices, scores) \
                     if scores is not None and hasattr(self, "_fused_ok") \
                     else super().__call__(x, indices)
+            lo, extra = on[0], on[1:]
             k = indices.shape[-1]
             fused = hasattr(self, "_fused_ok") and self._fused_ok(x, indices)
             if fused:
@@ -2678,15 +2856,7 @@ def _make_lora_switch_glu(base_cls, caps=None):
                 x_gate = self.gate_proj(xe, idx, sorted_indices=do_sort)
                 h = self.activation(x_up, x_gate)
                 y = self.down_proj(h, idx, sorted_indices=do_sort)
-                rr = idx.size
-                h_rows = h.reshape(rr, 1, h.shape[-1])
-                ef, mask = lora_expert_ids(lo, idx.reshape(-1))
-                s_rows = _mask_rows(
-                    _lora_flat_row_scales(lo.slot, indices, h.dtype, order), mask)
-                d = expert_delta(lo, h_rows, ef, s_rows)
-                d2 = _extra_expert_delta(extra, h_rows, idx, indices, h.dtype, order)
-                if d2 is not None:
-                    d = d + d2
+                d = expert_lora_delta(self.down_proj, h, idx, indices, order)
                 y = y + d.reshape(y.shape).astype(y.dtype)
                 if do_sort:
                     y = _lora_scatter_unsort(y, inv_order, indices.shape)
@@ -2700,8 +2870,7 @@ def _make_lora_switch_glu(base_cls, caps=None):
 
 
 _LORA_BLOCKED_CONTAINER_NAMES = (
-    "_CPUOffload", "_FusedKQuantMoeBlock", "_FusedKQuantGemmaExperts",
-    "_FusedGptOss", "_FusedNativeFPSwitchGLU",
+    "_CPUOffload", "_FusedGptOss", "_FusedNativeFPSwitchGLU",
 )
 
 
@@ -2712,6 +2881,52 @@ def _lora_container_blocked(*mods) -> str | None:
                 if name in cls.__name__:
                     return cls.__name__
     return None
+
+
+def _stamp_gate_slots(by_path: dict, paths, slot: int, *,
+                      expert: bool = False) -> None:
+    """Record ``slot`` on the nearest ancestor of each path whose class
+    names the child the path runs through in ``_kq_lora_gate``, so its
+    fused path can tell when an adapted member has a slot on. ``expert``
+    marks an expert-stack target, which only the streaming refusal reads."""
+    for path in paths:
+        parts = path.split(".")
+        for i in range(len(parts) - 1, -1, -1):
+            owner = by_path.get(".".join(parts[:i]))
+            gate = getattr(type(owner), "_kq_lora_gate", None)
+            if gate is None:
+                continue
+            if parts[i] in gate:
+                slots = set(owner.__dict__.get("_kq_lora_slots", ()))
+                slots.add(int(slot))
+                object.__setattr__(owner, "_kq_lora_slots", tuple(sorted(slots)))
+                if expert:
+                    object.__setattr__(owner, "_kq_expert_lora", True)
+            break
+
+
+def refuse_streamed_fused_expert_lora(model) -> None:
+    """Raise when a fused MoE block in ``model``'s decoder layers carries
+    an expert adapter target. Expert streaming calls this before it wraps,
+    wires or credits anything."""
+    layers: Any = getattr(model, "layers", None)
+    if layers is None:
+        layers = getattr(getattr(model, "model", None), "layers", None) or ()
+    hits: list[str] = []
+    for i, layer in enumerate(layers):
+        walk: Any = getattr(layer, "named_modules", None)
+        mods = (list(walk()) if walk is not None
+                else [("", m) for m in layer.modules()])
+        hits += [f"layers.{i}.{p}".rstrip(".") for p, m in mods
+                 if getattr(m, "__dict__", {}).get("_kq_expert_lora")]
+    if hits:
+        n = (f"{len(hits)} blocks carry" if len(hits) > 1 else "1 block carries")
+        raise NotImplementedError(
+            f"expert LoRA on a fused MoE block needs the routed experts in "
+            f"memory, and this load streams them. {n} expert targets, the "
+            f"first at {hits[0]}. Load the model without "
+            f"expert streaming, use an adapter without expert targets, or set "
+            f"GMLX_FUSED_MOE_BLOCK=0 to load the blocks unfused.")
 
 
 def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
@@ -2745,12 +2960,17 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
         parent = by_path.get(cpath.rpartition(".")[0])
         blocked = _lora_container_blocked(container, parent) if parent is not None \
             else _lora_container_blocked(container)
+        if blocked and "_CPUOffload" in blocked:
+            raise NotImplementedError(
+                f"expert LoRA target {path!r}: expert streaming or table "
+                f"placement wrapped the experts before the adapter installed "
+                f"({blocked}); install the adapter before placement")
         if blocked:
             raise NotImplementedError(
                 f"expert LoRA target {path!r}: owner path runs through "
-                f"{blocked}, which bypasses the SwitchGLU forward (apply the "
-                f"adapter before placement; block/gemma/gpt-oss fusions are "
-                f"not supported)")
+                f"{blocked}, which bypasses the SwitchGLU forward (gpt-oss "
+                f"and native-FP expert fusions are not supported; "
+                f"GMLX_FUSED_MOE=0 loads them unfused)")
         if lm.transform != "passthrough":
             raise NotImplementedError(
                 f"expert LoRA target {path!r} has unsupported transform "
@@ -2777,13 +2997,46 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
         if not isinstance(container, tuple(classes.values())) \
                 and type(container).__name__ != "_LoRASwitchGLU":
             _swap_class(container, classes, _make_lora_switch_glu, None)
+        _stamp_gate_slots(by_path, (path,), slot, expert=True)
     return len(targets)
+
+
+def _hadamard_qembedding(module) -> bool:
+    return any(c.__name__ == "HadamardQuantizedEmbedding" for c in type(module).__mro__)
+
+
+def _embedding_refusal(module, lm, config) -> str | None:
+    """Why ``module`` cannot take the token embedding pair ``lm``, or None:
+    the install's backstop for the header check of
+    :func:`adapter.embedding_refusal`."""
+    from . import adapter as _adapter
+    from .hadamard_modules import is_folded
+
+    if is_folded(module) or _hadamard_qembedding(module):
+        return _adapter._EMBD_FOLDED
+    if isinstance(module, nn.Embedding):
+        n_vocab, n_embd = module.weight.shape
+    else:
+        n_vocab, n_embd = int(module.num_embeddings), int(module.dims)
+    if lm.a.ndim != 2 or lm.b.ndim != 2 or lm.a.shape[0] != n_vocab \
+            or lm.b.shape[0] != n_embd:
+        return _adapter.embd_shape_message(lm.a.shape, lm.b.shape, n_vocab, n_embd)
+    cfg = config or {}
+    text_cfg = cfg.get("text_config") or {}
+    if cfg.get("tie_word_embeddings") or text_cfg.get("tie_word_embeddings"):
+        return _adapter._EMBD_TIED
+    if "granite_switch" in (cfg.get("model_type"), text_cfg.get("model_type")):
+        return _adapter._EMBD_GRANITE_SWITCH
+    return None
+
+
+_EMBEDDING_LEAVES = (KQuantEmbedding, nn.Embedding, nn.QuantizedEmbedding)
 
 
 def install_lora_adapter(model: nn.Module, plan,
                          *, n_head: int | None = None,
                          n_head_kv: int | None = None,
-                         slot: int = 0) -> int:
+                         slot: int = 0, config: dict | None = None) -> int:
     """Wrap each Linear named by a LoRA ``plan`` with its live adapter delta.
 
     A second leaf-swap pass (mirrors :func:`install_kquant_modules`): walks
@@ -2796,9 +3049,13 @@ def install_lora_adapter(model: nn.Module, plan,
     for ``k_proj``). Missing head counts on such a target raise rather than apply
     an un-permuted delta onto a de-permuted base (which would corrupt attention).
 
+    A ``token_embd`` pair wraps the token embedding in a
+    :class:`LoRAKQuantEmbedding`. ``config`` (the model's config dict) says
+    whether the embedding is also the output head, which refuses the pair.
+
     Two loud failures, never a silent drop (a dropped adapter weight serves a
-    subtly wrong model): a target that names an unwrappable module (MoE-expert /
-    embedding adapters are deferred) and a target with no matching module at all.
+    subtly wrong model): a target that names an unwrappable module and a
+    target with no matching module at all.
     """
     targets = dict(plan.modules)   # module_path -> LoraModule
     wrapped: set[str] = set()
@@ -2814,6 +3071,14 @@ def install_lora_adapter(model: nn.Module, plan,
         if lm.experts:
             continue
         existing = by_path.get(path)
+        if lm.embedding and isinstance(existing, LoRAKQuantEmbedding):
+            why = _embedding_refusal(existing.base, lm, config)
+            if why is not None:
+                raise ValueError(why)
+            existing.add_slot(lm.a, lm.b, lm.scale, slot)
+            wrapped.add(path)
+            del targets[path]
+            continue
         if isinstance(existing, LoRAKQuantLinear):
             if lm.transform == "qk_permute":
                 nh = n_head_kv if path.endswith("k_proj") else n_head
@@ -2836,10 +3101,21 @@ def install_lora_adapter(model: nn.Module, plan,
         lm = targets.get(path)
         if lm is None or lm.experts:
             return module
+        if lm.embedding and (isinstance(module, _EMBEDDING_LEAVES)
+                             or _hadamard_qembedding(module)):
+            why = _embedding_refusal(module, lm, config)
+            if why is not None:
+                raise ValueError(why)
+            wrapped.add(path)
+            return LoRAKQuantEmbedding(module, lm.a, lm.b, lm.scale, slot=slot)
+        if lm.embedding:
+            raise NotImplementedError(
+                f"token_embd LoRA: the token embedding {path!r} is a "
+                f"{type(module).__name__}, which gmlx cannot wrap")
         if not isinstance(module, (KQuantLinear, nn.Linear)):
             raise NotImplementedError(
                 f"LoRA target {path!r} is a {type(module).__name__}, not a "
-                f"wrappable Linear (embedding LoRA is deferred)")
+                f"wrappable Linear (only the token embedding takes a LoRA pair)")
         b = lm.b
         if lm.transform == "qk_permute":
             nh = n_head_kv if path.endswith("k_proj") else n_head
@@ -2866,6 +3142,7 @@ def install_lora_adapter(model: nn.Module, plan,
         raise ValueError(
             f"LoRA adapter targets {sorted(missing)} have no matching module in "
             f"the loaded model - adapter/base mismatch (never silently skipped)")
+    _stamp_gate_slots(by_path, sorted(wrapped - set(expert_targets)), slot)
     _drop_fused_wires(by_path, wrapped)
     return len(wrapped)
 

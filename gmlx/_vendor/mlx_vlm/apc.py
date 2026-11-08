@@ -1181,6 +1181,9 @@ class DiskBlockStore:
         # racing a write can wait briefly for the bytes to land.
         self._in_flight: dict[int, threading.Event] = {}
         self._in_flight_lock = threading.Lock()
+        # gmlx: hashes dropped while their write was queued or running.
+        self._kq_dropped: set[int] = set()
+        self._kq_unlink_later: set[Path] = set()
         # block_hash -> (shard_path, block_idx_in_shard)
         self._index: dict[int, Tuple[Path, int]] = {}
         # exact full-prefix hash -> snapshot path
@@ -2641,12 +2644,17 @@ class DiskBlockStore:
         with self._in_flight_lock:
             for block_hash in block_hashes:
                 self._in_flight.pop(int(block_hash), None)
+                # gmlx: a drop mark lives only while its write is in flight.
+                self._kq_dropped.discard(int(block_hash))
         try:
             # The completed shard is now evictable too. Without this second
             # pass, one oversized last write can leave disk usage over its cap.
             if self.max_bytes is not None and self._disk_bytes > self.max_bytes:
                 with self._write_lock:
                     self._maybe_evict()
+            if self._kq_unlink_later:
+                with self._write_lock:
+                    self._kq_unlink(())
         except OSError as e:
             logger.warning("APC disk eviction failed: %s", e)
         finally:
@@ -3013,20 +3021,82 @@ class DiskBlockStore:
         finally:
             clear_mlx_streams()
 
+    def drop_hashes(self, hashes: Iterable[int]) -> int:
+        """gmlx: forget blocks and exact snapshots by hash. A queued write
+        of one is skipped, a write in progress is deleted when it finishes,
+        and a written shard that holds one leaves the index now and is
+        deleted. Returns the shards dropped from the index."""
+        hs = {int(h) for h in hashes}
+        with self._in_flight_lock:
+            self._kq_dropped |= hs & set(self._in_flight)
+        paths = self._kq_unindex(hs)
+        # The caller is the engine thread, and a write in progress can take
+        # seconds: when the write lock is busy, the writer deletes the files.
+        if self._write_lock.acquire(blocking=False):
+            try:
+                self._kq_unlink(paths)
+            finally:
+                self._write_lock.release()
+        else:
+            with self._in_flight_lock:
+                self._kq_unlink_later |= paths
+        return len(paths)
+
+    def _kq_unindex(self, hs: set) -> set:
+        """Drop the index entries of every shard that holds one of ``hs``,
+        and return those shards' paths."""
+        with self._index_lock:
+            found = {h for h in hs if h in self._index or h in self._exact_index}
+            paths = {self._index[h][0] for h in hs if h in self._index}
+            paths |= {self._exact_index[h] for h in hs if h in self._exact_index}
+        with self._in_flight_lock:
+            self._kq_dropped -= found
+        for path in paths:
+            self._drop_index_for_path(path)
+        return paths
+
+    def _kq_unlink(self, paths) -> None:
+        """Delete shards. The caller holds the write lock."""
+        with self._in_flight_lock:
+            paths = set(paths) | self._kq_unlink_later
+            self._kq_unlink_later.clear()
+        for path in paths:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            self._disk_bytes = max(0, self._disk_bytes - size)
+
     def _write_payload(
         self, shard_id: str, block_hashes: Sequence[int], payload: Any
     ) -> bool:
         path = self._shard_path(shard_id)
+        hs = {int(h) for h in block_hashes}
         try:
             # Serialize disk/index updates for background and producer writes.
             # Callbacks run outside this lock: they may acquire the manager lock.
             with self._write_lock:
+                with self._in_flight_lock:
+                    dropped = hs & self._kq_dropped
+                if dropped:
+                    # gmlx: dropped while queued; never written.
+                    with self._in_flight_lock:
+                        self._kq_dropped -= dropped
+                    return False
                 if isinstance(payload, _DiskExactCacheSnapshot):
                     self._write_exact_cache_snapshot(path, payload)
                 elif isinstance(payload, _DiskLayerMajorSnapshot):
                     self._write_layer_major_snapshot(path, payload)
                 else:
                     raise TypeError(f"unsupported APC disk payload: {type(payload)!r}")
+                with self._in_flight_lock:
+                    dropped = hs & self._kq_dropped
+                    self._kq_dropped -= dropped
+                if dropped:
+                    # gmlx: dropped while it was being written.
+                    self._kq_unlink(self._kq_unindex(dropped))
+                    return False
         except Exception as e:
             logger.warning("APC disk shard save failed for %s: %s", path, e)
             self._notify_write_callback(self._write_failure_callback, len(block_hashes))

@@ -31,6 +31,9 @@ models. The server chooses each model's block size and pool
 size. `GET /v1/cache/stats` reports the hits, the stores and the
 other counters, as [Endpoints](api.md#endpoints) lists.
 
+A [scoring request](api.md#text-completions) does not read or fill the
+cache: it runs on a full-precision cache of its own.
+
 ## What each family reuses
 
 How much of a prompt the cache can reuse depends on the model family,

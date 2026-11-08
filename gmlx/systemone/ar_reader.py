@@ -48,6 +48,25 @@ def _logits(out):
     return getattr(out, "logits", out)
 
 
+def language_model(model):
+    """The object chat prefill and decode call. An outer VLM class numbers
+    every text chunk from 0, so full-logit reads call the language model,
+    which numbers a chunk from its cache offset."""
+    return getattr(model, "language_model", model)
+
+
+def tokenizer_of(processor):
+    """The tokenizer a decision encodes with: the text server's tokenizer
+    wrapper, else the processor when it encodes, else the tokenizer of a
+    VLM processor served with its mmproj."""
+    wrapper = getattr(processor, "_wrapper", None)
+    if wrapper is not None:
+        return wrapper
+    if callable(getattr(processor, "encode", None)):
+        return processor
+    return getattr(processor, "tokenizer", processor)
+
+
 def text_model(model):
     """The mlx-lm model under the server's text-only wrapper, if any."""
     lm = getattr(model, "language_model", None)
@@ -236,7 +255,7 @@ class LetterTokens:
     so a request can tokenize its passes before the reads start."""
 
     def __init__(self, processor, *, lock=None):
-        self.wrapper = getattr(processor, "_wrapper", processor)
+        self.wrapper = tokenizer_of(processor)
         self.lock = lock if lock is not None else contextlib.nullcontext()
         self._ids: dict[str, list[int]] = {}
 
@@ -283,6 +302,7 @@ class LetterReader:
     def __init__(self, model, letter_ids: list[int], *,
                  rows_scope: Optional[Callable[[int], Any]] = None):
         self.model = model
+        self.lm = language_model(model)
         self.letter_ids = list(letter_ids)
         self.rows_scope = rows_scope or _no_rows
         self.trunk: Any
@@ -319,7 +339,7 @@ class LetterReader:
     def _full(self, x, cache):
         self.forwards += 1
         with self.rows_scope(x.shape[0]):
-            return _logits(self.model(x, cache=cache))
+            return _logits(self.lm(x, cache=cache))
 
     def _advance(self, x, cache) -> None:
         """Run ``x`` into ``cache`` without reading scores."""
@@ -361,7 +381,7 @@ class LetterReader:
         letter = mx.array(self.letter_ids)
         try:
             with (rows_scope or self.rows_scope)(1):
-                full = _logits(self.model(x, cache=self.make_cache()))[0, -1]
+                full = _logits(self.lm(x, cache=self.make_cache()))[0, -1]
                 h = self.trunk(x, cache=self.make_cache())
                 split = self.head(h)[0, -1]
         except Exception:  # noqa: BLE001 - a trunk that will not run alone

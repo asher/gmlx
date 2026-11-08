@@ -14,7 +14,8 @@ from .capacity import _defer
 from .residency_build import _clear_table_step
 from .residency_footprint import (_decode_feeder_of, _gguf_footprint_bytes,
                                   _plain_footprint, _prefill_feeder_of,
-                                  _ring_room, _streaming_footprint)
+                                  _ring_room, _streaming_footprint,
+                                  text_adapter_bytes)
 from .residency_types import (IMAGE_KIND, STORE, VIDEO_KIND, ModelBusyError,
                               _STOCK_IMAGE_KINDS, _WORKER_KINDS, _WORKER_ORDER,
                               _Entry, _Figures, _Ledger, _log, _mine,
@@ -140,6 +141,14 @@ class _PoolCore:
                 and os.path.isfile(model_path)):
             from gmlx.load.preflight import preflight
             preflight(model_path)
+            # An adapter the base cannot take is refused from the headers,
+            # so it evicts nothing.
+            from gmlx.load.adapter import adapter_load_refusal
+            effective = getattr(build_spec, "effective_adapters", None)
+            adapter_load_refusal(
+                model_path, effective() if callable(effective) else (), env,
+                stream=getattr(build_spec, "stream", None),
+                mtp=bool(getattr(build_spec, "speculative", False)))
         # Image pipelines a post-build refit evicts. The worker reservation
         # was decided before the build, which may have seen them busy, so
         # they are released after the build lock drops: a reservation taken
@@ -278,7 +287,19 @@ class _PoolCore:
                     self._resident_bytes() if held is None else held))
         elif stream is None and model_kind not in _WORKER_KINDS:
             incoming = _plain_footprint(model_path, file_bytes, env)
+        if model_kind not in _WORKER_KINDS:
+            incoming += text_adapter_bytes(build_spec)
         return file_bytes, incoming
+
+    def resident_chat_entry(self, model_path, signature) -> _Entry | None:
+        """From ``figures`` with no lock: the resident chat entry built for
+        ``model_path`` under ``signature`` (a load signature), or None. The
+        entry may be mid-teardown."""
+        for e in self.figures.entries:
+            if (not e.is_image and str(e.model_path) == str(model_path)
+                    and tuple(e.cache_key[3:]) == tuple(signature)):
+                return e
+        return None
 
     def load_entry(self, model_path, spec, env=None) -> _Entry:
         """For a route's check, from ``figures`` with no lock: the resident

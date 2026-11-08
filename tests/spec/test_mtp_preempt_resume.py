@@ -573,6 +573,86 @@ def test_preempt_waits_for_first_delivery(monkeypatch):
         (7, 12), (0, 101), (7, 101)]
 
 
+def _closing_hook(close):
+    from gmlx.gen.thinking_budget import MTPFinishThinking
+
+    return MTPFinishThinking(
+        end_seq=(close[-1],), skip_ids=list(close), reclose_ids=list(close),
+        budget=0, start_seq=(30,), start_in_thinking=True)
+
+
+def test_preempt_waits_for_a_close_in_flight(monkeypatch):
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    install_continuous_batch_admission()
+    calls = []
+    monkeypatch.setattr(ar, "run_speculative_server_rounds",
+                        _recording_rounds(calls))
+
+    model = SimpleNamespace()
+    host = _make_batch(ar, uids=(0,), model=model)
+    close = [20, 21, 22]
+    hook = _closing_hook(close)
+    assert hook.take_forced() == close
+    host._kq_close_hook = hook
+    host.next()
+    host.next()
+    host.extend(_make_batch(ar, uids=(7,), model=model))
+
+    for t in close:
+        assert [r.uid for r in host.next()] == [0]   # no preempt
+        assert len(calls) == 1
+        hook.observe(t)
+    host.next()
+    assert len(calls) == 2                       # rebuilt after the close
+    assert calls[1]["hidden"] is None
+    assert hook.done and not hook.closing()      # the rebuilt batch has none
+
+
+def test_a_close_longer_than_a_block_lands_whole_before_a_preempt(monkeypatch):
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    install_continuous_batch_admission()
+    calls = []
+    rebuilt = _recording_rounds(calls)
+
+    def rounds(model, draft_model, prompt_cache, hidden, **kw):
+        if hidden is None:
+            return rebuilt(model, draft_model, prompt_cache, hidden, **kw)
+        kw.pop("draft_kind", None)
+        kw.pop("token_dtype", None)
+        kw.pop("row_ids", None)
+        return spec.owned_server_rounds(
+            model, draft_model, prompt_cache, hidden, **kw)
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", rounds)
+    model = SimpleNamespace(language_model=_VerifyEchoLM())
+    close = [20, 21, 22, 23, 24, 25, 26]           # seven ids, blocks of 4
+    hook = _closing_hook(close)
+    cache = _FakeCache(width=1)
+    cache._kq_mtp_thinking_hook = hook
+    host = ar.SpeculativeGenerationBatch(
+        model=model, draft_model=_EchoDrafter(cap=0), draft_kind="mtp",
+        uids=[0], first_tokens=mx.array([5]), prompt_cache=[cache],
+        sampler=None, stop_criteria=lambda tok: False, max_tokens=[40],
+        hidden=mx.zeros((1, 4, 8)),
+        shared_kv_states={"full": (mx.zeros((1, 2, 4, 4)),
+                                   mx.zeros((1, 2, 4, 4)))},
+        prompt_tokens=None, greedy_sampling=True)
+    host._kq_close_hook = hook
+    out = [r.token for r in host.next()]         # first token
+    out += [r.token for r in host.next()]        # the close's first chunk
+    assert out == [5, 20, 21, 22, 23]
+    host.extend(_make_batch(ar, uids=(9,), model=model))
+    for _ in range(6):
+        out += [r.token for r in host.next() if r.uid == 0]
+    assert len(calls) == 1                       # the rebuild ran
+    assert out[1:1 + len(close)] == close
+    assert 101 in out[1 + len(close):]
+
+
 # -- preempt capture: the closed round's undelivered tail ------------------
 
 
@@ -739,3 +819,156 @@ def test_injection_consumes_gated_double_buffer():
     # admission landed; every forwarded input advanced exactly once per row
     assert toks == [4, 5, 8]
     assert lm.plain_inputs[2][:2] == [3, 4]
+
+
+def test_a_failed_preempt_close_requeues_the_row(monkeypatch):
+    """The scalar generator's close throws. The row is rebuilt from what it
+    delivered, the waiter joins on its own, and no scalar loop restarts
+    from the host's prefill state."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    from test_spec_engine_release import _MEM, _guarded
+
+    install_continuous_batch_admission()
+    calls = []
+    inner = _recording_rounds(calls)
+
+    def failing_close(model, draft_model, prompt_cache, hidden, **kw):
+        it = inner(model, draft_model, prompt_cache, hidden, **kw)
+        try:
+            yield from it
+        except GeneratorExit:
+            it.close()
+            if len(calls) == 1:
+                raise RuntimeError(_MEM) from None
+            raise
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", failing_close)
+    model = SimpleNamespace()
+    host = _make_batch(ar, uids=(0,), model=model, max_tokens=8)
+    gen, tick = _guarded(monkeypatch, host, {0: [1], 7: [3]}, filtering=True)
+    assert [r.token for r in tick()] == [5]
+    assert [r.token for r in tick()] == [101]
+    host.extend(_make_batch(ar, uids=(7,), model=model, max_tokens=8))
+    assert tick() == []
+    assert calls[0]["closed"] is True
+    assert gen.removed == [0]
+    assert [(e[0], e[1]) for e in gen._unprocessed_sequences] == [
+        (0, [1, 5, 101])]
+    assert [(r.uid, r.token) for r in tick()] == [(7, 12)]
+    tick()
+    assert len(calls) == 2
+    assert calls[1]["first_bonus"].tolist() == [12]
+    assert calls[1]["hidden"] is not None
+
+
+class _FailingDrafter(_EchoDrafter):
+    """The echo drafter, whose draft call refuses an allocation once."""
+
+    def __init__(self, fail_at, **kw):
+        super().__init__(**kw)
+        self.fail_at = fail_at
+
+    def draft_block(self, b, hidden, kv, n, sampler, dtype, **kw):
+        if len(self.draft_calls) + 1 == self.fail_at:
+            self.draft_calls.append(-1)
+            from test_spec_engine_release import _MEM
+
+            raise RuntimeError(_MEM)
+        out = super().draft_block(b, hidden, kv, n, sampler, dtype, **kw)
+        self.draft_calls.append(int(out.shape[0]))
+        return out
+
+
+def _real_batch(ar, *, uids, drafter, cache):
+    lm = _VerifyEchoLM()
+    model = SimpleNamespace(language_model=lm)
+    B = len(uids)
+    batch = ar.SpeculativeGenerationBatch(
+        model=model, draft_model=drafter, draft_kind="mtp",
+        uids=list(uids), first_tokens=mx.array([5] * B),
+        prompt_cache=[cache], sampler=None,
+        stop_criteria=lambda tok: False, max_tokens=[16] * B,
+        hidden=mx.zeros((B, 4, 8)),
+        shared_kv_states={"full": (mx.zeros((B, 2, 4, 4)),
+                                   mx.zeros((B, 2, 4, 4)))},
+        prompt_tokens=None, greedy_sampling=True)
+    return batch, model
+
+
+def test_the_scalar_loop_dying_in_a_round_requeues_its_row(monkeypatch):
+    """The real scalar round loop behind the serve batch: a draft call
+    refuses an allocation in the second round, and the row comes back
+    requeued with what it delivered."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    from test_spec_engine_release import _guarded
+
+    install_continuous_batch_admission()
+    monkeypatch.setattr(ar, "run_speculative_server_rounds",
+                        spec.owned_server_rounds)
+    batch, _ = _real_batch(ar, uids=(0,), drafter=_FailingDrafter(2, cap=0),
+                           cache=_FakeCache(width=1))
+    gen, tick = _guarded(monkeypatch, batch, {0: [1, 2]}, filtering=True)
+    delivered = []
+    for _ in range(6):
+        out = tick()
+        assert not any(r.finish_reason for r in out)
+        delivered += [r.token for r in out]
+        if gen.removed:
+            break
+    assert delivered[:2] == [5, 6]
+    assert gen.removed == [0]
+    assert [(e[0], e[1]) for e in gen._unprocessed_sequences] == [
+        (0, [1, 2] + delivered)]
+
+
+class _RefusingCache(_FakeCache):
+    """A batch cache whose extend refuses an allocation: the injection
+    drain fails half way."""
+
+    def extend(self, other):
+        from test_spec_engine_release import _MEM
+
+        raise RuntimeError(_MEM)
+
+
+def test_the_batch_loop_dying_in_its_injection_drain_requeues_every_row(
+        monkeypatch):
+    """The real batch round loop: the drain that adopts an injected row
+    throws. Every row, the injected one too, comes back requeued, and the
+    dead generator's injection queue is empty."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.spec.admission import install_continuous_batch_admission
+
+    from test_spec_engine_release import _guarded
+
+    install_continuous_batch_admission()
+    monkeypatch.setattr(ar, "run_speculative_server_rounds",
+                        spec.owned_server_rounds_batch)
+    host, model = _real_batch(ar, uids=(0, 1), drafter=_ArmableDrafter(cap=0),
+                              cache=_RefusingCache(width=2))
+    other, _ = _real_batch(ar, uids=(2,), drafter=host.draft_model,
+                           cache=_FakeCache(width=1))
+    other.model = model
+    gen, tick = _guarded(monkeypatch, host, {0: [1], 1: [2], 2: [3]},
+                         filtering=True)
+    got = {0: [], 1: [], 2: []}
+    for _ in range(3):
+        for r in tick():
+            got[r.uid].append(r.token)
+    host.extend(other)
+    for _ in range(4):
+        for r in tick():
+            assert r.finish_reason is None
+            got[r.uid].append(r.token)
+        if gen.removed:
+            break
+    assert host._kq_rounds_dead
+    assert sorted(gen.removed) == [0, 1, 2]
+    assert model._generator_injections == []
+    queue = {e[0]: e[1] for e in gen._unprocessed_sequences}
+    assert queue == {0: [1] + got[0], 1: [2] + got[1], 2: [3] + got[2]}
+    assert got[2] == [5]

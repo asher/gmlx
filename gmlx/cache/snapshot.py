@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from collections import OrderedDict
+from contextlib import contextmanager
 from typing import Any
 
 from gmlx.envflags import env_int
@@ -306,8 +307,11 @@ def drafter_sidecar_store(
             clones.append(clone)
         ids = tuple(int(t) for t in token_ids)[:store_len]
         idx = _sidecar_index(manager)
+        record = getattr(manager, "kq_record", None)
         with manager.lock:
             idx[(ids, int(extra_hash))] = clones
+            if record is not None:
+                record("sidecar", (ids, int(extra_hash)))
             idx.move_to_end((ids, int(extra_hash)))
             while len(idx) > _SIDECAR_ENTRIES:
                 idx.popitem(last=False)
@@ -329,6 +333,8 @@ def drafter_sidecar_store(
                                             block_size=manager.block_size)
                 # The disk writer counts disk_writes when the write lands.
                 disk.save_exact_cache(khash, ids, salted, clones)
+                if record is not None:
+                    record("disk", khash)
             except Exception:
                 _log.debug("APC sidecar disk save failed", exc_info=True)
         _ckpt_bump(manager, "sidecar_writes")
@@ -2450,6 +2456,21 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
         return 0
 
 
+_RETIRE_BLOCKED = [0]
+
+
+@contextmanager
+def retirement_blocked():
+    """No retirement store runs in the scope. The tick guard drops the
+    engine's state after a command buffer failure: that state is not
+    valid, and closing a round generator would retire it."""
+    _RETIRE_BLOCKED[0] += 1
+    try:
+        yield
+    finally:
+        _RETIRE_BLOCKED[0] -= 1
+
+
 def retirement_store(
     manager: Any,
     mode: str | None,
@@ -2482,7 +2503,7 @@ def retirement_store(
     the fallback can store past ``max_len``, so callers must log the
     return, not the cap.
     """
-    if manager is None or token_ids is None:
+    if manager is None or token_ids is None or _RETIRE_BLOCKED[0]:
         return 0
     ids = [int(t) for t in token_ids]
     if mode == "ckpt":

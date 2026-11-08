@@ -91,8 +91,8 @@ These pages are the starting points:
   stream their experts from disk.
 - [Long context](long-context.md): Running a model past its trained
   context with rope scaling.
-- [LoRA adapters](lora.md): Training an adapter and serving several on one
-  base model.
+- [LoRA adapters](lora.md): Training an adapter, serving several on one
+  base model and mixing them per request.
 - [Distillation](distill.md): Teaching a small model a document or a larger
   model's behavior.
 - [Distillation walkthrough](distill-walkthrough.md): One distillation task

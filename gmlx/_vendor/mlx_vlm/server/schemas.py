@@ -1,7 +1,14 @@
 import os
 from typing import TYPE_CHECKING, Any, List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 from typing_extensions import Required, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
@@ -813,10 +820,18 @@ class VLMRequest(FlexibleBaseModel):
     )
     top_logprobs: Optional[int] = Field(
         None,
+        ge=0,  # gmlx
         description=(
             "Number of most-likely tokens to return at each position "
-            "(0-20). Requires logprobs=true. The server-side cap is set by "
+            "(0-100). Requires logprobs=true. The server-side cap is set by "
             "the TOP_LOGPROBS_K env var; values above the cap are clamped."
+        ),
+    )
+    # gmlx: logprob entries name tokens as "token_id:<id>".
+    return_tokens_as_token_ids: Optional[bool] = Field(
+        None,
+        description=(
+            'Name each logprob token as "token_id:<id>" instead of its text.'
         ),
     )
     resize_shape: Optional[ResizeShapeInput] = Field(
@@ -885,6 +900,27 @@ class ChatRequest(GenerationRequest):
     )
     tool_parser: Optional[str] = Field(None, description=_TOOL_PARSER_DESC)
     _validate_tool_parser = field_validator("tool_parser")(_check_tool_parser)
+    # gmlx: vLLM's field. The answer carries the prompt's ids and each
+    # choice's generated ids.
+    return_token_ids: Optional[bool] = Field(
+        None,
+        description=(
+            "Return the prompt's token ids and each choice's generated token ids."
+        ),
+    )
+
+
+class _TokenIdFields(BaseModel):
+    """gmlx: the token-id fields appear only when the request asked for them."""
+
+    @model_serializer(mode="wrap")
+    def _omit_unasked_ids(self, handler):
+        out = handler(self)
+        if isinstance(out, dict):
+            for key in ("prompt_token_ids", "token_ids"):
+                if key in out and out[key] is None:
+                    del out[key]
+        return out
 
 
 class TopLogprob(BaseModel):
@@ -904,14 +940,15 @@ class ChatLogprobs(BaseModel):
     content: List[ChatLogprobContent] = []
 
 
-class ChatChoice(BaseModel):
+class ChatChoice(_TokenIdFields):
     index: int = 0
     finish_reason: str = "stop"
     message: ChatMessage
     logprobs: Optional[ChatLogprobs] = None
+    token_ids: Optional[List[int]] = None  # gmlx
 
 
-class ChatResponse(BaseModel):
+class ChatResponse(_TokenIdFields):
     id: str = ""
     object: str = "chat.completion"
     created: int = 0
@@ -919,6 +956,7 @@ class ChatResponse(BaseModel):
     choices: List[ChatChoice] = []
     usage: Optional[UsageStats] = None
     timings: Optional[GenerationTimings] = None
+    prompt_token_ids: Optional[List[int]] = None  # gmlx
 
 
 class ChatStreamChoice(BaseModel):
@@ -926,6 +964,7 @@ class ChatStreamChoice(BaseModel):
     finish_reason: Optional[str] = None
     delta: ChatMessage
     logprobs: Optional[ChatLogprobs] = None
+    token_ids: Optional[List[int]] = None  # gmlx
 
 
 class ChatStreamChunk(BaseModel):
@@ -936,6 +975,7 @@ class ChatStreamChunk(BaseModel):
     choices: List[ChatStreamChoice] = []
     usage: Optional[UsageStats] = None
     timings: Optional[Union[GenerationTimings, StreamingTimings]] = None
+    prompt_token_ids: Optional[List[int]] = None  # gmlx
 
 
 # Models for Anthropic-compatible /v1/messages endpoint

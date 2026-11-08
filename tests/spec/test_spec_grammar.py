@@ -168,6 +168,62 @@ def test_start_commits_the_first_token_once():
     assert _allowed(g.masks([])[0], EOS)
 
 
+START_THINK = TOK.convert_tokens_to_ids("<think>")
+
+
+def _served(*procs):
+    """``procs`` as serve wraps them for a prompt that opens and closes no
+    block, with no markers configured (the maybe state): the vocab's
+    <think> pair resolves."""
+    import importlib
+
+    from gmlx.upstream.patching import root
+
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    rg = gen.ResponseGenerator.__new__(gen.ResponseGenerator)
+    rg.tokenizer = rg.processor = TOK
+    args = SimpleNamespace(
+        logit_bias=None, repetition_penalty=None, repetition_context_size=20,
+        presence_penalty=None, presence_context_size=20,
+        frequency_penalty=None, frequency_context_size=20,
+        logits_processors=list(procs), enable_thinking=True,
+        thinking_start_token=None, thinking_end_token=None,
+        _kq_thinking_explicit=False)
+    return root(gen.ResponseGenerator._make_logits_processors)(
+        rg, args, mx.array([[DIGITS[3], DIGITS[4]]]))
+
+
+def test_a_maybe_row_allows_the_grammar_and_the_start_token_first():
+    g = _rows(_served(_proc())).grammar
+    (row,) = g.masks([])
+    assert _allowed(row, DIGITS[0]) and _allowed(row, START_THINK)
+    assert not _allowed(row, BAD)
+
+
+def test_a_maybe_row_start_draft_opens_a_block_for_the_round():
+    g = _rows(_served(_proc())).grammar
+    masks = g.masks([START_THINK, BAD, END_THINK, DIGITS[3]])
+    assert _allowed(masks[0], START_THINK) and not _allowed(masks[0], BAD)
+    assert (masks[1:3] == -1).all()
+    assert _allowed(masks[3], DIGITS[3]) and not _allowed(masks[3], BAD)
+    g.commit([START_THINK, BAD, END_THINK])
+    (row,) = g.masks([])
+    assert _allowed(row, DIGITS[0]) and not _allowed(row, BAD)
+
+
+def test_a_maybe_row_first_grammar_token_keeps_the_grammar():
+    g = _rows(_served(_proc())).grammar
+    g.start(DIGITS[1])
+    (row,) = g.masks([])
+    assert _allowed(row, DIGITS[2])
+    assert not _allowed(row, START_THINK) and not _allowed(row, BAD)
+
+
+def test_scalar_rounds_on_a_maybe_row_equal_constrained_greedy():
+    out = _scalar(_DigitDrafter(cap=0), rows=_rows(_served(_proc())))
+    assert out == _reference(DIGITS[0], 20)
+
+
 def test_no_grammar_in_plain_processors():
     assert _rows([lambda t, x: x]).grammar is None
     assert SpecRowProcessors.from_processors(None, []) is None
@@ -391,3 +447,82 @@ def test_rounds_get_row_procs_at_start_after_preempt_and_on_injection(
     host.next()                     # preempt, rebuild, inject
     assert seen == [("start", ["g-host"]), ("start", ["g-host"]),
                     ("inject", [["g-wait"]])]
+
+
+@pytest.mark.parametrize("wrap", ["bare", "maybe"])
+@pytest.mark.parametrize("cut", [1, 3, 7])
+def test_an_mtp_replay_resumes_the_grammar_where_the_row_stopped(
+        monkeypatch, wrap, cut):
+    """A requeued MTP row replays its prompt plus the delivered tokens. Its
+    resumed processor's prefill call consumes the last of them, and the
+    rounds take that matcher, so the next mask is the live one."""
+    from gmlx._vendor.mlx_vlm import structured
+    from gmlx.serve.tick_guard import _resumed_processors
+
+    monkeypatch.setattr(structured, "_apply_llguidance_mask",
+                        lambda logits, mask: logits)
+    prompt = [DIGITS[3], DIGITS[4]]
+    logits = mx.zeros((1, VOCAB))
+    delivered = DIGITS[:cut]
+
+    def make():
+        return [_proc()] if wrap == "bare" else _served(_proc())
+
+    live = make()
+    live[0](mx.array(prompt), logits)
+    rows = SpecRowProcessors.from_processors(live, list(prompt))
+    rows.start(delivered[0])
+    rows.commit(delivered[1:])
+
+    replay = _resumed_processors(make(), delivered)
+    ctx = prompt + delivered
+    replay[0](mx.array(ctx), logits)
+    again = SpecRowProcessors.from_processors(replay, ctx)
+    assert (again.grammar.masks([]) == rows.grammar.masks([])).all()
+    assert (again.grammar.masks(DIGITS[cut:cut + 2])
+            == rows.grammar.masks(DIGITS[cut:cut + 2])).all()
+
+
+@pytest.mark.parametrize("cut", [1, 2, 4])
+def test_a_resumed_maybe_wrapper_masks_as_the_live_one(monkeypatch, cut):
+    """The wrapper's replay asks the matcher where the live run read the
+    first step's mask row, and hands its grammar the answer tokens."""
+    from gmlx._vendor.mlx_vlm import structured
+
+    monkeypatch.setattr(structured, "_apply_llguidance_mask",
+                        lambda logits, mask: logits)
+    prompt = [DIGITS[3], DIGITS[4]]
+    logits = mx.zeros((1, VOCAB))
+    gen = DIGITS[:cut]
+    (live,) = _served(_proc())
+    live(mx.array(prompt), logits)
+    for t in gen:
+        live.process_last_token(t, logits)
+    (proc,) = _served(_proc())
+    replay = proc.resumed(gen)
+    replay(mx.array(gen[-1:]), logits)
+    assert replay._active and live._active
+    want = np.zeros((1, (LLG_TOK.vocab_size + 31) // 32), dtype=np.int32)
+    got = want.copy()
+    llguidance.numpy.fill_next_token_bitmask(
+        live.processor.ll_matchers[0], want, 0)
+    llguidance.numpy.fill_next_token_bitmask(
+        replay.processor.ll_matchers[0], got, 0)
+    assert (got == want).all()
+
+
+def test_a_resumed_maybe_wrapper_keeps_a_block_the_reply_opened(monkeypatch):
+    """A reply that opened a block before the cut resumes inside it: the
+    grammar waits for the end marker again."""
+    from gmlx._vendor.mlx_vlm import structured
+
+    monkeypatch.setattr(structured, "_apply_llguidance_mask",
+                        lambda logits, mask: logits)
+    (proc,) = _served(_proc())
+    gen = [START_THINK, BAD, BAD]
+    replay = proc.resumed(gen)
+    logits = mx.zeros((1, VOCAB))
+    replay(mx.array(gen[-1:]), logits)
+    assert not replay._active
+    replay.process_last_token(END_THINK, logits)
+    assert replay._active

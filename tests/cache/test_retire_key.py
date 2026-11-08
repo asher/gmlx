@@ -558,3 +558,36 @@ def test_lcp_no_tools_echo_drops_reasoning():
                  "thinking_end_token": "</think>"}
     assert rk.next_turn_lcp(ctx, [1, 2, 3, 4], [4]) == 2
     assert seen["reasoning"] is False
+
+
+def test_split_pair_takes_the_render_pair_when_the_request_sets_none():
+    ctx = _fake_ctx([1])
+    assert rk._split_pair(ctx) == (None, None)
+    ctx["think"] = ("<|channel>thought", "<channel|>")
+    assert rk._split_pair(ctx) == ("<|channel>thought", "<channel|>")
+    assert rk._thinking_markers(ctx)[0] == ("<|channel>thought", "<channel|>")
+    # The request's markers win, and one marker is not filled in.
+    ctx["kw"] = {"thinking_end_token": "</think>"}
+    assert rk._split_pair(ctx) == (None, "</think>")
+
+
+def test_build_assistant_message_splits_with_the_render_pair():
+    ctx = _fake_ctx([1])
+    ctx["_gen_prompt"] = "<|turn>model\n"
+    ctx["think"] = ("<mm:think>", "</mm:think>")
+    msg = rk.build_assistant_message(
+        ctx, "<mm:think>\nponder\n</mm:think>\n\nthe answer")
+    assert msg["content"].strip() == "the answer"
+    assert msg["reasoning_content"] == "ponder"
+
+
+def test_build_assistant_message_atem_reply_after_a_mid_header_prompt():
+    # The served splitter reads the rendered prompt; the mirror reads its
+    # generation-prompt render, so a Muse reply splits the same way.
+    ctx = _fake_ctx([1])
+    ctx["_gen_prompt"] = "Q<|eot|><|start|>assistant"
+    msg = rk.build_assistant_message(
+        ctx, " to=self<|message|>weigh it<|eom|>"
+             "<|start|>assistant to=user<|message|>the answer")
+    assert (msg["reasoning_content"], msg["content"]) == (
+        "weigh it", "the answer")

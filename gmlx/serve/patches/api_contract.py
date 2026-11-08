@@ -16,6 +16,7 @@ import logging
 import os
 
 import gmlx.serve.bridge_vlm as serving
+from gmlx.gen.logprobs import TOP_LOGPROBS_CEILING, TOP_LOGPROBS_DEFAULT
 from gmlx.systemone.extensions import GMLX_EXTENSIONS
 from gmlx.systemone.schema import JEV_EXTENSIONS
 from gmlx.upstream.patching import link, under, wrapped_with
@@ -46,7 +47,7 @@ _INPUT_TOKENS_PATHS = ("/responses/input_tokens", "/v1/responses/input_tokens")
 _GEN_ARGS_CONSUMED = frozenset({
     "max_tokens", "max_output_tokens", "temperature", "top_p", "top_k",
     "min_p", "top_n_sigma", "p_less", "typical_p",
-    "seed", "logprobs", "repetition_penalty",
+    "seed", "logprobs", "top_logprobs", "repetition_penalty",
     "repetition_context_size", "presence_penalty", "presence_context_size",
     "frequency_penalty", "frequency_context_size", "logit_bias",
     "enable_thinking", "thinking_budget", "thinking_start_token",
@@ -62,11 +63,17 @@ _GEN_ARGS_CONSUMED = frozenset({
 })
 
 # gmlx server patches (stop resolver, profile capture, template kwargs,
-# XTC) read these off every generation request.
+# XTC, the thinking-budget fields) read these off every generation request.
 _GMLX_CONSUMED = frozenset({
     "profile", "chat_template_kwargs", "xtc_probability", "xtc_threshold",
     # z.ai / GLM API spelling of the thinking switch: {"type": "enabled"|"disabled"}
     "thinking",
+    # Per-request adapter strengths (lora_request.py): the gmlx spelling,
+    # by path or file name, and the llama-server spelling, by index.
+    "adapters", "lora",
+    # the budget message, and llama-server's names for the two budget fields
+    "thinking_budget_message", "reasoning_budget_tokens",
+    "reasoning_budget_message",
 })
 
 # /v1/chat/completions (openai.py chat_completions_endpoint + the gmlx stop
@@ -77,19 +84,23 @@ _GMLX_CONSUMED = frozenset({
 # ``_infer_tool_parser_from_processor``.
 CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "model", "messages", "stream", "stream_options", "adapter_path",
-    "resize_shape", "tools", "tool_choice", "tool_parser", "top_logprobs",
-    "stop", "timings_per_token",
+    "resize_shape", "tools", "tool_choice", "tool_parser",
+    "stop", "timings_per_token", "return_tokens_as_token_ids", "return_token_ids",
     # OpenAI's chat spelling of the output cap (sampling.py alias transform)
     "max_completion_tokens",
     # Word timestamps on a model that hears audio (word_timestamps.py).
     "mm_processor_kwargs", "timestamp_granularities",
+    # Assistant prefill (prefill.py).
+    "continue_final_message", "add_generation_prompt",
 })
 
 # /v1/responses (openai.py responses_endpoint). No ``stop`` here: the gmlx
 # stop filter wraps only the chat routes, so a Responses ``stop`` is unread.
-# ``logprobs`` is excluded: _build_gen_args reads it, but the Responses shape
-# never returns logprobs, so setting it changes nothing observable.
-RESPONSES_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
+# ``logprobs`` and ``top_logprobs`` are excluded: _build_gen_args reads them,
+# but the Responses shape never returns logprobs, so setting them changes
+# nothing observable.
+_LOGPROB_FIELDS = frozenset({"logprobs", "top_logprobs"})
+RESPONSES_CONSUMED = (_GEN_ARGS_CONSUMED - _LOGPROB_FIELDS) | _GMLX_CONSUMED \
     | frozenset({
         "model", "input", "instructions", "previous_response_id", "tools",
         "tool_choice", "tool_parser", "store", "stream", "adapter_path",
@@ -99,7 +110,7 @@ RESPONSES_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
 # ``json_schema`` format maps onto ``response_format``); ``metadata`` is
 # declared on the schema but never read, so it warns. ``logprobs`` excluded
 # for the same reason as on /v1/responses.
-ANTHROPIC_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
+ANTHROPIC_CONSUMED = (_GEN_ARGS_CONSUMED - _LOGPROB_FIELDS) | _GMLX_CONSUMED \
     | frozenset({
         "model", "messages", "system", "stream", "stop_sequences", "tools",
         "tool_choice", "tool_parser", "thinking", "output_config",
@@ -107,18 +118,20 @@ ANTHROPIC_CONSUMED = (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED \
     })
 
 # /v1/completions (gmlx's own route, server_patches/completions.py).
-# ``logprobs`` is excluded: the field is neutralized there (token logprobs
-# are never returned on the text-completions shape), so it warns.
+# ``logprobs`` is the completions integer, read by the route; the chat
+# ``top_logprobs`` is unread there, so it warns.
 COMPLETIONS_CONSUMED = (
-    (_GEN_ARGS_CONSUMED - {"logprobs"}) | _GMLX_CONSUMED | frozenset({
+    (_GEN_ARGS_CONSUMED - _LOGPROB_FIELDS) | _GMLX_CONSUMED | frozenset({
         "model", "prompt", "stream", "stream_options", "stop",
-        "echo", "suffix", "n", "best_of",
+        "echo", "suffix", "n", "best_of", "logprobs",
+        "return_tokens_as_token_ids", "add_special_tokens",
     })
 )
 
 
 SYSTEMONE_CONSUMED = frozenset({
     "model", "state", "questions", "seed", "images", "profile",
+    "adapters", "lora",
 }) | frozenset(JEV_EXTENSIONS) | frozenset(GMLX_EXTENSIONS)
 
 
@@ -246,25 +259,25 @@ def _maybe_warn_unfulfilled_tool_choice(path: str, tc, result) -> None:
 
 def _maybe_warn_top_logprobs(path: str, request) -> None:
     """Warn when a request asks for more logprob alternatives than the
-    server-side ``TOP_LOGPROBS_K`` cap allows (default 0): the response
+    server-side ``TOP_LOGPROBS_K`` cap allows (default 20): the response
     silently carries empty/truncated alternatives otherwise."""
     want = getattr(request, "top_logprobs", None)
     if not want:
         return
     try:
-        cap = int(os.environ.get("TOP_LOGPROBS_K", 0) or 0)
+        cap = int(os.environ.get("TOP_LOGPROBS_K", TOP_LOGPROBS_DEFAULT) or 0)
     except ValueError:
         cap = 0
-    # Mirror the engine's effective cap (get_top_logprobs_k clamps to 20):
+    # Mirror the engine's effective cap (get_top_logprobs_k clamps to 100):
     # comparing against the raw env value would stay silent for a request in
-    # (20, TOP_LOGPROBS_K] that the server still truncates.
-    cap = max(0, min(cap, 20))
+    # (100, TOP_LOGPROBS_K] that the server still truncates.
+    cap = max(0, min(cap, TOP_LOGPROBS_CEILING))
     if want > cap:
         _log.warning(
             "%s: top_logprobs=%d exceeds the server cap %d (TOP_LOGPROBS_K, "
-            "hard-capped at 20 by the engine), so alternatives beyond the "
+            "hard-capped at %d by the engine), so alternatives beyond the "
             "cap are omitted (see docs/api.md)",
-            path, want, cap)
+            path, want, cap, TOP_LOGPROBS_CEILING)
 
 
 def _http_request_of(values):

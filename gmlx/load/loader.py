@@ -2066,15 +2066,12 @@ def _detect_xtml_thinking(tokenizer, raw_tokenizer, log) -> None:
     <think>/</think>. Kimi-K3 gates thinking on an XTML channel
     (<|open|>think<|sep|> ... <|close|>think<|sep|>) where "think" is
     plain text between structural tokens, so the inference misses it and
-    apply_chat_template injects enable_thinking=False into a template
-    whose own default is thinking on. The model then opens the response
-    channel immediately and never thinks. Detect the gate in the template
-    text and set the wrapper's think markers so has_thinking flips True
-    and the injected default becomes enable_thinking=True.
+    the wrapper reports no think markers. Detect the gate in the template
+    text and set the wrapper's think markers, so has_thinking is True and
+    the reasoning split and thinking budget find the channel.
 
-    Detection renders the template's own default generation prompt (raw
-    tokenizer, no wrapper injection) and checks it ends with the XTML
-    think-open. Matching on rendered output rather than template source
+    Detection renders the template's own default generation prompt and
+    checks it ends with the XTML think-open. Matching on rendered output rather than template source
     covers both spellings in the wild (otag('think') in GGUF-embedded
     templates, open_tag('think') in the llama.cpp jinja)."""
     if tokenizer.has_thinking:
@@ -2100,10 +2097,7 @@ def _detect_xtml_thinking(tokenizer, raw_tokenizer, log) -> None:
     tokenizer._think_end = end
     tokenizer._think_start_tokens = tuple(start_ids)
     tokenizer._think_end_tokens = tuple(end_ids)
-    log(
-        "[tokenizer] XTML think channel detected; "
-        "enable_thinking defaults on"
-    )
+    log("[tokenizer] XTML think channel detected")
 
 
 def _resolve_chat_template(chat_template: str | None) -> str | None:

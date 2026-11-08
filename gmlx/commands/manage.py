@@ -2509,9 +2509,9 @@ def _rm_resolve_target(cfg, requested):
 
 def _chat_files(mc) -> tuple:
     """The files a chat model entry names: its GGUF, mmproj, draft,
-    adapter, and the speech companion ``asr`` names as a path."""
+    adapters, and the speech companion ``asr`` names as a path."""
     asr = mc.asr if isinstance(mc.asr, str) else None
-    return (mc.path, mc.mmproj, mc.draft_gguf, mc.adapter, asr)
+    return (mc.path, mc.mmproj, mc.draft_gguf, *mc.adapter_paths(), asr)
 
 
 def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
@@ -2552,7 +2552,7 @@ def _rm_deletion_plan(cfg, target, m, disc, *, keep_files, notes,
                              "what an interrupted pull left of it")
             to_delete += files
         for label, comp in (("mmproj", m.mmproj), ("draft", m.draft_gguf),
-                            ("adapter", m.adapter)):
+                            *(("adapter", a) for a, _st in m.adapters)):
             if not comp or str(comp).startswith("hf:"):
                 continue
             state, files = _rm_files(comp, cfg.model_dirs, ref_paths)
@@ -3045,7 +3045,7 @@ def _model_flags(m) -> list[str]:
         flags.append("vlm")
     if getattr(m, "speculative", False) or getattr(m, "draft_gguf", None):
         flags.append("mtp")
-    if getattr(m, "adapter", None):
+    if getattr(m, "adapters", None):
         flags.append("lora")
     stream = getattr(m, "stream", None)
     if stream == "cpu":

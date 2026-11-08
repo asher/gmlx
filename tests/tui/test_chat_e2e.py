@@ -127,7 +127,7 @@ class _InertEsc:
 
 
 def _run_text_chat(monkeypatch, tmp_path, lines, *, extra_argv=(), reply="Hello there",
-                   tty=False, load_model=None):
+                   tty=False, load_model=None, stream=None):
     """Run the real REPL over a scripted line list with the model layer faked.
 
     Returns ``(rc, scripted, stream)`` - the exit code, the scripted keyboard
@@ -137,7 +137,7 @@ def _run_text_chat(monkeypatch, tmp_path, lines, *, extra_argv=(), reply="Hello 
     stock loader fake.
     """
     scripted = _Scripted(lines)
-    stream = _FakeStream(reply)
+    stream = stream or _FakeStream(reply)
     caches = []
 
     def fake_mpc(model, max_kv_size=None):
@@ -1546,9 +1546,10 @@ def test_vlm_mtp_text_turns_apply_penalties_and_bias(monkeypatch, tmp_path):
 
 
 def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=(),
-                       tok=None):
+                       tok=None, sstream=None,
+                       apply_adapter=lambda args, model, config, fold=True: None):
     scripted = _Scripted(lines)
-    sstream = _FakeSpecStream()
+    sstream = sstream or _FakeSpecStream()
 
     class _Model:
         language_model = object()
@@ -1562,12 +1563,14 @@ def _run_text_mtp_chat(monkeypatch, tmp_path, lines, *, extra_argv=(),
                         lambda *a, **k: True)
     monkeypatch.setattr("gmlx.commands.cli._apply_placement",
                         lambda args, model: None)
-    monkeypatch.setattr("gmlx.commands.cli._apply_cli_adapter",
-                        lambda args, model, config: None)
-    monkeypatch.setattr(
-        "gmlx.spec.mtp_load.load_mtp_model",
-        lambda *a, **k: (_Model(), drafter, {"model_type": "fake"},
-                         tok or _FakeTok()))
+    monkeypatch.setattr("gmlx.commands.cli._apply_cli_adapter", apply_adapter)
+    def load_mtp_model(*a, before_wire=None, **k):
+        model, config = _Model(), {"model_type": "fake"}
+        if before_wire is not None:
+            before_wire(model.language_model, config)
+        return model, drafter, config, tok or _FakeTok()
+
+    monkeypatch.setattr("gmlx.spec.mtp_load.load_mtp_model", load_mtp_model)
     monkeypatch.setattr("gmlx.cache.kv_cache.make_prompt_cache",
                         lambda lm: ["mtp-cache"])
     monkeypatch.setattr("gmlx.gen.generation.stream_generate_speculative",
@@ -1612,3 +1615,76 @@ def test_mtp_turns_render_past_the_history(monkeypatch, tmp_path, vlm):
     assert texts[0].endswith("]~b]ai\n<mm:think>")
     assert texts[1:] == [_M31_TURN.format(u) + "<mm:think>"
                          for u in ("again", "more")]
+
+
+class _ScaleStream(_FakeStream):
+    """Records the adapter strengths published for each turn's forward."""
+
+    def __init__(self):
+        super().__init__()
+        self.scales = []
+
+    def __call__(self, *a, **k):
+        self.scales.append(_published())
+        return super().__call__(*a, **k)
+
+
+class _ScaleSpecStream(_FakeSpecStream):
+    def __init__(self):
+        super().__init__()
+        self.scales = []
+
+    def __call__(self, *a, **k):
+        self.scales.append(_published())
+        return super().__call__(*a, **k)
+
+
+def _published():
+    from gmlx import lora_rows
+
+    return tuple(round(float(lora_rows.row_scales(i)[0]), 6)
+                 for i in range(lora_rows.n_slots()))
+
+
+@pytest.fixture
+def _static_rows():
+    from gmlx import lora_rows
+
+    lora_rows.configure("static", 1)
+    yield
+    lora_rows.configure("static", 1)
+
+
+@pytest.mark.parametrize("mtp", [False, True], ids=["plain", "mtp"])
+def test_adapter_strengths_are_published_absolute(
+        monkeypatch, tmp_path, capsys, _static_rows, mtp):
+    """chat installs each --adapter at strength 1 and publishes the flag
+    strengths per turn, so /adapter sets an absolute strength."""
+    a, b = tmp_path / "a.gguf", tmp_path / "b.gguf"
+    a.write_bytes(b"GGUF")
+    b.write_bytes(b"GGUF")
+    folds = []
+
+    def install(args, model, config, *, fold=True):
+        folds.append((args.adapter, fold))
+
+    lines = ["/adapter", "hello", "/adapter 0.5", "again", "/adapter on",
+             "more", "/adapter off", "last", "/exit"]
+    argv = ["--adapter", f"{a}:0.8", "--adapter", str(b)]
+    if mtp:
+        stream = _ScaleSpecStream()
+        rc, _ = _run_text_mtp_chat(monkeypatch, tmp_path, lines,
+                                   extra_argv=argv, sstream=stream,
+                                   apply_adapter=install)
+    else:
+        stream = _ScaleStream()
+        monkeypatch.setattr("gmlx.commands.cli._apply_cli_adapter", install)
+        rc, _, _ = _run_text_chat(monkeypatch, tmp_path, lines,
+                                  extra_argv=argv, stream=stream)
+    assert rc == 0
+    assert folds == [([(str(a), 0.8), (str(b), 1.0)], False)]
+    assert stream.scales == [(0.8, 1.0), (0.5, 0.5), (0.8, 1.0), (0.0, 0.0)]
+    said = [ln for ln in capsys.readouterr().out.splitlines()
+            if "adapter strength" in ln]
+    assert said == ["[chat] adapter strength: " + s
+                    for s in ("0.8, 1", "0.5, 0.5", "0.8, 1", "0, 0")]

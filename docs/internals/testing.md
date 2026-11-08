@@ -169,14 +169,23 @@ Each test selects a model by architecture from the GGUF header, and any
 architecture you do not have skips, so one small model is enough to
 exercise a path. The Qwen-Image 2.1 rows find their DiT by its tensor
 names instead, as the loader does, because the GGUFs of
-`unsloth/Qwen-Image-2.1-GGUF` carry no metadata keys at all.
+`unsloth/Qwen-Image-2.1-GGUF` carry no metadata keys at all. The `gmlx kld`
+parity rows and the assistant prefill rows find their files by name and
+size, because they compare with a fixture that llama.cpp recorded on those
+exact files. The prefill rows and the embedding adapter rows find them
+through `tests/llama_fixture.py`, which also checks the sha256 of each file
+of at most 512 MiB.
 
 | Module | Extra gate | What it checks |
 |--------|------------|----------------|
 | `tests/gen/test_batch_parity.py` | None | A batch of one matches single-stream decode, and a ragged batch diverges from it only at exact logit ties. |
 | `tests/gen/test_long_context.py` | None | A long decode keeps its ids in range, its logprobs finite and its output free of single-token collapse. |
 | `tests/gen/test_long_context.py::test_long_prefill_parity` | `KQUANT_LLAMACPP_BIN` | Long-prefill greedy output agrees with llama.cpp. |
-| `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching and injection. |
+| `tests/gen/test_kld_llama_parity.py` | `Qwen3.5-9B-Q4_K_M.gguf` and `Qwen3.5-9B-BF16.gguf` of the fixture's sizes | `gmlx kld` of Q4_K_M against BF16, and of Q4_K_M with a checked-in adapter against bare Q4_K_M, match llama-perplexity. The text tokenizes to its ids. |
+| `tests/load/test_fused_moe_adapter_gguf.py` | The Flash-Next row needs the three `Qwen3.8-Flash-Next-UD-IQ4_XS` shards of the catalog size. | A minted expert adapter keeps base steps fused and bit-exact, matches the unfused block when on, and reaches qwen35moe MTP verify. |
+| `tests/gen/test_serve_logprobs_gguf.py` | None | A lone serve row with a repetition penalty reports the f32 log_softmax of a plain step-by-step forward. |
+| `tests/gen/test_budget_message_gguf.py` | None | On the serve plain path, a thinking budget of 8 with a message forces the message and the end marker right after the budget. |
+| `tests/spec/test_full_prompt_prefill.py` | `KQUANT_TEST_MTP_GGUF` | The MTP serve path handles prefill, the prompt cache, batching, injection and the thinking-budget message. |
 | `tests/image/test_image_check3.py` | `GMLX_IMAGE_FIXTURES` | A Z-Image-Turbo step matches the oracle at 512x512 per block and per attention and FFN output, teacher-forced and free running, and in velocity at 512 and 1024. |
 | `tests/image/test_image_check3_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step matches the oracle per block at 512x512 and in velocity at 1024, and each op of a block its stock op. |
 | `tests/image/test_image_qwen_real.py` | None | A Qwen-Image 2.1 DiT GGUF has the committed header, loads with each tensor as bytes of the file, and a small cached step is finite with and without a reference. |
@@ -194,6 +203,11 @@ names instead, as the loader does, because the GGUFs of
 | `tests/image/test_image_check6_qwen.py` | `GMLX_IMAGE_FIXTURES` | A whole Qwen-Image 2.1 run from the oracle's conditioning and noise ends within the gate of the oracle's fp32 latents, on its schedule. |
 | `tests/image/test_image_check7_qwen.py` | `GMLX_IMAGE_FIXTURES` | A Qwen-Image 2.1 step at 512x512 under one live LoRA or two matches the oracle on merged weights, and each leaf its exact product. Wrong tables fail. |
 | `tests/models/test_nemotron_transcribe_speech.py` | `GMLX_TEST_NEMOTRON_TRANSCRIBE` and `GMLX_SPEECH_FIXTURES` in place of `KQUANT_TEST_GGUF_DIR` | The Nemotron 3.5 Transcribe encoder holds the transformers oracle's tolerances on three clips. Its tiny tests run in the CPU tier. |
+| `tests/load/test_embedding_lora_parity.py` | `stories15M_MOE-F16.gguf` of the fixture's size | Under the checked-in token embedding adapter, the greedy ids and the shift of each top-k logprob match the llama-server fixture at strengths 0, 1 and 1.5. |
+| `tests/load/test_embedding_lora_memory.py` | `Qwen3.5-9B-Q4_K_M.gguf` | A 32k token prompt embedded under a rank-16 embedding adapter peaks within one extra prompt-sized array of the bare lookup. |
+| `tests/serve/test_prefill_logp.py` | `Qwen3.5-9B-Q4_K_M.gguf` or `gemma-4-12B-it-Q6_K.gguf` of the fixture's sizes | A prompt that continues k generated tokens tokenizes to the generation prompt and those ids, and scores the next token near decode, with and without an adapter. |
+| `tests/serve/test_structured_output_gguf.py` | `gemma-4-12B-it-Q6_K.gguf`, `Qwen3.5-9B-Q4_K_M.gguf`, `SmolLM2-135M-Instruct-Q8_0.gguf`, `Qwen3-0.6B-Q8_0.gguf` or `gpt-oss-20b-MXFP4.gguf` | Through `gmlx serve`, a JSON schema reply parses to the schema with thinking off, on its default and on with a budget. |
+| `tests/serve/test_think_marker_vocab_gguf.py` | None | The synthetic vocabs of the think-marker matrix give the gate's first step and the marker splits of the real vocabs. Reads GGUF headers only. |
 | `tests/serve/test_serve_apc_engagement.py` | `GMLX_TEST_BIG_GGUFS=1` adds the multi-GB rows. | One model per cache-shape family runs through the server's load path and batch engine, and its own tier counters move. |
 | `tests/models/test_qwen3vl_integration.py` | None | A Qwen3-VL pair loads with every tensor used, the text model and the pair agree before the final norm, and prompt layout and image features match llama.cpp. |
 | `tests/models/test_embedders_reference.py` | `GMLX_TEST_MLX_DIR` runs the safetensors rows. | The embeddings encoders, the EmbeddingGemma GGUF among them, match reference vectors recorded with mlx-embeddings, on single texts and on a padded batch. |

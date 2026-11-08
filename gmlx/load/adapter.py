@@ -14,7 +14,12 @@ model is :func:`modules.install_lora_adapter`.
 """
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import os
+import struct
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import mlx.core as mx
 
@@ -45,6 +50,7 @@ class LoraModule:
     scale: float              # alpha / rank (PEFT scaling)
     transform: str = "passthrough"   # remap hint: passthrough | qk_permute | ...
     experts: bool = False     # 3-D pair: a (E, rank, in), b (E, out, rank)
+    embedding: bool = False   # token_embd pair: a (n_vocab, rank), b (n_embd, rank)
 
 
 @dataclass
@@ -53,6 +59,20 @@ class LoraAdapter:
     arch: str | None
     modules: dict = field(default_factory=dict)   # module_path -> LoraModule
     path: str | None = None
+    sha256: str = ""          # digest of the file bytes this plan loaded
+    nbytes: int = 0           # size of that file
+
+
+class AdapterIdentity(NamedTuple):
+    """What a loaded copy holds in one adapter slot."""
+    path: str
+    sha256: str
+    nbytes: int
+
+
+_LOAD_TRIES = 3
+
+_TOKEN_EMBD = "token_embd.weight"
 
 
 def _infer_rank(module_path: str, a: mx.array, b: mx.array) -> int:
@@ -71,15 +91,25 @@ def _infer_rank(module_path: str, a: mx.array, b: mx.array) -> int:
     return min(shared)
 
 
+def _lora_scale(alpha: float, rank: int) -> float:
+    """llama.cpp's ``get_scale`` at strength 1: alpha 0 means no scaling."""
+    return alpha / rank if alpha else 1.0
+
+
 def build_adapter_plan(meta: dict, arrays: dict,
                        *, base_arch: str | None = None) -> LoraAdapter:
     """Pure core: build a :class:`LoraAdapter` from a decoded GGUF KV dict + tensor
     dict (no file I/O, so it is unit-testable). ``base_arch`` (the base model's
     architecture) is checked against the adapter's and used for the name remap.
 
-    Raises on a non-lora adapter, a missing ``alpha``, an arch mismatch, an
-    incomplete a/b pair, or a target tensor that doesn't map to a module (never
-    silently dropped - a dropped adapter weight would serve a subtly wrong model)."""
+    Raises on a non-lora adapter, an arch mismatch, an incomplete a/b pair,
+    or a target tensor that doesn't map to a module (never silently dropped -
+    a dropped adapter weight would serve a subtly wrong model).
+
+    The scale follows llama.cpp: ``alpha / rank``, and 1 when ``alpha`` is 0
+    or missing. A ``token_embd.weight`` pair is the token embedding's: A is
+    ``(n_vocab, rank)`` and B ``(n_embd, rank)``, the transpose of a linear
+    pair's layout."""
     a_type = meta.get("adapter.type")
     if a_type != "lora":
         raise ValueError(
@@ -95,10 +125,7 @@ def build_adapter_plan(meta: dict, arrays: dict,
         raise ValueError("no architecture for the adapter (neither the GGUF's "
                          "general.architecture nor a base_arch was given)")
 
-    alpha = meta.get("adapter.lora.alpha")
-    if alpha is None:
-        raise ValueError("adapter GGUF has no adapter.lora.alpha - cannot scale")
-    alpha = float(alpha)
+    alpha = float(meta.get("adapter.lora.alpha") or 0.0)
 
     # Pair lora_a / lora_b by their shared base tensor name.
     a_by_base: dict = {}
@@ -117,6 +144,10 @@ def build_adapter_plan(meta: dict, arrays: dict,
             missing = _A_SUFFIX if a is None else _B_SUFFIX
             raise ValueError(
                 f"adapter tensor {base_name!r} is missing its {missing} half")
+        if base_name != _TOKEN_EMBD and base_name.endswith(_TOKEN_EMBD):
+            # llama.cpp's suffix test sends this pair down its token
+            # embedding path, which never reads it.
+            raise ValueError(per_layer_embd_message(base_name))
         dec = parse_gguf_name(remap_arch, base_name)
         if dec.kind != RemapDecision.KIND_MAP:
             raise ValueError(
@@ -125,6 +156,22 @@ def build_adapter_plan(meta: dict, arrays: dict,
         module_path = dec.hf_name
         if module_path.endswith(".weight"):
             module_path = module_path[: -len(".weight")]
+        transform = "passthrough" if dec.transform in _FACTOR_PASSTHROUGH else dec.transform
+        if base_name == _TOKEN_EMBD:
+            if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[1] \
+                    or transform != "passthrough":
+                raise ValueError(
+                    f"{_TOKEN_EMBD}: lora_a (A) {tuple(a.shape)} and lora_b (B) "
+                    f"{tuple(b.shape)} are not (n_vocab, r) and (n_embd, r)")
+            rank = int(a.shape[1])
+            modules[module_path] = LoraModule(
+                module_path=module_path, a=a, b=b, rank=rank,
+                scale=_lora_scale(alpha, rank), embedding=True)
+            continue
+        rank_one = a.ndim == 1
+        if rank_one:
+            # ggml drops the trailing unit dim of a rank-1 lora_a, ne [in, 1].
+            a = a.reshape(1, -1)
         experts = a.ndim == 3 or b.ndim == 3
         if experts:
             # Per-expert stack: GGUF ne order reversed gives a (E, rank, in),
@@ -136,29 +183,50 @@ def build_adapter_plan(meta: dict, arrays: dict,
                     f"{module_path}: expert lora pair lora_a {tuple(a.shape)} / "
                     f"lora_b {tuple(b.shape)} is not (E, r, in) / (E, out, r)")
             rank = int(a.shape[1])
+        elif rank_one and b.ndim == 2 and b.shape[1] == 1:
+            rank = 1
         else:
             rank = _infer_rank(module_path, a, b)
-        transform = "passthrough" if dec.transform in _FACTOR_PASSTHROUGH else dec.transform
         modules[module_path] = LoraModule(
             module_path=module_path, a=a, b=b, rank=rank,
-            scale=alpha / rank, transform=transform, experts=experts)
+            scale=_lora_scale(alpha, rank), transform=transform, experts=experts)
 
     if not modules:
         raise ValueError("adapter GGUF contains no lora_a/lora_b tensor pairs")
     return LoraAdapter(alpha=alpha, arch=arch, modules=modules)
 
 
+def _file_key(path: str) -> tuple:
+    st = os.stat(path)
+    return (st.st_ino, st.st_size, st.st_mtime_ns)
+
+
 def load_lora_adapter(adapter_path: str,
                       *, base_arch: str | None = None) -> LoraAdapter:
     """Read a GGUF LoRA adapter from disk and build its apply plan. The adapter's
     a/b tensors are full-precision (F32), so the wire-byte reader returns them as
-    plain arrays (no kquant codec)."""
+    plain arrays (no kquant codec).
+
+    The tensors are copied out of the file, so a later rewrite of the file
+    never changes what the loaded copy serves. ``sha256`` is the digest of
+    the file bytes. A file that changes while it loads is read again, and
+    refused after three tries."""
     from .wire import load_gguf_wire_bytes
 
-    arrays, _kquant_meta, _arch, meta, _shapes = load_gguf_wire_bytes(
-        adapter_path, expect_quant=False)
+    for _ in range(_LOAD_TRIES):
+        before = _file_key(adapter_path)
+        with open(adapter_path, "rb") as fh:
+            digest = hashlib.file_digest(fh, "sha256").hexdigest()
+        arrays, _kquant_meta, _arch, meta, _shapes = load_gguf_wire_bytes(
+            adapter_path, zero_copy=False, expect_quant=False)
+        if _file_key(adapter_path) == before:
+            break
+    else:
+        raise ValueError(f"adapter file {adapter_path} changed while it loaded")
     plan = build_adapter_plan(meta, arrays, base_arch=base_arch)
     plan.path = adapter_path
+    plan.sha256 = digest
+    plan.nbytes = int(before[1])
     return plan
 
 
@@ -176,7 +244,8 @@ def _config_as_dict(config) -> dict:
 
 
 def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
-                       *, base_arch: str | None = None, slot: int = 0) -> int:
+                       *, base_arch: str | None = None, slot: int = 0,
+                       strength: float = 1.0) -> int:
     """Apply a GGUF LoRA adapter live over a loaded base text model - no merge (the
     base stays K-quant; the adapter rides alongside in full precision). Returns the
     number of modules installed.
@@ -191,17 +260,32 @@ def apply_gguf_adapter(raw_model, config, adapter_gguf: str,
     structurally - a target path with no matching module makes
     :func:`modules.install_lora_adapter` raise, never a silent no-op. ``slot`` is
     the adapter's column in the row channel; a second adapter on an already
-    adapted model installs alongside the first (see the installer)."""
+    adapted model installs alongside the first (see the installer).
+    ``strength`` multiplies every module's static scale, for callers that
+    publish no row vector."""
+    plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
+    return install_gguf_adapter(raw_model, config, plan, slot=slot,
+                                strength=strength)
+
+
+def install_gguf_adapter(raw_model, config, plan: LoraAdapter, *, slot: int = 0,
+                         strength: float = 1.0) -> int:
+    """Install an adapter plan that is already loaded, as
+    :func:`apply_gguf_adapter` does. Returns the number of modules
+    installed."""
     from .modules import install_lora_adapter
 
+    if strength != 1.0:
+        plan = dataclasses.replace(plan, modules={
+            k: dataclasses.replace(m, scale=m.scale * float(strength))
+            for k, m in plan.modules.items()})
     cfg = _config_as_dict(config)
     text_cfg = cfg.get("text_config") or {}
     n_head = cfg.get("num_attention_heads", text_cfg.get("num_attention_heads"))
     n_head_kv = cfg.get("num_key_value_heads",
                         text_cfg.get("num_key_value_heads", n_head))
-    plan = load_lora_adapter(adapter_gguf, base_arch=base_arch)
     return install_lora_adapter(_text_root(raw_model, plan), plan, n_head=n_head,
-                                n_head_kv=n_head_kv, slot=slot)
+                                n_head_kv=n_head_kv, slot=slot, config=cfg)
 
 
 def _text_root(model, plan):
@@ -214,6 +298,191 @@ def _text_root(model, plan):
     if inner is None or any(p.startswith("language_model.") for p in plan.modules):
         return model
     return inner
+
+
+_EMBD_TIED = ("adapter trains token_embd.weight, but this model uses its token "
+              "embedding as the output head. An embedding adapter needs a separate "
+              "output head; llama.cpp cannot apply it either.")
+_EMBD_FOLDED = ("adapter targets token_embd.weight, which this model stores as a "
+                "Hadamard-rotated table. llama.cpp refuses this pair too.")
+_EMBD_GRANITE_SWITCH = ("adapter trains token_embd.weight, but Granite Switch embeds "
+                        "its substituted ids with a plain lookup that llama.cpp never "
+                        "adapts, so gmlx refuses it.")
+
+
+def embd_shape_message(a_shape, b_shape, n_vocab: int, n_embd: int) -> str:
+    """The refusal for a token_embd pair that does not fit its base.
+    Shapes in numpy order: A ``(n_vocab, r)``, B ``(n_embd, r)``."""
+    return (f"token_embd LoRA pair (A) {tuple(a_shape)} / (B) {tuple(b_shape)} "
+            f"does not fit the embedding ({n_vocab}, {n_embd}) (wrong base model?)")
+
+
+def per_layer_embd_message(base_name: str) -> str:
+    """The refusal for a pair on a table whose name ends in
+    ``token_embd.weight`` but is not the token embedding."""
+    return (f"adapter targets {base_name}. llama.cpp loads this pair but "
+            f"never applies it, so gmlx refuses it.")
+
+
+def _folded_table(scan) -> bool:
+    """Whether the base's ``prism.hadamard`` spec stores the token
+    embedding rotated. A malformed spec counts as no fold here; the load
+    reports it."""
+    from .hadamard import KEY_VERSION, HadamardSpecError, parse_hadamard_spec
+
+    if scan.kv.get(KEY_VERSION) is None:
+        return False
+    sizes = [n for k, n in scan.skipped.items() if k.startswith("prism.hadamard.")]
+    if sizes:
+        from .headerscan import scan_gguf
+
+        scan = scan_gguf(scan.path, include_tensors=False, array_limit=max(sizes) + 1)
+    try:
+        spec = parse_hadamard_spec(scan.kv)
+    except HadamardSpecError:
+        return False
+    return spec is not None and _TOKEN_EMBD in spec.inverse_names
+
+
+def embedding_refusal(adapter_path: str, base_gguf_path: str) -> str | None:
+    """Why the base cannot take the adapter's ``token_embd`` pair, from the
+    two headers alone, or None. None too for an adapter with no such pair.
+    A pair on a per-layer table is refused whatever the base.
+    The installer makes the same checks for callers that skip this one."""
+    from .headerscan import scan_gguf
+    from .preflight import find_split_shards
+
+    adapter = {t.name: t.shape for t in scan_gguf(adapter_path).tensors}
+    name = os.path.basename(adapter_path)
+    for t in sorted(adapter):
+        base_name = t.rsplit(".", 1)[0] if t.endswith((_A_SUFFIX, _B_SUFFIX)) else ""
+        if base_name != _TOKEN_EMBD and base_name.endswith(_TOKEN_EMBD):
+            return f"{name}: " + per_layer_embd_message(base_name)
+    a_ne = adapter.get(_TOKEN_EMBD + _A_SUFFIX)
+    if a_ne is None:
+        return None
+    b_ne = adapter.get(_TOKEN_EMBD + _B_SUFFIX)
+    shards = [scan_gguf(p) for p in find_split_shards(base_gguf_path)]
+    tensors = {t.name: t.shape for s in shards for t in s.tensors}
+    head = shards[0]
+    if "output.weight" not in tensors:
+        return f"{name}: {_EMBD_TIED}"
+    embd = tensors.get(_TOKEN_EMBD)
+    if embd is None or len(embd) != 2 or b_ne is None or len(a_ne) != 2 \
+            or len(b_ne) != 2 or a_ne[0] != b_ne[0] \
+            or a_ne[1] != embd[1] or b_ne[1] != embd[0]:
+        n_embd, n_vocab = (embd if embd is not None and len(embd) == 2 else (0, 0))
+        return f"{name}: " + embd_shape_message(
+            tuple(reversed(a_ne)), tuple(reversed(b_ne or ())), n_vocab, n_embd)
+    if head.kv.get("general.architecture") == "graniteswitch":
+        return f"{name}: {_EMBD_GRANITE_SWITCH}"
+    if _folded_table(head):
+        return f"{name}: {_EMBD_FOLDED}"
+    return None
+
+
+_GATE_UP_EXPS = ("ffn_gate_exps.weight", "ffn_up_exps.weight",
+                 "ffn_gate_up_exps.weight")
+
+
+def expert_gate_up_refusal(adapter_path: str) -> str | None:
+    """Why gmlx cannot apply the adapter's expert pairs, from its header,
+    or None. Expert adapters apply to the down projection only."""
+    from .headerscan import scan_gguf
+
+    for t in scan_gguf(adapter_path).tensors:
+        base_name = t.name[: -len(_A_SUFFIX)] if t.name.endswith(_A_SUFFIX) else ""
+        if base_name.endswith(_GATE_UP_EXPS):
+            return (f"{os.path.basename(adapter_path)}: adapter targets "
+                    f"{base_name}. gmlx applies expert adapters to the down "
+                    f"projection only, not the gate or up projections.")
+    return None
+
+
+def adapter_load_refusal(base_gguf_path: str, adapter_paths, env=None, *,
+                         stream=None, mtp: bool = False) -> None:
+    """Refuse, before any model build, an adapter the base cannot take,
+    from the headers alone. Raises ``ValueError`` with the first refusal
+    over ``adapter_paths``; returns None when every adapter can load.
+    ``env``, ``stream`` and ``mtp`` describe the build, for the checks that
+    depend on it. A base that is not a GGUF file has no header to read."""
+    base = str(base_gguf_path)
+    if not (base.endswith(".gguf") and os.path.isfile(base)):
+        return None
+    for path in adapter_paths or ():
+        if not os.path.isfile(path):
+            continue                       # the load reports a missing file
+        try:
+            why = (embedding_refusal(str(path), str(base_gguf_path))
+                   or expert_gate_up_refusal(str(path)))
+        except (ValueError, struct.error, IndexError):
+            continue                       # and a file that is not a GGUF
+        if why is not None:
+            raise ValueError(why)
+    if stream in ("experts", "cpu"):
+        why = fused_expert_lora_refusal(
+            base, [p for p in adapter_paths or () if os.path.isfile(p)], env,
+            mtp=mtp)
+        if why is not None:
+            raise ValueError(why)
+    return None
+
+
+# Base architectures whose MoE blocks fuse on a resident load. qwen35moe
+# fuses only on the plain text path: its MTP target builds the owned block.
+_FUSED_BLOCK_ARCHS = frozenset({"qwen3next", "qwen4exp", "qwen35moe", "gemma4"})
+_FALSE_WORDS = ("0", "false", "no", "off")
+_TRUE_WORDS = ("1", "true", "yes", "on")
+
+
+def _expert_target(adapter_path: str) -> str | None:
+    """The first expert-stack tensor ``adapter_path`` adapts, or None."""
+    from .headerscan import scan_gguf
+
+    try:
+        tensors = scan_gguf(adapter_path).tensors
+    except (ValueError, struct.error, IndexError):
+        return None                        # the load reports it
+    for t in tensors:
+        if "_exps." in t.name and t.name.endswith(_A_SUFFIX):
+            return t.name[: -len(_A_SUFFIX)]
+    return None
+
+
+def fused_expert_lora_refusal(gguf_path: str, adapter_paths, env=None, *,
+                              mtp: bool = False) -> str | None:
+    """Why a streamed load of ``gguf_path`` cannot take ``adapter_paths``,
+    or None. Expert LoRA on a fused MoE block needs the experts in memory.
+    Header reads only; ``env`` is the build's env window over
+    ``os.environ``, and ``mtp`` the caller's speculative choice, which a
+    false ``MLX_VLM_GGUF_SPECULATIVE`` overrides as the serve bridge does."""
+    from gmlx.envflags import env_value
+
+    from .headerscan import scan_gguf
+
+    paths = tuple(p for p in adapter_paths if p)
+    if not paths:
+        return None
+    for name in ("GMLX_FUSED_MOE", "GMLX_FUSED_MOE_BLOCK"):
+        if (env_value(name, env) or "1") == "0":
+            return None
+    arch = scan_gguf(gguf_path, include_tensors=False).kv.get("general.architecture")
+    if arch not in _FUSED_BLOCK_ARCHS:
+        return None
+    if arch == "qwen35moe":
+        spec = (env_value("MLX_VLM_GGUF_SPECULATIVE", env) or "").strip().lower()
+        if spec not in _FALSE_WORDS and (mtp or spec in _TRUE_WORDS):
+            return None
+    for path in paths:
+        target = _expert_target(path)
+        if target is not None:
+            return (f"adapter {os.path.basename(path)} adapts expert tensor "
+                    f"{target}, and expert LoRA on a fused MoE block needs the "
+                    f"routed experts in memory, but this load streams them. Load "
+                    f"the model without expert streaming, use an adapter without "
+                    f"expert targets, or set GMLX_FUSED_MOE_BLOCK=0 to load the "
+                    f"blocks unfused.")
+    return None
 
 
 def base_tensor_names(gguf_path: str) -> list[str]:
@@ -324,6 +593,12 @@ def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
         names, refused = adapter_tensor_names(paths, base_arch=base_arch, base_names=base_names)
     else:
         names, refused = _gguf_py_names(paths, base_arch=base_arch, n_layers=n_layers)
+    for mod, (tensor, _transform) in list(names.items()):
+        if tensor.endswith(_TOKEN_EMBD):
+            # The writer stores the linear layout, which an embedding pair
+            # does not use.
+            refused[mod] = "embedding pairs are not exported"
+            del names[mod]
     if refused:
         raise ValueError(f"a GGUF adapter cannot hold {len(refused)} of the "
                          f"{len(paths)} LoRA modules: {refusal_summary(refused)}")

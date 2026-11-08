@@ -32,6 +32,7 @@ from `tokenizers` primitives.
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -62,6 +63,8 @@ from .gguf_meta import (
     read_str_array as _read_str_array,
     read_string as _read_string,
 )
+
+_log = logging.getLogger(__name__)
 
 
 # Word-split regexes for byte-level BPE, keyed below by the GGUF
@@ -1137,6 +1140,28 @@ def eos_ids(tokenizer) -> list[int]:
     return ids
 
 
+def _piece_bytes(tok: str, *, bytelevel: bool, bd: dict[str, int] | None) -> bytes | None:
+    """One vocabulary piece's bytes under the ``token_bytes`` rules, or
+    ``None`` when a ByteLevel piece holds a character outside the map."""
+    if bytelevel:
+        try:
+            return bytes(bd[ch] for ch in tok)  # type: ignore[index]
+        except KeyError:
+            return None
+    if tok.startswith("<0x") and tok.endswith(">") and len(tok) == 6:
+        try:
+            return bytes([int(tok[3:5], 16)])
+        except ValueError:
+            pass
+    return tok.replace(_SPM_SPACE, " ").encode("utf-8")
+
+
+def _added_text(inner) -> dict[int, str]:
+    return {int(tid): str(t)
+            for tid, t in getattr(inner, "added_tokens_decoder", {}).items()
+            if not getattr(t, "special", False)}
+
+
 def token_bytes(tokenizer, width: int | None = None) -> list[bytes | None]:
     """The byte string of every id in ``[0, width)``, with ``None`` for
     specials and for ids the vocabulary does not fill. ``width`` defaults
@@ -1152,9 +1177,7 @@ def token_bytes(tokenizer, width: int | None = None) -> list[bytes | None]:
     if width is None:
         width = n
     special = special_ids(tokenizer)
-    added_text = {int(tid): str(t)
-                  for tid, t in getattr(inner, "added_tokens_decoder", {}).items()
-                  if not getattr(t, "special", False)}
+    added_text = _added_text(inner)
     out: list[bytes | None] = [None] * width
     bytelevel = is_bytelevel(tokenizer)
     bd = byte_decoder() if bytelevel else None
@@ -1165,19 +1188,104 @@ def token_bytes(tokenizer, width: int | None = None) -> list[bytes | None]:
         if tid in added_text:
             out[tid] = added_text[tid].encode("utf-8")
             continue
-        if bytelevel:
-            try:
-                out[tid] = bytes(bd[ch] for ch in tok)
-            except KeyError:
-                out[tid] = None
+        out[tid] = _piece_bytes(tok, bytelevel=bytelevel, bd=bd)
+    return out
+
+
+class _BytesContext:
+    """What ``token_bytes_for`` needs from one tokenizer, built once."""
+
+    def __init__(self, tokenizer):
+        self.fallback = False
+        self.special: set[int] = set()
+        self.added: dict[int, str] = {}
+        self.bytelevel = False
+        self.bd: dict[str, int] | None = None
+        self.n = 0
+        self.warned = False
+        self.inner = tokenizer
+        try:
+            b = backend(tokenizer)
+            b.decoder, b.pre_tokenizer  # noqa: B018 - a fast backend has both
+            inner = hf_inner(tokenizer)
+            self.inner = inner
+            self.n = len(inner)
+            self.special = special_ids(tokenizer)
+            self.added = _added_text(inner)
+            self.bytelevel = is_bytelevel(tokenizer)
+            self.bd = byte_decoder() if self.bytelevel else None
+        except Exception:
+            self.fallback = True
+
+
+_BYTES_ATTR = "_gmlx_token_bytes_ctx"
+
+
+def _bytes_context(tokenizer, lock) -> _BytesContext:
+    ctx = getattr(tokenizer, _BYTES_ATTR, None)
+    if ctx is not None:
+        return ctx
+    if lock is None:
+        ctx = _BytesContext(tokenizer)
+    else:
+        with lock:
+            ctx = getattr(tokenizer, _BYTES_ATTR, None) or _BytesContext(tokenizer)
+    try:
+        setattr(tokenizer, _BYTES_ATTR, ctx)
+    except (AttributeError, TypeError):
+        pass
+    return ctx
+
+
+def _decoded_bytes(tokenizer, tid: int) -> bytes:
+    try:
+        return tokenizer.decode([int(tid)]).encode("utf-8")
+    except Exception:
+        return b""
+
+
+def token_bytes_for(tokenizer, ids, *, lock=None) -> list[bytes]:
+    """The raw vocabulary bytes of each id in ``ids``, under the rules of
+    ``token_bytes``. A special gets the UTF-8 of its token text, and an id
+    past the vocabulary (a padded head) gets ``b""``.
+
+    The per-tokenizer context is built once, under ``lock`` when given, and
+    cached on the tokenizer. Each call then converts only the ids it gets.
+    A tokenizer with no fast backend, and an id whose lookup fails, get the
+    bytes of the id decoded alone, as UTF-8."""
+    ctx = _bytes_context(tokenizer, lock)
+    out: list[bytes] = []
+    for tid in ids:
+        tid = int(tid)
+        if ctx.fallback:
+            out.append(_decoded_bytes(tokenizer, tid))
             continue
-        if tok.startswith("<0x") and tok.endswith(">") and len(tok) == 6:
-            try:
-                out[tid] = bytes([int(tok[3:5], 16)])
-                continue
-            except ValueError:
-                pass
-        out[tid] = tok.replace(_SPM_SPACE, " ").encode("utf-8")
+        if tid < 0 or tid >= ctx.n:
+            out.append(b"")
+            continue
+        try:
+            tok = ctx.inner.convert_ids_to_tokens(tid)
+            if tok is None:
+                got = b""
+            elif tid in ctx.added:
+                got = ctx.added[tid].encode("utf-8")
+            elif tid in ctx.special:
+                got = str(tok).encode("utf-8")
+            else:
+                got = _piece_bytes(tok, bytelevel=ctx.bytelevel, bd=ctx.bd)
+            if got is None:
+                raise KeyError(tid)
+        except Exception:
+            got = _decoded_bytes(tokenizer, tid)
+            if not ctx.warned:
+                ctx.warned = True
+                _log.warning("token bytes: id %d has no vocabulary bytes; "
+                             "using its decoded text", tid)
+        out.append(got)
+    if ctx.fallback and not ctx.warned:
+        ctx.warned = True
+        _log.warning("token bytes: the tokenizer has no fast backend; logprob "
+                     "bytes are the decoded text of each token")
     return out
 
 

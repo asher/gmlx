@@ -112,7 +112,6 @@ _CHILD = textwrap.dedent('''
         from gmlx.spec import mtp_load
         from gmlx.spec.drafter_protocol import DrafterAdapter, validate_drafter
         from gmlx.upstream.single_bos_fix import install_single_bos_fix
-        from gmlx.upstream.system_content_fix import install_system_content_fix
 
         def log(*a, **k):
             pass
@@ -151,7 +150,6 @@ _CHILD = textwrap.dedent('''
                                       target=target, log=log)
         validate_drafter(DrafterAdapter(drafter))
         # The containers, plain and as speculative targets.
-        install_system_content_fix()
         install_single_bos_fix()
         for model_type in ("gemma4", "gemma4_unified"):
             plain = install(vlm.build_vlm_model(container(model_type))[0])
