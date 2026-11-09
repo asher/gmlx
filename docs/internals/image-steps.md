@@ -149,7 +149,7 @@ An AV step with `int8`, `off`, `attention`, `linears` or `all`, on a
 server whose features list `int8`, runs at that setting over its entry's
 `defaults.int8`, and one without it runs at the entry's. The linear
 layers are converted as the DiT loads, so a step names a value whose
-linear layers match the entry's; the attention is a setting of the loaded
+linear layers match the entry's. The attention is a setting of the loaded
 DiT, so a step that changes it loads nothing. The step is priced at its
 setting. A model's status names the entry's setting under `int8`. A value
 off the list gets 400, and so do a value whose linear layers differ from

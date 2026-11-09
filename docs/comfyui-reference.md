@@ -114,15 +114,13 @@ step at it, as [Faster clips with int8](video.md#faster-clips-with-int8)
 describes: it is lossy, needs an M5 or newer, and no value but `off`
 runs with `fasth3`.
 
-The linear layers are part of the DiT the server loaded, so a value runs
-only when its linear layers match the entry's: `off` and `attention` on an
-entry at `off` or `attention`, `linears` and `all` on an entry at
-`linears` or `all`. The loader refuses any other value with the server's
-message. A server that cannot run a value refuses the first step with an
-error that names `int8`, and the error shows on the sampler. A gmlx server
-from before the setting runs the entry's, and ComfyUI's log warns once for
-each model loaded with a value other than `entry` or `off`. A value other
-than `entry` or `off` on an image model is refused at the loader.
+The loader refuses a value that changes the entry's linear layers, as
+[In serve and ComfyUI](video.md#in-serve-and-comfyui) explains. A server
+that cannot run a value refuses the first step with an error that names
+`int8`, and the error shows on the sampler. A value other than `entry` or
+`off` is refused on an image model, and a gmlx server from before the
+setting runs the entry's in its place, with one warning in ComfyUI's log
+for each model.
 
 ## What the gmlx nodes refuse
 

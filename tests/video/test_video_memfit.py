@@ -3,7 +3,8 @@ least 0.25 GiB over every measured cell, its closest cell within 0.35
 GiB and none more than 1.5 GiB over past its slope's 10 percent; the
 same for FastH3's own step fits and for the fits of keyframes and
 anchors; the rows of a clip; what each file costs; the refusal and its
-message; the admission table of docs/video.md. CPU, no weights."""
+message; the admission table and the int8 table of docs/video.md. CPU,
+no weights."""
 from __future__ import annotations
 
 import dataclasses
@@ -833,3 +834,39 @@ def test_a_denoise_over_the_budget_with_int8_linears_names_the_setting(
     assert str(e.value).endswith(
         "Run with int8 off or attention, or try 768x768. GMLX_OVERCOMMIT=1 "
         "overrides.")
+
+
+# docs/video.md's int8 table: the largest clip of h3 on its 8-step LoRA at
+# int8 linears or all on each Mac, with the 1,024-row prompt of the
+# keyframe table. Mac: (clips that fit, the next clips up that do not).
+_INT8_MACS = {
+    36: ((), ((1344, 768, 124), (768, 768, 124))),
+    48: (((1344, 768, 124), (768, 768, 243)),
+         ((1344, 768, 243), (768, 768, 362))),
+    64: (((1344, 768, 362), (768, 768, 362)), ()),
+}
+
+
+@pytest.mark.parametrize("attention", ["dense", "int8"],
+                         ids=["linears", "all"])
+@pytest.mark.parametrize("mac", list(_INT8_MACS))
+def test_int8_linears_make_the_clips_the_video_page_gives(
+        monkeypatch, no_overcommit, mac, attention):
+    from gmlx.image import text_encoder
+    from video_fixtures import H3_HEADER, fixture_view
+
+    monkeypatch.setattr(memfit, "file_bytes", lambda p: FILES[p])
+    monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
+    monkeypatch.setattr(text_encoder, "_header_view",
+                        lambda p: fixture_view(H3_HEADER))
+
+    def plan(w, h, f):
+        return memfit.plan_run(
+            hf.FAMILY, dit="dit", encoder="encoder", vae="vae",
+            audio_vae="audio_vae", loras=["lora"], frames=f, width=w,
+            height=h, text=1024, attention=attention, linears="int8",
+            budget=capacity.ram_budget_bytes(mac * GiB))
+
+    fits, over = _INT8_MACS[mac]
+    assert all(plan(*shape).fits for shape in fits)
+    assert not any(plan(*shape).fits for shape in over)

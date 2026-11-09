@@ -522,9 +522,9 @@ make the clip longer, or cut the video shorter.
 
 ### Int8 refusals
 
-[`--int8`](video.md#faster-clips-with-int8), an entry's `defaults.int8`,
-a job's `int8` field and the ComfyUI loader's `int8` input are refused
-before any weight loads:
+An [int8](video.md#faster-clips-with-int8) value this Mac or install
+cannot run is refused before any weight loads, with one of these
+messages:
 
 - `MiniMax-H3 fl2va runs with int8 attention, whose kernel needs a GPU
   with NAX units (M5 or newer), and this Mac's GPU has none`, or the same
@@ -545,10 +545,10 @@ before any weight loads:
   the entry, or add a second entry on the same files at the value you
   want.
 - A memory refusal that names `int8 off or attention`: the clip or the
-  DiT does not fit with the int8 weights of `linears` or `all`, 7.86 GiB
-  more than the file's. Run at `off` or `attention`, which keep the
-  file's weights, or make the clip smaller. The text depends on where the
-  check runs:
+  DiT does not fit with the int8 weights of `linears` or `all`, which
+  [take more memory](video.md#faster-clips-with-int8). Run at `off` or
+  `attention`, which keep the file's weights, or make the clip smaller.
+  The text depends on where the check runs:
   - `this clip does not fit in memory: ... Run with int8 off or
     attention, which keep the file's linears, or try a smaller size or a
     shorter clip`, from `gmlx video generate`, and from `gmlx video

@@ -53,10 +53,8 @@ serves these routes. They need ffmpeg, which writes the MP4, as
 | `guide_no_audio` | `true` anchors guide videos without their sound. |
 | `int8` | `off`, `attention`, `linears` or `all`, the [int8 setting](video.md#faster-clips-with-int8) of the DiT. Unset, the entry's `defaults.int8`, else `off`. |
 
-The linear layers of `int8` are part of the DiT the entry loads, so a job
-names a value whose linear layers match the entry's: `off` or `attention`
-on an entry at `off` or `attention`, and `linears` or `all` on an entry at
-`linears` or `all`. Any other value is refused with 400.
+A value that changes the entry's linear layers gets 400, as
+[In serve and ComfyUI](video.md#in-serve-and-comfyui) explains.
 
 The steps and the shifts come from the entry, as on the command line. A
 `references` list asks for MiniMax-H3's Ref2VA mode, which the server does

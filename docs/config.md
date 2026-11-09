@@ -311,7 +311,7 @@ video_models:
     vae: Comfy-Org__MiniMax-H3/vae/minimax_h3_video_vae_fp16.safetensors
     audio_vae: Comfy-Org__MiniMax-H3/vae/minimax_h3_audio_vae_fp32.safetensors
     adapters: [lightx2v__Minimax-h3-Turbo/minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors]
-    defaults: {steps: 8, shift: 6, size: 1344x768, seconds: 5, int8: "off"}
+    defaults: {steps: 8, shift: 6, size: 1344x768, seconds: 5, int8: off}
 ```
 
 | Key | Default | Meaning |
@@ -332,10 +332,7 @@ video_models:
 `defaults.int8` is `off`, the default, `attention`, `linears` or `all`,
 the parts of the DiT that run in int8, as
 [Faster clips with int8](video.md#faster-clips-with-int8) describes.
-`linears` and `all` hold 7.86 GiB more memory. Two entries on the same
-files that differ only in `int8` load apart. A job's `int8` field and the
-`int8` input of the ComfyUI model loader run over it when they keep the
-entry's linear layers.
+`linears` and `all` take more memory.
 
 ## Profiles
 

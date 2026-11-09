@@ -17,8 +17,8 @@ Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
 It needs no pip extra: the `video` extra is OpenCV, for video input to
 vision models.
-[FastH3](#fasth3), a faster version of the model, needs an M5 chip or
-newer.
+[FastH3](#fasth3), a faster version of the model, and
+[int8](#faster-clips-with-int8) need an M5 chip or newer.
 
 - [Make your first clip](#make-your-first-clip)
 - [Choose a recipe](#choose-a-recipe)
@@ -176,25 +176,28 @@ gmlx video generate h3 --int8 attention --prompt "..."
 
 | `--int8` | Runs in int8 | DiT memory |
 |---|---|---|
-| `off` | nothing (the default) | as the default |
-| `attention` | the attention | as the default |
-| `linears` | the four linear layers of each block | 7.86 GiB more |
-| `all` | the attention and the linear layers | 7.86 GiB more |
+| `off` | nothing (the default) | the file's |
+| `attention` | the attention | the file's |
+| `linears` | the four linear layers of each block | 8.4 GB more on the Q4_K file |
+| `all` | the attention and the linear layers | 8.4 GB more on the Q4_K file |
 
 With `attention`, a step takes less time on a large or long clip, such
 as 1344x768 for 5 s or 672x384 for 12 s. On a short, small clip, such as
 672x384 for 5 s, the gain is small.
+
+On an M5 Max, a 1344x768 clip of 5 seconds takes about a tenth less time
+at `linears` and about a fifth less at `all`.
 
 For `linears` and `all`, gmlx converts the weights of those layers to
 int8 as the DiT loads, which is where the extra memory goes. The memory
 check counts it, so a clip that fits at `off` can be refused at
 `linears`. No value but `off` runs with `fasth3`.
 
-### Make an int8 profile
+### Run an entry in int8
 
 Set `int8` in an entry's [`defaults`](config.md#video_modelsdefaults) to
 run every clip of that entry at one value. Two entries on the same files
-give you two profiles:
+run the model at two values:
 
 ```yaml
 video_models:
@@ -215,7 +218,8 @@ A `gmlx serve` job runs its entry's value. Its
 off, but not the linear layers, which are set when the entry loads. In
 ComfyUI, the `int8` input of
 [`gmlx Model Loader`](comfyui-reference.md#the-model-loaders-int8) does
-the same for each step.
+the same for each step. A value that changes the linear layers is
+refused. Run it on a [second entry](#run-an-entry-in-int8) instead.
 
 ## Clip length, size and memory
 
@@ -244,6 +248,16 @@ The largest clip each Mac makes:
 | 36 GB | 1344x768, 5 s, or 768x768 up to 10 s | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768, 5 s |
 | 48 GB | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768 up to 15 s | 1344x768, 5 s, or 768x768 up to 15 s |
 | 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s | 1344x768 up to 15 s |
+
+At [`--int8 linears` or `all`](#faster-clips-with-int8), `h3` and
+`h3-fast` need a larger Mac. These rows are for the Q4_K file that
+`gmlx video pull h3` downloads:
+
+| Mac memory | `h3` and `h3-fast` at `linears` or `all` |
+|------------|-------------------------------------------|
+| 32 or 36 GB | No clip |
+| 48 GB | 1344x768, 5 s, or 768x768 up to 10 s |
+| 64 GB or more | 1344x768 up to 15 s |
 
 [Keyframes and guides](#keyframes-and-guides) take more memory. The
 smallest Mac that makes a 5 second `h3` clip with them on the command
