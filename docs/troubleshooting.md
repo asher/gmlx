@@ -546,8 +546,8 @@ messages:
 - A memory refusal that names `int8 off or attention`, or `int8 off` on
   `fasth3`: the clip or the DiT does not fit with the int8 weights of
   `linears` or `all`, which [take more memory](video.md#faster-clips-with-int8).
-  Run at `off` or `attention`, which keep the file's weights, or make the
-  clip smaller. The text depends on where the check runs:
+  Run at the value the message names, which keeps the file's weights, or
+  make the clip smaller. The text depends on where the check runs:
   - `this clip does not fit in memory: ... Run with int8 off or
     attention, which keep the file's linears, or try a smaller size or a
     shorter clip`, from `gmlx video generate`, and from `gmlx video
