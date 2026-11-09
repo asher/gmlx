@@ -6,6 +6,7 @@ tests run on mlx-kquant's ops on a NAX GPU, and everywhere on reference
 ops written from the ops' formula in MLX."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import re
@@ -117,14 +118,14 @@ def test_a_gpu_without_nax_is_refused_and_one_with_nax_converts(
 def test_fasth3_converts_its_linears_and_refuses_int8_attention(
         linears_load, monkeypatch):
     """FastH3 runs its video sparse attention with int8 linears: the load
-    gate counts H3's 200 block linears, not the gates, and they convert.
-    Int8 attention on top is refused, since it replaces dense attention
-    only, so the gate's hint names int8 off alone."""
+    gate counts H3's 200 block linears and the 50 VSA gates, and they
+    convert. Int8 attention on top is refused, since it replaces dense
+    attention only, so the gate's hint names int8 off alone."""
     vsa_kernel(monkeypatch)
     int8_kernel(monkeypatch)
     model = linears_load(fast=True)
     (k,) = linears_load.loads
-    assert k["gate_extra"] == 8_441_753_600 + 5 * 28672 * 5376 + 4 * 28672
+    assert k["gate_extra"] == 9_286_144_000 + 5 * 28672 * 5376 + 4 * 28672
     assert k["gate_hint"] == "Run with int8 off, or try a smaller DiT quant"
     assert linears_load.converted == [hf.FAMILY.int8_linears]
     assert model._linears == "int8"
@@ -219,10 +220,19 @@ def _identify(path, *, family=None, variant=None):
         view=view)
 
 
-def _load(monkeypatch, path: str, linears: str | None = None):
+def _identify_fast(path, *, family=None, variant=None):
+    """The tiny file with a VSA gate in each block, as FastH3."""
+    vid = _identify(path)
+    return dataclasses.replace(
+        vid, variant=hf.FASTH3,
+        config={**vid.config, "vsa_sparsity": hf.VSA_SPARSITY})
+
+
+def _load(monkeypatch, path: str, linears: str | None = None,
+          identify=_identify):
     """The tiny DiT, with the loader's default linears when ``linears`` is
     None. For int8 the refusal sees a NAX GPU during the load only."""
-    monkeypatch.setattr(vloader, "identify_dit", _identify)
+    monkeypatch.setattr(vloader, "identify_dit", identify)
     kw = {} if linears is None else {"linears": linears}
     with monkeypatch.context() as m:
         if linears == "int8":
@@ -400,6 +410,38 @@ def test_the_conversion_makes_each_block_linear_int8(tiny_gguf, monkeypatch,
         diff = mx.abs(leaf.weight.astype(mx.float32) - sim)
         assert mx.max(diff).item() <= 1
         assert mx.mean(diff == 0).item() >= CODE_AGREEMENT, path
+
+
+def test_fasth3s_gates_load_as_kquant_leaves_and_convert_to_int8(
+        tmp_path, monkeypatch, ops):
+    """FastH3's VSA gate in each block loads as a K-quant leaf, as qkv_proj
+    does, and converts to int8 with the block linears: its codes and
+    scales are int8_quantize_rows of the file's float32 gate."""
+    from image_fixtures import write_gguf
+
+    tensors = _tiny_tensors()
+    rng = np.random.default_rng(1)
+    gates = [f"blocks.{i}.attn.to_gate_compress" for i in range(DEPTH)]
+    for g in gates:
+        w = (rng.standard_normal((256, 256)) / 16).astype(np.float32)
+        tensors[f"{g}.weight"] = (np.array(kq.quantize(mx.array(w),
+                                                       "q4_k")[0]), "Q4_K")
+    path = write_gguf(tmp_path / "fasth3-tiny.gguf", tensors, arch=None)
+    vsa_kernel(monkeypatch)
+    file = _load(monkeypatch, path, "file", identify=_identify_fast)
+    model = _load(monkeypatch, path, "int8", identify=_identify_fast)
+    before, mods = dict(file.named_modules()), dict(model.named_modules())
+    assert all(type(before[g]) is KQuantLinear for g in gates)
+    assert sorted(p for p, m in mods.items()
+                  if isinstance(m, Int8Linear)) == sorted(_PATHS + gates)
+    for g in gates:
+        base, leaf = before[g], mods[g]
+        w = kq.dequantize(base["weight"], base["scales"], base.kquant_type,
+                          mx.float32)
+        codes, scales = kq.int8_quantize_rows(w)
+        assert leaf.act_group is None
+        assert mx.array_equal(leaf.weight, codes)
+        assert mx.array_equal(leaf.scales, scales.reshape(-1))
 
 
 def _spy(monkeypatch) -> list:

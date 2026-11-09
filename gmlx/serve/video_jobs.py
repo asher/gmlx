@@ -911,10 +911,9 @@ def encode_anchors(job: Job, hold, served, todo) -> dict:
 
 
 def job_pacer(job: Job):
-    """The job's pacer: it stops the job once its stop is set, gives chat
-    its share of the GPU and evaluates, as a pack step's does."""
-    import mlx.core as mx
-
+    """The job's checks at each pause point: it stops the job once its stop
+    is set and gives chat its share of the GPU. The sampler runs them on
+    the row budget (``api.Budget``) and the decode between its pieces."""
     from .gpu_share import pacer
     from .image_service import JobStopped
 
@@ -925,8 +924,6 @@ def job_pacer(job: Job):
             raise JobStopped(timed_out=False)
         if chat is not None:
             chat(arrays)
-        if arrays:
-            mx.eval(*arrays)
 
     return fn
 
@@ -938,7 +935,7 @@ def _clip_part(job: Job, store: VideoJobs, hold, out: str) -> None:
 
     from gmlx.image.pacing import paced
     from gmlx.video import anchors as anc
-    from gmlx.video import pipeline, run
+    from gmlx.video import api, pipeline, run
     from gmlx.video.vae.h3_audio import SAMPLE_RATE
     from gmlx.video.vae.reader import load_vae
 
@@ -979,7 +976,7 @@ def _clip_part(job: Job, store: VideoJobs, hold, out: str) -> None:
                 height=s["height"], steps=s["steps"], shifts=s["shifts"],
                 seed=s["seed"], table=served.pipe.default_table,
                 anchors=placed, spans=k["spans"], on_step=on_step,
-                pacer=pace)
+                pacer=api.Budget(pace))
             mx.eval(xv, xa)
         del feats, placed
         store.progress(job, phase="decoding")

@@ -22,6 +22,7 @@ import gmlx.serve.bridge_vlm as serving  # noqa: E402
 from gmlx.config import VideoServerCfg  # noqa: E402
 from gmlx.serve import image_service, video_jobs as vj  # noqa: E402
 from gmlx.serve.patches import body_intake, videos  # noqa: E402
+from video_fixtures import ROW_REGIME_IDS, ROW_REGIMES  # noqa: E402
 
 
 class Clock:
@@ -1805,6 +1806,98 @@ def test_the_jobs_pacer_reaches_the_sampler_and_stops_the_job(
     assert seen.get("pacer") is not None and seen.get("stopped")
     assert job.record["gmlx"]["step"] == 1
     assert order[-1] == ("settle", vj.JOB)
+
+
+class _Points:
+    """A DiT whose forward marks 50 pause points and does nothing else,
+    the array of each point its index."""
+
+    def __init__(self, at=None):
+        self.at = at
+        self.last = -1
+
+    def plan(self, layout, t_video, t_audio):
+        return None
+
+    def __call__(self, video, audio, *a, **k):
+        import mlx.core as mx
+
+        from gmlx.image import pacing
+
+        for i in range(50):
+            self.last = i
+            pacing.point(mx.array(i))
+            if self.at is not None:
+                self.at(i)
+        return mx.zeros(video.shape), mx.zeros(audio.shape)
+
+
+def _sampling(monkeypatch, size, frames, text, dit, hit):
+    """A generate that samples 2 steps of ``dit`` on the clip's layout
+    through ``api.sample`` with the job's pacer, each evaluation of the
+    row budget recorded in ``hit``. Returns (generate, the layout)."""
+    import mlx.core as mx
+
+    from gmlx.video import api, layout
+    from gmlx.video.families.h3 import family as hf
+
+    vs, aus = hf.latent_shapes(frames, *size)
+    lay = layout.pack(hf.TIMELINE, text, *vs[2:], aus[3])
+
+    class Budget(api.RowBudget):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._eval = lambda *x: hit.append(int(x[0].item()))
+
+    monkeypatch.setattr(api, "RowBudget", Budget)
+
+    def generate(pipe, feats, **k):
+        return api.sample(dit, mx.zeros(vs), mx.zeros(aus),
+                          mx.zeros((1, text, 8)), lay, steps=2,
+                          shifts=hf.SHIFTS, on_step=k["on_step"],
+                          pacer=k["pacer"])
+    return generate, lay
+
+
+@pytest.mark.parametrize("size, frames, text, rows, every", ROW_REGIMES,
+                         ids=ROW_REGIME_IDS)
+def test_the_jobs_sampler_evaluates_on_the_row_budget_with_its_checks(
+        tmp_path, monkeypatch, size, frames, text, rows, every):
+    """A job's sampler evaluates on the clip's rows as the CLI does,
+    every ceil(32768 / rows) points and again from each step's start, and
+    runs chat's share at every point."""
+    from gmlx.serve import gpu_share
+
+    hit, chat, order = [], [], []
+    generate, lay = _sampling(monkeypatch, size, frames, text, _Points(),
+                              hit)
+    assert lay.rows == rows
+    hold = _clip_part_stubs(monkeypatch, order, generate)
+    monkeypatch.setattr(gpu_share, "pacer", lambda: chat.append)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    vj._clip_part(job, store, hold, store.clip(job.id))
+    each = list(range(every - 1, 50, every))
+    assert hit == each + each
+    assert len(chat) == 2 * 50
+
+
+def test_a_job_stops_at_its_next_point_between_two_evaluations(
+        tmp_path, monkeypatch):
+    """At 2054 rows the sampler evaluates every 16th point, and a stop
+    set after point 3 stops the job at point 4."""
+    from gmlx.serve.image_service import JobStopped
+
+    hit, order = [], []
+    dit = _Points(at=lambda i: i == 3 and job.stop.set())
+    generate, lay = _sampling(monkeypatch, (512, 512), 22, 188, dit, hit)
+    assert lay.rows == 2054
+    hold = _clip_part_stubs(monkeypatch, order, generate)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    with pytest.raises(JobStopped):
+        vj._clip_part(job, store, hold, store.clip(job.id))
+    assert dit.last == 4 and hit == []
 
 
 def test_the_decode_paces_and_stops_between_its_pieces(tmp_path,

@@ -479,6 +479,7 @@ def _upsample_system(guide: str, frames: int | None, first: bool,
 
 
 INT8_LINEARS = {"blocks.*.attn.qkv_proj": None,
+                "blocks.*.attn.to_gate_compress": None,
                 "blocks.*.attn.out_proj": None,
                 "blocks.*.mlp.fc1": None,
                 "blocks.*.mlp.fc2": 1024}

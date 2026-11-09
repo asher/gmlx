@@ -1370,7 +1370,7 @@ async def _av_step(t0, tensors, fields, run):
             # the table's pairs, its factors and the own table's excess.
             import mlx.core as mx
 
-            from gmlx.image.pacing import paced
+            from gmlx.video import api
 
             from ..image_steps import FACTORS, StepInterrupted
 
@@ -1398,19 +1398,13 @@ async def _av_step(t0, tensors, fields, run):
                     cond = vs.anchor_cond(served, refs, placed, got)
                 except ValueError as e:
                     raise StepError(400, str(e)) from None
-            pace = step_pacer(run, gen)
-
-            def pacer(arrays):
-                pace(arrays)
-                mx.eval(*arrays)
-
             t1 = time.perf_counter()
-            with paced(pacer):
-                vv, va, hit = vs.av_step(
-                    served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
-                    _cond_key(hashes[0]), core, anchors=placed, cond=cond,
-                    spans=spans, int8=int8)
-                mx.eval(vv, va)
+            vv, va, hit = vs.av_step(
+                served, v_w.mx(), a_w.mx(), ts, shifts, scale, feats,
+                _cond_key(hashes[0]), core, anchors=placed, cond=cond,
+                spans=spans, int8=int8,
+                pacer=api.Budget(step_pacer(run, gen)))
+            mx.eval(vv, va)
             if run is not None and (run.gen != gen or run.ended):
                 raise StepInterrupted()
             return _host(vv), _host(va), time.perf_counter() - t1, hit

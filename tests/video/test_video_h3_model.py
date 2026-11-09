@@ -14,6 +14,7 @@ from gmlx.image import ops, pacing
 from gmlx.video import api, layout, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
+from video_fixtures import ROW_REGIME_IDS, ROW_REGIMES
 
 TINY = {"num_attention_heads": 2, "attention_head_dim": 128,
         "hidden_size": 64, "num_layers": 2, "num_refiner_layers": 1,
@@ -293,15 +294,8 @@ def test_a_run_steps_each_stream_on_its_own_schedule(tiny, monkeypatch,
     assert seen[0] == (0.0, 0.0)
 
 
-@pytest.mark.parametrize("size, frames, text, rows, every", [
-    ((1344, 768), 362, 25, 109087, 1),
-    ((1344, 768), 124, 188, 37898, 1),
-    ((1344, 768), 124, 1, 37711, 1),
-    ((768, 768), 124, 188, 21914, 2),
-    ((672, 384), 124, 188, 9926, 4),
-    ((512, 512), 22, 188, 2054, 16),
-], ids=["1344x768x362", "1344x768x124", "1344x768x124-short-caption",
-         "768x768x124", "672x384x124", "512x512x22"])
+@pytest.mark.parametrize("size, frames, text, rows, every", ROW_REGIMES,
+                         ids=ROW_REGIME_IDS)
 def test_the_default_pacer_evaluates_on_the_clips_rows(size, frames, text,
                                                        rows, every):
     """Every point of a clip of 32768 rows or more evaluates, whatever its
@@ -328,9 +322,9 @@ def test_a_run_counts_the_layouts_rows_and_starts_each_step_again(
     hit, made = [], []
     real = api.RowBudget
 
-    def budget(rows, threshold):
+    def budget(rows, threshold, on_point=None):
         made.append((rows, threshold))
-        return real(rows, threshold,
+        return real(rows, threshold, on_point=on_point,
                     evaluate=lambda *a: hit.append(int(a[0].item())))
 
     def fake(self, video, audio, *a, **k):

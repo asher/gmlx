@@ -783,15 +783,26 @@ def test_the_int8_dit_counts_each_block_linear_from_the_header():
     assert memfit.int8_delta(hf.FAMILY, pre) == H3_INT8_DELTA
 
 
-def test_the_fasth3_file_converts_its_block_linears_and_not_its_gates():
+# FastH3's: H3's and its 50 VSA gates, each 7168 x 5376 Q4_K, at one int8
+# byte a weight and a float32 scale an output row.
+FASTH3_INT8_DELTA = 9_286_144_000
+
+
+def test_the_fasth3_file_converts_its_block_linears_and_its_gates():
     """The FastH3 file carries the wan label and a VSA gate in each block.
-    Its 200 block linears convert and its gates do not, so it holds H3's
-    delta."""
-    from video_fixtures import fasth3_view
+    Its 200 block linears and its 50 gates convert, 844,390,400 bytes over
+    H3's delta, and H3's header still holds H3's delta. fc1 stays the
+    largest conversion."""
+    from video_fixtures import H3_HEADER, fasth3_view, fixture_view
 
     view = fasth3_view()
-    assert len(memfit._int8_matrices(hf.FAMILY, view)) == 4 * 50
-    assert memfit.int8_delta(hf.FAMILY, view) == H3_INT8_DELTA
+    assert len(memfit._int8_matrices(hf.FAMILY, view)) == 5 * 50
+    gate = 7168 * 5376 + 4 * 7168 - 7168 * 5376 * 144 // 256
+    assert FASTH3_INT8_DELTA == H3_INT8_DELTA + 50 * gate
+    assert memfit.int8_delta(hf.FAMILY, view) == FASTH3_INT8_DELTA
+    assert memfit.int8_transient(hf.FAMILY, view) == H3_INT8_TRANSIENT
+    assert memfit.int8_delta(hf.FAMILY, fixture_view(H3_HEADER)) == (
+        H3_INT8_DELTA)
 
 
 def test_the_dit_bytes_of_int8_linears_are_the_file_and_the_delta(

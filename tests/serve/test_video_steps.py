@@ -35,6 +35,7 @@ from gmlx.video import layout, pipeline  # noqa: E402
 from gmlx.video.families.h3 import family as hf  # noqa: E402
 from gmlx.video.families.h3 import model as hm  # noqa: E402
 from test_video_h3_model import TINY, tiny_weights  # noqa: E402
+from video_fixtures import ROW_REGIME_IDS, ROW_REGIMES  # noqa: E402
 
 _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 P = wire.PREFIX
@@ -705,6 +706,91 @@ def test_a_step_counts_the_entrys_own_lora_once(tmp_path, request):
     host.budget_bytes = lora + caches + plan.terms["denoise"]["step"] + 4096
     c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
               audio_scale=SCALE)
+
+
+def _counted_budget(monkeypatch, made, hit=None):
+    """``api.RowBudget`` recording each budget made and its calls, and its
+    evaluations in ``hit`` when given, in place of evaluating."""
+
+    class Budget(vapi.RowBudget):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.calls = 0
+            if hit is not None:
+                self._eval = lambda *x: hit.append(int(x[0].item()))
+            made.append(self)
+
+        def __call__(self, arrays):
+            self.calls += 1
+            super().__call__(arrays)
+
+    monkeypatch.setattr(vapi, "RowBudget", Budget)
+
+
+def test_an_av_step_runs_its_checks_at_every_point_on_the_row_budget(
+        host, monkeypatch):
+    """The pack's AV step hands its forward a row budget of the step's own
+    rows, whose checks are the step's: chat's share at every point, and
+    the run's interrupt."""
+    from gmlx.serve import gpu_share
+
+    made, chat, seen = [], [], {}
+    _counted_budget(monkeypatch, made)
+    monkeypatch.setattr(gpu_share, "pacer", lambda: chat.append)
+    real = vs.av_step
+
+    def av_step(*a, **k):
+        seen["pacer"] = k["pacer"]
+        return real(*a, **k)
+
+    monkeypatch.setattr(vs, "av_step", av_step)
+    video, audio, feats = _clip()
+    c = _client()
+    row = {"cond": c.put(feats)}
+    run = c.begin("h3")
+    c.av_step("h3", run, video, audio, 600.0, row, shifts=SHIFTS,
+              audio_scale=SCALE)
+    lay = layout.pack(hf.TIMELINE, feats.shape[1], *video.shape[2:],
+                      audio.shape[3])
+    (budget,) = made
+    assert (budget.rows, budget.threshold) == (lay.rows, vapi.EVAL_ROWS)
+    assert budget.calls == len(chat) > 0
+    assert isinstance(seen["pacer"], vapi.Budget)
+    steps.STATE.interrupt(run)
+    with pytest.raises(steps.StepInterrupted):
+        seen["pacer"].on_point(())
+    c.end(run)
+
+
+@pytest.mark.parametrize("size, frames, text, rows, every", ROW_REGIMES,
+                         ids=ROW_REGIME_IDS)
+def test_an_av_steps_forward_evaluates_on_its_rows_with_its_checks(
+        host, monkeypatch, size, frames, text, rows, every):
+    """The AV step's budget on a clip's layout: the step's checks at each
+    of a forward's points, and an evaluation every ceil(32768 / rows)
+    points, as the CLI's."""
+    from gmlx.serve import gpu_share
+
+    made, chat, hit = [], [], []
+    _counted_budget(monkeypatch, made, hit)
+    monkeypatch.setattr(gpu_share, "pacer", lambda: chat.append)
+
+    def denoise_step(model, video, audio, *a, **k):
+        for i in range(50):
+            vapi.pacing.point(mx.array(i))
+        return mx.zeros(video.shape), mx.zeros(audio.shape)
+
+    monkeypatch.setattr(vapi, "denoise_step", denoise_step)
+    vsh, ash = hf.latent_shapes(frames, *size)
+    budget = vapi.Budget(steps.step_pacer(None, 0))
+    _on_worker(lambda: vs.av_step(
+        host.served, mx.zeros(vsh), mx.zeros(ash), 600.0, SHIFTS, 1.0,
+        mx.zeros((1, text, TINY["text_dim"])), f"rows{rows}", None,
+        pacer=budget))
+    (made_budget,) = made
+    assert made_budget.rows == rows
+    assert hit == list(range(every - 1, 50, every))
+    assert len(chat) == 50
 
 
 def test_a_runs_first_step_counts_the_clips_decodes(host):

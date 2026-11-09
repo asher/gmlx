@@ -193,7 +193,9 @@ For `linears` and `all`, gmlx converts the weights of those layers to
 int8 as the DiT loads, which is where the extra memory goes. The memory
 check counts it, so a clip that fits at `off` can be refused at
 `linears`. `fasth3` runs at `linears` and refuses `attention` and `all`,
-since int8 attention replaces dense attention and FastH3's is sparse.
+since int8 attention replaces dense attention and FastH3's is sparse. At
+`linears` it also converts the gate of its sparse attention in each
+block, so its DiT holds 9.3 GB more.
 
 ### Run an entry in int8
 
