@@ -1050,6 +1050,30 @@ def test_int8_this_server_cannot_run_is_a_400_before_the_job(
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
 
 
+@pytest.mark.parametrize("sent", [None, "linears", "all"])
+def test_fasth3_takes_int8_linears_and_refuses_int8_attention(
+        routes, monkeypatch, sent):
+    """FastH3 on an entry at int8 linears takes a job at linears, and a
+    job at all is a 400 with the attention text and no job."""
+    from video_fixtures import int8_kernel, vsa_kernel
+
+    int8_kernel(monkeypatch)
+    vsa_kernel(monkeypatch)
+    _entry_at(monkeypatch, "linears", "fasth3")
+    fields = {"prompt": "a cat"} | ({"int8": sent} if sent else {})
+    r = routes.client.post("/v1/videos", json=fields)
+    if sent != "all":
+        assert r.status_code == 200, r.text
+        assert r.json()["gmlx"]["int8"] == "linears"
+        return
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        "MiniMax-H3 fasth3 runs video sparse attention, and int8 attention "
+        "applies to dense attention only", "int8")
+    assert routes.store.jobs == {} and routes.store.pending == {}
+
+
 def test_no_ffmpeg_is_a_501_with_the_missing_program_text(routes,
                                                          monkeypatch):
     from gmlx.serve import media_programs

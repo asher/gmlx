@@ -783,6 +783,17 @@ def test_the_int8_dit_counts_each_block_linear_from_the_header():
     assert memfit.int8_delta(hf.FAMILY, pre) == H3_INT8_DELTA
 
 
+def test_the_fasth3_file_converts_its_block_linears_and_not_its_gates():
+    """The FastH3 file carries the wan label and a VSA gate in each block.
+    Its 200 block linears convert and its gates do not, so it holds H3's
+    delta."""
+    from video_fixtures import fasth3_view
+
+    view = fasth3_view()
+    assert len(memfit._int8_matrices(hf.FAMILY, view)) == 4 * 50
+    assert memfit.int8_delta(hf.FAMILY, view) == H3_INT8_DELTA
+
+
 def test_the_dit_bytes_of_int8_linears_are_the_file_and_the_delta(
         monkeypatch):
     from gmlx.image import text_encoder

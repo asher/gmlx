@@ -111,8 +111,8 @@ default, `off`, `attention`, `linears` or `all`. `entry` runs each step at
 the entry's [`defaults.int8`](config.md#video_modelsdefaults) and sends
 nothing. Any other value goes with each step, and the server runs that
 step at it, as [Faster clips with int8](video.md#faster-clips-with-int8)
-describes: it is lossy, needs an M5 or newer, and no value but `off`
-runs with `fasth3`.
+describes: it is lossy, needs an M5 or newer, and `fasth3` runs at
+`off` and `linears` only.
 
 The loader refuses a value that changes the entry's linear layers, as
 [In serve and ComfyUI](video.md#in-serve-and-comfyui) explains. A server

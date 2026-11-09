@@ -535,9 +535,8 @@ messages:
   0.5.11 or later`: the installed mlx-kquant has no int8 kernel. Update
   gmlx, which brings the mlx-kquant it needs.
 - `MiniMax-H3 fasth3 runs video sparse attention, and int8 attention
-  applies to dense attention only`, or `..., and int8 linears run on
-  variants with dense attention only`: run `fasth3` at `off`, or the clip
-  on `h3`.
+  applies to dense attention only`: run `fasth3` at `off` or `linears`,
+  or the clip on `h3`.
 - `this model's entry loads its DiT at int8 off, so a request names int8
   off or attention, not linears; set the entry's defaults.int8 to run
   linears`: the linear layers are converted as the DiT loads, so a job or
