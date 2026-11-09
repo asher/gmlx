@@ -291,3 +291,24 @@ def test_text_cut_keeps_media_blocks():
     ids = [2, 5, 6, 93, 90, 90, 94, 7, 8, 9, 1]
     cut = emb._cut_text(ids, 8, emb._protected(ids, m))
     assert cut == [2, 5, 6, 93, 90, 90, 94, 1]
+
+
+@pytest.mark.parametrize("name, want", [
+    ("ball_3s.mp4", [0, 10, 20]),
+    # 40 frames at 1 fps, cut to 32 uniformly.
+    ("scenes_40s.mp4", [0, 5, 10, 15, 25, 30, 35, 40, 50, 55, 60, 65, 75, 80, 85, 90,
+                        100, 105, 110, 115, 125, 130, 135, 140, 150, 155, 160, 165,
+                        175, 180, 185, 195]),
+])
+def test_video_frames_sample_as_the_reference(name, want):
+    # The indices transformers' EmbeddingGemma2VideoProcessor.sample_frames
+    # picks from torchcodec's metadata of the same file.
+    from gmlx._vendor.mlx_vlm.utils import VideoSampling
+    from gmlx.serve import media_decode
+
+    path = _ORACLE.parent / "embeddinggemma2_reference" / "media" / name
+    frames, meta = media_decode.read_video(
+        str(path), sampling=VideoSampling(fps=proc.VIDEO_FPS, max_frames=proc.VIDEO_MAX_FRAMES),
+        frame_sampler=proc.frame_sampler)
+    assert list(map(int, meta.frames_indices)) == want
+    assert frames.shape[0] == len(want)
