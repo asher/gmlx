@@ -290,7 +290,11 @@ def test_explicit_starts_match_registered_mask(d):
 def test_explicit_starts_masked_fallback(monkeypatch):
     # Declined fused decode with explicit starts must mask pad rows on
     # the materialize path, not attend them.
+    from gmlx.cache import kvarn_sdpa
+
     monkeypatch.setenv("GMLX_KVARN_SDPA", "0")
+    # The switch is read once per process; reread it here, and restore it.
+    monkeypatch.setattr(kvarn_sdpa, "_sdpa_env", None)
     pads = [0, 150, 296]
     c, _ = _decode_setup(600, pads)
     q = _make_q()
