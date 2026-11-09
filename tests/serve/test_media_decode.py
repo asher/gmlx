@@ -724,6 +724,16 @@ def test_ffmpeg_gives_a_frame_picked_twice_twice(ffmpeg_reader):
     assert np.array_equal(frames[0], frames[1]) and not np.array_equal(frames[1], frames[2])
 
 
+def test_ffmpeg_reads_more_frames_than_one_select_sum_takes(ffmpeg_reader):
+    # ffmpeg's expression parser refuses a sum of over 100 terms; mlx-vlm's
+    # default sampling takes up to 768 frames.
+    path = os.path.join(_FIXTURES, "embeddinggemma2_reference", "media", "scenes_40s.mp4")
+    every, _ = md.read_video(path, frame_sampler=lambda m, **k: list(range(200)))
+    assert every.shape[0] == 200
+    some, _ = md.read_video(path, frame_sampler=lambda m, **k: [7, 150, 199])
+    assert np.array_equal(some, every[[7, 150, 199]])
+
+
 def test_ffmpeg_charges_the_frames_before_it_decodes_one(monkeypatch, ffmpeg_reader):
     path = os.path.join(_FIXTURES, "video_decode", "vfr.mp4")
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 9 * 160 * 120)

@@ -532,6 +532,19 @@ def _probe_video(ffprobe: str, video_path: str):
     return count, fps, duration, width, height, turns
 
 
+def _select(frames: list[int]) -> str:
+    """ffmpeg's select expression for ``frames``. Its parser refuses a sum
+    of more than 100 terms, so the terms nest in groups of 16."""
+    terms = [f"eq(n\\,{i})" for i in frames]
+
+    def tree(ts: list[str]) -> str:
+        if len(ts) <= 16:
+            return "+".join(ts)
+        size = -(-len(ts) // 16)
+        return "+".join(f"({tree(ts[i:i + size])})" for i in range(0, len(ts), size))
+    return tree(terms)
+
+
 def _read_video_ffmpeg(video_path: str, resolved, frame_sampler):
     import numpy as np
     from gmlx._vendor.mlx_vlm.utils import VideoMetadata
@@ -549,7 +562,7 @@ def _read_video_ffmpeg(video_path: str, resolved, frame_sampler):
     # torchcodec turns a frame after its conversion to RGB, and the ffmpeg
     # CLI before, so the frames come unturned and turn here.
     wanted = sorted(set(indices.tolist()))
-    pick = "+".join(f"eq(n\\,{i})" for i in wanted)
+    pick = _select(wanted)
     frame_bytes = width * height * 3
     run = media_programs._run_bounded(
         [ffmpeg, "-v", "error", "-nostdin", "-protocol_whitelist", "file",
