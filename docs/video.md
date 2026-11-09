@@ -17,13 +17,13 @@ Video needs a Mac with an M3 chip or newer, 32 GB of memory or more,
 ffmpeg, and about 40 GB of disk for the model's files.
 It needs no pip extra: the `video` extra is OpenCV, for video input to
 vision models.
-[FastH3](#fasth3), a faster version of the model, needs an M5 chip or
-newer.
+[FastH3](#fasth3), a faster version of the model, and
+[int8](#faster-clips-with-int8) need an M5 chip or newer.
 
 - [Make your first clip](#make-your-first-clip)
 - [Choose a recipe](#choose-a-recipe)
 - [FastH3](#fasth3)
-- [Int8 attention](#int8-attention)
+- [Faster clips with int8](#faster-clips-with-int8)
 - [Clip length, size and memory](#clip-length-size-and-memory)
 - [Dialogue](#dialogue)
 - [Keyframes and guides](#keyframes-and-guides)
@@ -164,27 +164,62 @@ error: MiniMax-H3 fasth3 runs video sparse attention, whose kernel needs a GPU w
 In ComfyUI, the gmlx nodes run FastH3 through the `fasth3-t2v` workflow,
 as [FastH3 in ComfyUI](comfyui.md#fasth3) shows.
 
-## Int8 attention
+## Faster clips with int8
+
+On an M5 or newer, `--int8` runs parts of MiniMax-H3's DiT in 8-bit
+integer math in place of the default products. The clip changes: it is
+not the one `off` makes from the same seed.
 
 ```sh
-gmlx video generate h3 --attention int8 --prompt "..."
+gmlx video generate h3 --int8 attention --prompt "..."
 ```
 
-`--attention int8` runs the attention of MiniMax-H3's DiT with int8
-products. It is opt-in and lossy: the clip differs from the one that the
-default dense attention makes from the same seed. The text encoder and
-the VAEs run as before. It needs an M5 or newer, and it does not run
-with `fasth3`. On a large or long clip, such as 1344x768 for 5 s or
-672x384 for 12 s, a step takes less time than with dense attention. On a
-short, small clip, such as 672x384 for 5 s, the gain is small.
+| `--int8` | Runs in int8 | DiT memory |
+|---|---|---|
+| `off` | nothing (the default) | the file's |
+| `attention` | the attention | the file's |
+| `linears` | the four linear layers of each block | 8.4 GB more on the Q4_K file |
+| `all` | the attention and the linear layers | 8.4 GB more on the Q4_K file |
 
-To run every clip of an entry this way, set `attention: int8` in its
-[`defaults`](config.md#video_modelsdefaults). A job of `gmlx serve`
-runs the entry's attention unless its
-[`attention`](video-api.md#request-fields) field names the other, and in
-ComfyUI the `attention` input of
-[`gmlx Model Loader`](comfyui-reference.md#the-model-loaders-attention)
-sets it for each step.
+With `attention`, a step takes less time on a large or long clip, such
+as 1344x768 for 5 s or 672x384 for 12 s. On a short, small clip, such as
+672x384 for 5 s, the gain is small.
+
+On an M5 Max, a 1344x768 clip of 5 seconds takes about a tenth less time
+at `linears` and about a fifth less at `all`.
+
+For `linears` and `all`, gmlx converts the weights of those layers to
+int8 as the DiT loads, which is where the extra memory goes. The memory
+check counts it, so a clip that fits at `off` can be refused at
+`linears`. No value but `off` runs with `fasth3`.
+
+### Run an entry in int8
+
+Set `int8` in an entry's [`defaults`](config.md#video_modelsdefaults) to
+run every clip of that entry at one value. Two entries on the same files
+run the model at two values:
+
+```yaml
+video_models:
+  h3:
+    # ... the files of the h3 entry
+  h3-int8:
+    # ... the same files
+    defaults: {int8: all}
+```
+
+Each entry loads its own DiT, so using both keeps both in memory until
+`gmlx serve` unloads one.
+
+### In serve and ComfyUI
+
+A `gmlx serve` job runs its entry's value. Its
+[`int8`](video-api.md#request-fields) field can turn int8 attention on or
+off, but not the linear layers, which are set when the entry loads. In
+ComfyUI, the `int8` input of
+[`gmlx Model Loader`](comfyui-reference.md#the-model-loaders-int8) does
+the same for each step. A value that changes the linear layers is
+refused. Run it on a [second entry](#run-an-entry-in-int8) instead.
 
 ## Clip length, size and memory
 
@@ -213,6 +248,17 @@ The largest clip each Mac makes:
 | 36 GB | 1344x768, 5 s, or 768x768 up to 10 s | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768, 5 s |
 | 48 GB | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768 up to 15 s | 1344x768, 5 s, or 768x768 up to 15 s |
 | 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s | 1344x768 up to 15 s |
+
+At [`--int8 linears` or `all`](#faster-clips-with-int8), `h3` and
+`h3-fast` need a larger Mac. These rows are for the Q4_K file that
+`gmlx video pull h3` downloads:
+
+| Mac memory | `h3` and `h3-fast` at `linears` or `all` |
+|------------|-------------------------------------------|
+| 32 GB | No clip |
+| 36 GB | None at 768x768 or larger |
+| 48 GB | 1344x768, 5 s, or 768x768 up to 10 s |
+| 64 GB or more | 1344x768 up to 15 s |
 
 [Keyframes and guides](#keyframes-and-guides) take more memory. The
 smallest Mac that makes a 5 second `h3` clip with them on the command

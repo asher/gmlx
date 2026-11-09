@@ -3704,7 +3704,7 @@ def test_video_models_parse_and_normalize():
         adapters=["/turbo.safetensors", {"path": "/b.safetensors",
                                          "strength": 0.5}],
         defaults={"steps": "8", "shift": 6, "size": "1344X768",
-                  "seconds": 10, "attention": "int8"}))
+                  "seconds": 10, "int8": "all"}))
     m = cfg.video_models["h3"]
     assert (m.path, m.encoder, m.vae, m.audio_vae) == (
         "/m/h3.gguf", "/m/qwen3vl-32b.gguf", "/m/video_vae.safetensors",
@@ -3712,7 +3712,7 @@ def test_video_models_parse_and_normalize():
     assert (m.encoder_mmproj, m.tiny_vae, m.variant) == (None, None, None)
     assert m.adapters == (("/turbo.safetensors", 1.0), ("/b.safetensors", 0.5))
     assert m.defaults == {"steps": 8, "shift": 6.0, "size": "1344x768",
-                          "seconds": 10.0, "attention": "int8"}
+                          "seconds": 10.0, "int8": "all"}
     assert "h3" not in cfg.models and "h3" not in cfg.image_models
 
 
@@ -3723,8 +3723,12 @@ def test_video_models_parse_and_normalize():
     ({"defaults": {"steps": 0}}, "positive"),
     ({"defaults": {"steps": 4.9}}, "whole number"),
     ({"defaults": {"shift": float("nan")}}, "positive"),
-    ({"defaults": {"attention": "int4"}},
-     "defaults.attention: expected one of dense, int8, got 'int4'"),
+    ({"defaults": {"int8": "int4"}},
+     "defaults.int8: expected one of off, attention, linears, all, got "
+     "'int4'"),
+    ({"defaults": {"int8": True}},
+     "defaults.int8: expected one of off, attention, linears, all, got "
+     "True"),
     ({"variant": 1}, "variant: expected a string"),
     ({"adapters": [{"path": "/a", "strength": "x"}]}, "strength"),
     ({"upsampler": "nope"}, "`upsampler` 'nope' is not a model id"),
@@ -3809,14 +3813,35 @@ def test_a_video_models_upsampler_and_its_prompt_resolve(tmp_path):
     assert sig["chat"] == sig["chat2"] != sig[None]
 
 
-def test_the_attention_of_a_video_entry_splits_its_load():
-    """Two entries on the same files that differ only in
-    defaults.attention load apart, and an entry without the key loads as
-    one set to dense."""
+def test_the_int8_setting_of_a_video_entry_splits_its_load():
+    """Two entries on the same files that differ only in defaults.int8
+    load apart, each value its own load, and an entry without the key
+    loads as one set to off."""
     sig = {a: cfgmod.resolve_video_model("h3", build_config(_video_doc(
-        defaults={} if a is None else {"attention": a}))).load_signature()
-        for a in (None, "dense", "int8")}
-    assert sig[None] == sig["dense"] != sig["int8"]
+        defaults={} if a is None else {"int8": a}))).load_signature()
+        for a in (None, "off", "attention", "linears", "all")}
+    assert sig[None] == sig["off"]
+    assert len({sig[a] for a in ("off", "attention", "linears", "all")}) == 4
+    assert sig["all"][-1] == "all"
+
+
+@pytest.mark.parametrize("key", ["attention", "linears"])
+def test_the_old_int8_keys_of_a_video_entry_are_refused_naming_int8(key):
+    """defaults.attention, the unreleased key before the int8 setting,
+    and a linears key are refused with the setting that replaces them."""
+    with pytest.raises(ConfigError) as e:
+        build_config(_video_doc(defaults={key: "int8"}))
+    assert str(e.value).endswith(
+        f"defaults.{key}: the int8 setting replaces it; set int8 to one of "
+        "off, attention, linears, all")
+
+
+def test_a_bare_yaml_off_is_the_int8_setting_off():
+    """YAML reads a bare off as false: int8: off is the value off."""
+    import yaml
+
+    doc = _video_doc(**yaml.safe_load("defaults: {int8: off}"))
+    assert build_config(doc).video_models["h3"].defaults["int8"] == "off"
 
 
 def test_video_models_round_trip_through_print_config():

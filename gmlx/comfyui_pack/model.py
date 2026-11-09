@@ -31,8 +31,8 @@ import comfy.patcher_extension
 import comfy.supported_models
 import comfy.utils
 
-from . import compat
-from .client import (INT8_ATTENTION, GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal,
+from . import compat, discovery
+from .client import (INT8_FEATURE, GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal,
                      StepClient,
                      set_interrupt_check, tensor_hash)
 from .clip import TYPED, TypedPrompt
@@ -597,17 +597,21 @@ class RemoteForward:
             anchors.append(a)
         return anchors, spans
 
-    def _attention(self, fields: dict) -> None:
-        """The model loader's attention on each AV step, which the server runs
-        over its entry's. A server from before int8 attention runs dense, with
-        one warning a model when the loader asks for int8."""
+    def _int8(self, fields: dict) -> None:
+        """The model loader's int8 setting on each AV step, which the server
+        runs over its entry's; ``entry`` sends nothing. A server from before
+        the int8 setting runs the entry's, with one warning a model when the
+        loader asks for a value other than off."""
+        value = self.b.int8
+        if value == "entry":
+            return
         caps = getattr(self.b.client, "capabilities", None) or {}
-        if INT8_ATTENTION in (caps.get("features") or ()):
-            fields["attention"] = self.b.attention
-        elif self.b.attention != "dense" and "attention" not in self.warned:
-            self.warned.add("attention")
-            log.warning("gmlx: this gmlx server runs no int8 attention, so %r runs dense "
-                        "attention; update it", self.b.model_id)
+        if INT8_FEATURE in (caps.get("features") or ()):
+            fields["int8"] = value
+        elif value != "off" and "int8" not in self.warned:
+            self.warned.add("int8")
+            log.warning("gmlx: this gmlx server has no int8 setting, so %r runs as its "
+                        "entry says; update it", self.b.model_id)
 
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries
@@ -651,7 +655,7 @@ class RemoteForward:
             fields["anchors"] = anchors
         if spans:
             fields["spans"] = spans
-        self._attention(fields)
+        self._int8(fields)
         vs, au = video.float(), audio.float()
         ts = timesteps.float().reshape(-1)
 
@@ -737,20 +741,25 @@ class RemoteForward:
         return out.unsqueeze(2) if framed else out
 
 
-def load_model(client: StepClient, model_id: str, attention: str = "dense") -> GmlxModelPatcher:
+def load_model(client: StepClient, model_id: str, int8: str = "entry") -> GmlxModelPatcher:
     """The gmlx MODEL of ``model_id`` on ``client``'s server, whose MiniMax-H3
-    steps run at ``attention``, dense or int8."""
+    steps run at the int8 setting ``int8``, or the entry's. A value whose
+    linears differ from the entry's is refused here when the status names the
+    entry's setting, else at the first step."""
     status = client.status(model_id)
     facts = status.get("comfy") or {}
     if not facts.get("model_class"):
         raise GmlxError(f"gmlx: the server gives no ComfyUI model class for {model_id!r}")
-    if attention != "dense" and not status.get("audio"):
-        raise GmlxRefusal(f"gmlx: {attention} attention runs on MiniMax-H3, and {model_id!r} "
-                          "is an image model; set attention to dense")
+    if int8 not in ("entry", "off") and not status.get("audio"):
+        raise GmlxRefusal(f"gmlx: int8 {int8} runs on MiniMax-H3, and {model_id!r} is an "
+                          "image model; set int8 to entry")
+    why = discovery.int8_refusal(status.get("int8") or "entry", int8)
+    if why:
+        raise GmlxRefusal(f"gmlx: {why}")
     manifest = client.manifest(model_id)
     model, _cfg = build_weightless(manifest, facts["model_class"])
     binding = GmlxBinding(client, model_id, status, int(manifest.get("count") or 0),
-                          attention=attention)
+                          int8=int8)
     model.diffusion_model.forward = RemoteForward(model, binding)
     patcher = GmlxModelPatcher(model, load_device=CPU, offload_device=CPU)
     patcher.gmlx = binding

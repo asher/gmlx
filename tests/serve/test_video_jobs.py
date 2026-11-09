@@ -801,7 +801,7 @@ def routes(tmp_path, monkeypatch):
     monkeypatch.setattr(serving, "resolve_video_request",
                         lambda m: ("/abs/h3.gguf", spec))
     monkeypatch.setattr(videos, "_entry_plan", lambda s: SimpleNamespace(
-        family="h3", variant="fl2va"))
+        family="h3", variant="fl2va", int8="off"))
     monkeypatch.setattr(media_programs, "find", lambda n: "/opt/ffmpeg")
     app = FastAPI()
     cfg = SimpleNamespace(video_models={"h3": {}}, video=VideoServerCfg())
@@ -944,33 +944,78 @@ def _post(routes, how: str, fields: dict):
                               headers={"content-type": ctype})
 
 
-@pytest.mark.parametrize("how", ["json", "form"])
-@pytest.mark.parametrize("default, sent, want", [
-    (None, None, "dense"), (None, "int8", "int8"), ("int8", None, "int8"),
-    ("int8", "dense", "dense")])
-def test_a_jobs_attention_is_its_field_then_the_entrys_then_dense(
-        routes, monkeypatch, how, default, sent, want):
-    """The job runs the attention its POST names, else its entry's
-    defaults.attention, else dense, and its record shows it."""
-    from video_fixtures import qk8_kernel
+def _entry_at(monkeypatch, int8: str, variant: str = "fl2va") -> None:
+    """The routes' entry plan at the int8 setting ``int8``."""
+    monkeypatch.setattr(videos, "_entry_plan", lambda s: SimpleNamespace(
+        family="h3", variant=variant, int8=int8))
 
-    qk8_kernel(monkeypatch)
-    if default:
-        routes.spec.defaults = {"attention": default}
-    fields = {"prompt": "a cat"} | ({"attention": sent} if sent else {})
+
+@pytest.mark.parametrize("how", ["json", "form"])
+@pytest.mark.parametrize("entry, sent, want", [
+    ("off", None, "off"), ("off", "attention", "attention"),
+    ("attention", None, "attention"), ("attention", "off", "off"),
+    ("linears", None, "linears"), ("linears", "all", "all"),
+    ("all", "linears", "linears")])
+def test_a_jobs_int8_is_its_field_then_the_entrys(routes, monkeypatch, how,
+                                                  entry, sent, want):
+    """The job runs the int8 setting its POST names, else its entry's
+    defaults.int8, and its record shows it as gmlx.int8."""
+    from video_fixtures import int8_kernel
+
+    int8_kernel(monkeypatch)
+    _entry_at(monkeypatch, entry)
+    fields = {"prompt": "a cat"} | ({"int8": sent} if sent else {})
     r = _post(routes, how, fields)
     assert r.status_code == 200, r.text
-    assert r.json()["gmlx"]["attention"] == want
-    assert routes.store.jobs[r.json()["id"]].params["attention"] == want
+    assert r.json()["gmlx"]["int8"] == want
+    assert routes.store.jobs[r.json()["id"]].params["int8"] == want
 
 
-@pytest.mark.parametrize("how", ["json", "form"])
-def test_an_attention_off_the_list_is_a_400_naming_it(routes, how):
-    r = _post(routes, how, {"prompt": "a cat", "attention": "int4"})
+@pytest.mark.parametrize("entry, sent", [
+    ("off", "linears"), ("off", "all"), ("attention", "linears"),
+    ("linears", "off"), ("linears", "attention"), ("all", "off")])
+def test_a_job_whose_linears_differ_from_its_entrys_is_a_400(
+        routes, monkeypatch, entry, sent):
+    """The linears are a property of the loaded DiT: a job names a value
+    whose linears match its entry's, and any other is refused naming the
+    entry's value and the setting that changes it, with no job."""
+    from video_fixtures import int8_kernel
+
+    int8_kernel(monkeypatch)
+    _entry_at(monkeypatch, entry)
+    allowed = (("off", "attention") if entry in ("off", "attention")
+               else ("linears", "all"))
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat",
+                                               "int8": sent})
     assert r.status_code == 400, r.text
     err = r.json()["error"]
     assert (err["message"], err["param"]) == (
-        "attention is dense or int8, not 'int4'", "attention")
+        f"this model's entry loads its DiT at int8 {entry}, so a request "
+        f"names int8 {allowed[0]} or {allowed[1]}, not {sent}; set the "
+        f"entry's defaults.int8 to run {sent}", "int8")
+    assert routes.store.jobs == {} and routes.store.pending == {}
+
+
+@pytest.mark.parametrize("how", ["json", "form"])
+def test_an_int8_value_off_the_list_is_a_400_naming_it(routes, how):
+    r = _post(routes, how, {"prompt": "a cat", "int8": "int4"})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        "int8 is off, attention, linears or all, not 'int4'", "int8")
+    assert routes.store.jobs == {} and routes.store.pending == {}
+
+
+@pytest.mark.parametrize("sent", [["all"], {}, 8, True])
+def test_an_int8_of_another_json_type_is_a_400_naming_it(routes, sent):
+    """A JSON list, object, number or boolean in the int8 field is the
+    field's 400, not a server error."""
+    r = routes.client.post("/v1/videos", json={"prompt": "a cat",
+                                               "int8": sent})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert (err["message"], err["param"]) == (
+        f"int8 is off, attention, linears or all, not {sent!r}", "int8")
     assert routes.store.jobs == {} and routes.store.pending == {}
 
 
@@ -982,12 +1027,11 @@ def test_int8_this_server_cannot_run_is_a_400_before_the_job(
     own text, naming the field, and leave no job."""
     import mlx_kquant as kq
 
-    from video_fixtures import qk8_kernel
+    from video_fixtures import int8_kernel
 
-    qk8_kernel(monkeypatch, nax=case != "nax")
+    int8_kernel(monkeypatch, nax=case != "nax")
     variant = "fasth3" if case == "sparse" else "fl2va"
-    monkeypatch.setattr(videos, "_entry_plan", lambda s: SimpleNamespace(
-        family="h3", variant=variant))
+    _entry_at(monkeypatch, "off", variant)
     if case == "kq":
         monkeypatch.setattr(kq, "sdpa_qk8", None)
     what = f"MiniMax-H3 {variant} runs with int8 attention"
@@ -998,10 +1042,10 @@ def test_int8_this_server_cannot_run_is_a_400_before_the_job(
             "nax": f"{what}, whose kernel needs a GPU with NAX units (M5 or "
             "newer), and this Mac's GPU has none"}[case]
     r = routes.client.post("/v1/videos", json={"prompt": "a cat",
-                                               "attention": "int8"})
+                                               "int8": "attention"})
     assert r.status_code == 400, r.text
     err = r.json()["error"]
-    assert (err["message"], err["param"]) == (want, "attention")
+    assert (err["message"], err["param"]) == (want, "int8")
     assert routes.store.jobs == {} and routes.store.pending == {}
     assert os.listdir(os.path.join(str(routes.store.root), "inputs")) == []
 
@@ -1076,12 +1120,12 @@ def test_post_takes_no_pool_lock_and_no_acquire(routes, monkeypatch):
 
 def test_the_estimate_refuses_a_clip_past_the_budget_beside_pinned_models(
         routes, monkeypatch):
-    """The clip is priced at the job's attention, which may be int8 on an
-    entry of dense attention."""
+    """The clip is priced at the job's int8 setting, which may run int8
+    attention on an entry at off."""
     from gmlx.serve import residency, video_service
-    from video_fixtures import qk8_kernel
+    from video_fixtures import int8_kernel
 
-    qk8_kernel(monkeypatch)
+    int8_kernel(monkeypatch)
 
     pinned = SimpleNamespace(pinned=True, footprint=60, model_path="/abs/x")
     own = SimpleNamespace(pinned=True, footprint=1000, model_path="/abs/h3"
@@ -1105,12 +1149,12 @@ def test_the_estimate_refuses_a_clip_past_the_budget_beside_pinned_models(
     monkeypatch.setattr(video_service, "plan_clip", plan_clip)
     r = routes.client.post("/v1/videos", json={"prompt": "a cat",
                                                "size": "768x768",
-                                               "attention": "int8"})
+                                               "int8": "attention"})
     assert r.status_code == 413, r.text
     assert r.json()["error"]["message"].endswith(
         "does not fit in memory: denoise 9 GiB; use a smaller size")
-    assert (seen["budget"], seen["text"], seen["attention"]) == (40, 12,
-                                                                 "int8")
+    assert (seen["budget"], seen["text"], seen["int8"]) == (40, 12,
+                                                            "attention")
 
 
 def test_the_gate_reads_no_video_body(routes, monkeypatch):
@@ -1608,7 +1652,7 @@ def _clip_part_stubs(monkeypatch, order, generate):
 
     def ensure_dit(s):
         # The job's encode let the DiT go: it loads again at the entry's
-        # attention.
+        # int8 setting.
         order.append("ensure_dit")
         if s.pipe.dit is None:
             s.pipe.dit = SimpleNamespace(attention=s.plan.attention)
@@ -1624,8 +1668,21 @@ def _clip_part_stubs(monkeypatch, order, generate):
     served = SimpleNamespace(
         pipe=SimpleNamespace(default_table="t0", dit=None),
         spec=SimpleNamespace(vae="v", audio_vae="a"),
-        plan=SimpleNamespace(attention="dense"))
+        plan=_Plan("off"))
     return SimpleNamespace(_entry=SimpleNamespace(pipeline=served))
+
+
+class _Plan(SimpleNamespace):
+    """An entry plan at an int8 setting, with the DiT attention of it."""
+
+    def __init__(self, int8: str):
+        super().__init__(int8=int8)
+
+    @property
+    def attention(self) -> str:
+        from gmlx.video.registry import int8_parts
+
+        return int8_parts(self.int8)[0]
 
 
 def _clip_job(store):
@@ -1662,14 +1719,16 @@ def test_the_jobs_turn_runs_after_the_dit_loads_and_settles_in_finally(
 
 
 @pytest.mark.parametrize("entry, left, sent, want", [
-    ("dense", None, "int8", "int8"), ("int8", "dense", None, "int8"),
-    ("int8", None, "dense", "dense"), ("dense", "int8", None, "dense")])
-def test_the_clip_is_priced_and_runs_at_the_jobs_attention(
+    ("off", None, "attention", "int8"), ("attention", "dense", None, "int8"),
+    ("attention", None, "off", "dense"), ("off", "int8", None, "dense"),
+    ("linears", "int8", None, "dense"), ("linears", None, "all", "int8")])
+def test_the_clip_is_priced_and_runs_at_the_jobs_int8(
         tmp_path, monkeypatch, entry, left, sent, want):
-    """The worker sets the DiT's attention before each clip, the job's
-    else the entry's: after the DiT loads again at the entry's attention
-    (``left`` None, as after the job's encode), or over whatever the last
-    job or step left. The clip's check prices the job's."""
+    """The worker sets the DiT's attention before each clip from the
+    job's int8 setting, else the entry's: after the DiT loads again at
+    the entry's (``left`` None, as after the job's encode), or over
+    whatever the last job or step left. The clip's check prices the
+    job's."""
     import mlx.core as mx
 
     from gmlx.serve.patches import image_steps as pis
@@ -1682,15 +1741,15 @@ def test_the_clip_is_priced_and_runs_at_the_jobs_attention(
 
     hold = _clip_part_stubs(monkeypatch, [], generate)
     monkeypatch.setattr(pis, "_check_clip", lambda *a, **k: checked.append(
-        k["attention"]))
+        k["int8"]))
     served = hold._entry.pipeline
-    served.plan.attention = entry
+    served.plan.int8 = entry
     if left is not None:
         served.pipe.dit = SimpleNamespace(attention=left)
     store, clock, driver = _store(tmp_path)
     job = _clip_job(store)
     if sent:
-        job.params["attention"] = sent
+        job.params["int8"] = sent
     vj._clip_part(job, store, hold, store.clip(job.id))
     assert (ran, checked) == ([want], [sent])
 

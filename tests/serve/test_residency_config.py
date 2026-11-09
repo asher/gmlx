@@ -823,30 +823,31 @@ def test_a_video_model_loads_and_releases_through_its_own_kind(monkeypatch,
     assert calls == [("load", "h3"), ("release", "VID")]
 
 
-def test_two_video_entries_apart_only_in_attention_load_apart(monkeypatch,
-                                                                request):
-    """h3 and h3-int8 on the same files, asked for in turn, each load
-    with their own attention: the pool does not hand one the other's."""
+def test_two_video_entries_apart_only_in_int8_load_apart(monkeypatch,
+                                                           request):
+    """h3 and h3-int8 on the same files at int8 off and all, asked for in
+    turn, each load at their own setting: the pool does not hand one the
+    other's DiT."""
     from gmlx.config import build_config
     from gmlx.serve import capacity as cap
 
     h3 = _VIDEO["video_models"]["h3"]
     serving.register_resolved_models(build_config({**_VIDEO, "video_models": {
-        "h3": {**h3, "defaults": {"attention": "dense"}},
-        "h3-int8": {**h3, "defaults": {"attention": "int8"}}}}))
+        "h3": {**h3, "defaults": {"int8": "off"}},
+        "h3-int8": {**h3, "defaults": {"int8": "all"}}}}))
     request.addfinalizer(serving.clear_resolved_models)
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     proxy, pool, seen_env, _td = make_pool()
     loads = []
     pool._video_fns = (lambda spec: 30 * GB,
                        lambda spec: loads.append(
-                           (spec.id, spec.defaults["attention"])) or spec.id,
+                           (spec.id, spec.defaults["int8"])) or spec.id,
                        lambda box: box.clear())
     for name in ("h3", "h3-int8"):
         hold = residency.acquire_video_model(name, pool=pool)
         assert hold._entry.pipeline == name
         hold.release()
-    assert loads == [("h3", "dense"), ("h3-int8", "int8")]
+    assert loads == [("h3", "off"), ("h3-int8", "all")]
 
 
 # The published files of the h3 recipes, in bytes: the DiT, the text
@@ -869,6 +870,7 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
     from gmlx.serve import capacity
     from gmlx.video import loader, memfit, pipeline, registry
     from gmlx.video.registry import get_family
+    from video_fixtures import H3_HEADER, fixture_view
 
     fast = variant == "fasth3"
     monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None:
@@ -876,10 +878,11 @@ def _h3_entry(monkeypatch, variant, size, seconds, budget=120 * GB,
                             family=get_family("h3"),
                             variant="fasth3" if fast else "fl2va",
                             config={"text_dim": 5120,
-                                    "hidden_size": 5376}))
+                                    "hidden_size": 5376},
+                            view=fixture_view(H3_HEADER)))
     if fast:
         monkeypatch.setattr(registry, "run_refusal",
-                            lambda fam, v, attention="dense": None)
+                            lambda fam, v, int8="off": None)
     files = {**_H3_FILES, "extra": extra}
     monkeypatch.setattr(memfit, "file_bytes", lambda p: files[p])
     monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
@@ -960,7 +963,7 @@ def test_a_video_entrys_own_lora_term_is_its_file_once_alone(monkeypatch,
 
 
 def test_an_int8_entry_checks_the_kernel_and_books_its_step(monkeypatch):
-    """An entry whose defaults hold attention: int8 is refused on an
+    """An entry whose defaults hold int8: attention is refused on an
     mlx-kquant without sdpa_qk8 before it is priced, and its step books
     the int8 copies of q and k by packed row."""
     import mlx_kquant as kq
@@ -971,7 +974,7 @@ def test_an_int8_entry_checks_the_kernel_and_books_its_step(monkeypatch):
 
     dense = vs.entry_plan(_h3_entry(monkeypatch, "h3-base", "768x768", 5))
     spec = _h3_entry(monkeypatch, "h3-base", "768x768", 5)
-    spec.defaults["attention"] = "int8"
+    spec.defaults["int8"] = "attention"
     monkeypatch.delattr(kq, "sdpa_qk8", raising=False)
     with pytest.raises(VideoModelError) as e:
         vs.entry_plan(spec)
@@ -988,6 +991,52 @@ def test_an_int8_entry_checks_the_kernel_and_books_its_step(monkeypatch):
     step = [p.terms["denoise"]["step"] for p in plans]
     assert step[1] - step[0] == (memfit.PEAKS["h3"].int8_attention
                                  * plans[1].rows)
+
+
+# The int8 DiT's bytes past its file, from the H3 header: each block
+# linear at one int8 byte a weight and a float32 scale a row, less its
+# Q4_K bytes (design 3.5).
+_INT8_DELTA = 8_441_753_600
+
+
+@pytest.mark.parametrize("int8", ["linears", "all"])
+def test_an_int8_linears_entry_books_its_int8_dit_and_step(monkeypatch,
+                                                           int8):
+    """An entry at int8 linears or all is refused on an mlx-kquant without
+    int8_matmul before it is priced. Its plan books the int8 DiT, the file
+    and the header's delta, and its step books the int8 copy of fc2's
+    input by packed row; its signature carries the setting."""
+    import mlx_kquant as kq
+
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+    from gmlx.video.fingerprint import VideoModelError
+    from video_fixtures import int8_kernel
+
+    int8_kernel(monkeypatch)
+    off = vs.entry_plan(_h3_entry(monkeypatch, "h3-base", "768x768", 5))
+    spec = _h3_entry(monkeypatch, "h3-base", "768x768", 5)
+    spec.defaults["int8"] = int8
+    monkeypatch.delattr(kq, "int8_matmul")
+    with pytest.raises(VideoModelError) as e:
+        vs.entry_plan(spec)
+    assert str(e.value) == (
+        "video model 'h3-base': MiniMax-H3 fl2va runs with int8 linears, "
+        f"and the installed mlx-kquant {kq.__version__} has no int8_matmul; "
+        "update mlx-kquant to 0.5.11 or later")
+    int8_kernel(monkeypatch)
+    got = vs.entry_plan(spec)
+    assert (off.linears, got.linears, got.int8) == ("file", "int8", int8)
+    assert got.dit_bytes - off.dit_bytes == _INT8_DELTA
+    plans = [vs.plan_clip(p, frames=p.frames, width=p.size[0],
+                          height=p.size[1], text=vs.PRICED_TEXT_ROWS)
+             for p in (off, got)]
+    step = [p.terms["denoise"]["step"] for p in plans]
+    qk8 = memfit.PEAKS["h3"].int8_attention if int8 == "all" else 0
+    assert step[1] - step[0] == ((memfit.PEAKS["h3"].int8_linears + qk8)
+                                 * plans[1].rows)
+    assert plans[1].terms["denoise"]["dit"] - plans[0].terms["denoise"][
+        "dit"] == _INT8_DELTA
 
 
 def test_the_caches_of_a_tight_video_entry_take_the_room_its_clip_leaves(
@@ -1046,6 +1095,31 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
     budget = capacity.ram_budget_bytes(32 << 30)
     got = vs.entry_plan(_h3_entry(monkeypatch, "h3", "1344x768", 5, budget))
     assert got.cache_share == 1.0 and got.footprint <= budget
+
+
+@pytest.mark.parametrize("int8, tail", [
+    ("off", "Set a smaller defaults.size or defaults.seconds."),
+    ("attention", "Set a smaller defaults.size or defaults.seconds."),
+    ("linears", "Set a smaller defaults.size or defaults.seconds, or "
+     "defaults.int8 off or attention."),
+    ("all", "Set a smaller defaults.size or defaults.seconds, or "
+     "defaults.int8 off or attention.")])
+def test_an_int8_linears_entry_over_its_budget_names_the_setting(
+        monkeypatch, int8, tail):
+    """An entry refused for memory at int8 linears or all names the int8
+    setting that keeps the file's linears beside the clip's size and
+    length; at off or attention it names the clip alone."""
+    from gmlx.serve import video_service as vs
+    from gmlx.video import memfit
+    from video_fixtures import int8_kernel
+
+    monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
+    int8_kernel(monkeypatch)
+    spec = _h3_entry(monkeypatch, "h3-base", "1344x768", 5, 16 * GB)
+    spec.defaults["int8"] = int8
+    with pytest.raises(memfit.VideoMemoryError) as e:
+        vs.entry_plan(spec)
+    assert str(e.value).endswith(f"{tail} GMLX_OVERCOMMIT=1 overrides.")
 
 
 # A caption of the H3 upsampler's 6144 tokens and the one row of its

@@ -104,18 +104,23 @@ the nodes there. A Desktop build that carries a signed policy file can
 refuse custom nodes that its policy does not list, and `install` says so
 when it finds one.
 
-## The model loader's attention
+## The model loader's int8
 
-`gmlx Model Loader` has an `attention` input, `dense` or `int8`, for
-MiniMax-H3, and `dense` is the default. Each step of the model sends it to
-the server, which runs that step at it over the entry's
-[`defaults.attention`](config.md#video_modelsdefaults). `int8` runs as
-[Int8 attention](video.md#int8-attention) describes: it is lossy, needs an
-M5 or newer and does not run with `fasth3`. A server that cannot run it
-refuses the first step with an error that names the attention, and the
-error shows on the sampler. A gmlx server from before int8 attention runs
-dense attention, and ComfyUI's log warns once for each model loaded.
-`int8` on an image model is refused at the loader.
+`gmlx Model Loader` has an `int8` input for MiniMax-H3: `entry`, the
+default, `off`, `attention`, `linears` or `all`. `entry` runs each step at
+the entry's [`defaults.int8`](config.md#video_modelsdefaults) and sends
+nothing. Any other value goes with each step, and the server runs that
+step at it, as [Faster clips with int8](video.md#faster-clips-with-int8)
+describes: it is lossy, needs an M5 or newer, and no value but `off`
+runs with `fasth3`.
+
+The loader refuses a value that changes the entry's linear layers, as
+[In serve and ComfyUI](video.md#in-serve-and-comfyui) explains. A server
+that cannot run a value refuses the first step with an error that names
+`int8`, and the error shows on the sampler. A value other than `entry` or
+`off` is refused on an image model, and a gmlx server from before the
+setting runs the entry's in its place, with one warning in ComfyUI's log
+for each model.
 
 ## What the gmlx nodes refuse
 

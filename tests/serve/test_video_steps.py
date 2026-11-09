@@ -514,11 +514,12 @@ def _int8_calls(monkeypatch) -> list:
     return calls
 
 
-def test_a_step_runs_the_attention_it_names_over_the_entrys(request,
-                                                           monkeypatch):
-    """A step's attention field runs that step at it, and a step without
-    one runs at the entry's, whatever the last step left. The DiT loaded
-    again after an encode, at the entry's attention, runs the step's."""
+def test_a_step_runs_the_int8_it_names_over_the_entrys(request,
+                                                      monkeypatch):
+    """A step's int8 field runs that step's attention at it, and a step
+    without one runs at the entry's, whatever the last step left. The DiT
+    loaded again after an encode, at the entry's setting, runs the
+    step's."""
     import dataclasses
 
     from gmlx.video import loader
@@ -533,39 +534,48 @@ def test_a_step_runs_the_attention_it_names_over_the_entrys(request,
     c = _client()
     row = {"cond": c.put(feats)}
 
-    def int8(attention=None) -> bool:
+    def int8(value=None) -> bool:
         calls.clear()
         c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
-                  audio_scale=SCALE, attention=attention)
+                  audio_scale=SCALE, int8=value)
         return bool(calls)
 
-    assert [int8("int8"), int8(), int8("dense")] == [True, False, False]
+    assert [int8("attention"), int8(), int8("off")] == [True, False, False]
     _on_worker(vs.drop_dit, served)
-    assert int8("int8")
-    served.plan = dataclasses.replace(served.plan, attention="int8")
-    assert [int8(), int8("dense"), int8()] == [True, False, True]
+    assert int8("attention")
+    served.plan = dataclasses.replace(served.plan, int8="attention")
+    assert [int8(), int8("off"), int8()] == [True, False, True]
 
 
-@pytest.mark.parametrize("case", ["value", "sparse", "kq", "nax"])
-def test_a_step_refuses_an_attention_it_cannot_run_naming_it(
+@pytest.mark.parametrize("case", ["value", "list", "object", "linears", "all",
+                                  "sparse", "kq", "nax"])
+def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
         host, monkeypatch, case):
-    """A value off the list, and int8 on the variant with sparse
-    attention, on a kq with no sdpa_qk8 or on a GPU with no NAX units, are
-    the step's 400 with the run's own text and the field named."""
+    """A value off the list, a JSON list or object in its place, linears
+    or all on an entry at off, and int8
+    attention on the variant with sparse attention, on a kq with no
+    sdpa_qk8 or on a GPU with no NAX units, are the step's 400 with the
+    run's own text and the field named."""
     import dataclasses
 
     import mlx_kquant as kq
 
-    from video_fixtures import qk8_kernel
+    from video_fixtures import int8_kernel
 
-    qk8_kernel(monkeypatch, nax=case != "nax")
+    int8_kernel(monkeypatch, nax=case != "nax")
     if case == "kq":
         monkeypatch.setattr(kq, "sdpa_qk8", None)
     variant = hf.FASTH3 if case == "sparse" else "fl2va"
     monkeypatch.setattr(host.served, "plan", dataclasses.replace(
         host.served.plan, variant=variant))
     what = f"MiniMax-H3 {variant} runs with int8 attention"
-    want = {"value": "attention is dense or int8, not 'int4'",
+    rule = ("this model's entry loads its DiT at int8 off, so a request "
+            "names int8 off or attention, not {0}; set the entry's "
+            "defaults.int8 to run {0}")
+    off_list = "int8 is off, attention, linears or all, not {!r}"
+    want = {"value": off_list.format("int4"),
+            "list": off_list.format(["all"]), "object": off_list.format({}),
+            "linears": rule.format("linears"), "all": rule.format("all"),
             "sparse": "MiniMax-H3 fasth3 runs video sparse attention, and "
             "int8 attention applies to dense attention only",
             "kq": f"{what}, and the installed mlx-kquant {kq.__version__} "
@@ -578,13 +588,15 @@ def test_a_step_refuses_an_attention_it_cannot_run_naming_it(
     with pytest.raises(StepsClientError) as e:
         c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
                   audio_scale=SCALE,
-                  attention="int4" if case == "value" else "int8")
+                  int8={"value": "int4", "list": ["all"], "object": {},
+                        "linears": "linears", "all": "all"}.get(case,
+                                                                "attention"))
     assert e.value.status == 400
-    assert e.value.body == {"error": want, "param": "attention"}
+    assert e.value.body == {"error": want, "param": "int8"}
 
 
-def test_an_int8_step_on_a_dense_entry_is_priced_at_int8(request,
-                                                        monkeypatch):
+def test_an_int8_step_on_an_entry_at_off_is_priced_at_int8(request,
+                                                          monkeypatch):
     """The int8 step books 14,784 bytes a packed row past the dense step
     (``VideoPeaks.int8_attention``). Half that past the dense step's need,
     the dense step runs and the int8 step is refused."""
@@ -604,7 +616,7 @@ def test_an_int8_step_on_a_dense_entry_is_priced_at_int8(request,
     kw = dict(shifts=SHIFTS, audio_scale=SCALE)
     c.av_step("h3", None, video, audio, 600.0, row, **kw)
     with pytest.raises(StepsClientError) as e:
-        c.av_step("h3", None, video, audio, 600.0, row, attention="int8",
+        c.av_step("h3", None, video, audio, 600.0, row, int8="attention",
                   **kw)
     assert e.value.status == 400
     assert "does not fit in memory" in e.value.body["error"]
@@ -1508,11 +1520,15 @@ def test_a_video_entry_released_with_a_client_table_frees_its_pipeline(
     assert [r() for r in refs] == [None, None]
 
 
+@pytest.mark.parametrize("int8, want", [
+    ("attention", ("int8", "file")), ("linears", ("dense", "int8")),
+    ("all", ("int8", "int8"))])
 def test_an_int8_entry_loads_its_dit_with_int8_after_each_encode(
-        monkeypatch):
-    """An entry whose plan holds int8 attention loads its DiT with it at
-    its first load and at the load after an encode lets it go, so it
-    never runs dense attention in silence."""
+        monkeypatch, int8, want):
+    """An entry at an int8 setting loads its DiT with that attention and
+    those linears at its first load and at the load after an encode lets
+    it go, so it never runs dense attention or the file's linears in
+    silence (design 9, D-1)."""
     import dataclasses
 
     from gmlx.serve import image_service
@@ -1520,18 +1536,19 @@ def test_an_int8_entry_loads_its_dit_with_int8_after_each_encode(
 
     pipe, weights = _own_pipe()
     served = _served(pipe)
-    plan = dataclasses.replace(served.plan, attention="int8")
+    plan = dataclasses.replace(served.plan, int8=int8)
     loads = []
     monkeypatch.setattr(vs, "entry_plan", lambda spec: plan)
     monkeypatch.setattr(pipeline, "load", lambda *a, **k: (
-        loads.append(k["attention"]), pipe)[1])
+        loads.append((k["attention"], k["linears"])), pipe)[1])
     monkeypatch.setattr(loader, "load_dit", lambda *a, **k: (
-        loads.append(k["attention"]), (_tiny_dit(weights), None))[1])
+        loads.append((k["attention"], k["linears"])),
+        (_tiny_dit(weights), None))[1])
     monkeypatch.setattr(image_service, "_SHARES", {})
     got = _on_worker(vs._load, served.spec)
     _on_worker(vs.drop_dit, got)
     _on_worker(vs.ensure_dit, got)
-    assert loads == ["int8", "int8"]
+    assert loads == [want, want]
     _on_worker(vs._release, [got])
 
 
@@ -2384,7 +2401,7 @@ def test_each_route_refuses_a_model_of_the_other_kind(host, route, model,
 def test_a_video_model_status_names_comfyuis_class_and_its_shifts(
         host, tmp_path, monkeypatch):
     """The pack builds its model from the status's class and refuses a
-    variant it does not run."""
+    variant it does not run. The status names the entry's int8 setting."""
     spec = host.served.spec
     for name in ("path", "encoder", "vae", "audio_vae"):
         f = tmp_path / name
@@ -2400,6 +2417,11 @@ def test_a_video_model_status_names_comfyuis_class_and_its_shifts(
     assert st["sampling"]["steps"] == 8
     assert (st["sampling"]["shift"], st["sampling"]["audio_shift"]) == (6, 3)
     assert st["sampling"]["sigmas"] is None
+    # The pack refuses a loader int8 value against the entry's at load.
+    assert st["int8"] == "off"
+    monkeypatch.setattr(spec, "defaults", {**(spec.defaults or {}),
+                                           "int8": "linears"})
+    assert _client().status("h3")["int8"] == "linears"
 
 
 def test_a_fasth3_status_hands_the_sampler_its_trained_sigmas(

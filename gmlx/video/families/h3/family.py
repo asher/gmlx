@@ -478,6 +478,12 @@ def _upsample_system(guide: str, frames: int | None, first: bool,
                             last=last)
 
 
+INT8_LINEARS = {"blocks.*.attn.qkv_proj": None,
+                "blocks.*.attn.out_proj": None,
+                "blocks.*.mlp.fc1": None,
+                "blocks.*.mlp.fc2": 1024}
+
+
 FAMILY = VideoFamily(
     name="h3",
     title=TITLE,
@@ -518,6 +524,9 @@ FAMILY = VideoFamily(
     prompt_ids=_prompt_ids,
     vision_tokens=vision_tokens,
     keyframe_encode=_keyframe_encode,
+    # The four linears of each DiT block take int8 linears; fc2 takes one
+    # activation scale per 1024 of its input columns.
+    int8_linears=INT8_LINEARS,
     upsample=_upsample.UPSAMPLE,
     upsample_system=_upsample_system,
 )

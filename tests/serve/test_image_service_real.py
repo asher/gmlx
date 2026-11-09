@@ -241,7 +241,7 @@ def test_serve_admits_the_fasth3_default_clip_from_36_gb(gguf_dir, monkeypatch,
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(capacity, "overcommit", lambda: False)
     monkeypatch.setattr(registry, "run_refusal",
-                        lambda fam, variant, attention="dense": None)
+                        lambda fam, variant, int8="off": None)
     if not fits:
         with pytest.raises(video_memfit.VideoMemoryError):
             video_service.entry_plan(spec)

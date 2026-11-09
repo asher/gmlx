@@ -3,6 +3,9 @@ checked against the arithmetic run directly."""
 
 import contextlib
 import json
+import os
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -556,8 +559,29 @@ def _scored_logits(scorer, ids):
 _IDS = (np.arange(2 * N_CTX, dtype=np.int32).reshape(2, N_CTX) * 5) % V
 
 
+def _exact() -> bool:
+    from gmlx.image.float32 import f32_products_exact
+
+    return f32_products_exact()
+
+
+def _rerun_without_tf32(request) -> None:
+    """Rerun this test in a child process with TF32 off, as gmlx kld runs
+    (gmlx.commands.cli sets MLX_ENABLE_TF32=0 for kld)."""
+    env = dict(os.environ, MLX_ENABLE_TF32="0")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         request.node.nodeid], cwd=request.config.rootpath, env=env,
+        capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+
+
 @pytest.mark.parametrize("head", ["linear", "bias", "tied", "affine", "scaled"])
-def test_scorer_runs_the_head_in_float32_on_the_scored_positions(head, monkeypatch):
+def test_scorer_runs_the_head_in_float32_on_the_scored_positions(head, monkeypatch,
+                                                                 request):
+    if not _exact():
+        _rerun_without_tf32(request)
+        return
     import mlx.core as mx
 
     model = _tiny_model(head)

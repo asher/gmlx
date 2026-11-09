@@ -520,6 +520,51 @@ The frames a guide video keeps, which
 the clip from the guide's frame on. Move the guide to an earlier frame,
 make the clip longer, or cut the video shorter.
 
+### Int8 refusals
+
+An [int8](video.md#faster-clips-with-int8) value this Mac or install
+cannot run is refused before any weight loads, with one of these
+messages:
+
+- `MiniMax-H3 fl2va runs with int8 attention, whose kernel needs a GPU
+  with NAX units (M5 or newer), and this Mac's GPU has none`, or the same
+  with `int8 linears`: every value but `off` needs an M5 or newer. Run at
+  `off`.
+- `..., and the installed mlx-kquant X has no sdpa_qk8; update mlx-kquant
+  to 0.5.10 or later`, or `... has no int8_matmul; update mlx-kquant to
+  0.5.11 or later`: the installed mlx-kquant has no int8 kernel. Update
+  gmlx, which brings the mlx-kquant it needs.
+- `MiniMax-H3 fasth3 runs video sparse attention, and int8 attention
+  applies to dense attention only`, or `..., and int8 linears run on
+  variants with dense attention only`: run `fasth3` at `off`, or the clip
+  on `h3`.
+- `this model's entry loads its DiT at int8 off, so a request names int8
+  off or attention, not linears; set the entry's defaults.int8 to run
+  linears`: the linear layers are converted as the DiT loads, so a job or
+  a ComfyUI loader can change the attention only. Set `defaults.int8` on
+  the entry, or add a second entry on the same files at the value you
+  want.
+- A memory refusal that names `int8 off or attention`: the clip or the
+  DiT does not fit with the int8 weights of `linears` or `all`, which
+  [take more memory](video.md#faster-clips-with-int8). Run at `off` or
+  `attention`, which keep the file's weights, or make the clip smaller.
+  The text depends on where the check runs:
+  - `this clip does not fit in memory: ... Run with int8 off or
+    attention, which keep the file's linears, or try a smaller size or a
+    shorter clip`, from `gmlx video generate`, and from `gmlx video
+    bench` as `the WxHxF shape does not fit in memory: ...`.
+  - `this clip does not fit in memory: ... Run with int8 off or
+    attention, or try --size WxH, which fits at this length`, the same
+    from `gmlx video generate` when a smaller size or length fits at the
+    current setting.
+  - `The MiniMax-H3 DiT weights of ... GiB exceed the working budget of
+    ... GiB. Run with int8 off or attention, or try a smaller DiT quant`,
+    from the check before the DiT loads.
+  - `video model '...' needs ... GiB for one ... clip of ... frames, over
+    the working budget of ... GiB. Set a smaller defaults.size or
+    defaults.seconds, or defaults.int8 off or attention`, from
+    `gmlx serve` for an entry at `linears` or `all`.
+
 ### Video jobs
 
 These are the answers and job errors of

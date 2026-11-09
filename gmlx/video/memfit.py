@@ -23,7 +23,10 @@ a line fit of what the run adds, both read as MLX's active peak.
   costs its file once. Any other LoRA costs ``lora_k`` times its file:
   its arrays and the copies the patch table builds from them. A step
   with int8 attention adds the int8 copies of q and k and their scales
-  by row.
+  by row. A DiT with int8 linears holds the int8 weights and scales of
+  its converted linears in place of their file bytes, counted from the
+  header (``int8_delta``), and its step adds the largest int8 copy of a
+  linear's input by row.
 - audio: the audio VAE's file and its decode by audio latent.
 - decode: the video VAE's file, or TAEH3's for a preview, and one chunk
   of frames by output pixel. A chunk does not grow with the clip.
@@ -75,6 +78,7 @@ class VideoPeaks:
     lora_dtype: str = "BF16"        # the DiT's activation dtype
     lora_k: float = 2.0
     int8_attention: float = 0.0     # per packed row, a step's int8 q and k
+    int8_linears: float = 0.0       # per packed row, an int8 linear's input
 
 
 # MiniMax-H3 Q4_K, the stock Qwen3-VL-32B Q4_K_M encoder, Comfy-Org's
@@ -122,6 +126,11 @@ class VideoPeaks:
 # Int8 attention holds, beside a dense step, the int8 q and k of 56 heads
 # of 128 and their float32 scales, one a head: 2 x 56 x 128 + 2 x 56 x 4
 # bytes a packed row. The term is counted, not measured.
+#
+# Int8 linears hold, beside a step on the file's linears, the int8 copy
+# of fc2's input, the widest, and its float32 scales, one per 1024
+# columns: 14336 + 14 x 4 bytes a packed row. The term is counted, not
+# measured.
 PEAKS = {
     "h3": VideoPeaks(
         encoder_load=0.26 * GiB,
@@ -138,7 +147,8 @@ PEAKS = {
         clip_encode=Line(3.52 * GiB, 303),
         clip_frame=17,
         audio_encode=Line(1.84 * GiB, 301_400),
-        int8_attention=14_784),
+        int8_attention=14_784,
+        int8_linears=14_392),
 }
 # FastH3: vantagewithai's Q4_K_M with its VSA gates, measured as the H3
 # cells on the same encoder, VAEs and LoRA, in
@@ -162,6 +172,9 @@ _HINTS = {"encode": "the text encoder needs more memory than this Mac "
                        "keyframe",
           "anchors": "try a smaller size or a shorter guide clip",
           "denoise": "try a smaller size or a shorter clip",
+          "linears": "run with int8 off or attention, which keep the "
+                     "file's linears, or try a smaller size or a shorter "
+                     "clip",
           "audio": "try a shorter clip",
           "decode": "try a smaller size, or --preview"}
 
@@ -191,6 +204,7 @@ class VideoPlan:
     rows: int
     encoder_load: int = 0           # the encode's part no prompt changes
     keyframes: bool = False         # the encode runs the vision tower
+    linears: str = "file"           # the DiT's block linears
 
     @property
     def peak(self) -> int:
@@ -227,8 +241,11 @@ class VideoPlan:
         return max(over, key=self.phases.__getitem__)
 
     def hint(self) -> str:
-        """What to change."""
+        """What to change. A denoise over the budget with int8 linears
+        names the file's linears first."""
         cause = self.cause
+        if cause == "denoise" and self.linears == "int8":
+            cause = "linears"
         return _HINTS[cause] if cause else ""
 
     def describe(self) -> str:
@@ -256,6 +273,7 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
                 mmproj: int = 0, tower: int = 0, blocks=(),
                 anchor_frames=(), anchor_audio=(),
                 anchor_vae: int | None = None, attention: str = "dense",
+                linears: str = "file",
                 budget: float | None = None) -> VideoPlan:
     """The plan of one run of ``variant``, on its own fits where ``PEAKS``
     has them, else its family's. File sizes in bytes; ``lora_dtypes`` holds
@@ -274,7 +292,9 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
     guide at ``pixels``, through the video VAE file ``anchor_vae``
     (``vae`` when None), and ``anchor_audio``, the latents of each guide
     audio. A step with ``attention`` ``"int8"`` holds the int8 copies of
-    q and k too. ``budget`` defaults to
+    q and k too, and with ``linears`` ``"int8"`` the int8 copy of a
+    linear's input; ``dit`` then counts the int8 weights
+    (``dit_bytes``). ``budget`` defaults to
     ``capacity.working_budget_bytes()``."""
     p = PEAKS[variant] if variant in PEAKS else PEAKS[family]
     load = encoder + p.encoder_load
@@ -300,6 +320,8 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
     work = step.bytes(rows)
     if attention == "int8":
         work += p.int8_attention * rows
+    if linears == "int8":
+        work += p.int8_linears * rows
     terms["denoise"] = {"dit": dit,
                         "lora": lora if alone else p.lora_k * lora,
                         "step": work}
@@ -314,7 +336,8 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
         budget = working_budget_bytes()
     phases = {ph: int(sum(t.values())) for ph, t in terms.items()}
     return VideoPlan(phases=phases, terms=terms, budget=budget, rows=rows,
-                     encoder_load=int(floor), keyframes=bool(blocks))
+                     encoder_load=int(floor), keyframes=bool(blocks),
+                     linears=linears)
 
 
 def _encode_terms(p: VideoPeaks, encoder: int, kept: float, text: int,
@@ -412,6 +435,55 @@ def tower_bytes(mmproj: str) -> int:
     return mmproj_bytes(_header_view(os.path.expanduser(mmproj)), fp32=True)
 
 
+def _int8_matrices(fam, view) -> list:
+    """(out, in, file bytes) of each tensor that the family's int8
+    linears convert, from a DiT header, its names with or without one of
+    the family's prefixes."""
+    import fnmatch
+
+    from gmlx.image.memfit import tensor_bytes
+
+    out = []
+    for name, t in view.tensors.items():
+        for pre in fam.strip_prefixes:
+            if name.startswith(pre):
+                name = name[len(pre):]
+                break
+        path, _, kind = name.rpartition(".")
+        if kind != "weight" or len(t.shape) != 2 or not any(
+                fnmatch.fnmatchcase(path, pat) for pat in fam.int8_linears):
+            continue
+        k, n = t.shape
+        out.append((int(n), int(k), t.nbytes or tensor_bytes(t.shape,
+                                                             t.codec)))
+    return out
+
+
+def int8_delta(fam, view) -> int:
+    """The bytes a DiT with int8 linears holds over its file: each
+    converted matrix's int8 weight and float32 scale a row, less its file
+    bytes, from the header ``view``. Exact, not a fit."""
+    return sum(n * k + 4 * n - b for n, k, b in _int8_matrices(fam, view))
+
+
+def int8_transient(fam, view) -> int:
+    """The bytes a conversion holds beside the loaded DiT: the largest
+    converted matrix at float32, its int8 codes and its scales."""
+    return max((4 * n * k + n * k + 4 * n
+                for n, k, _ in _int8_matrices(fam, view)), default=0)
+
+
+def dit_bytes(fam, path: str, linears: str = "file") -> int:
+    """The bytes the DiT at ``path`` holds once loaded with ``linears``:
+    its file, plus ``int8_delta`` for int8 linears."""
+    total = file_bytes(path)
+    if linears == "int8":
+        from gmlx.image.text_encoder import _header_view
+
+        total += int8_delta(fam, _header_view(os.path.expanduser(path)))
+    return total
+
+
 def file_bytes(path: str) -> int:
     """A file's bytes, every shard of a split GGUF."""
     from gmlx.load.preflight import find_split_shards
@@ -449,17 +521,19 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
              tiny: bool = False, variant: str | None = None,
              mmproj: str | None = None, blocks=(), anchors=(),
              anchor_vae: str | None = None, attention: str = "dense",
+             linears: str = "file",
              budget: float | None = None) -> VideoPlan:
     """``plan_memory`` from the files at these paths, with ``blocks``
     keyframe vision tokens through ``mmproj`` and placed ``anchors``
     (``layout.AnchorRows``) encoded through ``anchor_vae`` (``vae``
-    when None) and ``audio_vae``, the DiT running ``attention``."""
+    when None) and ``audio_vae``, the DiT running ``attention`` and
+    ``linears``."""
     if blocks and mmproj is None:
         raise ValueError("keyframes need the encoder's mmproj")
     vision = mmproj if blocks else None
     rows, audio = clip_rows(fam, frames=frames, width=width, height=height,
                             text=text, anchors=anchors)
-    return plan_memory(fam.name, dit=file_bytes(dit),
+    return plan_memory(fam.name, dit=dit_bytes(fam, dit, linears),
                        encoder=file_bytes(encoder), vae=file_bytes(vae),
                        audio_vae=file_bytes(audio_vae),
                        loras=[file_bytes(p) for p in loras],
@@ -474,7 +548,7 @@ def plan_run(fam, *, dit: str, encoder: str, vae: str, audio_vae: str,
                                      if a.audio_t],
                        anchor_vae=None if anchor_vae is None
                        else file_bytes(anchor_vae), attention=attention,
-                       budget=budget)
+                       linears=linears, budget=budget)
 
 
 def check(plan: VideoPlan, what: str = "this clip", resize=None) -> None:
@@ -488,7 +562,11 @@ def check(plan: VideoPlan, what: str = "this clip", resize=None) -> None:
         return
     hint = plan.hint()
     if resize is not None and plan.cause == "denoise":
-        hint = resize() or hint
+        sized = resize()
+        if sized and plan.linears == "int8":
+            hint = f"run with int8 off or attention, or {sized}"
+        elif sized:
+            hint = sized
     raise VideoMemoryError(
         f"{what} does not fit in memory: {plan.describe()}. "
         f"{hint[0].upper()}{hint[1:]}. GMLX_OVERCOMMIT=1 overrides.")

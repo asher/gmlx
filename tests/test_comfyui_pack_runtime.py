@@ -363,6 +363,19 @@ def test_video_pull_names_are_the_video_recipes_the_nodes_run(widgets):
     assert list(widgets.VIDEO_PULL_NAMES) == list(RECIPES)
 
 
+def test_the_loaders_int8_refusal_is_the_servers_word_for_word(widgets):
+    """The pack refuses a loader int8 value against the entry's at load
+    with the text the server's step gives, for every pair: the pack does
+    not import gmlx, so the two copies are held equal here."""
+    from gmlx.video.registry import INT8, int8_request_refusal
+    assert widgets.INT8 == ("entry", *INT8)
+    for entry in INT8:
+        assert widgets.int8_refusal(entry, "entry") is None
+        for value in INT8:
+            assert widgets.int8_refusal(entry, value) == int8_request_refusal(
+                entry, value)
+
+
 def test_a_kept_list_is_probed_again_after_keep_seconds(widgets, tmp_path, monkeypatch):
     """A slow probe keeps its answer no longer: R after a pull shows the new
     list within seconds."""

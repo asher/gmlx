@@ -13,7 +13,7 @@ import struct
 import numpy as np
 import pytest
 from video_fixtures import (H3_HEADER, fixture_view, gguf_tokenizer,
-                            qk8_kernel, vsa_kernel)
+                            int8_kernel, vsa_kernel)
 
 from gmlx.commands import video as cmd
 from gmlx.commands import video_bench as vb
@@ -477,37 +477,45 @@ def test_fasth3_runs_on_its_own_shifts_and_steps_fit(bench, monkeypatch,
                                       (64, 64, 5), TEXT, False).phases
 
 
-def test_the_attention_flag_reaches_the_plan_the_load_and_the_record(
-        bench, monkeypatch, capsys):
+@pytest.mark.parametrize("int8, parts", [("attention", ("int8", "file")),
+                                         ("all", ("int8", "int8"))])
+def test_the_int8_flag_reaches_the_plan_the_load_and_the_record(
+        bench, monkeypatch, capsys, int8, parts):
+    """--int8 sets the DiT's attention and linears at the load, the
+    record holds the setting, and the check before any load prices the
+    int8 step and, with int8 linears, the int8 DiT from its header."""
     from gmlx.video import pipeline
 
-    qk8_kernel(monkeypatch)
+    int8_kernel(monkeypatch)
     loads, load = [], pipeline.load
     monkeypatch.setattr(pipeline, "load", lambda path, **kw: (
-        loads.append(kw["attention"]) or load(path, **kw)))
+        loads.append((kw["attention"], kw["linears"])) or load(path, **kw)))
     checked, check = [], memfit.check
     monkeypatch.setattr(memfit, "check", lambda plan, **kw: (
         checked.append(plan) or check(plan, **kw)))
-    assert bench("--attention", "int8", "--steps", "1", "--shapes",
+    assert bench("--int8", int8, "--steps", "1", "--shapes",
                  "64x64x5", "--no-decode", "--json") == 0
     r, = _records(capsys.readouterr().out)
-    assert loads == ["int8"] and r["settings"]["attention"] == "int8"
-    # The check before any load prices the int8 step too.
+    assert loads == [parts] and r["settings"]["int8"] == int8
     peaks = memfit.PEAKS["h3"]
+    lin = peaks.int8_linears if parts[1] == "int8" else 0
     assert [p.terms["denoise"]["step"] for p in checked] == [
-        peaks.plain_step.bytes(p.rows) + peaks.int8_attention * p.rows
-        for p in checked]
+        peaks.plain_step.bytes(p.rows) + (peaks.int8_attention + lin)
+        * p.rows for p in checked]
+    delta = memfit.int8_delta(hf.FAMILY, fixture_view(H3_HEADER))
+    assert [p.terms["denoise"]["dit"] for p in checked] == [
+        r["model"]["dit"]["bytes"] + (delta if lin else 0)] * len(checked)
     assert r["predicted"] == vb._plan(hf.FAMILY, "fl2va", r["model"],
                                       (64, 64, 5), TEXT, False,
-                                      "int8").phases
+                                      int8, delta).phases
     assert r["predicted"] != vb._plan(hf.FAMILY, "fl2va", r["model"],
                                       (64, 64, 5), TEXT, False).phases
 
 
 def test_int8_without_nax_is_refused_before_any_load(bench, monkeypatch,
                                                     capsys):
-    qk8_kernel(monkeypatch, nax=False)
-    assert bench("--attention", "int8", "--variant", "fl2va",
+    int8_kernel(monkeypatch, nax=False)
+    assert bench("--int8", "attention", "--variant", "fl2va",
                  "--steps", "1") == 1
     assert capsys.readouterr().err.splitlines()[-1] == (
         "error: MiniMax-H3 fl2va runs with int8 attention, whose kernel "

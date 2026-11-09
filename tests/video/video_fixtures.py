@@ -141,6 +141,18 @@ def qk8_kernel(monkeypatch, nax: bool = True) -> None:
     monkeypatch.setattr(kq, "nax_available", lambda: nax)
 
 
+def int8_kernel(monkeypatch, nax: bool = True) -> None:
+    """An mlx-kquant with the int8 attention and int8 linear ops, on a GPU
+    with NAX units or without, so a run at any int8 setting does not
+    depend on the machine's kq."""
+    import mlx_kquant as kq
+
+    qk8_kernel(monkeypatch, nax)
+    for name in ("int8_quantize_rows", "int8_matmul"):
+        monkeypatch.setattr(kq, name, getattr(kq, name, lambda *a, **k: None),
+                            raising=False)
+
+
 @functools.lru_cache(maxsize=None)
 def _video_dits(root: str, family: str) -> tuple:
     from gmlx.image.fingerprint import view_from_scans

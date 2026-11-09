@@ -3,7 +3,8 @@ least 0.25 GiB over every measured cell, its closest cell within 0.35
 GiB and none more than 1.5 GiB over past its slope's 10 percent; the
 same for FastH3's own step fits and for the fits of keyframes and
 anchors; the rows of a clip; what each file costs; the refusal and its
-message; the admission table of docs/video.md. CPU, no weights."""
+message; the admission table and the int8 table of docs/video.md. CPU,
+no weights."""
 from __future__ import annotations
 
 import dataclasses
@@ -755,3 +756,120 @@ def test_on_32_gb_a_long_prompt_with_keyframes_names_them(monkeypatch,
     assert msg.endswith("with the encode over it. Try a shorter prompt or "
                         "a smaller size, or one keyframe. GMLX_OVERCOMMIT=1 "
                         "overrides.")
+
+
+# Int8 linears: H3's 200 block linears at one int8 byte a weight and one
+# float32 scale an output row in place of their Q4_K bytes, and the
+# widest int8 input of a step, fc2's, beside it (design 3.5).
+H3_INT8_DELTA = 8_441_753_600
+# fc1, N 28672 and K 5376: the float32 weight, its codes and its scales.
+H3_INT8_TRANSIENT = 5 * 28672 * 5376 + 4 * 28672
+
+
+def test_the_int8_dit_counts_each_block_linear_from_the_header():
+    """At the published file's header the 200 converted matrices hold
+    8,441,753,600 bytes over their Q4_K bytes, and the largest conversion
+    holds fc1 at float32 with its codes and scales beside the DiT. The
+    token refiner's linears, though Q4_K, are not counted."""
+    from video_fixtures import H3_HEADER, fixture_view
+
+    view = fixture_view(H3_HEADER)
+    mats = memfit._int8_matrices(hf.FAMILY, view)
+    assert len(mats) == 4 * 50
+    assert memfit.int8_delta(hf.FAMILY, view) == H3_INT8_DELTA
+    assert memfit.int8_transient(hf.FAMILY, view) == H3_INT8_TRANSIENT
+    # A prefixed file holds the same matrices.
+    pre = fixture_view(H3_HEADER, prefix=hf.FAMILY.strip_prefixes[0])
+    assert memfit.int8_delta(hf.FAMILY, pre) == H3_INT8_DELTA
+
+
+def test_the_dit_bytes_of_int8_linears_are_the_file_and_the_delta(
+        monkeypatch):
+    from gmlx.image import text_encoder
+    from video_fixtures import H3_HEADER, fixture_view
+
+    monkeypatch.setattr(memfit, "file_bytes", lambda p: FILES["dit"])
+    monkeypatch.setattr(text_encoder, "_header_view",
+                        lambda p: fixture_view(H3_HEADER))
+    assert memfit.dit_bytes(hf.FAMILY, "dit.gguf") == FILES["dit"]
+    assert memfit.dit_bytes(hf.FAMILY, "dit.gguf", "int8") == (
+        FILES["dit"] + H3_INT8_DELTA)
+
+
+def test_an_int8_linears_step_holds_fc2s_int8_input_beside_the_files():
+    """fc2's int8 input of 14336 columns and its float32 scales, one each
+    1024 columns: 14,392 bytes a packed row over the step on the file's
+    linears, and no other term moves."""
+    kw = dict(dit=12 << 30, encoder=20 << 30, vae=1 << 30,
+              audio_vae=1 << 30, rows=37735, text=1024, audio_latents=150,
+              pixels=1344 * 768, budget=100 << 30)
+    file = memfit.plan_memory("h3", **kw)
+    int8 = memfit.plan_memory("h3", linears="int8", **kw)
+    step = int8.terms["denoise"].pop("step") - file.terms["denoise"].pop(
+        "step")
+    assert step == (14336 + 14336 // 1024 * 4) * 37735 == 14_392 * 37735
+    assert int8.terms == file.terms
+    both = memfit.plan_memory("h3", attention="int8", linears="int8", **kw)
+    assert both.phases["denoise"] - file.phases["denoise"] == (
+        (14_392 + 14_784) * 37735)
+
+
+def test_a_denoise_over_the_budget_with_int8_linears_names_the_setting(
+        no_overcommit):
+    """The hint of a clip whose denoise does not fit at int8 linears
+    names int8 off or attention first, before a size, as the resize the
+    CLI finds does."""
+    rows, audio = memfit.clip_rows(hf.FAMILY, frames=124, width=1344,
+                                   height=768, text=25)
+    plan = memfit.plan_memory(
+        "h3", dit=FILES["dit"] + H3_INT8_DELTA, encoder=1, vae=1,
+        audio_vae=1, rows=rows, text=25, audio_latents=audio,
+        pixels=1344 * 768, linears="int8", budget=float(FILES["dit"]))
+    assert plan.cause == "denoise"
+    assert _refusal(plan).endswith(
+        "Run with int8 off or attention, which keep the file's linears, or "
+        "try a smaller size or a shorter clip. GMLX_OVERCOMMIT=1 overrides.")
+    with pytest.raises(memfit.VideoMemoryError) as e:
+        memfit.check(plan, resize=lambda: "try 768x768")
+    assert str(e.value).endswith(
+        "Run with int8 off or attention, or try 768x768. GMLX_OVERCOMMIT=1 "
+        "overrides.")
+
+
+# docs/video.md's int8 table: the largest clip of h3 on its 8-step LoRA at
+# int8 linears or all on each Mac, with the 1,024-row prompt of the
+# keyframe table. Mac: (clips that fit, the next clips up that do not).
+# On 32 GB the int8 DiT and its LoRA alone are over the budget, so even
+# the smallest clip is refused. On 36 GB smaller clips fit.
+_INT8_MACS = {
+    32: ((), ((32, 32, hf.MIN_FRAMES),)),
+    36: (((512, 288, 124),), ((1344, 768, 124), (768, 768, 124))),
+    48: (((1344, 768, 124), (768, 768, 243)),
+         ((1344, 768, 243), (768, 768, 362))),
+    64: (((1344, 768, 362), (768, 768, 362)), ()),
+}
+
+
+@pytest.mark.parametrize("attention", ["dense", "int8"],
+                         ids=["linears", "all"])
+@pytest.mark.parametrize("mac", list(_INT8_MACS))
+def test_int8_linears_make_the_clips_the_video_page_gives(
+        monkeypatch, no_overcommit, mac, attention):
+    from gmlx.image import text_encoder
+    from video_fixtures import H3_HEADER, fixture_view
+
+    monkeypatch.setattr(memfit, "file_bytes", lambda p: FILES[p])
+    monkeypatch.setattr(memfit, "lora_dtype", lambda p: "BF16")
+    monkeypatch.setattr(text_encoder, "_header_view",
+                        lambda p: fixture_view(H3_HEADER))
+
+    def plan(w, h, f):
+        return memfit.plan_run(
+            hf.FAMILY, dit="dit", encoder="encoder", vae="vae",
+            audio_vae="audio_vae", loras=["lora"], frames=f, width=w,
+            height=h, text=1024, attention=attention, linears="int8",
+            budget=capacity.ram_budget_bytes(mac * GiB))
+
+    fits, over = _INT8_MACS[mac]
+    assert all(plan(*shape).fits for shape in fits)
+    assert not any(plan(*shape).fits for shape in over)

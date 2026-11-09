@@ -171,12 +171,16 @@ def _shown(fam, variant: str) -> str:
 def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
              identified: Identified | None = None,
-             log=print, kind: str = "image") -> tuple[nn.Module, DitInfo]:
+             log=print, kind: str = "image", gate_extra: int = 0,
+             gate_hint: str = "Try a smaller DiT quant"
+             ) -> tuple[nn.Module, DitInfo]:
     """Load a DiT GGUF. Raises ``ImageModelError`` for a file gmlx image
     refuses and ``UnsupportedCodecError`` for a codec it cannot run.
     ``identified`` is what ``identify_dit`` gave for this file, which then
     is not identified again. ``kind`` names the command in the log and in
-    refusals."""
+    refusals. The load gate counts ``gate_extra`` bytes past the file's,
+    which the caller adds once the load returns, and refuses with
+    ``gate_hint``."""
     from mlx_kquant.nn import KQuantLinear
 
     from gmlx.load.loader import (
@@ -234,8 +238,8 @@ def load_dit(path: str, *, family: str | None = None,
         f"{ident.layout}, {len(view.tensors)} tensors")
     # The tensors cast to the activation dtype are held twice until the
     # load ends.
-    gate_load(file_bytes(view) + cast_bytes(view, act), str(path),
-              what=f"{fam.title} DiT", hint="Try a smaller DiT quant")
+    gate_load(file_bytes(view) + cast_bytes(view, act) + gate_extra,
+              str(path), what=f"{fam.title} DiT", hint=gate_hint)
 
     before = _active_now()
     arrays, meta, _, _, _ = load_gguf_wire_bytes(

@@ -3,10 +3,11 @@ right positions while a live image row's rope state sits on the model.
 
 Each step runs under ``engine_jobs._step_scope`` with a stale image row's
 state planted before it: 3-D positions of the same batch size and
-non-zero deltas. A chunked prefill in float32 is not bit-equal to one
-forward, so the checks use ``TOL``, measured on this model (largest gap
-about 3e-6) with a wide margin. A position fault moves the logits by
-0.17 or more."""
+non-zero deltas. A chunked prefill is not bit-equal to one forward, so
+the checks use ``TOL``. On this model the largest gap is about 5.4e-3
+where float32 products run at TF32 precision, as on an M5 GPU, and about
+3e-6 in exact float32. A position fault moves the logits by 0.1 or
+more."""
 
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ pytestmark = pytest.mark.skipif(
     bool(os.environ.get("KQUANT_FORCE_CPU")),
     reason="qwen3_5 GDN forward is Metal-only")
 
-TOL = 1e-3
+TOL = 2e-2
 LETTERS = list(range(60, 112))
 
 

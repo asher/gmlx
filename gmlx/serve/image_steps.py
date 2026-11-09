@@ -72,7 +72,7 @@ CLIENT_TABLE_BYTES = 16 << 20
 UNBOUNDED = 1 << 62
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
             "ref_cache", "skip_blocks", "av_step", "anchors",
-            "keyframe_upsampling", "int8_attention")
+            "keyframe_upsampling", "int8")
 
 
 @dataclass(frozen=True)
@@ -869,8 +869,10 @@ def video_status(spec, resident: bool, plan=None) -> dict:
                     "shift": plan.shifts["video"],
                     "audio_shift": plan.shifts["audio"], "sigmas": sigmas,
                     "schedule": None, "neg_skip": []}
+    from .video_service import entry_int8
+
     return {"model": spec.id, "family": fam.name, "variant": variant,
-            "resident": resident,
+            "resident": resident, "int8": entry_int8(spec),
             "comfy": {"model_class": facts["model_class"],
                       "image_model": facts["image_model"]},
             "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),
