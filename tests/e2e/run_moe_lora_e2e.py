@@ -15,10 +15,9 @@ logprobs at the model's strength and at 0:
 * the adapter's effect on the first token, on minus off, correlates with
   the resident load's: a slot mapped to the wrong expert gives no
   correlation;
-* a streamed load that decodes from the arena counts the adapter tables
-  in its budget line. The Qwen3.6 file decodes from the arena. Gemma 4
-  stores gate and up as one fused tensor, which the decode feeder does not
-  take yet, so its streamed decode has no arena.
+* a streamed load decodes from the arena and counts the adapter tables
+  in its budget line. Gemma 4 stores gate and up as one fused tensor, so
+  its row checks the feeders on that layout.
 
 Models: a Qwen3.6-35B-A3B file (``qwen35moe``, also with ``--stream-cpu``)
 and a Gemma 4 26B-A4B file, each skipped when missing. Not ``test_``-
@@ -171,6 +170,8 @@ def run_model(tag: str, model: str, strength: float, modes: list, arena: bool,
         log = unfused["log"]
         check(f"{tag} {flag}: decodes from the arena",
               "decode feeder unavailable" not in log)
+        check(f"{tag} {flag}: prefills through the ring",
+              "feeder prefill unavailable" not in log)
         budget = [ln for ln in log.splitlines() if "[stream] memory budget:" in ln]
         check(f"{tag} {flag}: budget counts the adapter tables",
               bool(budget) and "(adapter tables" in budget[0],
@@ -190,7 +191,7 @@ def main() -> int:
     print(f"logs in {out}", flush=True)
     for tag, model, strength, modes, arena in (
             ("qwen36", a.qwen, 0.2, ["--stream-experts", "--stream-cpu"], True),
-            ("gemma4", a.gemma, 1.0, ["--stream-experts"], False)):
+            ("gemma4", a.gemma, 1.0, ["--stream-experts"], True)):
         if not os.path.isfile(model):
             print(f"SKIP  {tag}: {model} not found", flush=True)
             continue

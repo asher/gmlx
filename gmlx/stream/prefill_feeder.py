@@ -39,9 +39,10 @@ import numpy as np
 from .feeder_common import (
     ATTRS,
     BOUNCE_BYTES,
-    KINDS,
     DaemonPool,
     copy_experts,
+    feeder_ranges,
+    kind_bytes,
     lock_pages,
     read_range,
     read_range_aligned,
@@ -90,14 +91,18 @@ class PrefillFeeder:
         offsets: dict[int, list[tuple[str, int, int, int, str]]],
         modules: dict[int, list],
     ):
-        self._layers: dict[int, dict] = {}  # li -> {kind: (module, path, off, nbytes)}
+        # li -> {kind: (module, path, off, nbytes, FeederRange)}; nbytes is
+        # the stack's size in a ring slot.
+        self._layers: dict[int, dict] = {}
         max_bytes: dict[str, int] = {}
         for li, ranges in offsets.items():
-            kinds = {r[4] for r in ranges}
-            if kinds != set(KINDS) or len(ranges) != len(KINDS):
+            franges = feeder_ranges(ranges)
+            if franges is None:
                 continue
             entry = {}
-            for path, off, nbytes, _, kind in ranges:
+            for rng in franges:
+                path, off, kind = rng.path, rng.off, rng.kind
+                nbytes = rng.length * rng.n_exp
                 mod = None
                 for m in modules.get(li, ()):
                     proj = getattr(m, ATTRS[kind], None)
@@ -107,10 +112,10 @@ class PrefillFeeder:
                         break
                 if mod is None:
                     break
-                entry[kind] = (mod, path, off, nbytes)
-            if len(entry) == len(KINDS):
+                entry[kind] = (mod, path, off, nbytes, rng)
+            if len(entry) == len(franges):
                 self._layers[li] = entry
-                for kind, (_, _, _, nbytes) in entry.items():
+                for kind, (_, _, _, nbytes, _) in entry.items():
                     max_bytes[kind] = max(max_bytes.get(kind, 0), nbytes)
         if not self._layers:
             raise RuntimeError("no layers with matching gate/up/down stacks")
@@ -142,7 +147,7 @@ class PrefillFeeder:
         self._sizes: dict[str, int] = {}
         try:
             for entry in self._layers.values():
-                for _, path, _, _ in entry.values():
+                for _, path, *_ in entry.values():
                     if path not in self._fds:
                         fd = os.open(path, os.O_RDONLY)
                         self._fds[path] = fd
@@ -296,8 +301,8 @@ class PrefillFeeder:
     def _verify_zero_copy(self) -> None:
         li = min(self._layers)
         verify_zero_copy(
-            li, ((k, mod, path, off)
-                 for k, (mod, path, off, _) in self._layers[li].items()),
+            li, ((k, mod, path, off, rng.length)
+                 for k, (mod, path, off, _, rng) in self._layers[li].items()),
             self._fds)
 
     def covers(self, li: int) -> bool:
@@ -382,17 +387,18 @@ class PrefillFeeder:
             # No module or seed copy in this frame: a wedged read blocks it
             # for the life of the process.
             seeds = None
-            reads = [(kind, path, off, nbytes)
-                     for kind, (_, path, off, nbytes) in self._layers[li].items()]
+            reads = [(kind, nbytes, rng)
+                     for kind, (*_, nbytes, rng) in self._layers[li].items()]
             held = self._copy_held(
-                src, slot, {kind: nb for kind, _, _, nb in reads}, copies)
+                src, slot, {kind: nb for kind, nb, _ in reads}, copies)
             futs = []
-            for kind, path, off, nbytes in reads:
-                fd = self._fds[path]
+            for kind, nbytes, rng in reads:
+                fd = self._fds[rng.path]
                 mv = slot[kind][1]
-                for start, end in _read_spans(nbytes, held.get(kind)):
+                for start, end, foff in _read_jobs(rng, nbytes,
+                                                   held.get(kind)):
                     futs.append(self._submit_read(
-                        path, fd, mv[start:end], off + start))
+                        rng.path, fd, mv[start:end], foff))
             # The arena gets its slots back before a read can wedge.
             futures_wait(copies)
             if src is not None:
@@ -449,8 +455,8 @@ class PrefillFeeder:
         if self._arena_hook is None:
             return None
         return self._arena_hook(li, {
-            kind: (path, off, nbytes)
-            for kind, (_, path, off, nbytes) in self._layers[li].items()})
+            kind: (rng.path, rng.off, rng.step, rng.length)
+            for kind, (*_, rng) in self._layers[li].items()})
 
     def _release_sources(self) -> None:
         """Give the arena back the slots of stages that never started."""
@@ -509,7 +515,7 @@ class PrefillFeeder:
         if views is None:
             slot = self._slots[self._slot_of[li]]
             views = {}
-            for kind, (mod, _, _, nbytes) in entry.items():
+            for kind, (mod, _, _, nbytes, _) in entry.items():
                 shape = getattr(mod, ATTRS[kind]).weight.shape
                 views[kind] = slot_view(slot[kind][0], nbytes, shape)
             self._views[(li, self._slot_of[li])] = views
@@ -606,11 +612,11 @@ class PrefillFeeder:
             want[[e for e in ids if 0 <= e < len(want)]] = True
             held = self._copy_held(
                 src, slot,
-                {kind: nb for kind, (_, _, _, nb) in entry.items()},
+                {kind: nb for kind, (_, _, _, nb, _) in entry.items()},
                 copies, want=want)
-            for kind, (mod, path, off, nbytes) in entry.items():
+            for kind, (mod, path, off, _, rng) in entry.items():
                 n_exp = getattr(mod, ATTRS[kind]).weight.shape[0]
-                stride = nbytes // n_exp
+                stride = rng.length
                 mv = slot[kind][1]
                 fd = self._fds[path]
                 mask = held.get(kind, (None,))[0]
@@ -618,7 +624,7 @@ class PrefillFeeder:
                     if 0 <= e < n_exp and not (mask is not None and mask[e]):
                         futs.append(self._submit_read(
                             path, fd, mv[e * stride:(e + 1) * stride],
-                            off + e * stride))
+                            off + e * rng.step))
         finally:
             futures_wait(copies)
             if src is not None:
@@ -688,16 +694,35 @@ def _read_spans(nbytes: int, held=None):
             yield start, min(start + _READ_CHUNK, b)
 
 
+def _read_jobs(rng, nbytes: int, held=None):
+    """``(start, end, file_off)`` reads that fill a ring slot of ``nbytes``
+    from ``rng``: the contiguous spans of ``_read_spans``, or one read per
+    expert not ``held`` where the experts sit ``rng.step`` apart in the
+    file (a half of a fused gate_up tensor)."""
+    if rng.step == rng.length:
+        for start, end in _read_spans(nbytes, held):
+            yield start, end, rng.off + start
+        return
+    mask = None if held is None else held[0]
+    n = rng.length
+    for e in range(rng.n_exp):
+        if mask is not None and e < len(mask) and mask[e]:
+            continue
+        for start in range(0, n, _READ_CHUNK):
+            end = min(start + _READ_CHUNK, n)
+            yield e * n + start, e * n + end, rng.off + e * rng.step + start
+
+
 def ring_bytes(offsets) -> int:
     """A-priori size of the ring: ``ring_slots()`` times the largest
     layer's expert stacks, per kind, over the layers the feeder would
     cover."""
     largest: dict[str, int] = {}
     for ranges in offsets.values():
-        kinds = {r[4] for r in ranges}
-        if kinds != set(KINDS) or len(ranges) != len(KINDS):
+        sizes = kind_bytes(ranges)
+        if sizes is None:
             continue
-        for _, _, nbytes, _, kind in ranges:
+        for kind, nbytes in sizes.items():
             largest[kind] = max(largest.get(kind, 0), nbytes)
     return ring_slots() * sum(largest.values())
 

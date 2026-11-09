@@ -12,11 +12,68 @@ import queue
 import threading
 from concurrent.futures import Future
 from contextlib import contextmanager
+from typing import NamedTuple
 
 import numpy as np
 
 KINDS = ("gate", "up", "down")
 ATTRS = {k: f"{k}_proj" for k in KINDS}
+
+
+class FeederRange(NamedTuple):
+    """One kind's expert bytes in the file: expert ``e`` is ``length``
+    bytes at ``off + e * step``. ``half`` is 0 (gate) or 1 (up) for a cut
+    of a fused gate_up tensor at ``tensor_off``, else None."""
+    path: str
+    off: int
+    step: int
+    length: int
+    n_exp: int
+    kind: str
+    tensor_off: int
+    half: int | None
+
+
+def feeder_ranges(ranges) -> list[FeederRange] | None:
+    """A layer's raw ``(path, off, nbytes, n_exp, kind)`` ranges as one
+    gate, up and down range each, or None when the feeders cannot cover
+    the layer. A fused gate_up range splits at each expert's row midpoint,
+    as the loader splits the tensor."""
+    out = []
+    for path, off, nbytes, n_exp, kind in ranges:
+        if not n_exp:
+            return None
+        step = nbytes // n_exp
+        if kind == "gate_up":
+            if step % 2:
+                return None
+            half = step // 2
+            out.append(FeederRange(path, off, step, half, n_exp, "gate",
+                                   off, 0))
+            out.append(FeederRange(path, off + half, step, half, n_exp,
+                                   "up", off, 1))
+        else:
+            out.append(FeederRange(path, off, step, step, n_exp, kind,
+                                   off, None))
+    if (sorted(r.kind for r in out) != sorted(KINDS)
+            or len({r.n_exp for r in out}) != 1):
+        return None
+    return out
+
+
+def kind_bytes(ranges) -> dict[str, int] | None:
+    """Stack bytes per kind of a layer the feeders would cover, for
+    sizing, or None. Needs no expert count: a fused gate_up range is half
+    gate and half up."""
+    out: dict[str, int] = {}
+    for _, _, nbytes, _, kind in ranges:
+        parts = ((("gate", nbytes // 2), ("up", nbytes // 2))
+                 if kind == "gate_up" else ((kind, nbytes),))
+        for k, nb in parts:
+            if k in out:
+                return None
+            out[k] = nb
+    return out if sorted(out) == sorted(KINDS) else None
 
 
 def read_range(fd, mv, off: int) -> None:
@@ -167,13 +224,14 @@ def unlock_pages(entry: tuple[int, int]) -> None:
 def verify_zero_copy(li: int, entries, fds: dict[str, int]) -> None:
     """The swap trick assumes each module weight is a zero-copy view of its
     file range: staged file bytes must be exactly what the compute would have
-    read through the mmap. ``entries`` yields ``(kind, module, path, off)``
-    for one layer; a head sample of each stack is compared byte-for-byte, so
+    read through the mmap. ``entries`` yields ``(kind, module, path, off,
+    length)`` for one layer, ``length`` the bytes per expert; a head sample
+    of each stack's first expert is compared byte-for-byte, so
     any loader-side transform disables the feeder rather than corrupting
     compute."""
     import mlx.core as mx
 
-    for kind, mod, path, off in entries:
+    for kind, mod, path, off, length in entries:
         w = getattr(mod, ATTRS[kind]).weight
         # CPU stream: a GPU slice of the file-backed stack would make the
         # driver page the referenced range in - the cost the feeders exist
@@ -185,7 +243,7 @@ def verify_zero_copy(li: int, entries, fds: dict[str, int]) -> None:
             per *= d
         lead = min(w.shape[0], -(-4096 // max(per, 1)))
         with mx.stream(mx.cpu):
-            head = bytes(np.array(w[:lead].reshape(-1)[:4096]))
+            head = bytes(np.array(w[:lead].reshape(-1)[:min(4096, length)]))
         if os.pread(fds[path], len(head), off) != head:
             raise RuntimeError(
                 f"layer {li} {kind} stack is not a zero-copy view of its "

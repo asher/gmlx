@@ -158,6 +158,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An adapter that changes expert weights loads and runs on a model whose
   experts stream from disk, Qwen3.6 MoE and Gemma 4 included. Before, the
   load refused it or every request failed.
+- A Gemma 4 MoE whose experts stream decodes from the arena and prefills
+  through the ring. Its fused gate-up tensor kept both feeders off, so a
+  streamed load read its experts from the page cache.
 - `gmlx serve` frees the prompt memory of a request that ends at a stop
   string or a client disconnect while other requests run. A request
   cancelled during a shared prefill now stops instead of running to its

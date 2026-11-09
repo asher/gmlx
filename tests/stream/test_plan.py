@@ -15,10 +15,11 @@ F16 = 2
 
 
 def _mint_moe(path, *, layers=2, experts=8, used=2, expert_count_kv=True,
-              big_layer=None, nextn_block=None):
+              big_layer=None, nextn_block=None, fused=False):
     """A llama-shaped MoE file. ``big_layer`` doubles that layer's expert
     stacks so the ring (twice the largest layer) is distinguishable;
-    ``nextn_block`` makes that block a NextN block."""
+    ``nextn_block`` makes that block a NextN block; ``fused`` stores gate
+    and up as one gate_up tensor, as Gemma 4 does."""
     from gguf import GGUFWriter
 
     w = GGUFWriter(str(path), "llama")
@@ -42,7 +43,10 @@ def _mint_moe(path, *, layers=2, experts=8, used=2, expert_count_kv=True,
                      np.zeros((experts, 64), dtype=np.float16))
         w.add_tensor(f"blk.{i}.ffn_gate_shexp.weight",
                      np.zeros((16, 64), dtype=np.float16))
-        for kind in ("gate", "up", "down"):
+        if fused:
+            w.add_tensor(f"blk.{i}.ffn_gate_up_exps.weight",
+                         np.zeros((experts, 2 * rows, 64), dtype=np.float16))
+        for kind in ("down",) if fused else ("gate", "up", "down"):
             w.add_tensor(f"blk.{i}.ffn_{kind}_exps.weight",
                          np.zeros((experts, rows, 64), dtype=np.float16))
         if i == nextn_block:
@@ -142,6 +146,14 @@ def test_model_plan_prices_experts_ring_and_reads(tmp_path):
     assert m.streamable
     assert m.kv_costs is not None and m.kv_bytes(1) > 0
     assert m.trained_ctx == 4096
+
+
+def test_model_plan_prices_the_ring_of_a_fused_gate_up_file(tmp_path):
+    kw = dict(layers=2, experts=8, used=2, big_layer=1)
+    fused = sp.model_plan(sp.scan_path(
+        _mint_moe(tmp_path / "fused.gguf", fused=True, **kw)))
+    plain = sp.model_plan(sp.scan_path(_mint_moe(tmp_path / "plain.gguf", **kw)))
+    assert fused.ring_bytes == plain.ring_bytes == 2 * 3 * 8 * 128 * 64 * F16
 
 
 def test_model_plan_expert_count_from_shape(tmp_path):

@@ -30,12 +30,12 @@ from test_decode_feeder import (
 )
 
 
-def _make_prefill_feeder(monkeypatch, tmp_path, n_layers=2):
+def _make_prefill_feeder(monkeypatch, tmp_path, n_layers=2, fused=False):
     import mlx_kquant as kq
     from gmlx.stream.prefill_feeder import PrefillFeeder
 
     monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
-    offsets, modules = _make_fixture(tmp_path, n_layers)
+    offsets, modules = _make_fixture(tmp_path, n_layers, fused=fused)
     # PrefillFeeder's offsets tuples are (path, off, nbytes, n_exp, kind)
     return PrefillFeeder(offsets, modules), modules
 
@@ -68,6 +68,48 @@ def test_gapped_coverage_alternates_slots(monkeypatch, tmp_path):
         for kind in _KINDS:
             for e in (0, 3):
                 assert _slot_expert(feeder, 2, kind, e) == _expert_bytes(2, kind, e)
+    assert feeder._error is None
+
+
+def test_a_fused_gate_up_layer_fills_each_half(monkeypatch, tmp_path):
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, fused=True)
+    with feeder.prefill_partial_call(modules[0][0], 0, [1, 2]):
+        for kind in _KINDS:
+            for e in (1, 2):
+                assert _slot_expert(feeder, 0, kind, e) == _expert_bytes(0, kind, e)
+            for e in (0, 3):
+                assert _slot_expert(feeder, 0, kind, e) == b"\x00" * _STRIDE[kind]
+    with feeder.prefill_call(modules[1][0], 1):
+        for kind in _KINDS:
+            for e in range(4):
+                assert _slot_expert(feeder, 1, kind, e) == _expert_bytes(1, kind, e)
+    assert feeder._error is None
+
+
+def test_a_fused_ring_copies_and_seeds_through_the_arena(monkeypatch,
+                                                         tmp_path):
+    from test_decode_feeder import _arena_slot
+
+    dfeeder, feeder, modules = _sourced_pair(monkeypatch, tmp_path,
+                                             fused=True)
+    reads = _record_reads(monkeypatch, feeder)
+    with feeder.prefill_call(modules[0][0], 0, ids=mx.array([[0, 2]])):
+        for kind in _KINDS:
+            for e in range(4):
+                assert _slot_expert(feeder, 0, kind, e) == _expert_bytes(0, kind, e)
+    # Experts 1 and 3 came from the arena: no read of their bytes.
+    gate_up = feeder._layers[0]["gate"][4]
+    for e in (1, 3):
+        for half in (0, 1):
+            foff = gate_up.off + e * gate_up.step + half * gate_up.length
+            assert not any(o <= foff < o + n for o, n in reads)
+    feeder.release_slots()
+    dfeeder.ensure_wired()
+    for e in (0, 2):
+        s = int(dfeeder._slot_of[0][e])
+        if s >= 0:
+            for kind in _KINDS:
+                assert _arena_slot(dfeeder, 0, kind, s) == _expert_bytes(0, kind, e)
     assert feeder._error is None
 
 
@@ -401,6 +443,19 @@ def test_unshare_on_fork_marks_only_the_whole_pages_inside():
     assert subprocess.run(["/usr/bin/true"]).returncode == 0
 
 
+def test_ring_bytes_of_a_fused_layer_matches_the_unfused_layer(tmp_path):
+    from gmlx.stream.prefill_feeder import ring_bytes
+
+    for d in ("plain", "fused"):
+        (tmp_path / d).mkdir()
+    plain, _ = _make_fixture(tmp_path / "plain", 2)
+    fused, _ = _make_fixture(tmp_path / "fused", 2, fused=True)
+    assert ring_bytes(fused) == ring_bytes(plain) > 0
+    # The plan's entries carry no expert count.
+    flat = {li: [r[:3] + (0,) + r[4:] for r in rs] for li, rs in fused.items()}
+    assert ring_bytes(flat) == ring_bytes(plain)
+
+
 def test_ring_bytes_is_twice_the_largest_layer(tmp_path):
     from gmlx.stream.prefill_feeder import ring_bytes
 
@@ -484,12 +539,14 @@ def test_read_range_aligned_matches_plain_reads(tmp_path, monkeypatch):
         os.close(fd)
 
 
-def _seeded_pair(monkeypatch, tmp_path, n_layers=3, slots=2):
+def _seeded_pair(monkeypatch, tmp_path, n_layers=3, slots=2, fused=False):
     from test_decode_feeder import _make_feeder
 
     dfeeder, _ = _make_feeder(
-        monkeypatch, tmp_path, slots_per_layer=slots, n_layers=n_layers)
-    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers)
+        monkeypatch, tmp_path, slots_per_layer=slots, n_layers=n_layers,
+        fused=fused)
+    feeder, modules = _make_prefill_feeder(monkeypatch, tmp_path, n_layers,
+                                           fused=fused)
     feeder._seed_hook = dfeeder.seed_from_ring
     return dfeeder, feeder, modules
 
@@ -567,10 +624,11 @@ def test_seeding_off_leaves_arena_cold(monkeypatch, tmp_path):
     assert dfeeder._seeded == 0 and (dfeeder._owner[0] == -1).all()
 
 
-def _sourced_pair(monkeypatch, tmp_path, n_layers=2):
+def _sourced_pair(monkeypatch, tmp_path, n_layers=2, fused=False):
     """A ring and a decode arena whose layers 0..n-1 hold experts 1 and 3
     (in slots 0 and 1), wired as the loader wires them."""
-    dfeeder, feeder, modules = _seeded_pair(monkeypatch, tmp_path, n_layers)
+    dfeeder, feeder, modules = _seeded_pair(monkeypatch, tmp_path, n_layers,
+                                            fused=fused)
     feeder._arena_hook = dfeeder.arena_sources
     for li in range(n_layers):
         dfeeder.stage(li, np.array([[3, 1]], dtype=np.uint32))
@@ -592,7 +650,7 @@ def _record_reads(monkeypatch, feeder):
 def _layer_reads(feeder, li, reads):
     """kind -> sorted (expert offset, length) reads inside layer li's stack."""
     out = {}
-    for kind, (_, _, off, nbytes) in feeder._layers[li].items():
+    for kind, (_, _, off, nbytes, _) in feeder._layers[li].items():
         out[kind] = sorted((o - off, n) for o, n in reads
                            if off <= o < off + nbytes)
     return out
