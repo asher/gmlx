@@ -9,8 +9,8 @@ builds as ``mlx-community__<name>``. An absent build skips.
 Each case is one request of one item: text, with and without a prompt
 name, near 6,000 tokens; images at the default budget and at 560; a 10 s
 clip, a 34 s 44.1 kHz stereo clip cut at 30 s and whole, three clips in one
-item; a 3 s video and a 40 s video (the 32-frame cap); an interleaved item;
-and a conversation. Each response holds the reference's token count, and
+item; a 3 s video, a 40 s video (the 32-frame cap) and a 3 s HD video
+tagged BT.709; an interleaved item; and a conversation. Each response holds the reference's token count, and
 its vector holds a minimum cosine to the reference vector.
 
 A quantized build is held to a reference recorded from a float32 copy of
@@ -24,8 +24,10 @@ Floors, from the worst cosines on M3 GPU and on the CPU:
   UD-Q6_K_XL text at 0.99766, where the CPU Q6_K matmul is less exact in
   every dtype, and the bf16 build at 0.99906, where MLX's CPU bfloat16
   matmul is. The reference itself in bfloat16 is at 0.99979.
-- Media sit at 0.997 and above everywhere. Video is the lowest: OpenCV
-  decodes frames about 2 levels darker than torchcodec does.
+- Media sit at 0.9998 and above, with ffmpeg on PATH. ffmpeg decodes the
+  same frames as torchcodec. Without ffmpeg, OpenCV reads the videos: its
+  frames differ by a few levels, and by tens on BT.709 video, so the video
+  cases hold 0.995.
 
 The F16 projector case runs the float32 path that M1 and M2 take.
 """
@@ -47,11 +49,19 @@ _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "embeddinggemma2_r
 
 # Minimum cosine per build: text on the GPU, text on the CPU, media.
 _FLOORS = {
-    "Q8_0": (0.9985, 0.9985, 0.995),
-    "UD-Q6_K_XL": (0.9985, 0.997, 0.995),
-    "8bit": (0.999, 0.999, 0.995),
-    "bf16": (0.9995, 0.999, 0.995),
+    "Q8_0": (0.9985, 0.9985, 0.999),
+    "UD-Q6_K_XL": (0.9985, 0.997, 0.999),
+    "8bit": (0.999, 0.999, 0.999),
+    "bf16": (0.9995, 0.999, 0.999),
 }
+# Video read by OpenCV, when ffmpeg is not on PATH.
+_OPENCV_VIDEO_FLOOR = 0.995
+
+
+def _has_video(case) -> bool:
+    parts = case.get("parts") or [p for m in case.get("messages", [])
+                                  if isinstance(m["content"], list) for p in m["content"]]
+    return any(p["type"] == "video" for p in parts)
 
 
 def _cases():
@@ -94,8 +104,11 @@ def _check(configured, media, build):
     import mlx.core as mx
 
     vectors, tokens = _reference(build)
+    from gmlx.serve import media_programs
+
     gpu, cpu, media_floor = _FLOORS[build]
     text_floor = cpu if mx.default_device() == mx.cpu else gpu
+    ffmpeg = bool(media_programs.find("ffmpeg") and media_programs.find("ffprobe"))
     worst: dict[str, float] = {}
     misses = []
     try:
@@ -112,6 +125,8 @@ def _check(configured, media, build):
             print(f"{i:<20} {cos:.6f}")
             worst[kind] = min(worst.get(kind, 1.0), cos)
             floor = text_floor if kind == "text" else media_floor
+            if not ffmpeg and _has_video(case):
+                floor = _OPENCV_VIDEO_FLOOR
             if cos < floor:
                 misses.append(f"{i}: cosine {cos:.6f} < {floor}")
     finally:

@@ -71,16 +71,22 @@ def audio():
     _flac("hum_4s", _tones(4, 16000, [110, 147]), 16000)
 
 
-def _video(name, seconds, fps, draw):
-    w, h = 256, 192
+# An HD clip tagged BT.709, where a decoder that converts with the BT.601
+# matrix, as OpenCV does, is off by tens of levels.
+_BT709 = ["-vf", "scale=out_color_matrix=bt709:out_range=tv", "-colorspace", "bt709",
+          "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+
+
+def _video(name, seconds, fps, draw, size=(256, 192), background=None, bt709=False):
+    w, h = size
     proc = subprocess.Popen(
         ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
-         "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", "-c:v", "libx264",
-         "-preset", "veryslow", "-crf", "30", "-pix_fmt", "yuv420p",
+         "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", *(_BT709 if bt709 else []),
+         "-c:v", "libx264", "-preset", "veryslow", "-crf", "30", "-pix_fmt", "yuv420p",
          "-movflags", "+faststart", str(OUT / name)], stdin=subprocess.PIPE)
     assert proc.stdin is not None
     for i in range(int(seconds * fps)):
-        im = Image.new("RGB", (w, h), "white")
+        im = background.copy() if background is not None else Image.new("RGB", (w, h), "white")
         draw(ImageDraw.Draw(im), i / fps, w, h)
         proc.stdin.write(im.tobytes())
     proc.stdin.close()
@@ -102,6 +108,24 @@ def videos():
 
     _video("ball_3s.mp4", 3, 10, ball)
     _video("scenes_40s.mp4", 40, 5, scenes)
+    hd_video()
+
+
+def hd_video():
+    # Saturated color ramps behind a turning blue square.
+    w, h = 1280, 720
+    x = np.linspace(0, 1, w)[None, :, None]
+    y = np.linspace(0, 1, h)[:, None, None]
+    ramp = np.concatenate([np.broadcast_to(x, (h, w, 1)), np.broadcast_to(y, (h, w, 1)),
+                           np.broadcast_to(1 - x, (h, w, 1))], axis=2)
+    background = Image.fromarray((ramp * 255).round().astype(np.uint8))
+
+    def square(d, t, w, h):
+        cx, cy, r = w / 2 + 300 * np.cos(t), h / 2 + 200 * np.sin(t), 90
+        d.rectangle((cx - r, cy - r, cx + r, cy + r), fill=(20, 40, 210))
+
+    _video("square_hd709_3s.mp4", 3, 24, square, size=(w, h), background=background,
+           bt709=True)
 
 
 if __name__ == "__main__":

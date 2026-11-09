@@ -85,6 +85,7 @@ def cases() -> list[dict]:
                                           _m("audio", "arpeggio_10s.flac")]},
         {"id": "v_ball", "parts": [_m("video", "ball_3s.mp4")]},
         {"id": "v_scenes", "parts": [_m("video", "scenes_40s.mp4")]},
+        {"id": "v_hd709", "parts": [_m("video", "square_hd709_3s.mp4")]},
         {"id": "x_interleaved", "parts": [_t("A photo of "), _m("image", "red_circle.png"),
                                           _t(" next to the sound "),
                                           _m("audio", "beep_1s.flac"), _t(".")]},
