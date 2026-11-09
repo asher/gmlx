@@ -708,7 +708,8 @@ def _gemma4_audio_name(name: str):
 
     Returns ``(target_name, transform)`` or ``None`` to skip. ``transform`` is one
     of ``None`` / ``"conv2d"`` (SSCP conv [out,in,kH,kW]->[out,kH,kW,in]) /
-    ``"conv_dw"`` (depthwise conv [C,K]->[C,K,1]) / ``"scalar"`` (0-d clip bound).
+    ``"conv_dw"`` (depthwise conv [C,K]->[C,K,1]) / ``"scalar"`` (0-d clip bound) /
+    ``"softplus_inv"`` (the raw value under a stored softplus).
     """
     hit = _GEMMA4A_TOP_MAP.get(name)
     if hit is not None:
@@ -745,7 +746,8 @@ def _gemma4_audio_name(name: str):
     if leaf != "weight":
         return None
     if sub == "per_dim_scale":
-        return f"{pre}.self_attn.per_dim_scale", None  # bare array attr (no .weight)
+        # A bare array attr (no .weight). The converter stores softplus of it.
+        return f"{pre}.self_attn.per_dim_scale", "softplus_inv"
     if sub == "attn_k_rel":
         return f"{pre}.self_attn.relative_k_proj.weight", None  # plain nn.Linear
     if sub == "conv_dw":
@@ -762,6 +764,9 @@ def _apply_audio_transform(arr: mx.array, transform) -> mx.array:
         return arr.reshape(arr.shape[0], arr.shape[1], 1)
     if transform == "scalar":  # (1,) clip bound -> 0-d, matching mx.array(+/-inf)
         return arr.reshape(())
+    if transform == "softplus_inv":  # the tower applies softplus itself
+        y = arr.astype(mx.float32)
+        return y + mx.log(-mx.expm1(-y))
     raise ValueError(f"unknown audio transform {transform!r}")
 
 

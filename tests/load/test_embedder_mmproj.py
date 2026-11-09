@@ -83,6 +83,8 @@ def _to_gguf(name: str, params: dict) -> np.ndarray:
         return v[..., 0]
     if transform == "scalar":
         return v.reshape(1)
+    if transform == "softplus_inv":     # the converter stores softplus(x)
+        return np.logaddexp(0.0, v)
     return v
 
 
@@ -234,3 +236,13 @@ def test_transformed_weights_dequantize_to_the_chip_dtype():
         mm_codecs={"v.patch_embd.weight": "q8_0"}, dequant_dtype=mx.bfloat16)
     assert meta == {}
     assert out["vision_tower.patch_embedder.input_proj.weight"].dtype == mx.bfloat16
+
+
+def test_per_dim_scale_undoes_the_converters_softplus():
+    # llama.cpp's converter stores softplus(per_dim_scale); the Gemma 4 audio
+    # tower applies softplus itself, so the remap hands it the raw value.
+    x = np.array([-2.0625, -0.5, 0.0, 0.3], np.float32)
+    target, transform = vlm._gemma4_audio_name("a.blk.3.per_dim_scale.weight")
+    assert target == "audio_tower.layers.3.self_attn.per_dim_scale"
+    got = vlm._apply_audio_transform(mx.array(np.logaddexp(0.0, x)), transform)
+    np.testing.assert_allclose(np.array(got), x, rtol=1e-5, atol=1e-5)
