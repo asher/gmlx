@@ -839,8 +839,11 @@ def test_a_denoise_over_the_budget_with_int8_linears_names_the_setting(
 # docs/video.md's int8 table: the largest clip of h3 on its 8-step LoRA at
 # int8 linears or all on each Mac, with the 1,024-row prompt of the
 # keyframe table. Mac: (clips that fit, the next clips up that do not).
+# On 32 GB the int8 DiT and its LoRA alone are over the budget, so even
+# the smallest clip is refused. On 36 GB smaller clips fit.
 _INT8_MACS = {
-    36: ((), ((1344, 768, 124), (768, 768, 124))),
+    32: ((), ((32, 32, hf.MIN_FRAMES),)),
+    36: (((512, 288, 124),), ((1344, 768, 124), (768, 768, 124))),
     48: (((1344, 768, 124), (768, 768, 243)),
          ((1344, 768, 243), (768, 768, 362))),
     64: (((1344, 768, 362), (768, 768, 362)), ()),

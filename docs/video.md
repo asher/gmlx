@@ -255,7 +255,8 @@ At [`--int8 linears` or `all`](#faster-clips-with-int8), `h3` and
 
 | Mac memory | `h3` and `h3-fast` at `linears` or `all` |
 |------------|-------------------------------------------|
-| 32 or 36 GB | No clip |
+| 32 GB | No clip |
+| 36 GB | None at 768x768 or larger |
 | 48 GB | 1344x768, 5 s, or 768x768 up to 10 s |
 | 64 GB or more | 1344x768 up to 15 s |
 
