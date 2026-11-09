@@ -1097,25 +1097,29 @@ def test_a_tight_video_entry_keeps_one_cond_in_the_tensor_cache(
     assert got.cache_share == 1.0 and got.footprint <= budget
 
 
-@pytest.mark.parametrize("int8, tail", [
-    ("off", "Set a smaller defaults.size or defaults.seconds."),
-    ("attention", "Set a smaller defaults.size or defaults.seconds."),
-    ("linears", "Set a smaller defaults.size or defaults.seconds, or "
-     "defaults.int8 off or attention."),
-    ("all", "Set a smaller defaults.size or defaults.seconds, or "
-     "defaults.int8 off or attention.")])
+@pytest.mark.parametrize("variant, int8, tail", [
+    ("h3-base", "off", "Set a smaller defaults.size or defaults.seconds."),
+    ("h3-base", "attention",
+     "Set a smaller defaults.size or defaults.seconds."),
+    ("h3-base", "linears", "Set a smaller defaults.size or "
+     "defaults.seconds, or defaults.int8 off or attention."),
+    ("h3-base", "all", "Set a smaller defaults.size or defaults.seconds, "
+     "or defaults.int8 off or attention."),
+    ("fasth3", "linears", "Set a smaller defaults.size or "
+     "defaults.seconds, or defaults.int8 off.")])
 def test_an_int8_linears_entry_over_its_budget_names_the_setting(
-        monkeypatch, int8, tail):
+        monkeypatch, variant, int8, tail):
     """An entry refused for memory at int8 linears or all names the int8
-    setting that keeps the file's linears beside the clip's size and
-    length; at off or attention it names the clip alone."""
+    settings that keep the file's linears beside the clip's size and
+    length, off alone on FastH3, whose sparse attention refuses int8
+    attention. At off or attention it names the clip alone."""
     from gmlx.serve import video_service as vs
     from gmlx.video import memfit
     from video_fixtures import int8_kernel
 
     monkeypatch.delenv("GMLX_OVERCOMMIT", raising=False)
     int8_kernel(monkeypatch)
-    spec = _h3_entry(monkeypatch, "h3-base", "1344x768", 5, 16 * GB)
+    spec = _h3_entry(monkeypatch, variant, "1344x768", 5, 16 * GB)
     spec.defaults["int8"] = int8
     with pytest.raises(memfit.VideoMemoryError) as e:
         vs.entry_plan(spec)

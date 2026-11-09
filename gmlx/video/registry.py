@@ -273,6 +273,14 @@ def attention_refusal(fam: VideoFamily, variant: str,
     return None
 
 
+def int8_fallback(fam: VideoFamily, variant: str) -> str:
+    """The int8 settings that keep the file's linears on ``variant``: off
+    alone where its sparse attention refuses int8 attention."""
+    row = fam.variant_row(variant)
+    return "off" if row is not None and row.vsa_sparsity else (
+        "off or attention")
+
+
 def linears_refusal(fam: VideoFamily, variant: str,
                     linears: str) -> str | None:
     """Why this install or Mac does not run ``variant`` with ``linears``,

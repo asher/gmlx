@@ -119,12 +119,13 @@ def test_fasth3_converts_its_linears_and_refuses_int8_attention(
     """FastH3 runs its video sparse attention with int8 linears: the load
     gate counts H3's 200 block linears, not the gates, and they convert.
     Int8 attention on top is refused, since it replaces dense attention
-    only."""
+    only, so the gate's hint names int8 off alone."""
     vsa_kernel(monkeypatch)
     int8_kernel(monkeypatch)
     model = linears_load(fast=True)
     (k,) = linears_load.loads
     assert k["gate_extra"] == 8_441_753_600 + 5 * 28672 * 5376 + 4 * 28672
+    assert k["gate_hint"] == "Run with int8 off, or try a smaller DiT quant"
     assert linears_load.converted == [hf.FAMILY.int8_linears]
     assert model._linears == "int8"
     with pytest.raises(vfp.VideoModelError) as ei:

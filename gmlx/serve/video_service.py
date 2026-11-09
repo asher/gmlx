@@ -282,7 +282,7 @@ def entry_plan(spec) -> VideoEntryPlan:
     from gmlx.video import memfit, pipeline
     from gmlx.video.fingerprint import VideoModelError
     from gmlx.video.loader import identify_dit
-    from gmlx.video.registry import int8_parts, run_refusal
+    from gmlx.video.registry import int8_fallback, int8_parts, run_refusal
 
     from .capacity import overcommit, working_budget_bytes
     from .image_service import _CACHE_BYTES, cache_bytes, fit_floored
@@ -357,8 +357,8 @@ def entry_plan(spec) -> VideoEntryPlan:
             f"GiB for one {width}x{height} clip of {d['frames']} frames, over "
             f"the working budget of {memfit.gib(budget, False)} GiB. Set a "
             "smaller defaults.size or defaults.seconds"
-            + (", or defaults.int8 off or attention" if linears == "int8"
-               else "")
+            + (f", or defaults.int8 {int8_fallback(fam, ident.variant)}"
+               if linears == "int8" else "")
             + ". GMLX_OVERCOMMIT=1 overrides.")
     footprint, share = got
     return VideoEntryPlan(**{**base.__dict__, "footprint": int(footprint),

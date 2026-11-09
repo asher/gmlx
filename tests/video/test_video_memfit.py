@@ -825,25 +825,31 @@ def test_an_int8_linears_step_holds_fc2s_int8_input_beside_the_files():
         (14_392 + 14_784) * 37735)
 
 
+@pytest.mark.parametrize("variant, keep, fallback", [
+    (None, "off or attention, which keep", "off or attention"),
+    ("fl2va", "off or attention, which keep", "off or attention"),
+    ("fasth3", "off, which keeps", "off")])
 def test_a_denoise_over_the_budget_with_int8_linears_names_the_setting(
-        no_overcommit):
+        no_overcommit, variant, keep, fallback):
     """The hint of a clip whose denoise does not fit at int8 linears
-    names int8 off or attention first, before a size, as the resize the
-    CLI finds does."""
+    names the int8 settings that keep the file's linears first, before a
+    size, as the resize the CLI finds does: off or attention, and off
+    alone on FastH3, whose sparse attention refuses int8 attention."""
     rows, audio = memfit.clip_rows(hf.FAMILY, frames=124, width=1344,
                                    height=768, text=25)
     plan = memfit.plan_memory(
         "h3", dit=FILES["dit"] + H3_INT8_DELTA, encoder=1, vae=1,
         audio_vae=1, rows=rows, text=25, audio_latents=audio,
-        pixels=1344 * 768, linears="int8", budget=float(FILES["dit"]))
+        pixels=1344 * 768, variant=variant, linears="int8",
+        budget=float(FILES["dit"]))
     assert plan.cause == "denoise"
     assert _refusal(plan).endswith(
-        "Run with int8 off or attention, which keep the file's linears, or "
-        "try a smaller size or a shorter clip. GMLX_OVERCOMMIT=1 overrides.")
+        f"Run with int8 {keep} the file's linears, or try a smaller size or "
+        "a shorter clip. GMLX_OVERCOMMIT=1 overrides.")
     with pytest.raises(memfit.VideoMemoryError) as e:
         memfit.check(plan, resize=lambda: "try 768x768")
     assert str(e.value).endswith(
-        "Run with int8 off or attention, or try 768x768. GMLX_OVERCOMMIT=1 "
+        f"Run with int8 {fallback}, or try 768x768. GMLX_OVERCOMMIT=1 "
         "overrides.")
 
 

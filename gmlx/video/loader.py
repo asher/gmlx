@@ -21,7 +21,8 @@ from gmlx.image.fingerprint import (Identified, ImageModelError,
                                     view_from_scans)
 
 from .fingerprint import VideoIdentified, VideoModelError, identify
-from .registry import attention_refusal, linears_refusal, vsa_refusal
+from .registry import (attention_refusal, int8_fallback, linears_refusal,
+                       vsa_refusal)
 
 if TYPE_CHECKING:
     from gmlx.image.registry import Family
@@ -79,8 +80,8 @@ def load_dit(path: str, *, family: str | None = None,
 
         gate = {"gate_extra": int8_delta(fam, vid.view)
                 + int8_transient(fam, vid.view),
-                "gate_hint": "Run with int8 off or attention, or try a "
-                             "smaller DiT quant"}
+                "gate_hint": f"Run with int8 {int8_fallback(fam, vid.variant)}"
+                             ", or try a smaller DiT quant"}
     # The image loader reads only fields a video family also has.
     ident = Identified(family=cast("Family", fam), config=vid.config,
                        prefix=vid.prefix,

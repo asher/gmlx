@@ -543,8 +543,9 @@ messages:
   a ComfyUI loader can change the attention only. Set `defaults.int8` on
   the entry, or add a second entry on the same files at the value you
   want.
-- A memory refusal that names `int8 off or attention`: the clip or the
-  DiT does not fit with the int8 weights of `linears` or `all`, which
+- A memory refusal that names `int8 off or attention`, or `int8 off` on
+  `fasth3`: the clip or the DiT does not fit with the int8 weights of
+  `linears` or `all`, which
   [take more memory](video.md#faster-clips-with-int8). Run at `off` or
   `attention`, which keep the file's weights, or make the clip smaller.
   The text depends on where the check runs:

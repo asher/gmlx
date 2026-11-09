@@ -175,6 +175,8 @@ _HINTS = {"encode": "the text encoder needs more memory than this Mac "
           "linears": "run with int8 off or attention, which keep the "
                      "file's linears, or try a smaller size or a shorter "
                      "clip",
+          "linears_off": "run with int8 off, which keeps the file's "
+                         "linears, or try a smaller size or a shorter clip",
           "audio": "try a shorter clip",
           "decode": "try a smaller size, or --preview"}
 
@@ -205,6 +207,7 @@ class VideoPlan:
     encoder_load: int = 0           # the encode's part no prompt changes
     keyframes: bool = False         # the encode runs the vision tower
     linears: str = "file"           # the DiT's block linears
+    fallback: str = "off or attention"  # int8 settings that keep them
 
     @property
     def peak(self) -> int:
@@ -245,7 +248,7 @@ class VideoPlan:
         names the file's linears first."""
         cause = self.cause
         if cause == "denoise" and self.linears == "int8":
-            cause = "linears"
+            cause = "linears_off" if self.fallback == "off" else "linears"
         return _HINTS[cause] if cause else ""
 
     def describe(self) -> str:
@@ -335,9 +338,12 @@ def plan_memory(family: str, *, dit: int, encoder: int, vae: int,
 
         budget = working_budget_bytes()
     phases = {ph: int(sum(t.values())) for ph, t in terms.items()}
+    from .registry import get_family, int8_fallback
+
     return VideoPlan(phases=phases, terms=terms, budget=budget, rows=rows,
                      encoder_load=int(floor), keyframes=bool(blocks),
-                     linears=linears)
+                     linears=linears, fallback=int8_fallback(
+                         get_family(family), variant or ""))
 
 
 def _encode_terms(p: VideoPeaks, encoder: int, kept: float, text: int,
@@ -564,7 +570,7 @@ def check(plan: VideoPlan, what: str = "this clip", resize=None) -> None:
     if resize is not None and plan.cause == "denoise":
         sized = resize()
         if sized and plan.linears == "int8":
-            hint = f"run with int8 off or attention, or {sized}"
+            hint = f"run with int8 {plan.fallback}, or {sized}"
         elif sized:
             hint = sized
     raise VideoMemoryError(
