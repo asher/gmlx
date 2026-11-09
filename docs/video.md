@@ -186,7 +186,8 @@ as 1344x768 for 5 s or 672x384 for 12 s. On a short, small clip, such as
 672x384 for 5 s, the gain is small.
 
 On an M5 Max, a 1344x768 clip of 5 seconds takes about a tenth less time
-at `linears` and about a fifth less at `all`.
+at `linears` and about a fifth less at `all`. On `fasth3` it takes about a
+sixth less at `linears`.
 
 For `linears` and `all`, gmlx converts the weights of those layers to
 int8 as the DiT loads, which is where the extra memory goes. The memory
