@@ -251,13 +251,41 @@ def _file_info(path: str):
     return miniaudio.get_file_info(path)
 
 
+def ffmpeg_resample(audio, rate: int, target: int):
+    """``audio`` resampled from ``rate`` to ``target`` as FFmpeg's resampler
+    does with its defaults (libswresample: a Kaiser-windowed sinc, beta 9,
+    cutoff 0.97, 32 taps), for a pair of rates it resamples exactly. Its
+    phase count caps that at 1024 output phases; past it, mlx-audio's
+    resampler runs."""
+    import numpy as np
+    from scipy.signal import resample_poly
+
+    g = math.gcd(rate, target)
+    up, down = target // g, rate // g
+    if up > 1024:
+        from mlx_audio.utils import resample_audio
+
+        return resample_audio(audio, rate, target)
+    cutoff = 0.97
+    half = math.ceil(16 / (min(1.0, up / down) * cutoff)) * up
+    # scipy's firwin with a ("kaiser", 9.0) window: a windowed sinc at unit
+    # gain.
+    band = cutoff / max(up, down)
+    taps = band * np.sinc(band * np.arange(-half, half + 1)) * np.kaiser(2 * half + 1, 9.0)
+    taps /= taps.sum()
+    return resample_poly(np.asarray(audio, dtype=np.float64), up, down, window=taps)
+
+
 def load_audio(file, sr: int, field: str = "audio",
-               max_seconds: float | None = None):
+               max_seconds: float | None = None, ffmpeg: bool = False):
     """mlx-vlm's ``load_audio`` for a BytesIO or an array: mono float32
     samples at ``sr``. Audio that resampling to ``sr`` would take past
     :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples is refused before
     the resample. With ``max_seconds``, only the start of a longer clip is
-    decoded and resampled.
+    decoded and resampled. With ``ffmpeg``, a stereo clip mixes down and the
+    clip resamples as FFmpeg does by default, as torchcodec decodes for
+    transformers' ``load_audio``: the channels summed at 0.5 ** 0.5 each,
+    then :func:`ffmpeg_resample`. Other channel counts take the mean.
 
     mlx-vlm resamples a clip of several channels along the channel axis and
     mixes it down after, which leaves it at its own rate and takes minutes
@@ -273,12 +301,14 @@ def load_audio(file, sr: int, field: str = "audio",
     charge(field)
     audio, rate = read_audio(file, dtype="float32", field=field,
                              max_seconds=max_seconds)
-    if audio.ndim > 1:
+    if ffmpeg and audio.ndim > 1 and audio.shape[1] == 2:
+        audio = (audio[:, 0] + audio[:, 1]) * np.float32(0.5 ** 0.5)
+    elif audio.ndim > 1:
         audio = audio.mean(axis=1)
     if rate != sr:
         if math.ceil(len(audio) * sr / rate) > mg.AUDIO_MAX_SAMPLES:
             raise mg.audio_too_long(field, sr, 1)
-        audio = resample_audio(audio, rate, sr)
+        audio = ffmpeg_resample(audio, rate, sr) if ffmpeg else resample_audio(audio, rate, sr)
     return np.asarray(audio, dtype=np.float32)
 
 

@@ -7,8 +7,10 @@ server's media limits. The towers run later, on the service's worker.
 
 - An image decodes as transformers' ``load_image`` does: EXIF orientation
   applied, then RGB.
-- An audio clip decodes to mono 16 kHz samples. It is cut at 30 s, as the
-  reference processor cuts it, and the decoder stops just past the cut.
+- An audio clip decodes to mono 16 kHz samples, mixed down and resampled
+  as torchcodec does for transformers' ``load_audio``. It is cut at 30 s,
+  as the reference processor cuts it, and the decoder stops just past the
+  cut.
   When a request lifts the cut, the decoder stops past the longest clip
   that fits one item, and a clip that reaches it is refused.
 - A video's frames are sampled as the model's video processor samples them:
@@ -77,7 +79,7 @@ def _audio(ref: MediaRef, options: proc.Options, max_tokens: int) -> proc.Audio:
         keep = lifted_cut_samples(max_tokens)
     samples = media_decode.load_audio(
         io.BytesIO(_bytes(ref)), proc.AUDIO_RATE, ref.field,
-        max_seconds=keep / proc.AUDIO_RATE + _MARGIN_S)
+        max_seconds=keep / proc.AUDIO_RATE + _MARGIN_S, ffmpeg=True)
     if len(samples) > keep:
         if not options.audio_cut:
             raise EmbeddingsRequestError(

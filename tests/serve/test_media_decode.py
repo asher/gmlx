@@ -807,3 +807,26 @@ def test_ffmpeg_gets_the_cut_as_its_time_limit(monkeypatch):
     argv, limit = seen[0]
     assert argv[argv.index("-t") + 1] == "30.25"
     assert limit == 2 * (16000 * 30 + 4000)
+
+
+def test_ffmpeg_mode_mixes_stereo_down_as_ffmpeg_does():
+    left = np.arange(-4000, 4000, 8, dtype=np.int64)
+    clip = wav(np.stack([left, left // 2], axis=1).reshape(-1), 8000, channels=2)
+    want = (left + left // 2) / 32768.0
+    mean = md.load_audio(io.BytesIO(clip), 8000)
+    np.testing.assert_allclose(mean, want * 0.5, atol=1e-6)
+    # FFmpeg's default stereo-to-mono matrix, as torchcodec decodes for
+    # transformers' load_audio.
+    ffmpeg = md.load_audio(io.BytesIO(clip), 8000, ffmpeg=True)
+    np.testing.assert_allclose(ffmpeg, want * 0.5 ** 0.5, atol=1e-6)
+
+
+def test_ffmpeg_resample_keeps_the_passband_and_cuts_above_nyquist():
+    # A 1 kHz tone passes; a 9 kHz tone, above the new Nyquist, does not
+    # fold back into the band.
+    rate, t = 44100, np.arange(44100) / 44100
+    for f, lo, hi in ((1000, 0.99, 1.01), (9000, 0.0, 0.01)):
+        y = md.ffmpeg_resample(np.sin(2 * np.pi * f * t), rate, 16000)
+        assert len(y) == 16000
+        gain = np.sqrt(2) * np.sqrt(np.mean(y[1000:-1000] ** 2))
+        assert lo <= gain <= hi, (f, gain)
