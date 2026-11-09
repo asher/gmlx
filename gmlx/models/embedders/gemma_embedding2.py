@@ -431,7 +431,8 @@ class Towers(nn.Module):
             ac = AudioConfig.from_dict(audio_config)
             self.audio_config = ac
             self.audio_tower = AudioEncoder(ac)
-            _settle_blocks(self.audio_tower.layers)
+            sscp = self.audio_tower.subsample_conv_projection
+            _settle_blocks([sscp.layer0, sscp.layer1, sscp, *self.audio_tower.layers])
             self.embed_audio = MultimodalEmbedder(
                 ac.output_proj_dims or ac.hidden_size, text_hidden,
                 eps=ac.rms_norm_eps)
