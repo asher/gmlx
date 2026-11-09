@@ -70,10 +70,10 @@ break, a 768x768 clip's steps take about 2.7 times as long as alone at
 the default share, with the pauses 55% of the denoise, and about 1.6
 times at `0`, with the pauses 29%.
 
-With no chat reply in progress, a pause only checks for a cancel, and
-the sampler evaluates on the row budget `gmlx video generate` uses: at
-each pause on a clip of 32,768 rows a step or more, and every few pauses
-on a smaller clip.
+With no chat reply in progress, a pause only checks for a cancel. The
+sampler evaluates on the row budget `gmlx video generate` uses, which is
+at each pause on a clip of 32,768 rows a step or more and every few
+pauses on a smaller clip.
 
 The request that queues a job plans its clip from the model's file
 headers against the memory the pinned models leave, and books nothing.

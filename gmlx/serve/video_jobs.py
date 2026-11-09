@@ -970,6 +970,7 @@ def _clip_part(job: Job, store: VideoJobs, hold, out: str) -> None:
         def on_step(i, n):
             store.progress(job, step=(i + 1, n))
 
+        # Here the pacer only checks, since no point runs outside the forward.
         with paced(pace):
             xv, xa = pipeline.generate(
                 served.pipe, feats, frames=s["frames"], width=s["width"],

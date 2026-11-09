@@ -21,8 +21,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `fasth3` runs `--int8 linears`, which it refused. See
   [Faster clips with int8](docs/video.md#faster-clips-with-int8).
-- `gmlx serve` video jobs and ComfyUI video steps run a small clip's steps
-  faster: they evaluate each step in as few pieces as `gmlx video generate`.
+- `gmlx serve` video jobs and ComfyUI video steps evaluate a step as
+  `gmlx video generate` does, so a small clip's steps take less time.
 - `gmlx init` and `--with-embeddings` set up EmbeddingGemma 2.
   `embeddings: true` still picks `qwen3-embed-0.6b`.
 - `prompt_name` and `dimensions` work on EmbeddingGemma and

@@ -178,7 +178,7 @@ gmlx video generate h3 --int8 attention --prompt "..."
 |---|---|---|
 | `off` | nothing (the default) | the file's |
 | `attention` | the attention | the file's |
-| `linears` | the four linear layers of each block | 8.4 GB more on the Q4_K file |
+| `linears` | the linear layers of each block, and FastH3's attention gates | 8.4 GB more on the Q4_K file, 9.3 GB on `fasth3`'s |
 | `all` | the attention and the linear layers | 8.4 GB more on the Q4_K file |
 
 With `attention`, a step takes less time on a large or long clip, such
@@ -193,9 +193,7 @@ For `linears` and `all`, gmlx converts the weights of those layers to
 int8 as the DiT loads, which is where the extra memory goes. The memory
 check counts it, so a clip that fits at `off` can be refused at
 `linears`. `fasth3` runs at `linears` and refuses `attention` and `all`,
-since int8 attention replaces dense attention and FastH3's is sparse. At
-`linears` it also converts the gate of its sparse attention in each
-block, so its DiT holds 9.3 GB more.
+since int8 attention replaces dense attention and FastH3's is sparse.
 
 ### Run an entry in int8
 
@@ -253,16 +251,17 @@ The largest clip each Mac makes:
 | 48 GB | 1344x768 up to 10 s, or 768x768 up to 15 s | 1344x768 up to 15 s | 1344x768, 5 s, or 768x768 up to 15 s |
 | 64 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s | 1344x768 up to 15 s |
 
-At [`--int8 linears` or `all`](#faster-clips-with-int8), `h3` and
-`h3-fast` need a larger Mac. These rows are for the Q4_K file that
-`gmlx video pull h3` downloads:
+At [`--int8 linears` or `all`](#faster-clips-with-int8), each model
+needs a larger Mac. These rows are for the files that `gmlx video pull`
+downloads:
 
-| Mac memory | `h3` and `h3-fast` at `linears` or `all` |
-|------------|-------------------------------------------|
-| 32 GB | No clip |
-| 36 GB | None at 768x768 or larger |
-| 48 GB | 1344x768, 5 s, or 768x768 up to 10 s |
-| 64 GB or more | 1344x768 up to 15 s |
+| Mac memory | `h3` and `h3-fast` at `linears` or `all` | `fasth3` at `linears` |
+|------------|-------------------------------------------|-----------------------|
+| 32 GB | No clip | No clip |
+| 36 GB | None at 768x768 or larger | None at 768x768 or larger |
+| 48 GB | 1344x768, 5 s, or 768x768 up to 10 s | 768x768, 5 s |
+| 64 GB | 1344x768 up to 15 s | 1344x768 up to 10 s, or 768x768 up to 15 s |
+| 96 GB or more | 1344x768 up to 15 s | 1344x768 up to 15 s |
 
 [Keyframes and guides](#keyframes-and-guides) take more memory. The
 smallest Mac that makes a 5 second `h3` clip with them on the command
