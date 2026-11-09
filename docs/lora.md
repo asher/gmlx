@@ -280,17 +280,9 @@ of the block's adapters on. In `gmlx serve` the other steps keep the fused
 speed. `gmlx run`, `--bench` included, and `gmlx chat` run every step of
 an adapted block unfused.
 
-An expert adapter on such a model needs the experts in memory. A load that
-streams the experts, such as one with `--stream-experts` or a model too
-large for memory, refuses it. To stream them anyway, set
-`GMLX_FUSED_MOE_BLOCK=0`, which loads the blocks unfused:
-
-```sh
-GMLX_FUSED_MOE_BLOCK=0 gmlx serve --config ~/.config/gmlx/gmlx.yaml
-```
-
-On gpt-oss and on native-FP expert stacks, an expert adapter needs
-`GMLX_FUSED_MOE=0`, which loads every MoE block unfused.
+An expert adapter also works on a load that streams the experts from
+disk. Its tables stay in memory beside the streamed experts, and the
+memory budget counts them.
 
 ## Limitations
 

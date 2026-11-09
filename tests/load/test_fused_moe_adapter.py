@@ -419,6 +419,38 @@ def test_a_table_only_offload_wrap_keeps_the_adapted_block(kq_calls, monkeypatch
     assert mx.array_equal(off, pre)
 
 
+def test_an_arena_swap_maps_each_slot_to_its_owner_expert():
+    """Under expert streaming the fused switch gathers from an arena whose
+    rows are slots, here 6 slots for 4 experts. Each slot gives its owner
+    expert's output with that expert's delta, and a dead slot gives zero."""
+    from gmlx.stream.feeder_common import swapped_weights
+
+    shell = _qwen3next_shell()
+    _install(shell, ["mlp.switch_mlp.down_proj"])
+    glu = shell.mlp.switch_mlp
+    owner = np.array([2, -1, 0, 3, 1, -1], dtype=np.int32)
+    live = owner >= 0
+
+    def arena(w):
+        rows = mx.take(w, mx.array(np.where(live, owner, 0).astype(np.uint32)), axis=0)
+        keep = mx.array(live).reshape((-1,) + (1,) * (w.ndim - 1))
+        return mx.where(keep, rows, mx.zeros_like(rows))
+
+    views = {k: arena(getattr(glu, f"{k}_proj").weight) for k in ("gate", "up", "down")}
+    x = mx.concatenate([_x(2), _x(3)], axis=0)
+    slots = np.array([[[0, 3]], [[4, 2]]], dtype=np.uint32)
+    experts = mx.array(owner[slots].astype(np.uint32))
+    on, off = _rows(1, u1=(1.0,)), _rows(1, u0=(0.0,))
+    with swapped_weights({k: (glu,) for k in views}, views, slot_owner=lambda: owner):
+        got = _run(on, [1, 1], lambda: glu(x, mx.array(slots)))
+        dead = _run(on, [1], lambda: glu(x[:1], mx.array([[[1, 5]]], dtype=mx.uint32)))
+    ref = _run(on, [1, 1], lambda: glu(x, experts))
+    base = _run(off, [0, 0], lambda: glu(x, experts))
+    assert _rel(base, ref) > 0.2
+    assert _rel(got, ref) < 0.03
+    assert mx.array_equal(dead, mx.zeros_like(dead))
+
+
 QE, QK = 64, 6
 
 

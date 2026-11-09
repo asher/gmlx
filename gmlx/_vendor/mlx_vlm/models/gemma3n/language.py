@@ -123,6 +123,7 @@ class Gemma3nAttention(nn.Module):
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
+        kv_handoff: Optional[dict] = None,
     ) -> mx.array:
         B, L, _ = x.shape
 
@@ -131,10 +132,12 @@ class Gemma3nAttention(nn.Module):
         queries = self.q_norm(queries)
 
         offset = 0
-        if self.is_kv_shared_layer and cache is not None:
-            state = cache.state
-            keys, values = state[0], state[1]
-            offset = cache.offset
+        if self.is_kv_shared_layer and kv_handoff:
+            # gmlx: a shared layer takes the keys, values and position offset
+            # its source layer used in this pass. ``cache.state`` is not the
+            # attended keys of a batch cache, and ``cache.offset`` has already
+            # moved past these tokens.
+            keys, values, offset = kv_handoff["kv"]
 
         else:
 
@@ -154,6 +157,8 @@ class Gemma3nAttention(nn.Module):
 
             if cache is not None:
                 keys, values = cache.update_and_fetch(keys, values)
+            if kv_handoff is not None:
+                kv_handoff["kv"] = (keys, values, offset)
 
         queries = queries.transpose(0, 2, 1, 3)
         queries = self.rope(queries, offset=offset)
@@ -344,6 +349,7 @@ class Gemma3nDecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
         per_layer_input: Optional[mx.array] = None,
+        kv_handoff: Optional[dict] = None,
     ):
         predictions = self.altup.predict(x)
         active_prediction = predictions[self.config.altup_active_idx]
@@ -355,6 +361,7 @@ class Gemma3nDecoderLayer(nn.Module):
             active_prediction_normed,
             mask,
             cache,
+            kv_handoff,
         )
 
         attn = self.post_attention_layernorm(attn)
@@ -539,6 +546,7 @@ class Gemma3Model(nn.Module):
         mags = mx.mean(h[1:] ** 2, axis=-1, keepdims=True) ** 0.5
         h[1:] = h[1:] * (target_magnitude / mx.maximum(mags, mx.finfo(h0.dtype).min))
 
+        handoff: dict = {}
         for i, layer in enumerate(self.layers):
             per_layer_input = per_layer_inputs[:, :, i, :]
 
@@ -550,11 +558,13 @@ class Gemma3Model(nn.Module):
             elif mask is None:
                 local_mask = sliding_window_mask
 
+            cache_idx = self.layer_idx_to_cache_idx[i]
             h = layer(
                 h,
                 local_mask,
-                cache[self.layer_idx_to_cache_idx[i]],
+                cache[cache_idx],
                 per_layer_input,
+                handoff.setdefault(cache_idx, {}),
             )
 
         # Per-layer inputs to single output

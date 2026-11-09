@@ -136,7 +136,9 @@ def fuse_shexp_gate_up(
     return arrays, kquant_meta, len(pairs)
 
 
-def split_fused_gate_up_kquant(w: mx.array) -> tuple[mx.array, mx.array]:
+def split_fused_gate_up_kquant(
+    w: mx.array, contiguous: bool = True,
+) -> tuple[mx.array, mx.array]:
     """Split a fused MoE gate-up wire-byte tensor along the byte-axis midpoint.
 
     Input shape (after GGUF axis reversal): ``(n_experts, 2 * intermediate,
@@ -152,12 +154,15 @@ def split_fused_gate_up_kquant(w: mx.array) -> tuple[mx.array, mx.array]:
     per-gather prefill cost (and the per-call strided-access overhead at
     decode). Memory-neutral: the two halves sum to the fused tensor's size, and
     the fused array is freed after the split. (Load-bearing for prefill perf.)
+    ``contiguous=False`` returns the two strided views instead.
     """
     if w.ndim != 3:
         raise ValueError(f"expected 3D fused expert tensor, got shape {w.shape}")
     half = w.shape[-2] // 2
-    return (mx.contiguous(w[..., :half, :]),
-            mx.contiguous(w[..., half:, :]))
+    gate, up = w[..., :half, :], w[..., half:, :]
+    if not contiguous:
+        return gate, up
+    return mx.contiguous(gate), mx.contiguous(up)
 
 
 def qk_permute_wire(w: mx.array, n_head: int) -> mx.array:

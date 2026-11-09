@@ -368,7 +368,7 @@ def test_unsupported_expert_fusions_still_raise(name):
     glu.__class__ = type(name, (type(glu),), {})
     model = _Holder(glu)
     with pytest.raises(NotImplementedError,
-                       match=f"{name}.*gpt-oss and native-FP expert fusions"):
+                       match=f"{name}.*GMLX_NATIVE_FP=packed"):
         _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0)
 
 
@@ -408,7 +408,6 @@ def test_install_records_adapter_slots_on_the_gated_block():
         alpha=1.0, arch="qwen3moe", modules={
             path: _lm(mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0, path)}))
     assert blk._kq_lora_slots == (0,)
-    assert blk._kq_expert_lora is True
     path = "layers.0.mlp.shared_expert.down_proj"
     modules.install_lora_adapter(model, adapter.LoraAdapter(
         alpha=1.0, arch="qwen3moe", modules={path: _dense(path, 16, 8)}), slot=1)
@@ -417,16 +416,6 @@ def test_install_records_adapter_slots_on_the_gated_block():
     modules.install_lora_adapter(model, adapter.LoraAdapter(
         alpha=1.0, arch="qwen3moe", modules={path: _dense(path, 8, 4)}), slot=2)
     assert blk._kq_lora_slots == (0, 1)
-
-
-def test_a_dense_adapter_on_the_gated_block_marks_no_expert_target():
-    model = _Layers()
-    path = "layers.0.mlp.shared_expert.up_proj"
-    modules.install_lora_adapter(model, adapter.LoraAdapter(
-        alpha=1.0, arch="qwen3moe", modules={path: _dense(path, 8, 16)}))
-    blk = model.layers[0].mlp
-    assert blk._kq_lora_slots == (0,)
-    assert "_kq_expert_lora" not in vars(blk)
 
 
 def test_expert_lora_drops_the_shexp_fold_stamp():

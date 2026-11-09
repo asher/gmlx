@@ -15,15 +15,18 @@ unadapted layers, where the fused router keeps float32. Their bound is the
 same step's gap with the slot off plus half the move, so it fails when the
 delta is skipped, but not when one adapted layer is.
 
+A gpt-oss file runs the same adapter on its default load, whose experts
+stay K-quant wire bytes under the fused switch.
+
 ``integration``; skips unless ``KQUANT_TEST_GGUF_DIR`` holds a qwen35moe
-GGUF, or the Qwen3.8-Flash-Next UD-IQ4_XS shards for the qwen4exp row.
+GGUF, a qwen4exp GGUF (Qwen3.8-Flash-Next) for the qwen4exp row, or a
+gpt-oss GGUF for the gpt-oss row.
 """
 
 from __future__ import annotations
 
 import gc
 import os
-from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
@@ -57,9 +60,12 @@ MIN_MOVE = 0.05
 # measured 0.027 with the slot on and 0.021 with it off. An adapted owned
 # block, verify against plain, at the verify input: measured 0.0045.
 VERIFY_TOL = 0.05
+# gpt-oss-20b MXFP4 (M3 Max): the logits move 0.040 from the base with the
+# slot on, and an adapted switch 0.069 (0.0047 from stock); the same adapter
+# shape moves qwen35moe more.
+GPT_OSS_MIN_MOVE = 0.02
+GPT_OSS_SWITCH_MOVE = 0.03
 
-FLASH_NEXT = "Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf"
-FLASH_NEXT_BYTES = 93_682_584_224
 
 
 @pytest.fixture(autouse=True)
@@ -76,16 +82,17 @@ def _qwen35moe(gguf_index):
     return paths[0]
 
 
-def _flash_next(gguf_index):
-    hit = [p for p in gguf_index.get("qwen4exp", ()) if Path(p).name == FLASH_NEXT]
-    if not hit:
-        pytest.skip(f"no {FLASH_NEXT} under KQUANT_TEST_GGUF_DIR")
-    shards = [Path(hit[0]).with_name(FLASH_NEXT.replace("00001-of", f"0000{i}-of"))
-              for i in (1, 2, 3)]
-    if not all(p.is_file() for p in shards) or \
-            sum(p.stat().st_size for p in shards) != FLASH_NEXT_BYTES:
-        pytest.skip("the Flash-Next UD-IQ4_XS shards are missing or of another size")
-    return hit[0]
+def _qwen4exp(gguf_index):
+    """A qwen4exp GGUF (Qwen3.8-Flash-Next) whose shards are all present."""
+    from gmlx.load.preflight import find_split_shards
+
+    for path in gguf_index.get("qwen4exp", ()):
+        try:
+            find_split_shards(path)
+        except FileNotFoundError:
+            continue
+        return path
+    pytest.skip("no complete 'qwen4exp' GGUF under KQUANT_TEST_GGUF_DIR")
 
 
 def _mint(gguf, tmp_path):
@@ -104,6 +111,8 @@ def _mint(gguf, tmp_path):
         pairs[f"blk.{i}.ffn_down_exps.weight"] = (
             rng.standard_normal((e, 1, inter)) / np.sqrt(inter),
             rng.standard_normal((e, hidden, 1)) * 0.5)
+        if f"blk.{i}.ffn_down_shexp.weight" not in shapes:
+            continue
         s_inter, hidden = shapes[f"blk.{i}.ffn_down_shexp.weight"]
         pairs[f"blk.{i}.ffn_down_shexp.weight"] = (
             rng.standard_normal((1, s_inter)) / np.sqrt(s_inter),
@@ -206,7 +215,6 @@ def _fused_block_check(gguf, tmp_path, monkeypatch):
         apply_gguf_adapter(raw, config, adapter_path, base_arch=arch)
         adapted = [b for b in blocks if b.__dict__.get("_kq_lora_slots")]
         assert len(adapted) == len(LAYERS)
-        assert all(b._kq_expert_lora for b in adapted)
         for b in blocks:
             assert (type(b), b.__dict__.get("_kq_shexp_fold", True)) == before[id(b)]
         folds = _fold_calls(monkeypatch)
@@ -259,9 +267,74 @@ def test_qwen35moe_plain_load_folds_off_and_matches_unfused_on(
     _fused_block_check(_qwen35moe(gguf_index), tmp_path, monkeypatch)
 
 
-def test_flash_next_folds_off_and_matches_unfused_on(gguf_index, tmp_path,
-                                                     monkeypatch):
-    _fused_block_check(_flash_next(gguf_index), tmp_path, monkeypatch)
+def test_gpt_oss_default_load_takes_an_expert_adapter(gguf_index, tmp_path,
+                                                       monkeypatch):
+    from gmlx import load_model
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
+    from gmlx.load.adapter import apply_gguf_adapter
+
+    paths = gguf_index.get("gpt-oss")
+    if not paths:
+        pytest.skip("no 'gpt-oss' GGUF under KQUANT_TEST_GGUF_DIR")
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.delenv("GMLX_NATIVE_FP", raising=False)
+    adapter_path, arch = _mint(paths[0], tmp_path)
+    raw, config, tok = load_model(paths[0], verbose=False)
+    try:
+        names = {type(m).__name__ for _, m in raw.named_modules()}
+        assert "_FusedKQuantSwitchGLU" in names
+        assert not names & {"_FusedGptOssMLPBlock", "_FusedNativeFPSwitchGLU"}
+        ids = list(tok.encode(PROMPT))
+        reg = _registry()
+
+        def step(uid):
+            return _run(raw, make_prompt_cache(raw), ids[:-1], ids[-1:], reg,
+                        uid)[-1]
+
+        base = step(0)
+        apply_gguf_adapter(raw, config, adapter_path, base_arch=arch)
+        assert np.array_equal(step(0), base)
+        adapted = [m for _, m in raw.named_modules()
+                   if "_FusedKQuantSwitchGLU" in
+                   {c.__name__ for c in type(m).__mro__}
+                   and getattr(getattr(m, "down_proj", None), "_kq_lora",
+                               None) is not None]
+        assert len(adapted) == len(LAYERS)
+        seen = {}
+        cls = type(adapted[0])
+        orig = cls.__call__
+
+        def rec(self, x, indices, *a, **k):
+            if x.size // x.shape[-1] == 1:
+                seen.setdefault(id(self), (x, indices))
+            return orig(self, x, indices, *a, **k)
+
+        with monkeypatch.context() as m:
+            m.setattr(cls, "__call__", rec)
+            on = step(1)
+        move = _rel(on, base)
+        print(f"[{arch}] logits: slot on vs base {move:.4f}")
+        assert move > GPT_OSS_MIN_MOVE
+        for sw in adapted:
+            x, indices = seen[id(sw)]
+            with lora_rows.bind(reg), lora_rows.published([1]):
+                got = _np(sw(x, indices))
+                with monkeypatch.context() as m:
+                    m.setattr(modules, "_FUSED_MOE_ENABLED", False)
+                    stock = _np(sw(x, indices))
+            with lora_rows.bind(reg), lora_rows.published([0]):
+                bare = _np(sw(x, indices))
+            print(f"[{arch}] switch: vs stock {_rel(got, stock):.4f}, "
+                  f"move {_rel(got, bare):.4f}")
+            assert _rel(got, stock) < BLOCK_TOL
+            assert _rel(got, bare) > GPT_OSS_SWITCH_MOVE
+    finally:
+        _free(raw)
+
+
+def test_qwen4exp_folds_off_and_matches_unfused_on(gguf_index, tmp_path,
+                                                    monkeypatch):
+    _fused_block_check(_qwen4exp(gguf_index), tmp_path, monkeypatch)
 
 
 def test_qwen35moe_mtp_verify_applies_the_expert_adapter(gguf_index, tmp_path,

@@ -67,6 +67,7 @@ CANDIDATE_ARCHES = [
     "k2-horizon",
     "ricursive",
     "graniteswitch",
+    "gemma3n",
 ]
 
 # Deliberately varying lengths -> a ragged batch -> exercises the left-padding /

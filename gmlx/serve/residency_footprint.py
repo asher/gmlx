@@ -116,30 +116,18 @@ def _drafter_bytes(model_path: str, build_spec) -> int:
     return mtp_block_bytes(model_path)
 
 
-def _refuse_streamed_fused_adapter(model_path, build_spec, env) -> None:
-    """Raise before a streamed load whose adapters adapt the experts of a
-    fused MoE block. ``env`` is the build's env window at the call."""
-    from gmlx.load.adapter import fused_expert_lora_refusal
-
-    effective = getattr(build_spec, "effective_adapters", None)
-    paths = effective() if callable(effective) else ()
-    why = fused_expert_lora_refusal(
-        str(model_path), paths, env,
-        mtp=bool(getattr(build_spec, "speculative", False)))
-    if why:
-        raise ValueError(why)
-
-
 def text_adapter_bytes(build_spec) -> int:
-    """The resident bytes of the text adapters a chat entry loads: twice
-    each file of the entry's adapter union. The load copies the tensors
-    out of the file, and the per-dtype tables add at most that again. A
-    missing file prices at 0; its load fails."""
+    """The resident bytes of the text adapters a chat entry loads, each
+    file of the entry's adapter union priced by ``adapter_resident_bytes``.
+    A missing file prices at 0; its load fails."""
+    from gmlx.load.adapter import adapter_resident_bytes
+
     effective: Callable[[], tuple[str, ...]] | None = getattr(
         build_spec, "effective_adapters", None)
     if not callable(effective):
         return 0
-    return sum(2 * os.path.getsize(p) for p in effective() if os.path.isfile(p))
+    return sum(adapter_resident_bytes(os.path.getsize(p))
+               for p in effective() if os.path.isfile(p))
 
 
 def _plain_footprint(model_path, file_bytes: int, env=None) -> int:

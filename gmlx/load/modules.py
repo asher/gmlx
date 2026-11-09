@@ -20,7 +20,6 @@ so generalizing architecture coverage never touches this file.
 from __future__ import annotations
 
 import os
-from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -2629,19 +2628,18 @@ def lora_epilogue_wins(rows: int, rank: int) -> bool:
 def _lora_epilogue_kwargs(lo, idx, dtype):
     """The kq ``lora_*`` kwargs for an expert target's fused down exit, or
     ``None`` when the in-op epilogue cannot take this call (older kq build,
-    CPU device, or a rank x k intermediate past the kernel's bound), in
-    which case the caller computes the delta with plain ops."""
-    if not _KQ_LORA_EPILOGUE or _lora_on_cpu():
+    CPU device, a rank x k intermediate past the kernel's bound, or a
+    streaming swap), in which case the caller computes the delta with plain
+    ops. Under a swap the stack is the arena, and kq rejects ``lora_a``
+    whose leading dim differs from the stack's row count, with
+    ``lora_table`` or without, so the slot-to-expert table cannot ride."""
+    if not _KQ_LORA_EPILOGUE or _lora_on_cpu() or lo.owner is not None:
         return None
     t, k = idx.shape
     a_t, b_t = lo.tables(dtype)
     if a_t.shape[-1] * k > 512:
         return None
     kw = {"lora_a": a_t, "lora_b": b_t}
-    if lo.owner is not None:
-        # Arena slot ids -> adapter expert ids inside the kernel; negative
-        # owners (dead slots) skip the row.
-        kw["lora_table"] = mx.array(np.asarray(lo.owner(), dtype=np.int32))
     rows = lora_rows.flat_rows(lo.slot, t, k)
     if rows is not None:
         kw["lora_rows"] = rows
@@ -2883,12 +2881,10 @@ def _lora_container_blocked(*mods) -> str | None:
     return None
 
 
-def _stamp_gate_slots(by_path: dict, paths, slot: int, *,
-                      expert: bool = False) -> None:
+def _stamp_gate_slots(by_path: dict, paths, slot: int) -> None:
     """Record ``slot`` on the nearest ancestor of each path whose class
     names the child the path runs through in ``_kq_lora_gate``, so its
-    fused path can tell when an adapted member has a slot on. ``expert``
-    marks an expert-stack target, which only the streaming refusal reads."""
+    fused path can tell when an adapted member has a slot on."""
     for path in paths:
         parts = path.split(".")
         for i in range(len(parts) - 1, -1, -1):
@@ -2900,33 +2896,7 @@ def _stamp_gate_slots(by_path: dict, paths, slot: int, *,
                 slots = set(owner.__dict__.get("_kq_lora_slots", ()))
                 slots.add(int(slot))
                 object.__setattr__(owner, "_kq_lora_slots", tuple(sorted(slots)))
-                if expert:
-                    object.__setattr__(owner, "_kq_expert_lora", True)
             break
-
-
-def refuse_streamed_fused_expert_lora(model) -> None:
-    """Raise when a fused MoE block in ``model``'s decoder layers carries
-    an expert adapter target. Expert streaming calls this before it wraps,
-    wires or credits anything."""
-    layers: Any = getattr(model, "layers", None)
-    if layers is None:
-        layers = getattr(getattr(model, "model", None), "layers", None) or ()
-    hits: list[str] = []
-    for i, layer in enumerate(layers):
-        walk: Any = getattr(layer, "named_modules", None)
-        mods = (list(walk()) if walk is not None
-                else [("", m) for m in layer.modules()])
-        hits += [f"layers.{i}.{p}".rstrip(".") for p, m in mods
-                 if getattr(m, "__dict__", {}).get("_kq_expert_lora")]
-    if hits:
-        n = (f"{len(hits)} blocks carry" if len(hits) > 1 else "1 block carries")
-        raise NotImplementedError(
-            f"expert LoRA on a fused MoE block needs the routed experts in "
-            f"memory, and this load streams them. {n} expert targets, the "
-            f"first at {hits[0]}. Load the model without "
-            f"expert streaming, use an adapter without expert targets, or set "
-            f"GMLX_FUSED_MOE_BLOCK=0 to load the blocks unfused.")
 
 
 def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
@@ -2968,9 +2938,10 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
         if blocked:
             raise NotImplementedError(
                 f"expert LoRA target {path!r}: owner path runs through "
-                f"{blocked}, which bypasses the SwitchGLU forward (gpt-oss "
-                f"and native-FP expert fusions are not supported; "
-                f"GMLX_FUSED_MOE=0 loads them unfused)")
+                f"{blocked}, which bypasses the SwitchGLU forward (the "
+                f"packed native-FP expert fusions that GMLX_NATIVE_FP=packed "
+                f"builds are not supported; the default GMLX_NATIVE_FP=auto "
+                f"load, or GMLX_FUSED_MOE=0, takes the adapter)")
         if lm.transform != "passthrough":
             raise NotImplementedError(
                 f"expert LoRA target {path!r} has unsupported transform "
@@ -2997,7 +2968,7 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
         if not isinstance(container, tuple(classes.values())) \
                 and type(container).__name__ != "_LoRASwitchGLU":
             _swap_class(container, classes, _make_lora_switch_glu, None)
-        _stamp_gate_slots(by_path, (path,), slot, expert=True)
+        _stamp_gate_slots(by_path, (path,), slot)
     return len(targets)
 
 

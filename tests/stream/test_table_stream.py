@@ -509,6 +509,69 @@ def test_the_stream_flag_s_arena_share_keys_on_the_tables_streaming(
     assert f"[stream] streaming: model 0 GB{why} - 1 MoE layers' " in out + err
 
 
+def test_a_streamed_expert_adapter_counts_in_the_arena_not_the_plan(monkeypatch):
+    """An expert adapter's tables stay in memory beside the arena. The arena
+    sizing sees them on top of the weights, priced as serve prices an
+    adapter file, and the streaming plan sees the same figures as a load
+    without the adapter."""
+    import types
+
+    import gmlx.gen.prefill_decay as decay
+    import gmlx.stream.budget as sbudget
+    import gmlx.stream.pin_weights as pins
+    import gmlx.stream.prefetch as prefetch
+    from gmlx.load.adapter import adapter_resident_bytes
+    from gmlx.load.modules import ExpertLoRA
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
+    monkeypatch.setattr(prefetch, "maybe_make_prefetcher",
+                        lambda path: types.SimpleNamespace(offsets={}))
+    monkeypatch.setattr(pins, "cast_copies", lambda m, p: types.SimpleNamespace(
+        dead_bytes=0, names=frozenset()))
+    monkeypatch.setattr(pins, "maybe_pin_weights", lambda *a, **kw: None)
+    monkeypatch.setattr(sbudget, "kv_room_bytes",
+                        lambda p, **kw: types.SimpleNamespace(bytes=0))
+    monkeypatch.setattr(decay, "note_streamed_tracked_bytes",
+                        lambda *a, **kw: None)
+    monkeypatch.setattr("gmlx.gen.prefill_decay.deduct_untracked_weights",
+                        lambda n, key=None: None)
+    seen: dict = {}
+    plan = ts.stream_plan
+
+    class Reached(Exception):
+        pass
+
+    def arena(total, *a, **kw):
+        seen["arena"] = total
+        raise Reached
+
+    def spy_plan(*a, **kw):
+        seen["plan"] = (a, kw)
+        return plan(*a, **kw)
+
+    monkeypatch.setattr("gmlx.stream.expert_streaming._decode_arena_bytes",
+                        arena)
+    monkeypatch.setattr(ts, "stream_plan", spy_plan)
+
+    def run(lo):
+        model, glu, rest, _ = _file_table_model()
+        _fake_budget(monkeypatch, rest - 1)
+        if lo is not None:
+            object.__setattr__(glu.down_proj, "_kq_lora", lo)
+        with pytest.raises(Reached):
+            install_expert_streaming(model, gguf_path="m.gguf", explicit=True,
+                                     feeder_prefill=False, feeder_decode=False)
+        return seen["arena"], seen["plan"]
+
+    bare, bare_plan = run(None)
+    lo = ExpertLoRA(mx.zeros((4, 64, 2)), mx.zeros((4, 2, 32)), 1.0)
+    adapted, adapted_plan = run(lo)
+    assert adapted - bare == adapter_resident_bytes(lo.nbytes) > 0
+    assert adapted_plan == bare_plan
+
+
 def test_the_stream_flag_under_the_budget_streams_table_and_experts(monkeypatch):
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")

@@ -45,22 +45,31 @@ def _expert_bytes(li: int, kind: str, e: int) -> bytes:
     return bytes((start + i) % 251 for i in range(_STRIDE[kind]))
 
 
-def _make_fixture(tmp_path, n_layers=2, down_scale=None):
+def _make_fixture(tmp_path, n_layers=2, down_scale=None, fused=False):
     """Temp 'GGUF' + offsets map + fake modules whose weights are numpy
     copies of the file bytes (so the zero-copy verification passes).
     ``down_scale`` is an (attribute, value) weight scale for each down
-    stack."""
+    stack. ``fused`` stores each layer's gate and up as one gate_up range,
+    each expert's gate bytes then its up bytes, as Gemma 4 files do; the
+    modules still hold separate gate and up stacks, as the loader's split
+    leaves them."""
     blob = bytearray()
     offsets: dict[int, list] = {}
     modules: dict[int, list] = {}
     for li in range(n_layers):
         mod = _Mod()
         offsets[li] = []
-        for kind in _KINDS:
+        if fused:
             off = len(blob)
+            blob += b"".join(_expert_bytes(li, "gate", e)
+                             + _expert_bytes(li, "up", e) for e in range(_E))
+            offsets[li].append(("PATH", off, len(blob) - off, _E, "gate_up"))
+        for kind in _KINDS:
             stack = b"".join(_expert_bytes(li, kind, e) for e in range(_E))
-            blob += stack
-            offsets[li].append(("PATH", off, len(stack), _E, kind))
+            if not fused or kind == "down":
+                off = len(blob)
+                blob += stack
+                offsets[li].append(("PATH", off, len(stack), _E, kind))
             w = np.frombuffer(stack, dtype=np.uint8).reshape(
                 (_E, 2, _STRIDE[kind] // 2)).copy()
             setattr(mod, f"{kind}_proj", _Proj(w))
@@ -83,7 +92,7 @@ def _fake_arena_alloc(shape):
 
 def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
                  pressure=False, fast_disk="off", lend_bytes=0,
-                 ring_share=0, down_scale=None):
+                 ring_share=0, down_scale=None, fused=False):
     import mlx_kquant as kq
     from gmlx.stream.decode_feeder import DecodeFeeder
 
@@ -100,7 +109,7 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
         # Keep residency tests deterministic: never read the host's real
         # memory-pressure level.
         monkeypatch.setenv("GMLX_DECODE_PRESSURE", "0")
-    offsets, modules = _make_fixture(tmp_path, n_layers, down_scale)
+    offsets, modules = _make_fixture(tmp_path, n_layers, down_scale, fused)
     per_expert = sum(_STRIDE.values())
     return DecodeFeeder(
         offsets, modules, arena_bytes=slots_per_layer * per_expert * n_layers,
@@ -111,6 +120,35 @@ def _make_feeder(monkeypatch, tmp_path, slots_per_layer=2, n_layers=2,
 def _arena_slot(feeder, li, kind, slot):
     view = feeder._views[(li, kind)]
     return bytes(view[slot].reshape(-1))
+
+
+def test_a_biased_expert_stack_is_named_in_the_refusal(monkeypatch,
+                                                       tmp_path):
+    import mlx_kquant as kq
+    from gmlx.stream.decode_feeder import DecodeFeeder
+
+    monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
+    offsets, modules = _make_fixture(tmp_path, 2)
+    for mods in modules.values():
+        mods[0].down_proj.bias = np.zeros((_E, 4), np.float32)
+    with pytest.raises(RuntimeError, match=r"expert stacks with a bias \(2 layers\)"):
+        DecodeFeeder(offsets, modules, arena_bytes=1 << 20)
+
+
+@pytest.mark.parametrize("aligned", ["1", "0"])
+def test_a_fused_gate_up_layer_stages_each_half(monkeypatch, tmp_path,
+                                                aligned):
+    monkeypatch.setenv("GMLX_DECODE_ALIGNED_READS", aligned)
+    feeder, _ = _make_feeder(monkeypatch, tmp_path, slots_per_layer=3,
+                             fused=True)
+    ids = np.array([[0, 3]], dtype=np.uint32)
+    slots = feeder.stage(1, ids)
+    for e, s in zip((0, 3), slots.reshape(-1)):
+        for kind in _KINDS:
+            assert _arena_slot(feeder, 1, kind, int(s)) == _expert_bytes(1, kind, e)
+        feeder._verify_slot(1, e, int(s), "test")
+    assert feeder.stage(1, ids).tolist() == slots.tolist()
+    assert feeder._hits == 2
 
 
 def test_stage_adopts_misses_and_hits_after(monkeypatch, tmp_path):

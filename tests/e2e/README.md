@@ -267,6 +267,7 @@ and the server never uses port 8091 or 8092.
 | --- | --- |
 | `run_server_e2e.py` | orchestrator: phases 0–3, argparse, report writing |
 | `run_lora_e2e.py` | focused runner: GGUF LoRA train → serve → assert the adapter shifts output |
+| `run_moe_lora_e2e.py` | focused runner: an expert adapter on a Qwen3.6 and a Gemma 4 MoE, resident and streamed; fused and unfused blocks agree, the streamed effect matches the resident one |
 | `run_apc_disk_e2e.py` | focused runner: disk-backed APC (`APC_DISK_PATH`) populates from purely sequential single-user traffic, survives a server restart, works under multi-client batching, and is namespace-isolated per model |
 | `run_launch_container_e2e.py` | focused runner: the built-in `gmlx launch` clients in a real Apple container, from images, homes, seeds and shares to sessions and media limits |
 | `run_launch_agents_e2e.py` | focused runner: five `launch.agents` agents in a real Apple container, from installs, web apps, joins, signals and `--detach` to `--remove-home` |

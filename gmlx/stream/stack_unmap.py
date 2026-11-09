@@ -25,7 +25,9 @@ import mlx.core as mx
 
 from .feeder_common import ATTRS, swapped_weights
 
-STAMP = "_kq_stacks_unmapped"   # module attr: {kind: (path, name, shape)}
+# module attr: {kind: (path, name, shape, half)}, half 0 or 1 for a cut
+# of a fused gate_up tensor, else None.
+STAMP = "_kq_stacks_unmapped"
 
 
 def placeholder(w):
@@ -44,27 +46,27 @@ def _names_by_offset(path: str) -> dict[int, str]:
 
 
 def unmap_stacks(layers: dict) -> tuple[int, int]:
-    """Replace the stacks of ``layers`` (a feeder's ``{li: {kind: (module,
-    path, off, nbytes)}}``) with placeholders. Returns the layer and byte
-    counts unmapped."""
+    """Replace the stacks of ``layers`` (the prefill feeder's ``{li: {kind:
+    (module, path, off, nbytes, FeederRange)}}``) with placeholders.
+    Returns the layer and byte counts unmapped."""
     names: dict[str, dict[int, str]] = {}
     n_layers = 0
     nbytes = 0
     for li, entry in layers.items():
         stamps: dict[int, tuple] = {}
-        for kind, (mod, path, off, nb) in entry.items():
+        for kind, (mod, path, _, nb, rng) in entry.items():
             by_off = names.get(path)
             if by_off is None:
                 by_off = names[path] = _names_by_offset(path)
-            name = by_off.get(off)
+            name = by_off.get(rng.tensor_off)
             if name is None:
                 raise RuntimeError(
-                    f"layer {li} {kind} stack: no tensor at offset {off} "
-                    f"of {path}")
+                    f"layer {li} {kind} stack: no tensor at offset "
+                    f"{rng.tensor_off} of {path}")
             proj = getattr(mod, ATTRS[kind])
             w = proj.weight
             files = stamps.setdefault(id(mod), (mod, {}))[1]
-            files[kind] = (path, name, tuple(w.shape))
+            files[kind] = (path, name, tuple(w.shape), rng.half)
             proj.weight = placeholder(w)
             nbytes += nb
         for mod, files in stamps.values():
@@ -78,7 +80,7 @@ def _remap(files: dict) -> dict:
 
     by_path: dict[str, dict] = {}
     views = {}
-    for kind, (path, name, shape) in files.items():
+    for kind, (path, name, shape, half) in files.items():
         arrays = by_path.get(path)
         if arrays is None:
             from .table_pread import oversize_names
@@ -89,6 +91,12 @@ def _remap(files: dict) -> dict:
                 kq.load_gguf(path, True, skip) if skip
                 else kq.load_gguf(path, True))[0]
         a = arrays[name]
+        if half is not None:
+            from gmlx.load.transforms import split_fused_gate_up_kquant
+
+            # A row-strided view: the kernels repack it, which a fallback
+            # call can afford and a copy of the fused stack per call cannot.
+            a = split_fused_gate_up_kquant(a, contiguous=False)[half]
         if tuple(a.shape) != shape:
             if a.size != math.prod(shape):
                 raise RuntimeError(

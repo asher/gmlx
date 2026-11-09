@@ -62,6 +62,8 @@ from .feeder_common import (
     DaemonPool,
     lock_pages,
     copy_experts,
+    no_layers_error,
+    ranges_or_reason,
     read_range,
     swapped_weights,
     unlock_pages,
@@ -464,22 +466,26 @@ class DecodeFeeder:
         # None = follow loadlog; the CLI passes -v (built after its session).
         self._stats_verbose = (
             loadlog.is_verbose() if stats_verbose is None else stats_verbose)
-        # li -> kind -> (module, path, file_off, stride, shape)
+        # li -> kind -> (module, path, file_off, stride, shape, step): expert
+        # e is ``stride`` bytes at file_off + e * step and at slot * stride
+        # in the arena.
         self._layers: dict[int, dict] = {}
         per_expert: dict[int, int] = {}  # li -> bytes per expert, all kinds
         n_experts: dict[int, int] = {}
+        skipped: dict[str, int] = {}
         for li, ranges in offsets.items():
-            kinds = {r[4] for r in ranges}
-            if kinds != set(KINDS) or len(ranges) != len(KINDS):
+            franges, why = ranges_or_reason(ranges)
+            if franges is None:
+                skipped[why] = skipped.get(why, 0) + 1
                 continue
             entry = {}
             total = 0
-            n_exp0 = None
-            for path, off, nbytes, n_exp, kind in ranges:
-                if not n_exp or (n_exp0 is not None and n_exp != n_exp0):
-                    break
-                n_exp0 = n_exp
+            n_exp0 = franges[0].n_exp
+            for rng in franges:
+                path, off, kind, n_exp = rng.path, rng.off, rng.kind, rng.n_exp
+                nbytes = rng.length * n_exp
                 mod = None
+                why = f"no expert module matching the {kind} stack"
                 for m in modules.get(li, ()):
                     proj = getattr(m, ATTRS[kind], None)
                     w = getattr(proj, "weight", None)
@@ -488,22 +494,26 @@ class DecodeFeeder:
                         and w.nbytes == nbytes
                         and w.ndim == 3
                         and w.shape[0] == n_exp
-                        and getattr(proj, "bias", None) is None
                     ):
+                        if getattr(proj, "bias", None) is not None:
+                            why = "expert stacks with a bias"
+                            continue
                         _refuse_expert_scales(proj, path)
                         mod = m
                         break
                 if mod is None:
+                    skipped[why] = skipped.get(why, 0) + 1
                     break
-                stride = nbytes // n_exp
-                entry[kind] = (mod, path, off, stride, tuple(w.shape))
+                stride = rng.length
+                entry[kind] = (mod, path, off, stride, tuple(w.shape),
+                               rng.step)
                 total += stride
-            if len(entry) == len(KINDS):
+            if len(entry) == len(franges):
                 self._layers[li] = entry
                 per_expert[li] = total
                 n_experts[li] = n_exp0
         if not self._layers:
-            raise RuntimeError("no layers with matching gate/up/down stacks")
+            raise no_layers_error(skipped)
 
         # Even per-layer budget split; ``slots`` experts resident per layer.
         per_layer_budget = arena_bytes // len(self._layers)
@@ -598,7 +608,7 @@ class DecodeFeeder:
         self.arena_bytes = 0
         for li, entry in self._layers.items():
             s = self._slots[li]
-            for kind, (_, _, _, stride, shape) in entry.items():
+            for kind, (_, _, _, stride, shape, _) in entry.items():
                 a = kq.arena_alloc([s * stride])
                 unshare_on_fork(a[1])
                 self._arena[(li, kind)] = a
@@ -629,7 +639,7 @@ class DecodeFeeder:
         if self._aligned:
             max_stride = max(
                 stride for entry in self._layers.values()
-                for (_, _, _, stride, _) in entry.values())
+                for (_, _, _, stride, *_) in entry.values())
             self._bounce_bytes = max_stride + 2 * _PAGE
             self._bounce: queue.Queue = queue.Queue()
             for _ in range(read_workers):
@@ -824,8 +834,9 @@ class DecodeFeeder:
     def _verify_zero_copy(self) -> None:
         li = min(self._layers)
         verify_zero_copy(
-            li, ((k, mod, path, off)
-                 for k, (mod, path, off, _, _) in self._layers[li].items()),
+            li, ((k, mod, path, off, stride)
+                 for k, (mod, path, off, stride, *_)
+                 in self._layers[li].items()),
             self._fds)
 
     def covers(self, li: int) -> bool:
@@ -857,10 +868,10 @@ class DecodeFeeder:
 
     def _read_expert(self, li: int, kind: str, e: int, slot: int,
                      bounce: queue.Queue | None = None) -> None:
-        _, path, off, stride, _ = self._layers[li][kind]
+        _, path, off, stride, _, step = self._layers[li][kind]
         mv = self._arena[(li, kind)][1]
         dest = mv[slot * stride:(slot + 1) * stride]
-        off_e = off + e * stride
+        off_e = off + e * step
         n = stride
         if not self._aligned:
             self._bytes_read += n
@@ -892,10 +903,10 @@ class DecodeFeeder:
         """Compare head/mid/tail samples of slot ``s`` against expert
         ``e``'s file bytes; any mismatch is corruption - dump enough state
         to attribute it and raise."""
-        for kind, (_, path, off, stride, _) in self._layers[li].items():
+        for kind, (_, path, off, stride, _, step) in self._layers[li].items():
             mv = self._arena[(li, kind)][1]
             base = s * stride
-            fbase = off + e * stride
+            fbase = off + e * step
             n = min(4096, stride)
             for o in {0, max(0, stride // 2 - n // 2), stride - n}:
                 got = bytes(mv[base + o: base + o + n])
@@ -1387,9 +1398,10 @@ class DecodeFeeder:
             entries = [(li, e) for li, e in self._layers.items()]
             for i in range(_FAST_DISK_PROBE_READS):
                 li, entry = entries[i % len(entries)]
-                _, path, off, stride, shape = entry[KINDS[i % len(KINDS)]]
+                _, path, off, stride, shape, step = entry[
+                    KINDS[i % len(KINDS)]]
                 e = int(rng.integers(0, max(1, shape[0])))
-                picks.append((path, off + e * stride, stride))
+                picks.append((path, off + e * step, stride))
             if not picks:
                 return 0.0
 
@@ -1719,11 +1731,12 @@ class DecodeFeeder:
     # prefill ring copies out of the arena
 
     def arena_sources(
-        self, li: int, geometry: dict[str, tuple[str, int, int]],
+        self, li: int, geometry: dict[str, tuple[str, int, int, int]],
     ) -> ArenaSources | None:
         """The layer's resident experts for a prefill ring stage to copy
         instead of reading, or None. ``geometry`` maps each kind to the
-        ring's (path, offset, nbytes) for the layer, and a layer whose
+        ring's (path, offset, step, bytes per expert) for the layer, and a
+        layer whose
         stacks differ from the arena's gives none. Called on the thread
         that writes the arena, so the residents cannot change before the
         writers' next join."""
@@ -1736,9 +1749,9 @@ class DecodeFeeder:
         entry = self._layers[li]
         if set(geometry) != set(entry):
             return None
-        for kind, (path, off, nbytes) in geometry.items():
-            _, a_path, a_off, stride, shape = entry[kind]
-            if (path, off, nbytes) != (a_path, a_off, stride * shape[0]):
+        for kind, (path, off, step, length) in geometry.items():
+            _, a_path, a_off, stride, _, a_step = entry[kind]
+            if (path, off, step, length) != (a_path, a_off, a_step, stride):
                 return None
         # A later chunk of a cold prompt copies what an earlier one seeded.
         item = self._seeds.get(li)
@@ -1832,7 +1845,7 @@ class DecodeFeeder:
         t0 = time.monotonic()
         entry = self._layers[li]
         jobs = []
-        for kind, (_, _, _, stride, _) in entry.items():
+        for kind, (_, _, _, stride, *_) in entry.items():
             dst = np.frombuffer(self._arena[(li, kind)][1], dtype=np.uint8)
             src = np.frombuffer(ring_mvs[kind], dtype=np.uint8)
             for chunk in np.array_split(pairs, _SEED_COPY_WORKERS):
@@ -2019,7 +2032,7 @@ class DecodeFeeder:
             counts = self._counts[li]
             s = int(cand[np.argmin(counts[owner[cand]])])
             self._slot_of[li][owner[s]] = -1
-        for kind, (_, _, _, stride, _) in self._layers[li].items():
+        for kind, (_, _, _, stride, *_) in self._layers[li].items():
             mv = self._arena[(li, kind)][1]
             np.frombuffer(mv, dtype=np.uint8)[
                 s * stride:(s + 1) * stride] = 0
@@ -2206,7 +2219,7 @@ class DecodeFeeder:
         if resident and rw is not None and rw.held + old_s * row > new_s * row:
             rw.drain()  # at most one grown layer of old buffers waits
         swaps = []
-        for kind, (_, _, _, stride, shape) in entry.items():
+        for kind, (_, _, _, stride, shape, _) in entry.items():
             key = (li, kind)
             a = kq.arena_alloc([new_s * stride])
             unshare_on_fork(a[1])

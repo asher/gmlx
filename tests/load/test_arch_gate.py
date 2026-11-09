@@ -108,15 +108,17 @@ def test_load_config_from_source_hf_id(tmp_path, monkeypatch):
     assert calls["args"] == ("some-org/some-repo", "config.json")
 
 
-def test_disabled_arch_refused_even_with_hf_source():
+def test_disabled_arch_refused_even_with_hf_source(monkeypatch):
     # An arch whose synth/remap/loader are complete but that has no
     # known-good GGUF is gate-disabled. The refusal is intentional and NOT
     # bypassable by an hf_source override (the defect is in the weights, not the
     # config), and the arch is excluded from the no-override loadable set.
-    assert config_synth.DISABLED_ARCHES, "expected at least one disabled arch"
-    for arch in config_synth.DISABLED_ARCHES:
-        assert arch not in config_synth.supported_arches()
-        for kwargs in ({}, {"hf_source": "some/hf-repo"}):
-            with pytest.raises(UnsupportedArchError) as ei:
-                gate(arch, **kwargs)
-            assert "disabled" in str(ei.value).lower()
+    arch = "gemma3n"
+    assert arch in config_synth.supported_arches()
+    monkeypatch.setitem(config_synth.DISABLED_ARCHES, arch, "bad weights")
+    assert arch not in config_synth.supported_arches()
+    for kwargs in ({}, {"hf_source": "some/hf-repo"}):
+        with pytest.raises(UnsupportedArchError) as ei:
+            gate(arch, **kwargs)
+        assert "disabled" in str(ei.value).lower()
+        assert "bad weights" in str(ei.value)
