@@ -363,20 +363,133 @@ class TextModel(nn.Module):
         return self.norm(h)
 
 
+class Towers(nn.Module):
+    """The Gemma 4 vision and audio towers and their projections into the
+    text width. Attribute names follow transformers, so checkpoint keys
+    ``vision_tower.*``, ``embed_vision.*``, ``audio_tower.*`` and
+    ``embed_audio.*`` load into this module unchanged."""
+
+    def __init__(self, text_hidden: int, vision_config: dict | None,
+                 audio_config: dict | None):
+        super().__init__()
+        from gmlx._vendor.mlx_vlm.models.gemma4.audio import AudioEncoder
+        from gmlx._vendor.mlx_vlm.models.gemma4.config import (
+            AudioConfig,
+            VisionConfig,
+        )
+        from gmlx._vendor.mlx_vlm.models.gemma4.gemma4 import MultimodalEmbedder
+        from gmlx._vendor.mlx_vlm.models.gemma4.vision import VisionModel
+
+        self.vision_config = self.audio_config = None
+        if vision_config is not None:
+            vc = VisionConfig.from_dict(vision_config)
+            self.vision_config = vc
+            self.vision_tower = VisionModel(vc)
+            self.embed_vision = MultimodalEmbedder(
+                vc.hidden_size, text_hidden, eps=vc.rms_norm_eps)
+        if audio_config is not None:
+            ac = AudioConfig.from_dict(audio_config)
+            self.audio_config = ac
+            self.audio_tower = AudioEncoder(ac)
+            self.embed_audio = MultimodalEmbedder(
+                ac.output_proj_dims or ac.hidden_size, text_hidden,
+                eps=ac.rms_norm_eps)
+
+    def sanitize(self, weights: dict[str, mx.array]) -> dict[str, mx.array]:
+        """transformers tower weights in this module's layout: the audio
+        convolutions move their input channels last, as MLX convolutions
+        take them. A weight already in MLX layout passes unchanged."""
+        out = {}
+        for k, v in weights.items():
+            if "rotary_emb" in k:
+                continue
+            if (k.endswith("conv.weight") and "subsample_conv_projection" in k
+                    and v.ndim == 4):
+                want_in = (1 if ".layer0." in k
+                           else self.audio_config.subsampling_conv_channels[0])
+                if v.shape[-1] != want_in:
+                    v = v.transpose(0, 2, 3, 1)
+            elif k.endswith("depthwise_conv1d.weight") and v.ndim == 3:
+                if v.shape[-1] != 1:
+                    v = v.transpose(0, 2, 1)
+            out[k] = v
+        return out
+
+    @property
+    def has_vision(self) -> bool:
+        return self.vision_config is not None
+
+    @property
+    def has_audio(self) -> bool:
+        return self.audio_config is not None
+
+    def encode_images(self, pixel_values: mx.array) -> mx.array:
+        """Soft tokens ``[n, text_hidden]`` of same-sized images or video
+        frames ``[B, 3, H, W]`` (values in [0, 1]), in image order."""
+        feats = self.vision_tower(pixel_values)          # [1, n, vision_hidden]
+        return self.embed_vision(feats)[0]
+
+    def encode_audio(self, features: mx.array, valid: mx.array) -> mx.array:
+        """Soft tokens ``[k, text_hidden]`` of one clip: ``features`` is
+        ``[1, frames, mel]`` and ``valid`` ``[1, frames]``, True at real
+        frames. Padded positions are dropped."""
+        enc, pad = self.audio_tower(features, mx.logical_not(valid))
+        keep = int(mx.logical_not(pad[0]).astype(mx.int32).sum().item())
+        # The tower's mask is a prefix of real frames, then padding.
+        return self.embed_audio(enc[:, :keep])[0]
+
+
 class Model(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
         self.model_type = args.model_type
         self.language_model = TextModel(args.text)
+        self.towers: Towers | None = None
+
+    @property
+    def placeholder_ids(self) -> tuple[int, int, int]:
+        """The image, video and audio placeholder token ids."""
+        a = self.args
+        return a.image_token_id, a.video_token_id, a.audio_token_id
+
+    def merge_media(self, input_ids: mx.array,
+                    media: dict[int, mx.array]) -> mx.array:
+        """Input embeddings ``[1, L, hidden]`` of ``input_ids`` ``[1, L]``
+        with each placeholder id's rows replaced, in order, by the rows of
+        ``media[id]`` (soft tokens from the towers, which are not scaled).
+        The placeholders first embed the pad id, as in transformers."""
+        mm = mx.zeros(input_ids.shape, dtype=mx.bool_)
+        for tok in self.placeholder_ids:
+            mm = mx.logical_or(mm, input_ids == tok)
+        text_ids = mx.where(mm, self.args.text.pad_token_id, input_ids)
+        h = self.language_model.embed(text_ids)
+        for tok, feats in media.items():
+            where = (input_ids[0] == tok)
+            n = int(where.astype(mx.int32).sum().item())
+            if n != feats.shape[0]:
+                raise ValueError(
+                    f"{n} placeholder tokens {tok} for {feats.shape[0]} soft tokens")
+            if n == 0:
+                continue
+            # Row r of h takes soft token (number of placeholders before r).
+            order = mx.cumsum(where.astype(mx.int32)) - 1
+            src = feats.astype(h.dtype)[mx.maximum(order, 0)]
+            h = mx.where(where[None, :, None], src[None], h)
+        return h
 
     def __call__(self, input_ids: mx.array | None = None,
                  attention_mask: mx.array | None = None, *,
-                 inputs_embeds: mx.array | None = None) -> EncoderOutput:
+                 inputs_embeds: mx.array | None = None,
+                 media: dict[int, mx.array] | None = None) -> EncoderOutput:
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError("pass exactly one of input_ids or inputs_embeds")
         if inputs_embeds is None:
-            inputs_embeds = self.language_model.embed(input_ids)
+            assert input_ids is not None
+            if media:
+                inputs_embeds = self.merge_media(input_ids, media)
+            else:
+                inputs_embeds = self.language_model.embed(input_ids)
         hidden = self.language_model(inputs_embeds, attention_mask)
         # Mean over the tokens in float32, then the projection: it is
         # linear, so this equals projecting each token and taking the mean.

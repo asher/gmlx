@@ -1188,6 +1188,7 @@ _QWEN3OMNI_A_TOP_MAP = {
 def remap_vision_arrays(
     arrays: dict[str, mx.array], model_type: str, *, with_audio: bool = False,
     mm_codecs: dict[str, str] | None = None, mm_meta: dict | None = None,
+    dequant_dtype: mx.Dtype = mx.float16,
 ) -> tuple[dict[str, mx.array], list[str], dict[str, str]]:
     """Remap an mmproj's tensors onto the mlx-vlm vision tower + projector.
 
@@ -1205,7 +1206,7 @@ def remap_vision_arrays(
     name -> codec) joins the LLM ``hf_kquant_meta`` so ``install_kquant_modules``
     swaps its module. A tensor the family transforms (a conv reshape, a QKV
     split), and every weight of a tower pinned to float by
-    ``float_dtype_rules``, is dequantized to float16 instead.
+    ``float_dtype_rules``, is dequantized to ``dequant_dtype`` instead.
 
     Returns ``(hf_vision_weights, skipped_names, vis_kqmeta)``.
     """
@@ -1220,7 +1221,8 @@ def remap_vision_arrays(
     floats = {k: v for k, v in arrays.items() if not k.endswith(".scales")}
     src_of: dict[int, str] = {}
     for name, codec in codecs.items():
-        deq = dequantize_wire(arrays[name], arrays[_scales_key(name)], codec)
+        deq = dequantize_wire(arrays[name], arrays[_scales_key(name)], codec,
+                              dequant_dtype)
         floats[name] = deq
         src_of[id(deq)] = name
     out, skipped = _remap_float_arrays(floats, model_type,
@@ -1244,17 +1246,19 @@ def _scales_key(weight_name: str) -> str:
     return weight_name[: -len(".weight")] + ".scales"
 
 
-def dequantize_wire(wire: mx.array, scales: mx.array, codec: str) -> mx.array:
-    """GGUF wire bytes as float16 of the tensor's logical shape (blocks run
+def dequantize_wire(wire: mx.array, scales: mx.array, codec: str,
+                    dtype: mx.Dtype = mx.float16) -> mx.array:
+    """GGUF wire bytes as ``dtype`` of the tensor's logical shape (blocks run
     along the last axis)."""
     import mlx_kquant as kq
 
-    return kq.dequantize(wire, scales, codec, mx.float16).reshape(
+    return kq.dequantize(wire, scales, codec, dtype).reshape(
         *wire.shape[:-1], -1)
 
 
 def unpack_unswappable_tower_weights(model, weights: dict[str, mx.array],
-                                     vis_kqmeta: dict[str, str]) -> int:
+                                     vis_kqmeta: dict[str, str],
+                                     dtype: mx.Dtype = mx.float16) -> int:
     """Dequantize, in ``weights``, each packed tower weight whose module is
     not an ``nn.Linear``, and drop it from ``vis_kqmeta``. A tower Embedding,
     conv or custom module reads its weight as a float array. Returns the
@@ -1269,7 +1273,7 @@ def unpack_unswappable_tower_weights(model, weights: dict[str, mx.array],
             continue
         codec = vis_kqmeta.pop(tgt)
         weights[tgt] = dequantize_wire(
-            weights[tgt], weights.pop(_scales_key(tgt)), codec)
+            weights[tgt], weights.pop(_scales_key(tgt)), codec, dtype)
         n += 1
     return n
 
@@ -2814,18 +2818,12 @@ def _gemma4_image_attention(text_config: dict, mm_meta: dict) -> None:
             None if causal else "vision")
 
 
-def _synthesize_gemma4_vlm_config(
-    text_config: dict, mm_meta: dict, *, standardize: bool = False
-) -> dict:
-    """gemma-4 omni config: existing gemma4 text synth + a vision tower from the
-    mmproj's ``clip.vision.*`` metadata, plus an audio tower from ``clip.audio.*``
-    when the mmproj carries one (``clip.has_audio_encoder``). Vision uses
-    ``use_clipped_linears`` False (its clip scalars are dropped); audio uses True
-    (its clip scalars are real bounds the real model applies). ``standardize``
-    enables the post-pooler ``(h - std_bias) * std_scale`` step - set when the
-    mmproj ships ``v.std_scale``/``v.std_bias`` (the 31B SigLIP encoder; E4B
-    omits both). Token ids fall to the gemma-4 defaults; the processor drives
-    soft-token expansion."""
+def gemma4_vision_config(mm_meta: dict, *, standardize: bool = False) -> dict:
+    """The Gemma 4 vision tower config from an mmproj's ``clip.vision.*``
+    metadata. ``use_clipped_linears`` is False (the vision clip scalars are
+    dropped). ``standardize`` enables the post-pooler ``(h - std_bias) *
+    std_scale`` step, for an mmproj that ships ``v.std_scale``/``v.std_bias``
+    (the 31B SigLIP encoder; E4B omits both)."""
     head_count = _mm_int(mm_meta, "clip.vision.attention.head_count")
     hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
     # SigLIP vision is MHA, so kv-heads == q-heads unless the GGUF says otherwise.
@@ -2848,26 +2846,42 @@ def _synthesize_gemma4_vlm_config(
     }
     eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
     if eps is not None:
-        vision_config["layer_norm_eps"] = float(eps)
+        vision_config["rms_norm_eps"] = float(eps)
+    return vision_config
 
-    audio_config = None
-    if mm_meta.get("clip.has_audio_encoder"):
-        a_head = _mm_int(mm_meta, "clip.audio.attention.head_count")
-        audio_config = {
-            "hidden_size": _mm_int(mm_meta, "clip.audio.embedding_length"),
-            "num_hidden_layers": _mm_int(mm_meta, "clip.audio.block_count"),
-            "num_attention_heads": a_head,
-            # llama.cpp hardcodes 1e-6 for every gemma4a model (clip.cpp), ignoring
-            # the GGUF's clip.audio.attention.layer_norm_epsilon (1e-5 here); match.
-            "rms_norm_eps": 1e-6,
-            # The per-block projections that ship clip scalars are ClippableLinear
-            # in the real model; clamp them (faithful to HF / llama.cpp build_mm).
-            "use_clipped_linears": True,
-            # Conformer output-projection width: a gemma4a arch constant, not GGUF
-            # metadata (``a.pre_encode.out`` is [1536, hidden]).
-            "output_proj_dims": 1536,
-        }
 
+def gemma4_audio_config(mm_meta: dict) -> dict | None:
+    """The Gemma 4 audio tower config from an mmproj's ``clip.audio.*``
+    metadata, or None when the mmproj has no audio encoder. Audio uses
+    ``use_clipped_linears`` True (its clip scalars are real bounds the real
+    model applies)."""
+    if not mm_meta.get("clip.has_audio_encoder"):
+        return None
+    return {
+        "hidden_size": _mm_int(mm_meta, "clip.audio.embedding_length"),
+        "num_hidden_layers": _mm_int(mm_meta, "clip.audio.block_count"),
+        "num_attention_heads": _mm_int(mm_meta, "clip.audio.attention.head_count"),
+        # llama.cpp hardcodes 1e-6 for every gemma4a model (clip.cpp), ignoring
+        # the GGUF's clip.audio.attention.layer_norm_epsilon (1e-5 here); match.
+        "rms_norm_eps": 1e-6,
+        # The per-block projections that ship clip scalars are ClippableLinear
+        # in the real model; clamp them (faithful to HF / llama.cpp build_mm).
+        "use_clipped_linears": True,
+        # Conformer output-projection width: a gemma4a arch constant, not GGUF
+        # metadata (``a.pre_encode.out`` is [1536, hidden]).
+        "output_proj_dims": 1536,
+    }
+
+
+def _synthesize_gemma4_vlm_config(
+    text_config: dict, mm_meta: dict, *, standardize: bool = False
+) -> dict:
+    """gemma-4 omni config: existing gemma4 text synth + a vision tower from the
+    mmproj's ``clip.vision.*`` metadata, plus an audio tower from ``clip.audio.*``
+    when the mmproj carries one (``clip.has_audio_encoder``). Token ids fall to
+    the gemma-4 defaults; the processor drives soft-token expansion."""
+    vision_config = gemma4_vision_config(mm_meta, standardize=standardize)
+    audio_config = gemma4_audio_config(mm_meta)
     _gemma4_image_attention(text_config, mm_meta)
     return {
         "model_type": "gemma4",

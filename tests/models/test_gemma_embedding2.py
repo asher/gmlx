@@ -279,3 +279,86 @@ def test_hd512_wrapper_routes_match_stock_attention(length, monkeypatch):
     h_want = np.array(want.last_hidden_state.astype(mx.float32))
     assert _rel_l2(h_got, h_want) < 1e-2
     assert float(np.array(got.text_embeds)[0] @ np.array(want.text_embeds)[0]) > 0.9999
+
+
+@pytest.fixture(scope="module")
+def media_oracle():
+    with np.load(_ORACLE / "media.npz") as f:
+        return {k: f[k] for k in f.files}
+
+
+def _media_model(oracle, media_oracle) -> eg2.Model:
+    config = json.loads(str(media_oracle["config"]))
+    model = eg2.Model(eg2.ModelArgs.from_dict(config))
+    model.load_weights([(k[2:], mx.array(v)) for k, v in oracle.items()
+                        if k.startswith("w.")], strict=True)
+    towers = eg2.Towers(config["text_config"]["hidden_size"],
+                        config["vision_config"], config["audio_config"])
+    weights = towers.sanitize({k[2:]: mx.array(v) for k, v in media_oracle.items()
+                               if k.startswith("w.")})
+    towers.load_weights(list(weights.items()), strict=True)
+    model.towers = towers
+    mx.eval(model.parameters())
+    return model
+
+
+def _pixels(img: np.ndarray) -> mx.array:
+    """``[N, H, W, 3]`` or ``[H, W, 3]`` uint8 as ``[N, 3, H, W]`` in [0, 1]."""
+    x = img.astype(np.float32) / 255.0
+    x = x[None] if x.ndim == 3 else x
+    return mx.array(x.transpose(0, 3, 1, 2))
+
+
+def _media(model, m, case):
+    towers = model.towers
+    image, video, audio = model.placeholder_ids
+
+    def clip(i):
+        return towers.encode_audio(mx.array(m[f"audio.features{i}"][None]),
+                                   mx.array(m[f"audio.mask{i}"][None]))
+
+    def frames():
+        return towers.encode_images(_pixels(m["video.frames"]))
+
+    if case == "image":
+        return {image: mx.concatenate([
+            towers.encode_images(_pixels(m["image.image0"])),
+            towers.encode_images(_pixels(m["image.image1"]))])}
+    if case == "video":
+        return {video: frames()}
+    if case == "audio":
+        return {audio: mx.concatenate([clip(0), clip(1)])}
+    return {image: towers.encode_images(_pixels(m["image.image0"])),
+            audio: clip(1), video: frames()}
+
+
+@pytest.mark.parametrize("case", ["image", "video", "audio", "mixed"])
+def test_media_matches_transformers(oracle, media_oracle, cpu, monkeypatch,
+                                    case):
+    # The reference pads images to a patch budget and runs a video's frames
+    # and an item's clips as one padded batch; gmlx runs each image and
+    # clip alone, unpadded.
+    monkeypatch.setattr(eg2, "Q_BLOCK", 16)
+    model = _media_model(oracle, media_oracle)
+    ids = mx.array(media_oracle[f"{case}.ids"][None])
+    vec = np.array(model(ids, media=_media(model, media_oracle, case)).text_embeds[0])
+    tol = max(10 * float(media_oracle[f"{case}.gap"][0]), 2e-5)
+    assert _rel_l2(vec, media_oracle[f"{case}.vec"]) < tol
+
+
+def test_video_frames_in_chunks_match_one_batch(oracle, media_oracle, cpu):
+    model = _media_model(oracle, media_oracle)
+    px = _pixels(media_oracle["video.frames"])
+    whole = model.towers.encode_images(px)
+    parts = mx.concatenate([model.towers.encode_images(px[i:i + 2])
+                            for i in range(0, px.shape[0], 2)])
+    np.testing.assert_allclose(np.array(parts), np.array(whole),
+                               rtol=1e-5, atol=1e-6)
+
+
+def test_placeholder_count_must_match_the_soft_tokens(oracle, media_oracle, cpu):
+    model = _media_model(oracle, media_oracle)
+    image = model.placeholder_ids[0]
+    ids = mx.array([[2, image, image, 1]])
+    with pytest.raises(ValueError, match="2 placeholder tokens"):
+        model(ids, media={image: mx.zeros((3, 64))})
