@@ -295,11 +295,13 @@ class VisionPatchEmbedder(nn.Module):
     def _position_embeddings(
         self, patch_positions: mx.array, padding_positions: mx.array
     ) -> mx.array:
-        oh = one_hot(patch_positions, self.position_embedding_size)
-        # [B, num_patches, 2, pos_size] -> [B, 2, num_patches, pos_size]
-        oh = oh.transpose(0, 2, 1, 3).astype(self.position_embedding_table.dtype)
-        position_embeddings = oh @ self.position_embedding_table
-        position_embeddings = position_embeddings.sum(axis=1)
+        # gmlx: a gather of one table row per axis, in place of a one-hot
+        # [B, num_patches, 2, pos_size] matmul. Each one-hot row selects one
+        # row, so the sum is the same, without the one-hot's memory.
+        # Padding positions (-1) read row 0 and are zeroed below.
+        table = self.position_embedding_table
+        pos = mx.maximum(patch_positions, 0)
+        position_embeddings = table[0][pos[..., 0]] + table[1][pos[..., 1]]
         position_embeddings = mx.where(
             mx.expand_dims(padding_positions, -1), 0.0, position_embeddings
         )
