@@ -169,6 +169,34 @@ def _rope(x: mx.array, base: float, offset: int = 0) -> mx.array:
     return x * cos + rot * sin
 
 
+def _settled(x: mx.array, length: int) -> mx.array:
+    """``x``, evaluated when ``length`` spans more than one query block.
+    Unevaluated, every block's attention scores stay alive until the blocks
+    join, and the layers of a long input overlap: about twice the peak
+    memory at full context."""
+    if length > Q_BLOCK:
+        mx.eval(x)
+    return x
+
+
+_SETTLED: dict[type, type] = {}
+
+
+def _settle_blocks(blocks: list) -> None:
+    """Make each tower block evaluate its output. Unevaluated, the blocks of
+    one image, video or clip overlap, and the tower takes about twice the
+    memory. The shared Gemma 4 modules stay as they are."""
+    for b in blocks:
+        cls = type(b)
+        if cls not in _SETTLED:
+            def call(self, *args, _base=cls, **kwargs):
+                out = _base.__call__(self, *args, **kwargs)
+                mx.eval(out)
+                return out
+            _SETTLED[cls] = type(cls.__name__, (cls,), {"__call__": call})
+        b.__class__ = _SETTLED[cls]
+
+
 def _band_mask(q0: int, q1: int, k0: int, k1: int, radius: int) -> mx.array:
     """``[q1 - q0, k1 - k0]`` boolean mask allowing ``|q - k| <= radius``."""
     q = mx.arange(q0, q1)[:, None]
@@ -229,8 +257,8 @@ class Attention(nn.Module):
         outs = []
         for q0 in range(0, L, Q_BLOCK):
             q1 = min(L, q0 + Q_BLOCK)
-            outs.append(mx.fast.scaled_dot_product_attention(
-                q[:, :, q0:q1], k, v, scale=1.0, mask=mask))
+            outs.append(_settled(mx.fast.scaled_dot_product_attention(
+                q[:, :, q0:q1], k, v, scale=1.0, mask=mask), L))
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
     def _banded(self, q, k, v, pad):
@@ -242,9 +270,9 @@ class Attention(nn.Module):
             q1 = min(L, q0 + Q_BLOCK)
             k0, k1 = max(0, q0 - w), min(L, q1 + w)
             mask = _combine(_band_mask(q0, q1, k0, k1, w), _key_pad(pad, k0, k1))
-            outs.append(mx.fast.scaled_dot_product_attention(
+            outs.append(_settled(mx.fast.scaled_dot_product_attention(
                 q[:, :, q0:q1], k[:, :, k0:k1], v[:, :, k0:k1],
-                scale=1.0, mask=mask))
+                scale=1.0, mask=mask), L))
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
 
@@ -369,7 +397,8 @@ class TextModel(nn.Module):
             pad = (attention_mask != 0)[:, None, None, :]
         h = inputs_embeds
         for i, layer in enumerate(self.layers):
-            h = layer(h, pad, self.ple.layer_input(inputs_embeds, i))
+            h = _settled(layer(h, pad, self.ple.layer_input(inputs_embeds, i)),
+                         h.shape[1])
         return self.norm(h)
 
 
@@ -395,12 +424,14 @@ class Towers(nn.Module):
             vc = VisionConfig.from_dict(vision_config)
             self.vision_config = vc
             self.vision_tower = VisionModel(vc)
+            _settle_blocks(self.vision_tower.encoder.layers)
             self.embed_vision = MultimodalEmbedder(
                 vc.hidden_size, text_hidden, eps=vc.rms_norm_eps)
         if audio_config is not None:
             ac = AudioConfig.from_dict(audio_config)
             self.audio_config = ac
             self.audio_tower = AudioEncoder(ac)
+            _settle_blocks(self.audio_tower.layers)
             self.embed_audio = MultimodalEmbedder(
                 ac.output_proj_dims or ac.hidden_size, text_hidden,
                 eps=ac.rms_norm_eps)
