@@ -541,8 +541,9 @@ def test_unsupported_model_type_names_the_supported_ones(tmp_path, model_type):
     msg = ei.value.reason
     assert repr(model_type) in msg and str(p) not in msg
     assert msg.startswith(f"model_type {model_type!r} is not a supported "
-                          "embeddings model. Supported: EmbeddingGemma, BERT, "
-                          "XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+                          "embeddings model. Supported: EmbeddingGemma, "
+                          "EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT and "
+                          "Qwen3-Embedding.")
     # A Qwen model type points at the Qwen3-Embedding paths.
     assert ("qwen3-embed-0.6b" in msg) == model_type.startswith("qwen")
     assert set(checkpoint.FAMILIES) == set(checkpoint.MODEL_TYPES)
@@ -570,8 +571,8 @@ def test_gemma3_causal_lm_is_not_an_encoder(tmp_path, cpu):
             "this gemma3_text checkpoint sets no use_bidirectional_attention "
             "and lists no sentence-transformers Dense module, so it is a "
             "Gemma 3 causal LM, not EmbeddingGemma. Supported: "
-            "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and "
-            "Qwen3-Embedding. For EmbeddingGemma, set server.embeddings to "
+            "EmbeddingGemma, EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT "
+            "and Qwen3-Embedding. For EmbeddingGemma, set server.embeddings to "
             "the embeddinggemma alias, the embeddinggemma-gguf GGUF alias, or "
             "an EmbeddingGemma safetensors checkpoint such as "
             "mlx-community/embeddinggemma-300m-8bit.")
@@ -593,8 +594,8 @@ def test_qwen3_causal_lm_is_not_an_encoder(tmp_path, cpu):
     assert ei.value.reason == (
         "this qwen3 checkpoint lists no sentence-transformers Pooling module "
         "and names no Qwen3-Embedding model, so it is a Qwen3 causal LM, not "
-        "Qwen3-Embedding. Supported: EmbeddingGemma, BERT, XLM-RoBERTa, "
-        "ModernBERT and Qwen3-Embedding. For Qwen3-Embedding, set "
+        "Qwen3-Embedding. Supported: EmbeddingGemma, EmbeddingGemma 2, BERT, "
+        "XLM-RoBERTa, ModernBERT and Qwen3-Embedding. For Qwen3-Embedding, set "
         "server.embeddings to the qwen3-embed-0.6b, qwen3-embed-4b or "
         "qwen3-embed-8b GGUF alias, or to a Qwen3-Embedding safetensors "
         "checkpoint such as mlx-community/Qwen3-Embedding-0.6B-8bit.")

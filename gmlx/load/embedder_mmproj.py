@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from gmlx.models.embedders.gemma_embedding2 import TOWER_PREFIXES
+
 from . import loadlog
+
+__all__ = ["TOWER_PREFIXES", "dequant_dtype", "load_towers", "mmproj_mismatch"]
 
 # Projector types of the Gemma 4 towers, by clip section.
 _PROJECTORS = {"vision": "gemma4v", "audio": "gemma4a"}
-
-TOWER_PREFIXES = ("vision_tower.", "embed_vision.", "audio_tower.",
-                  "embed_audio.")
-
 
 def mmproj_mismatch(kv: dict, text_hidden: int) -> str | None:
     """Why the mmproj with the header ``kv`` is not a projector for an
@@ -100,5 +100,13 @@ def load_towers(mmproj_path: str, *, text_hidden: int,
     _install_and_load(towers, weights, kqmeta, log=log, sanitize=False,
                       f16_keep=keep, act_dtype=act_dtype, text_patches=False,
                       source_key=weights_source_key(mmproj_path))
+    if with_vision and act_dtype == mx.float32:
+        # The vision tower casts pixels to its patch projection's dtype, so
+        # a float16 projection would run the tower in float16. In float32
+        # the rest of the tower promotes over its 16-bit weights.
+        proj = towers.vision_tower.patch_embedder.input_proj
+        if proj.weight.dtype == mx.float16:
+            proj.weight = proj.weight.astype(mx.float32)
+            mx.eval(proj.weight)
     towers.eval()
     return towers

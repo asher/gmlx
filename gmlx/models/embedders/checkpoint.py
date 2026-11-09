@@ -30,12 +30,13 @@ from mlx.utils import tree_map
 from gmlx.device import cpu_default_device
 from gmlx.load.dtypes import activation_dtype
 
-from . import bert, gemma_embedding, modernbert, qwen3
+from . import bert, gemma_embedding, gemma_embedding2, modernbert, qwen3
 from .base import POOLING_MODES
 
 # config.json model_type -> encoder module.
 MODEL_TYPES: dict[str, ModuleType] = {
     "gemma3_text": gemma_embedding,
+    "embedding_gemma2": gemma_embedding2,
     "bert": bert,
     "xlm-roberta": bert,
     "xlm_roberta": bert,
@@ -46,6 +47,7 @@ MODEL_TYPES: dict[str, ModuleType] = {
 # The model family each model_type serves, for messages.
 FAMILIES = {
     "gemma3_text": "EmbeddingGemma",
+    "embedding_gemma2": "EmbeddingGemma 2",
     "bert": "BERT",
     "xlm-roberta": "XLM-RoBERTa",
     "xlm_roberta": "XLM-RoBERTa",
@@ -59,6 +61,7 @@ FAMILIES = {
 # last token for a causal LM architecture such as Qwen3-Embedding's.
 DEFAULT_POOLING = {
     "gemma3_text": "mean",
+    "embedding_gemma2": "mean",
     "bert": "mean",
     "xlm-roberta": "mean",
     "xlm_roberta": "mean",
@@ -96,6 +99,9 @@ MEAN_FAMILIES = {
 # Qwen3-Embedding-0.6B, qwen3_embedding or Qwen3-Embed-4B.
 _QWEN3_EMBEDDING = _name_pattern(r"qwen3[-_]embed(ding)?")
 
+# sentence-transformers 6 ``pooling_mode`` values gmlx runs.
+_ST_POOLING_MODES = {"mean": "mean", "cls": "cls", "lasttoken": "last"}
+
 _POOLING_NAMES = {"mean": "the mean", "cls": "the first token",
                   "last": "the last token"}
 
@@ -103,7 +109,8 @@ _POOLING_NAMES = {"mean": "the mean", "cls": "the first token",
 # whose dtype rule it takes (gmlx.load.dtypes.NO_FLOAT16_MODEL_TYPES). The
 # rule is applied here, not by model type in the GGUF loader, because every
 # Gemma 3 chat model also has the model type gemma3_text.
-NO_FLOAT16 = {"gemma3_text": "gemma_embedding"}
+NO_FLOAT16 = {"gemma3_text": "gemma_embedding",
+              "embedding_gemma2": "gemma_embedding2"}
 
 
 # Appended to a refusal of a Qwen checkpoint.
@@ -264,6 +271,14 @@ def pooling_mode(path: str, model_type: str) -> str:
     name = _pooling_config_name(path)
     cfg = _read_json(path, name) if name is not None else None
     if isinstance(cfg, dict):
+        # sentence-transformers 6 names the mode in one key.
+        named_mode = cfg.get("pooling_mode")
+        if isinstance(named_mode, str):
+            if named_mode in _ST_POOLING_MODES:
+                return _ST_POOLING_MODES[named_mode]
+            raise UnsupportedEncoderError(
+                path, f"sentence pooling {named_mode!r} is not supported "
+                      f"(supported: {', '.join(POOLING_MODES)})")
         if cfg.get("pooling_mode_cls_token"):
             return "cls"
         if cfg.get("pooling_mode_mean_tokens"):
@@ -329,18 +344,24 @@ def _cast(model: nn.Module, dtypes: set, dtype: mx.Dtype) -> None:
                           model.parameters()))
 
 
+def _no_float16_dtype(model_type: str, quantized: bool) -> mx.Dtype:
+    """The activation dtype of a model type that never runs float16: the
+    chip policy's bfloat16, or float32 where the policy picks float16. A
+    quantized checkpoint runs float32 on the CPU device (see :func:`build`)."""
+    if quantized and cpu_default_device():
+        return mx.float32
+    return activation_dtype(NO_FLOAT16[model_type])
+
+
 def _no_float16(model: nn.Module, model_type: str, quantized: bool = False) -> None:
     """Cast every 16-bit float parameter of a model type that never runs
-    float16 to the dtype the chip policy gives it: bfloat16, or float32 where
-    the policy picks float16. The activations follow the parameters.
+    float16 to its activation dtype (see :func:`_no_float16_dtype`). The
+    activations follow the parameters.
 
     EmbeddingGemma is such a type. Its model card rules out float16
     activations, and the mlx-community conversions store their norms, dense
-    weights and quantization scales in float16. A quantized checkpoint runs
-    float32 on the CPU device (see :func:`build`)."""
-    dtype = activation_dtype(NO_FLOAT16[model_type])
-    if quantized and cpu_default_device():
-        dtype = mx.float32
+    weights and quantization scales in float16."""
+    dtype = _no_float16_dtype(model_type, quantized)
     _cast(model, {mx.float16, mx.bfloat16} - {dtype}, dtype)
 
 
@@ -414,6 +435,8 @@ def card_files_to_fetch(path: str) -> list[str]:
             return []
         has_modules = os.path.isfile(os.path.join(path, "modules.json"))
         has_card = os.path.isfile(os.path.join(path, "README.md"))
+        if model_type == "embedding_gemma2":
+            return []
         if model_type in ("gemma3_text", "qwen3"):
             try:
                 check(path, config)
@@ -435,12 +458,113 @@ def card_files_to_fetch(path: str) -> list[str]:
     return wanted
 
 
+def _gemma2_weights(path: str, towers: bool) -> dict[str, mx.array]:
+    """An EmbeddingGemma 2 checkpoint's text weights, or with ``towers``
+    its tower weights, without the ``model.`` prefix that transformers
+    checkpoints carry. MLX reads no tensor until it is used."""
+    out = {}
+    for k, v in _load_weights(path).items():
+        k = k.removeprefix("model.")
+        if "rotary_emb" in k:
+            continue
+        if k.startswith(gemma_embedding2.TOWER_PREFIXES) == towers:
+            out[k] = v
+    return out
+
+
+def _build_gemma_embedding2(path: str, config: dict) -> nn.Module:
+    """An EmbeddingGemma 2 text encoder. Its bfloat16 weights stay
+    bfloat16 on every chip; under float32 activations each matmul promotes.
+    Float16 parameters run as bfloat16 where the activations do, and a
+    float32 checkpoint runs float32. The towers load later, from
+    :func:`load_towers`."""
+    mode = pooling_mode(path, "embedding_gemma2")
+    if mode != "mean":
+        raise UnsupportedEncoderError(
+            path, f"its Pooling config takes {_POOLING_NAMES[mode]}; "
+                  "EmbeddingGemma 2 pools the mean")
+    weights = _gemma2_weights(path, towers=False)
+    model = gemma_embedding2.Model(gemma_embedding2.ModelArgs.from_dict(config))
+    _quantize(model, config, weights)
+    model.load_weights(list(weights.items()), strict=True)
+    act = _no_float16_dtype("embedding_gemma2",
+                            any(k.endswith(".scales") for k in weights))
+    if act == mx.bfloat16:
+        _cast(model, {mx.float16}, act)
+    else:
+        model.language_model.act_dtype = act
+    mx.eval(model.parameters())
+    model.eval()
+    return model
+
+
+def media_mismatch(path: str, config: dict | None = None) -> str | None:
+    """Why the EmbeddingGemma 2 checkpoint at ``path`` cannot take media,
+    or None: it has no tower config, or its ``processor_config.json`` asks
+    for preprocessing gmlx does not run."""
+    from .gemma_embedding2_processor import config_mismatch
+
+    if config is None:
+        config = _read_json(path, "config.json")
+    assert isinstance(config, dict)
+    if not (config.get("vision_config") or config.get("audio_config")):
+        return "its config.json has no vision_config or audio_config"
+    proc = _read_json(path, "processor_config.json")
+    if proc is None:
+        return None
+    if not isinstance(proc, dict):
+        return "processor_config.json is not a JSON object"
+    return config_mismatch(proc)
+
+
+def load_towers(path: str, config: dict | None = None):
+    """The ``gemma_embedding2.Towers`` of the EmbeddingGemma 2 checkpoint
+    at ``path``, in their stored dtype. Float16 parameters run as bfloat16
+    where the text encoder's activations do. Check :func:`media_mismatch`
+    first."""
+    if config is None:
+        config = _read_json(path, "config.json")
+    assert isinstance(config, dict)
+    args = gemma_embedding2.ModelArgs.from_dict(config)
+    towers = gemma_embedding2.Towers(args.text.hidden_size,
+                                     config.get("vision_config"),
+                                     config.get("audio_config"))
+    weights = towers.sanitize(_gemma2_weights(path, towers=True))
+    if not towers.has_vision:
+        weights = {k: v for k, v in weights.items()
+                   if not k.startswith(("vision_tower.", "embed_vision."))}
+    if not towers.has_audio:
+        weights = {k: v for k, v in weights.items()
+                   if not k.startswith(("audio_tower.", "embed_audio."))}
+    _quantize(towers, config, weights)
+    towers.load_weights(list(weights.items()), strict=True)
+    act = _no_float16_dtype("embedding_gemma2",
+                            any(k.endswith(".scales") for k in weights))
+    if act == mx.bfloat16:
+        _cast(towers, {mx.float16}, act)
+    mx.eval(towers.parameters())
+    towers.eval()
+    return towers
+
+
+def prompts(path: str) -> dict[str, str] | None:
+    """The sentence-transformers prompt table of the checkpoint at
+    ``path`` (``config_sentence_transformers.json``), or None."""
+    st = _read_json(path, "config_sentence_transformers.json")
+    table = st.get("prompts") if isinstance(st, dict) else None
+    if not isinstance(table, dict):
+        return None
+    return {str(k): v for k, v in table.items() if isinstance(v, str)} or None
+
+
 def build(path: str) -> nn.Module:
     """Build the encoder at ``path`` and load its weights."""
     config = _read_json(path, "config.json")
     model_type = check(path, config)
     assert isinstance(config, dict)
     module = MODEL_TYPES[model_type]
+    if module is gemma_embedding2:
+        return _build_gemma_embedding2(path, config)
     weights = module.Model.sanitize(_load_weights(path))
     args = dict(config, pooling=pooling_mode(path, model_type))
     if module is gemma_embedding:

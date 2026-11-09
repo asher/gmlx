@@ -55,6 +55,52 @@ PLACEHOLDERS = (IMAGE_TOKEN, AUDIO_TOKEN, VIDEO_TOKEN)
 BOI, EOI = "<|image>", "<image|>"
 BOA, EOA = "<|audio>", "<audio|>"
 
+# The processor_config.json values this module implements, by section. A
+# checkpoint whose file sets another value runs text-only.
+_CONFIG = {
+    "image_processor": {
+        "max_soft_tokens": IMAGE_BUDGET, "patch_size": PATCH_SIZE,
+        "pooling_kernel_size": POOLING_KERNEL, "resample": 3,
+        "do_resize": True, "do_rescale": True, "rescale_factor": 1 / 255,
+        "do_normalize": False},
+    "video_processor": {
+        "max_soft_tokens": FRAME_BUDGET, "patch_size": PATCH_SIZE,
+        "pooling_kernel_size": POOLING_KERNEL, "resample": 3,
+        "do_resize": True, "do_rescale": True, "rescale_factor": 1 / 255,
+        "do_normalize": False, "do_sample_frames": True, "fps": VIDEO_FPS,
+        "max_frames": VIDEO_MAX_FRAMES, "overflow_strategy": "uniform",
+        "add_timestamps": False},
+    "feature_extractor": {
+        "sampling_rate": AUDIO_RATE, "feature_size": 128,
+        "frame_length": _FRAME_LENGTH, "hop_length": _HOP_LENGTH,
+        "fft_length": 512, "mel_floor": 1e-3, "min_frequency": 0.0,
+        "max_frequency": 8000.0, "preemphasis": 0.0, "dither": 0.0,
+        "input_scale_factor": 1.0, "padding_side": "right"},
+}
+
+
+def config_mismatch(config: dict) -> str | None:
+    """Why a checkpoint's ``processor_config.json`` (parsed as ``config``)
+    asks for preprocessing this module does not run, or None. A value the
+    file leaves out takes the module's own."""
+    for section, want in _CONFIG.items():
+        got = config.get(section) or {}
+        if not isinstance(got, dict):
+            return f"processor_config.json: {section} is not an object"
+        for key, value in want.items():
+            if key not in got:
+                continue
+            v = got[key]
+            if isinstance(value, (bool, str)) or isinstance(v, bool):
+                same = type(v) is type(value) and v == value
+            else:
+                same = (isinstance(v, (int, float))
+                        and math.isclose(v, value, rel_tol=1e-9))
+            if not same:
+                return (f"processor_config.json sets {section}.{key} to "
+                        f"{v!r}; gmlx runs {value!r}")
+    return None
+
 
 @dataclass(frozen=True)
 class Options:

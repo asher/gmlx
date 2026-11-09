@@ -223,7 +223,8 @@ def test_check_names_why_a_model_cannot_load(unloadable, monkeypatch):
     reason = emb.check_embeddings_model(unloadable)
     assert reason.startswith("model_type 'qwen3_vl' is not a supported "
                              "embeddings model. Supported: EmbeddingGemma, "
-                             "BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+                             "EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT "
+                             "and Qwen3-Embedding.")
     assert "qwen3-embed-0.6b" in reason and unloadable not in reason
     assert emb._UNLOADABLE == {unloadable: reason}
     # A GGUF, or a repo id not cached yet, is left to the load.

@@ -185,6 +185,9 @@ def test_f16_mmproj_stays_16_bit_under_float32_activations(tmp_path, reference):
     norm = "vision_tower.encoder.layers.0.input_layernorm.weight"
     assert flat[q].dtype == mx.float16
     assert flat[norm].dtype == mx.float32
+    # The patch projection sets the tower's activation dtype.
+    proj = "vision_tower.patch_embedder.input_proj.weight"
+    assert flat[proj].dtype == mx.float32
     img, aud = _run(got)
     want_img, want_aud = _run(towers)
     assert _rel(img, want_img) < 5e-3 and _rel(aud, want_aud) < 5e-3

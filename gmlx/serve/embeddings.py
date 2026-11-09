@@ -23,8 +23,8 @@ Three backends, chosen by what ``embeddings:`` points at:
   itself, so each text is just forwarded.
 
 * safetensors encoder (an alias, an mlx-community repo id or a local dir):
-  EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding
-  checkpoints, loaded by :func:`gmlx.models.embedders.load`. It returns
+  EmbeddingGemma, EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT and
+  Qwen3-Embedding checkpoints, loaded by :func:`gmlx.models.embedders.load`. It returns
   pooled, L2-normalized vectors in ``outputs.text_embeds``, pooled as the
   checkpoint's sentence-transformers config sets (see
   :mod:`gmlx.models.embedders.checkpoint`).

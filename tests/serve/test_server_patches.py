@@ -485,7 +485,8 @@ def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path,
         assert err["message"] == (
             "the configured `server.embeddings` model cannot load: model_type "
             "'lfm2' is not a supported embeddings model. Supported: "
-            "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+            "EmbeddingGemma, EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT "
+            "and Qwen3-Embedding.")
         lines = [ln for ln in capsys.readouterr().out.splitlines()
                  if ln.startswith("[req] ")]
         assert len(lines) == 1

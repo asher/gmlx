@@ -39,6 +39,10 @@ Q_BLOCK = 512
 
 MODEL_TYPES = ("gemma_embedding2", "embedding_gemma2")
 
+# Checkpoint key prefixes of the media towers (see Towers).
+TOWER_PREFIXES = ("vision_tower.", "embed_vision.", "audio_tower.",
+                  "embed_audio.")
+
 
 @dataclass
 class TextArgs:
@@ -343,12 +347,18 @@ class TextModel(nn.Module):
         self.norm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.embedding_projection = nn.Linear(
             args.hidden_size, args.embedding_dim, bias=False)
+        # The activation dtype, when it is not the embedding's dtype: an
+        # MLX checkpoint keeps its bfloat16 weights under float32
+        # activations, and each matmul promotes.
+        self.act_dtype: mx.Dtype | None = None
 
     def embed(self, input_ids: mx.array) -> mx.array:
         """Token embeddings times sqrt(hidden_size), the scale rounded to the
         activation dtype first, as transformers rounds it to the weight dtype.
         In float32 the scale is exact, as in llama.cpp."""
         h = self.embed_tokens(input_ids)
+        if self.act_dtype is not None:
+            h = h.astype(self.act_dtype)
         return h * mx.array(self.args.hidden_size ** 0.5, h.dtype)
 
     def __call__(self, inputs_embeds: mx.array,
