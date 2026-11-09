@@ -42,3 +42,19 @@ def test_layers_the_feeders_cannot_cover():
     assert feeder_ranges(both) is None and kind_bytes(both) is None
     up_down = [("p", 0, 800, E, "up"), down]
     assert feeder_ranges(up_down) is None and kind_bytes(up_down) is None
+
+
+def test_the_refusal_names_why_each_layer_was_skipped():
+    from gmlx.stream.feeder_common import no_layers_error, ranges_or_reason
+
+    up_down = [("p", 0, 800, E, "up"), ("p", 900, 400, E, "down")]
+    assert ranges_or_reason(up_down) == (
+        None, "expert stacks down/up, not gate/up/down")
+    flat = [("p", 0, 1600, 0, "gate_up"), ("p", 1700, 400, 0, "down")]
+    assert ranges_or_reason(flat)[1] == (
+        "an expert stack with no per-expert layout")
+    err = no_layers_error({"expert stacks with a bias": 24,
+                           "expert stacks down/up, not gate/up/down": 1})
+    assert str(err) == ("no layers the feeder can stream: expert stacks "
+                        "with a bias (24 layers); expert stacks down/up, "
+                        "not gate/up/down (1 layer)")

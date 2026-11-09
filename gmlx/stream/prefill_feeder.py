@@ -41,8 +41,9 @@ from .feeder_common import (
     BOUNCE_BYTES,
     DaemonPool,
     copy_experts,
-    feeder_ranges,
     kind_bytes,
+    no_layers_error,
+    ranges_or_reason,
     lock_pages,
     read_range,
     read_range_aligned,
@@ -95,9 +96,11 @@ class PrefillFeeder:
         # the stack's size in a ring slot.
         self._layers: dict[int, dict] = {}
         max_bytes: dict[str, int] = {}
+        skipped: dict[str, int] = {}
         for li, ranges in offsets.items():
-            franges = feeder_ranges(ranges)
+            franges, why = ranges_or_reason(ranges)
             if franges is None:
+                skipped[why] = skipped.get(why, 0) + 1
                 continue
             entry = {}
             for rng in franges:
@@ -111,6 +114,8 @@ class PrefillFeeder:
                         mod = m
                         break
                 if mod is None:
+                    why = f"no expert module matching the {kind} stack"
+                    skipped[why] = skipped.get(why, 0) + 1
                     break
                 entry[kind] = (mod, path, off, nbytes, rng)
             if len(entry) == len(franges):
@@ -118,7 +123,7 @@ class PrefillFeeder:
                 for kind, (_, _, _, nbytes, _) in entry.items():
                     max_bytes[kind] = max(max_bytes.get(kind, 0), nbytes)
         if not self._layers:
-            raise RuntimeError("no layers with matching gate/up/down stacks")
+            raise no_layers_error(skipped)
         # Layer slots are flat arenas; a stack past int32 uint8 elements
         # (mx shape dims are int32) is held at a wider granule and viewed
         # back per layer (slot_itemsize / slot_view).

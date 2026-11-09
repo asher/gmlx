@@ -122,6 +122,19 @@ def _arena_slot(feeder, li, kind, slot):
     return bytes(view[slot].reshape(-1))
 
 
+def test_a_biased_expert_stack_is_named_in_the_refusal(monkeypatch,
+                                                       tmp_path):
+    import mlx_kquant as kq
+    from gmlx.stream.decode_feeder import DecodeFeeder
+
+    monkeypatch.setattr(kq, "arena_alloc", _fake_arena_alloc, raising=False)
+    offsets, modules = _make_fixture(tmp_path, 2)
+    for mods in modules.values():
+        mods[0].down_proj.bias = np.zeros((_E, 4), np.float32)
+    with pytest.raises(RuntimeError, match=r"expert stacks with a bias \(2 layers\)"):
+        DecodeFeeder(offsets, modules, arena_bytes=1 << 20)
+
+
 @pytest.mark.parametrize("aligned", ["1", "0"])
 def test_a_fused_gate_up_layer_stages_each_half(monkeypatch, tmp_path,
                                                 aligned):

@@ -62,7 +62,8 @@ from .feeder_common import (
     DaemonPool,
     lock_pages,
     copy_experts,
-    feeder_ranges,
+    no_layers_error,
+    ranges_or_reason,
     read_range,
     swapped_weights,
     unlock_pages,
@@ -471,9 +472,11 @@ class DecodeFeeder:
         self._layers: dict[int, dict] = {}
         per_expert: dict[int, int] = {}  # li -> bytes per expert, all kinds
         n_experts: dict[int, int] = {}
+        skipped: dict[str, int] = {}
         for li, ranges in offsets.items():
-            franges = feeder_ranges(ranges)
+            franges, why = ranges_or_reason(ranges)
             if franges is None:
+                skipped[why] = skipped.get(why, 0) + 1
                 continue
             entry = {}
             total = 0
@@ -482,6 +485,7 @@ class DecodeFeeder:
                 path, off, kind, n_exp = rng.path, rng.off, rng.kind, rng.n_exp
                 nbytes = rng.length * n_exp
                 mod = None
+                why = f"no expert module matching the {kind} stack"
                 for m in modules.get(li, ()):
                     proj = getattr(m, ATTRS[kind], None)
                     w = getattr(proj, "weight", None)
@@ -490,12 +494,15 @@ class DecodeFeeder:
                         and w.nbytes == nbytes
                         and w.ndim == 3
                         and w.shape[0] == n_exp
-                        and getattr(proj, "bias", None) is None
                     ):
+                        if getattr(proj, "bias", None) is not None:
+                            why = "expert stacks with a bias"
+                            continue
                         _refuse_expert_scales(proj, path)
                         mod = m
                         break
                 if mod is None:
+                    skipped[why] = skipped.get(why, 0) + 1
                     break
                 stride = rng.length
                 entry[kind] = (mod, path, off, stride, tuple(w.shape),
@@ -506,7 +513,7 @@ class DecodeFeeder:
                 per_expert[li] = total
                 n_experts[li] = n_exp0
         if not self._layers:
-            raise RuntimeError("no layers with matching gate/up/down stacks")
+            raise no_layers_error(skipped)
 
         # Even per-layer budget split; ``slots`` experts resident per layer.
         per_layer_budget = arena_bytes // len(self._layers)

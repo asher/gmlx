@@ -39,14 +39,20 @@ def feeder_ranges(ranges) -> list[FeederRange] | None:
     gate, up and down range each, or None when the feeders cannot cover
     the layer. A fused gate_up range splits at each expert's row midpoint,
     as the loader splits the tensor."""
+    return ranges_or_reason(ranges)[0]
+
+
+def ranges_or_reason(ranges) -> tuple[list[FeederRange] | None, str | None]:
+    """``feeder_ranges`` and, when it is None, why, for the feeders'
+    refusal."""
     out = []
     for path, off, nbytes, n_exp, kind in ranges:
         if not n_exp:
-            return None
+            return None, "an expert stack with no per-expert layout"
         step = nbytes // n_exp
         if kind == "gate_up":
             if step % 2:
-                return None
+                return None, "a fused gate_up stack of odd size"
             half = step // 2
             out.append(FeederRange(path, off, step, half, n_exp, "gate",
                                    off, 0))
@@ -55,10 +61,23 @@ def feeder_ranges(ranges) -> list[FeederRange] | None:
         else:
             out.append(FeederRange(path, off, step, step, n_exp, kind,
                                    off, None))
-    if (sorted(r.kind for r in out) != sorted(KINDS)
-            or len({r.n_exp for r in out}) != 1):
-        return None
-    return out
+    if sorted(r.kind for r in out) != sorted(KINDS):
+        kinds = "/".join(sorted(r[4] for r in ranges))
+        return None, f"expert stacks {kinds}, not gate/up/down"
+    if len({r.n_exp for r in out}) != 1:
+        return None, "expert stacks with different expert counts"
+    return out, None
+
+
+def no_layers_error(skipped: dict[str, int]) -> RuntimeError:
+    """The feeders' refusal when no layer qualifies, with the reasons
+    counted per layer."""
+    if not skipped:
+        return RuntimeError("no MoE expert layers")
+    why = "; ".join(f"{reason} ({n} layer{'' if n == 1 else 's'})"
+                    for reason, n in sorted(skipped.items(),
+                                            key=lambda kv: -kv[1]))
+    return RuntimeError(f"no layers the feeder can stream: {why}")
 
 
 def kind_bytes(ranges) -> dict[str, int] | None:
