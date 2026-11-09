@@ -208,6 +208,19 @@ def test_media_without_towers_is_refused(served, media, words):
                                     "model runs text-only")
 
 
+def test_a_video_without_a_decoder_is_a_400(served, monkeypatch):
+    import sys
+
+    from gmlx.serve import media_programs
+
+    monkeypatch.setattr(media_programs, "find", lambda name: None)
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    clip = (_ORACLE.parent / "video_decode" / "vfr.mp4").read_bytes()
+    with pytest.raises(emb.EmbeddingsRequestError, match="needs ffmpeg or OpenCV") as ei:
+        _run({"input": {"type": "video", "base64": base64.b64encode(clip).decode()}})
+    assert ei.value.status_code == 400
+
+
 def test_a_projector_that_does_not_fit_is_named_once(served, monkeypatch):
     def bad(*a):
         raise ValueError("its vision projection_dim is 640, and the text "

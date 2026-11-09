@@ -1,0 +1,72 @@
+{
+ "vp9.webm": {
+  "frames": 72,
+  "fps": 24.00800266755585,
+  "duration": 2.999,
+  "width": 160,
+  "height": 120,
+  "indices": [
+   0,
+   24,
+   36,
+   71
+  ],
+  "sha256": "199666521bf1c9c90806c6098cea95c58ccd7d2b2186501ec5553b768d85420c"
+ },
+ "rot90.mp4": {
+  "frames": 24,
+  "fps": 12.0,
+  "duration": 2.0,
+  "width": 120,
+  "height": 160,
+  "indices": [
+   0,
+   8,
+   12,
+   23
+  ],
+  "sha256": "ff9d8a92e4633e69b172f907f6f731bf2c011ec13c16553d2b28d2f415ade231"
+ },
+ "vfr.mp4": {
+  "frames": 50,
+  "fps": 16.666666666666668,
+  "duration": 3.0,
+  "width": 160,
+  "height": 120,
+  "indices": [
+   0,
+   16,
+   25,
+   49
+  ],
+  "sha256": "643cf131ac25bd696b7d1d9d76d29280ca99973d3d5d520b77c462c6fdf6bf40"
+ },
+ "ball_3s.mp4": {
+  "frames": 30,
+  "fps": 10.0,
+  "duration": 3.0,
+  "width": 256,
+  "height": 192,
+  "indices": [
+   0,
+   10,
+   15,
+   29
+  ],
+  "sha256": "6fb0287bbdaff8765e65651f636220250cc420e18c64c044ddec30ad6ff3cb11"
+ },
+ "square_hd709_3s.mp4": {
+  "frames": 72,
+  "fps": 24.0,
+  "duration": 3.0,
+  "width": 1280,
+  "height": 720,
+  "indices": [
+   0,
+   24,
+   36,
+   71
+  ],
+  "sha256": "2f13909b057ce20cd2530d5291dec063a07839949ed1e61da6079776bc140aef"
+ }
+}

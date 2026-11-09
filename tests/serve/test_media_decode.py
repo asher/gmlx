@@ -587,13 +587,19 @@ def _video(path, frames: int, size=(64, 48)) -> str:
     return str(path)
 
 
+@pytest.fixture
+def opencv_reader(monkeypatch):
+    """read_video takes OpenCV, as on a server without ffmpeg."""
+    monkeypatch.setattr(media_programs, "find", lambda name: None)
+
+
 def _stock_load_video():
     utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     stock = utils.load_video
     return utils, getattr(stock, "__wrapped__", stock)
 
 
-def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path):
+def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path, opencv_reader):
     """The frames and the VideoMetadata of mlx-vlm's load_video, for loose
     sampling keywords, a VideoSampling and a processor's frame sampler."""
     path = _video(tmp_path / "v.avi", 40)
@@ -614,7 +620,7 @@ def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path):
         assert meta == want_meta and np.array_equal(got, want), (args, kwargs)
 
 
-def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path):
+def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path, opencv_reader):
     path = _video(tmp_path / "v.avi", 8)
     _, stock = _stock_load_video()
     with pytest.raises(TypeError, match="unexpected keyword"):
@@ -624,7 +630,7 @@ def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path):
 
 
 def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, opencv_reader):
     """A frame sampler picks the count, and the count is charged before
     the first frame decodes."""
     cv2 = pytest.importorskip("cv2")
@@ -649,8 +655,8 @@ def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
     assert read == []
 
 
-def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path,
-                                                                       monkeypatch):
+def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
+        tmp_path, monkeypatch, opencv_reader):
     cv2 = pytest.importorskip("cv2")
     path = _video(tmp_path / "v.avi", 40)
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 7 * 64 * 48)
@@ -671,6 +677,76 @@ def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path
     with pytest.raises(MediaRefused, match="video of 8 frames of 64x48 pixels brings"):
         md.read_video(path)
     assert read == []
+
+
+_FIXTURES = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+
+
+def _torchcodec_clips():
+    with open(os.path.join(_FIXTURES, "video_decode", "torchcodec.json")) as f:
+        record = json.load(f)
+    for name, want in record.items():
+        folder = "video_decode" if os.path.exists(
+            os.path.join(_FIXTURES, "video_decode", name)) else \
+            os.path.join("embeddinggemma2_reference", "media")
+        yield pytest.param(os.path.join(_FIXTURES, folder, name), want, id=name)
+
+
+@pytest.fixture
+def ffmpeg_reader():
+    if not (media_programs.find("ffmpeg") and media_programs.find("ffprobe")):
+        pytest.skip("no ffmpeg and ffprobe on PATH")
+
+
+@pytest.mark.parametrize("path, want", _torchcodec_clips())
+def test_ffmpeg_reads_what_torchcodec_gives_transformers(path, want, ffmpeg_reader):
+    """The frame count, rate and duration of torchcodec's exact mode, the
+    shown size, and the same frames, recorded by
+    scripts/embedder_oracle/video_decode_reference.py: a VP9 WebM with no
+    frame count in its header, a clip whose frame rate changes, a clip
+    turned a quarter, and an HD clip tagged BT.709."""
+    import hashlib
+
+    frames, meta = md.read_video(path, frame_sampler=lambda m, **k: want["indices"])
+    assert meta.total_num_frames == want["frames"]
+    assert meta.fps == pytest.approx(want["fps"], rel=1e-12)
+    assert meta.duration == pytest.approx(want["duration"], rel=1e-12)
+    assert (meta.width, meta.height) == (want["width"], want["height"])
+    assert list(meta.frames_indices) == want["indices"]
+    assert frames.shape == (len(want["indices"]), 3, want["height"], want["width"])
+    assert hashlib.sha256(frames.tobytes()).hexdigest() == want["sha256"]
+
+
+def test_ffmpeg_gives_a_frame_picked_twice_twice(ffmpeg_reader):
+    path = os.path.join(_FIXTURES, "video_decode", "rot90.mp4")
+    frames, meta = md.read_video(path, frame_sampler=lambda m, **k: [3, 3, 5])
+    assert list(meta.frames_indices) == [3, 3, 5]
+    assert np.array_equal(frames[0], frames[1]) and not np.array_equal(frames[1], frames[2])
+
+
+def test_ffmpeg_charges_the_frames_before_it_decodes_one(monkeypatch, ffmpeg_reader):
+    path = os.path.join(_FIXTURES, "video_decode", "vfr.mp4")
+    monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 9 * 160 * 120)
+    ran = []
+    bounded = media_programs._run_bounded
+
+    def run_bounded(argv, *args, **kwargs):
+        ran.append(os.path.basename(argv[0]))
+        return bounded(argv, *args, **kwargs)
+    monkeypatch.setattr(media_programs, "_run_bounded", run_bounded)
+    with pytest.raises(MediaRefused, match="video of 10 frames of 160x120 pixels brings"):
+        md.read_video(path, frame_sampler=lambda m, **k: list(range(10)))
+    assert "ffmpeg" not in ran
+
+
+def test_without_a_decoder_a_chat_video_is_a_400(installed, monkeypatch, opencv_reader):
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    video = importlib.import_module("gmlx._vendor.mlx_vlm.generate.video")
+    with open(os.path.join(_FIXTURES, "video_decode", "vfr.mp4"), "rb") as f:
+        mp4 = _uri(f.read(), "video/mp4")
+    with pytest.raises(HTTPException) as err:
+        video.resolve_video_inputs(object(), [mp4])
+    assert err.value.status_code == 400 and "ffmpeg or OpenCV" in err.value.detail
 
 
 def test_mlx_vlm_samples_the_frames_of_an_inline_video(installed, tmp_path):
@@ -750,16 +826,15 @@ def test_the_media_pass_wraps_a_binding_another_installer_wrapped_first(
         media_sinks.uninstall()
 
 
-def test_video_without_opencv_names_the_video_extra(monkeypatch):
-    """OpenCV comes with the video extra; a video read without it says
-    which extra to install, before it opens the file."""
-    import sys
-
+def test_video_without_a_decoder_names_both_installs(monkeypatch, opencv_reader):
+    """OpenCV comes with the video extra. A server with neither ffmpeg nor
+    OpenCV refuses a video with both installs, before it opens the file."""
     from gmlx.commands import extras
 
     monkeypatch.setitem(sys.modules, "cv2", None)
     monkeypatch.setattr(extras, "install_route", lambda: extras.ROUTE_PIP)
-    with pytest.raises(ImportError, match=r"needs OpenCV: .*gmlx\[video\]"):
+    with pytest.raises(MediaRefused, match=r"needs ffmpeg or OpenCV: .*brew install ffmpeg"
+                                           r".*gmlx\[video\]"):
         md.read_video("/nonexistent.mp4")
 
 

@@ -517,7 +517,9 @@ Any other path or URL gets a 400 that tells you how to copy the file into
 the media folder. [`server.media_urls`](config.md#servermedia_urls) allows
 URLs from public hosts. Each item holds at most 32 MiB. Images can be PNG,
 JPEG, WebP, GIF, BMP or TIFF, and videos MP4, QuickTime, Matroska, WebM or
-AVI.
+AVI. The server reads videos with ffmpeg, which picks and decodes frames as
+the models' reference code does, or with OpenCV from the
+[`video` extra](installation.md#optional-features) when ffmpeg is missing.
 
 A text model that reads audio through a speech companion, such as
 [Granite Switch](granite-switch.md), takes `input_audio` parts on

@@ -324,19 +324,25 @@ def load_audio(file, sr: int, field: str = "audio",
 
 # Video
 
+# The 400 for a video when the server has no decoder.
+NO_VIDEO_DECODER = ("video input needs ffmpeg or OpenCV: install one with "
+                    "`brew install ffmpeg` or `{hint}`")
+
+
 def read_video(video_path: str, sampling=None, frame_sampler=None,
                **sampling_kwargs):
     """Read a video file as mlx-vlm's ``load_video`` does: a (T, C, H, W)
     array of the sampled frames and their ``VideoMetadata``. The frames
     count toward the request's decoded pixels before the first one is
-    read."""
+    read.
+
+    With ffmpeg and ffprobe on PATH, the frames and the metadata are the
+    ones torchcodec gives transformers' video processors. Otherwise OpenCV
+    reads the video, and raises :class:`~.patches.media_gate.MediaRefused`
+    when it is not installed either."""
     from dataclasses import fields
 
-    import numpy as np
-    from gmlx._vendor.mlx_vlm.utils import DEFAULT_VIDEO_SAMPLING, VideoMetadata, VideoSampling
-    from gmlx.commands.extras import opencv
-
-    cv2 = opencv("video input")
+    from gmlx._vendor.mlx_vlm.utils import DEFAULT_VIDEO_SAMPLING, VideoSampling
 
     if sampling_kwargs:
         unknown = set(sampling_kwargs) - {f.name for f in fields(VideoSampling)}
@@ -345,12 +351,81 @@ def read_video(video_path: str, sampling=None, frame_sampler=None,
                             f"{sorted(unknown)}")
         sampling = (sampling or VideoSampling()).merge(VideoSampling(**sampling_kwargs))
     resolved = (sampling or VideoSampling()).merge(DEFAULT_VIDEO_SAMPLING)
+    if video_path.startswith("file://"):
+        video_path = video_path[7:]
+    if media_programs.find("ffmpeg") and media_programs.find("ffprobe"):
+        return _read_video_ffmpeg(video_path, resolved, frame_sampler)
+    from gmlx.commands.extras import install_hint, opencv
+
+    try:
+        cv2 = opencv("video input")
+    except ImportError:
+        raise mg.MediaRefused(NO_VIDEO_DECODER.format(hint=install_hint("video"))) from None
+    return _read_video_opencv(cv2, video_path, resolved, frame_sampler)
+
+
+def _pick_frames(resolved, total_frames: int, video_fps: float, width: int,
+                 height: int, duration: float, frame_sampler):
+    """The indices of the frames to read, as mlx-vlm's ``load_video`` picks
+    them, after the pixel checks and the charge for them."""
+    import numpy as np
+    from gmlx._vendor.mlx_vlm.utils import VideoMetadata
+
     fps, nframes = resolved.fps, resolved.nframes
     min_frames, max_frames = resolved.min_frames, resolved.max_frames
     frame_factor = resolved.frame_factor
 
-    if video_path.startswith("file://"):
-        video_path = video_path[7:]
+    def _round(n):
+        return round(n / frame_factor) * frame_factor
+
+    def _floor(n):
+        return math.floor(n / frame_factor) * frame_factor
+
+    def _ceil(n):
+        return math.ceil(n / frame_factor) * frame_factor
+
+    sampled = False
+    if nframes is not None:
+        n = _round(nframes)
+        indices = np.linspace(0, total_frames - 1, n).round().astype(int)
+    elif frame_sampler is not None:
+        sampled = True
+        source = VideoMetadata(
+            total_num_frames=total_frames, fps=video_fps,
+            frames_indices=list(range(total_frames)), width=width,
+            height=height, duration=duration)
+        indices = np.asarray(
+            frame_sampler(source, fps=fps, max_frames=max_frames),
+            dtype=int).reshape(-1)
+        n = len(indices)
+    else:
+        if fps is None or max_frames is None:
+            # The defaults set both; a sampling that clears one has no
+            # frame count to give.
+            raise ValueError("video sampling needs fps and max_frames")
+        lo = _ceil(min_frames)
+        hi = _floor(min(max_frames, total_frames))
+        n = total_frames / video_fps * fps
+        n = min(max(n, lo), hi, total_frames)
+        n = _floor(n)
+        indices = np.linspace(0, total_frames - 1, n).round().astype(int)
+    if not sampled and not (frame_factor <= n <= total_frames):
+        raise ValueError(f"nframes must be in [{frame_factor}, {total_frames}], "
+                         f"got {n}.")
+    if n == 0 or np.any(indices < 0) or np.any(indices >= total_frames):
+        raise ValueError("Frame indices must be within a non-empty "
+                         f"{total_frames}-frame video.")
+    n = int(n)
+    if width * height > mg.MEDIA_MAX_PIXELS:
+        raise mg.too_many_pixels("video frame", width, height)
+    charge(f"video of {n} frames of {width}x{height} pixels", n * width * height)
+    return indices
+
+
+def _read_video_opencv(cv2, video_path: str, resolved, frame_sampler):
+    import numpy as np
+    from gmlx._vendor.mlx_vlm.utils import VideoMetadata
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise ValueError(f"Cannot open video: {os.path.basename(video_path)}")
@@ -360,51 +435,9 @@ def read_video(video_path: str, sampling=None, frame_sampler=None,
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         duration = total_frames / video_fps
-
-        def _round(n):
-            return round(n / frame_factor) * frame_factor
-
-        def _floor(n):
-            return math.floor(n / frame_factor) * frame_factor
-
-        def _ceil(n):
-            return math.ceil(n / frame_factor) * frame_factor
-
-        sampled = False
-        if nframes is not None:
-            n = _round(nframes)
-            indices = np.linspace(0, total_frames - 1, n).round().astype(int)
-        elif frame_sampler is not None:
-            sampled = True
-            source = VideoMetadata(
-                total_num_frames=total_frames, fps=video_fps,
-                frames_indices=list(range(total_frames)), width=width,
-                height=height, duration=duration)
-            indices = np.asarray(
-                frame_sampler(source, fps=fps, max_frames=max_frames),
-                dtype=int).reshape(-1)
-            n = len(indices)
-        else:
-            if fps is None or max_frames is None:
-                # The defaults set both; a sampling that clears one has no
-                # frame count to give.
-                raise ValueError("video sampling needs fps and max_frames")
-            lo = _ceil(min_frames)
-            hi = _floor(min(max_frames, total_frames))
-            n = total_frames / video_fps * fps
-            n = min(max(n, lo), hi, total_frames)
-            n = _floor(n)
-            indices = np.linspace(0, total_frames - 1, n).round().astype(int)
-        if not sampled and not (frame_factor <= n <= total_frames):
-            raise ValueError(f"nframes must be in [{frame_factor}, {total_frames}], "
-                             f"got {n}.")
-        if n == 0 or np.any(indices < 0) or np.any(indices >= total_frames):
-            raise ValueError("Frame indices must be within a non-empty "
-                             f"{total_frames}-frame video.")
-        n = int(n)
-        if width * height > mg.MEDIA_MAX_PIXELS:
-            raise mg.too_many_pixels("video frame", width, height)
-        charge(f"video of {n} frames of {width}x{height} pixels", n * width * height)
+        indices = _pick_frames(resolved, total_frames, video_fps, width, height,
+                               duration, frame_sampler)
+        n = len(indices)
         frames = None
         count = 0
         for idx in indices:
@@ -428,7 +461,7 @@ def read_video(video_path: str, sampling=None, frame_sampler=None,
             count += 1
     finally:
         cap.release()
-    if not count:
+    if not count or frames is None:
         raise ValueError("No frames read from the video.")
     video_np = np.transpose(frames[:count], (0, 3, 1, 2))
     metadata = VideoMetadata(
@@ -440,4 +473,107 @@ def read_video(video_path: str, sampling=None, frame_sampler=None,
         width=int(video_np.shape[3]),
         duration=duration,
     )
+    return video_np, metadata
+
+
+# The most text an ffprobe packet list may take: about 15 bytes a packet.
+_PROBE_LIMIT = 64 << 20
+
+
+def _probe_video(ffprobe: str, video_path: str):
+    """``(frames, fps, duration, width, height, turns)`` of the first video
+    stream, as torchcodec's exact mode gives them: the frame count from the
+    packets, the duration from the first packet's time to the latest end
+    of a packet, and the rate from the two. The size is the stored one, and
+    ``turns`` the quarter turns counterclockwise that show the frame."""
+    import json
+
+    name = os.path.basename(video_path)
+    stream = media_programs._run(
+        [ffprobe, "-v", "error", "-protocol_whitelist", "file", "-select_streams", "v:0",
+         "-show_entries",
+         "stream=width,height,time_base:stream_side_data=rotation", "-of", "json",
+         "file:" + video_path], None)
+    try:
+        streams = json.loads(stream.stdout or b"{}").get("streams") or []
+    except ValueError:
+        streams = []
+    if stream.returncode or not streams:
+        raise ValueError(f"Cannot open video: {name}")
+    info = streams[0]
+    width, height = int(info.get("width") or 0), int(info.get("height") or 0)
+    rotation = next((float(d["rotation"]) for d in info.get("side_data_list") or []
+                     if "rotation" in d), 0.0)
+    turns = round(rotation / 90) % 4
+    num, _, den = str(info.get("time_base") or "1/1").partition("/")
+    time_base = int(num) / int(den or 1)
+
+    run = media_programs._run_bounded(
+        [ffprobe, "-v", "error", "-protocol_whitelist", "file", "-select_streams", "v:0",
+         "-show_entries",
+         "packet=pts,dts,duration", "-of", "csv=p=0", "file:" + video_path], None, _PROBE_LIMIT)
+    if run is None:
+        raise ValueError(f"Too many frames in video: {name}")
+    code, out, _ = run
+    count, begin, end = 0, math.inf, -math.inf
+    for line in out.decode("ascii", "replace").splitlines():
+        pts, dts, length = (line.split(",") + ["", "", ""])[:3]
+        start = pts if pts.lstrip("-").isdigit() else dts
+        if not start.lstrip("-").isdigit():
+            continue
+        count += 1
+        t = int(start)
+        begin = min(begin, t)
+        end = max(end, t + (int(length) if length.isdigit() else 0))
+    if code or not count or not (width and height):
+        raise ValueError(f"Cannot read video: {name}")
+    duration = (end - begin) * time_base
+    fps = count / duration if duration > 0 else 1.0
+    return count, fps, duration, width, height, turns
+
+
+def _read_video_ffmpeg(video_path: str, resolved, frame_sampler):
+    import numpy as np
+    from gmlx._vendor.mlx_vlm.utils import VideoMetadata
+
+    ffprobe = media_programs.program("ffprobe")
+    ffmpeg = media_programs.program("ffmpeg")
+    total_frames, video_fps, duration, width, height, turns = _probe_video(ffprobe, video_path)
+    shown = (height, width) if turns % 2 else (width, height)
+    indices = _pick_frames(resolved, total_frames, video_fps, *shown, duration,
+                           frame_sampler)
+    n = len(indices)
+
+    # ffmpeg decodes the stream once and keeps the picked frames, each once;
+    # a sampler may pick a frame twice. The decoder opens local files only.
+    # torchcodec turns a frame after its conversion to RGB, and the ffmpeg
+    # CLI before, so the frames come unturned and turn here.
+    wanted = sorted(set(indices.tolist()))
+    pick = "+".join(f"eq(n\\,{i})" for i in wanted)
+    frame_bytes = width * height * 3
+    run = media_programs._run_bounded(
+        [ffmpeg, "-v", "error", "-nostdin", "-protocol_whitelist", "file",
+         "-noautorotate", "-i", "file:" + video_path, "-map", "0:v:0",
+         "-vf", f"select='{pick}'", "-fps_mode", "passthrough",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        None, len(wanted) * frame_bytes)
+    if run is None:
+        raise ValueError("The frames of the video change size.")
+    code, out, errors = run
+    got = len(out) // frame_bytes
+    if code or not got:
+        detail = errors.decode("utf-8", "replace").strip().splitlines()
+        raise ValueError(f"Cannot read video: {detail[-1] if detail else 'no frames'}")
+    decoded = np.frombuffer(bytes(out[:got * frame_bytes]), dtype=np.uint8).reshape(
+        got, height, width, 3)
+    # A file with fewer frames than its packets ends part-way.
+    position = {f: k for k, f in enumerate(wanted[:got])}
+    picked = indices.tolist()
+    count = next((k for k, i in enumerate(picked) if i not in position), n)
+    kept = picked[:count]
+    frames = np.rot90(decoded[[position[i] for i in kept]], turns, axes=(1, 2))
+    video_np = np.ascontiguousarray(frames.transpose(0, 3, 1, 2))
+    metadata = VideoMetadata(total_num_frames=total_frames, fps=video_fps,
+                             frames_indices=kept, height=shown[1], width=shown[0],
+                             duration=duration)
     return video_np, metadata
