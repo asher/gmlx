@@ -483,13 +483,18 @@ class AudioEncoder(nn.Module):
         chunk_size = self.config.attention_chunk_size
         max_future_horizon = self.config.attention_context_right
         max_past_horizon = max(0, self.config.attention_context_left - 1)
-        upper_diagonal = max_past_horizon + max_future_horizon
         context_size = chunk_size + max_past_horizon + max_future_horizon
 
-        lower_causal = mx.tril(mx.ones((context_size, chunk_size))).T
-        upper_causal = mx.tril(mx.ones((chunk_size, context_size)), k=upper_diagonal)
-        mask = (lower_causal * upper_causal).astype(mx.bool_)
-        return mask
+        # gmlx: transformers' sliding_window_mask_function and llama.cpp's
+        # gemma4a mask. A query sees keys up to max_past_horizon - 1 frames
+        # back and max_future_horizon - 1 ahead. Upstream also let it see
+        # the key max_past_horizon frames back.
+        query = mx.arange(chunk_size)[:, None]
+        key = mx.arange(context_size)[None, :]
+        dist = query + max_past_horizon - key
+        left = (dist >= 0) & (dist < max_past_horizon)
+        right = (dist < 0) & (-dist < max_future_horizon)
+        return left | right
 
     def __call__(self, audio_mel: mx.array, audio_mel_mask: mx.array) -> tuple:
         audio_encodings, current_mask = self.subsample_conv_projection(
