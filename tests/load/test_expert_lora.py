@@ -368,7 +368,7 @@ def test_unsupported_expert_fusions_still_raise(name):
     glu.__class__ = type(name, (type(glu),), {})
     model = _Holder(glu)
     with pytest.raises(NotImplementedError,
-                       match=f"{name}.*gpt-oss and native-FP expert fusions"):
+                       match=f"{name}.*GMLX_NATIVE_FP=packed"):
         _install(model, mx.zeros((4, 1, 16)), mx.zeros((4, 8, 1)), 1.0)
 
 

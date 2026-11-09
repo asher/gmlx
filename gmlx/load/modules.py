@@ -2937,9 +2937,10 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
         if blocked:
             raise NotImplementedError(
                 f"expert LoRA target {path!r}: owner path runs through "
-                f"{blocked}, which bypasses the SwitchGLU forward (gpt-oss "
-                f"and native-FP expert fusions are not supported; "
-                f"GMLX_FUSED_MOE=0 loads them unfused)")
+                f"{blocked}, which bypasses the SwitchGLU forward (the "
+                f"packed native-FP expert fusions that GMLX_NATIVE_FP=packed "
+                f"builds are not supported; the default GMLX_NATIVE_FP=auto "
+                f"load, or GMLX_FUSED_MOE=0, takes the adapter)")
         if lm.transform != "passthrough":
             raise NotImplementedError(
                 f"expert LoRA target {path!r} has unsupported transform "

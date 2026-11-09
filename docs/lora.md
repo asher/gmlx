@@ -284,9 +284,6 @@ An expert adapter also works on a load that streams the experts from
 disk. Its tables stay in memory beside the streamed experts, and the
 memory budget counts them.
 
-On gpt-oss and on native-FP expert stacks, an expert adapter needs
-`GMLX_FUSED_MOE=0`, which loads every MoE block unfused.
-
 ## Limitations
 
 - Only LoRA adapters work. DoRA on a quantized model is not supported.
