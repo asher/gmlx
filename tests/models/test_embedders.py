@@ -1023,6 +1023,23 @@ _GUARD = textwrap.dedent("""
     out = model(mx.array([[1, 2, 3]]))
     widths["gemma-embedding"] = int(out.text_embeds.shape[-1])
 
+    arch = "gemma-embedding2"
+    meta = {"general.architecture": arch, f"{arch}.context_length": 64,
+            f"{arch}.embedding_length": 64, f"{arch}.feed_forward_length": 96,
+            f"{arch}.block_count": 2, f"{arch}.attention.head_count": 2,
+            f"{arch}.attention.head_count_kv": [1, 1],
+            f"{arch}.attention.key_length": 32,
+            f"{arch}.attention.key_length_swa": 16,
+            f"{arch}.attention.layer_norm_rms_epsilon": 1e-6,
+            f"{arch}.attention.sliding_window": 8,
+            f"{arch}.attention.sliding_window_pattern": [True, False],
+            f"{arch}.embedding_length_per_layer_input": 16,
+            f"{arch}.embedding_length_out": 48,
+            "tokenizer.ggml.tokens": ["a"] * 64}
+    model, _ = loader.build_model(synthesize_config(meta, tensor_shapes={}))
+    out = model(mx.array([[1, 2, 3]]))
+    widths["gemma-embedding2"] = int(out.text_embeds.shape[-1])
+
     print(json.dumps({"attempts": attempts, "widths": widths,
                       "loaded": sorted(m for m in sys.modules
                                        if m.split(".")[0] in stock)}))
@@ -1042,7 +1059,8 @@ def test_no_gmlx_entry_point_imports_a_stock_package(tmp_path):
     assert got["attempts"] == [] and got["loaded"] == []
     assert got["widths"] == {"bert": 64, "xlm-roberta": 64, "modernbert": 64,
                              "gemma3_text": 64, "qwen3": 64,
-                             "gemma-embedding": 64}
+                             "gemma-embedding": 64,
+                             "gemma-embedding2": 48}
 
 
 def test_pyproject_does_not_list_mlx_embeddings():

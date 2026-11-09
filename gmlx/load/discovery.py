@@ -89,6 +89,7 @@ ENCODER_ARCHES = frozenset({
     "modernbert", "neo-bert", "nomic-bert", "nomic-bert-moe", "roberta",
     "t5encoder", "xlm-roberta",
     "gemma-embedding",   # EmbeddingGemma: gemma3 backbone, runs on the encoder path
+    "gemma-embedding2",  # EmbeddingGemma 2: Gemma 4-style encoder with media towers
 })
 _RERANK_RE = re.compile(r"(?i)(?:^|[-._])rerank(?:er)?(?:[-._]|$)")
 _EMBED_RE = re.compile(r"(?i)(?:^|[-._])embed(?:ding)?(?:[-._]|$)")

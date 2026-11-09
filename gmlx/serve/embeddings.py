@@ -263,8 +263,9 @@ def _local_checkpoint(model_path: str) -> str | None:
 
 
 _GGUF_SUPPORTED = ("Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
-                   "qwen3-embed-4b and qwen3-embed-8b aliases, and "
-                   "EmbeddingGemma, as the embeddinggemma-gguf alias.")
+                   "qwen3-embed-4b and qwen3-embed-8b aliases, EmbeddingGemma, "
+                   "as the embeddinggemma-gguf alias, and EmbeddingGemma 2, "
+                   "as the embeddinggemma-2-gguf alias.")
 
 
 # How a decoder GGUF pools, by llama.cpp's <arch>.pooling_type: 1 the mean,

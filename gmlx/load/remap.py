@@ -38,6 +38,10 @@ ARCH_ALIAS = {
     "gemma3": "GEMMA3",
     # EmbeddingGemma: gemma3 backbone; dense head (dense_2/3) in EXTRA_OVERRIDES.
     "gemma-embedding": "GEMMA3",
+    # EmbeddingGemma 2: gguf-py has no enum for it, and the GEMMA3 templates
+    # would home `output` on lm_head and the per-layer tensors on `model.*`,
+    # so it gets a complete, fail-closed table (GEMMA_EMBEDDING2 below).
+    "gemma-embedding2": "GEMMA_EMBEDDING2",
     "gemma3n": "GEMMA3N",
     "gemma2": "GEMMA2",
     "gemma": "GEMMA",
@@ -412,6 +416,55 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
         # them, so this is inert for plain gemma3/gemma4.
         (re.compile(r"^dense_2\.weight$"), "dense.0.weight", "passthrough"),
         (re.compile(r"^dense_3\.weight$"), "dense.1.weight", "passthrough"),
+    ],
+    # EmbeddingGemma 2: every tensor of llama.cpp's gemma-embedding2 onto the
+    # gmlx encoder's transformers-named tree (language_model.*). Complete and
+    # fail-closed: parse_gguf_name stops on anything this table misses.
+    "GEMMA_EMBEDDING2": [
+        (re.compile(r"^token_embd\.weight$"),
+         "language_model.embed_tokens.weight", "passthrough"),
+        (re.compile(r"^output_norm\.weight$"),
+         "language_model.norm.weight", "passthrough"),
+        (re.compile(r"^output\.weight$"),
+         "language_model.embedding_projection.weight", "passthrough"),
+        (re.compile(r"^per_layer_model_proj\.weight$"),
+         "language_model.ple.per_layer_model_projection.weight", "passthrough"),
+        (re.compile(r"^per_layer_proj_norm\.weight$"),
+         "language_model.ple.per_layer_projection_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "language_model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q\.weight$"),
+         "language_model.layers.{bid}.self_attn.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.weight$"),
+         "language_model.layers.{bid}.self_attn.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.weight$"),
+         "language_model.layers.{bid}.self_attn.v_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "language_model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_norm\.weight$"),
+         "language_model.layers.{bid}.self_attn.q_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_norm\.weight$"),
+         "language_model.layers.{bid}.self_attn.k_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.post_attention_norm\.weight$"),
+         "language_model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "language_model.layers.{bid}.pre_feedforward_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.weight$"),
+         "language_model.layers.{bid}.mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.weight$"),
+         "language_model.layers.{bid}.mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.weight$"),
+         "language_model.layers.{bid}.mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.post_ffw_norm\.weight$"),
+         "language_model.layers.{bid}.post_feedforward_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.inp_gate\.weight$"),
+         "language_model.layers.{bid}.ple_block.per_layer_input_gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.proj\.weight$"),
+         "language_model.layers.{bid}.ple_block.per_layer_projection.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.post_norm\.weight$"),
+         "language_model.layers.{bid}.ple_block.post_per_layer_input_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.layer_output_scale(?:\.weight)?$"),
+         "language_model.layers.{bid}.layer_scalar", "passthrough"),
     ],
     # DiffusionGemma: a complete table (every backbone tensor + the diffusion-
     # only tensors), because the mlx-vlm Model homes the Gemma-4 backbone under
@@ -2470,6 +2523,11 @@ def parse_gguf_name(arch_string: str, gguf_name: str) -> RemapDecision:
             RemapDecision.KIND_FAIL,
             reason=f"no diffusion-gemma override for {gguf_name!r}; extend the "
                    f"DIFFUSION_GEMMA table")
+    if arch_string == "gemma-embedding2":
+        return RemapDecision(
+            RemapDecision.KIND_FAIL,
+            reason=f"no gemma-embedding2 override for {gguf_name!r}; extend the "
+                   f"GEMMA_EMBEDDING2 table")
 
     # A weight scale follows its weight's mapping (after arch-priority claims).
     m = _WEIGHT_SCALE_RE.match(gguf_name)

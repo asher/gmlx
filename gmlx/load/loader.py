@@ -175,6 +175,19 @@ def build_model(config_dict: dict, *, mtp: bool = False):
             "(bidirectional encoder)"
         )
         return model, config
+    if mt == "gemma_embedding2":
+        # EmbeddingGemma 2: gmlx's own encoder. The remap targets its
+        # transformers-named tree (language_model.*), so no prefix. The
+        # towers attach later, from the mmproj, on the first media request.
+        import importlib
+
+        ge2 = importlib.import_module("gmlx.models.embedders.gemma_embedding2")
+        model = ge2.Model(ge2.ModelArgs.from_dict(config))
+        loadlog.verbose_print(
+            f"[build] {mt} -> gmlx embedders gemma_embedding2.Model "
+            "(bidirectional encoder)"
+        )
+        return model, config
     # The vendored mlx-lm resolves the model types gmlx owns through
     # gmlx.models.owned. Before the build, a model registers the cache
     # classes that prompt-cache load and CacheList.from_state resolve by

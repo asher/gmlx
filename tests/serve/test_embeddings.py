@@ -835,8 +835,9 @@ def no_gguf_load(monkeypatch):
 
 _SUPPORTED_GGUFS = (
     "Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
-    "qwen3-embed-4b and qwen3-embed-8b aliases, and EmbeddingGemma, as the "
-    "embeddinggemma-gguf alias.")
+    "qwen3-embed-4b and qwen3-embed-8b aliases, EmbeddingGemma, as the "
+    "embeddinggemma-gguf alias, and EmbeddingGemma 2, as the "
+    "embeddinggemma-2-gguf alias.")
 _CAUSAL = ("and its file name names no embedding model, so it is a causal "
            "LM, not an embeddings model. " + _SUPPORTED_GGUFS)
 
@@ -876,6 +877,11 @@ _CAUSAL = ("and its file name names no embedding model, so it is a causal "
     ("gemma-embedding", 0, "gemma-embedding.gguf",
      "this gemma-embedding GGUF sets gemma-embedding.pooling_type to 0, and "
      "gmlx runs a gemma-embedding encoder only with mean pooling (1). "
+     + _SUPPORTED_GGUFS),
+    ("gemma-embedding2", 1, "embeddinggemma-2-Q8_0.gguf", None),
+    ("gemma-embedding2", 2, "embeddinggemma-2-Q8_0.gguf",
+     "this gemma-embedding2 GGUF sets gemma-embedding2.pooling_type to 2, "
+     "and gmlx runs a gemma-embedding2 encoder only with mean pooling (1). "
      + _SUPPORTED_GGUFS),
     ("gemma-embedding", 4, "gemma-embedding.gguf",
      "this gemma-embedding GGUF sets gemma-embedding.pooling_type to 4 "
