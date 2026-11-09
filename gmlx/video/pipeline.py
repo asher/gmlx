@@ -128,7 +128,8 @@ def generate(pipe: VideoPipeline, features: mx.array, *, frames: int,
     anchors, whose rows take their noise from ``seed`` or from
     ``anchor_noise`` (``anchors.augment``), and ``spans`` the vision spans
     of the features' prompt. ``pacer`` runs at each pause point inside a
-    forward in place of ``api.sample``'s, which evaluates there; a
+    forward in place of ``api.sample``'s ``RowBudget``, which evaluates on
+    the clip's rows, at every point from ``api.EVAL_ROWS`` rows. A
     server's job paces with it beside chat decode and stops by it."""
     fam = pipe.video_family
     dim = int(pipe.dit.cfg.text_dim)

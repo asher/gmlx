@@ -6,7 +6,7 @@ the same type. They must rotate their queries to the tokens' positions, as
 the source layer does, and read the keys the source layer attended over.
 A batch cache moves its offset array in place and stores more state than
 the keys and values, so the batch engine exercises both. Tiny random
-models on the CPU, for the mlx-lm and mlx-vlm copies of the model.
+models, for the mlx-lm and mlx-vlm copies of the model.
 """
 
 from __future__ import annotations
@@ -60,6 +60,10 @@ def _logits(model, ids, cache):
 
 _IDS = [3, 9, 4, 7, 2, 5, 11, 8]
 
+# M5 GPUs run float32 GEMM at TF32, so decode and one prefill differ by up
+# to 0.007 here. Wrong shared keys move the logits by 0.69.
+_TOL = dict(atol=5e-2, rtol=0)
+
 
 @pytest.mark.parametrize("copy", sorted(_COPIES))
 def test_decode_matches_one_prefill(copy):
@@ -71,7 +75,7 @@ def test_decode_matches_one_prefill(copy):
     got = [_logits(model, [_IDS[:3]], cache)[0]]
     got += [_logits(model, [[t]], cache)[0] for t in _IDS[3:]]
     np.testing.assert_allclose(np.array(mx.concatenate(got)), np.array(want),
-                               atol=2e-4, rtol=2e-4)
+                               **_TOL)
 
 
 @pytest.mark.parametrize("copy", sorted(_COPIES))
@@ -93,4 +97,4 @@ def test_left_padded_batch_rows_match_each_row_alone(copy):
         want += [_logits(model, [[t]], alone)[0, -1] for t in (6, 1)]
         np.testing.assert_allclose(
             np.array(mx.stack([g[i] for g in got])), np.array(mx.stack(want)),
-            atol=2e-4, rtol=2e-4)
+            **_TOL)

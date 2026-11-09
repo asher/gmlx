@@ -35,21 +35,60 @@ def denoise_step(model, video: mx.array, audio: mx.array, sigmas: dict,
                  cond_video=cond_video, cond_audio=cond_audio, taps=taps)
 
 
-def _eval_point(arrays) -> None:
-    mx.eval(*arrays)
+# Each pause point counts the step's rows, not the rows of the arrays it
+# carries. The last 4096-row attention chunk of a 37898-row step carries
+# 1034 rows, so a budget on array rows would also evaluate every point of
+# a 2054-row step. At EVAL_ROWS rows or more every point evaluates, which
+# keeps the large shapes and memfit's plan for them as they are. 32768 is
+# under the 37710 rows of the default 1344x768 clip of 5 s before its
+# caption, so no caption changes that clip. A 512x512 clip of 22 frames
+# (2054 rows) evaluates every 16th point: at that size an evaluation at
+# every point costs about 6 percent of a step.
+EVAL_ROWS = 32768
+
+
+class RowBudget:
+    """The default pacer of a run of ``rows`` rows a step: it evaluates the
+    arrays of a point when the points since its last evaluation, each
+    counted as ``rows``, reach ``threshold`` rows. That is every
+    ``ceil(threshold / rows)`` points."""
+
+    def __init__(self, rows: int, threshold: int = EVAL_ROWS,
+                 evaluate: Callable | None = None):
+        self.rows, self.threshold = int(rows), int(threshold)
+        self._eval = mx.eval if evaluate is None else evaluate
+        self.held = 0
+
+    def __call__(self, arrays) -> None:
+        self.held += self.rows
+        if self.held >= self.threshold:
+            self.held = 0
+            self._eval(*arrays)
+
+    def reset(self) -> None:
+        """Start the count again after an evaluation outside the pacer."""
+        self.held = 0
+
+
+class _Budget:
+    """``sample``'s default pacer: a ``RowBudget`` of the layout's rows."""
+
+
+ROW_BUDGET = _Budget()
 
 
 def sample(model, video: mx.array, audio: mx.array, text: mx.array, layout,
            *, steps: int, shifts: dict, sigmas: dict | None = None,
            cond_video=(), cond_audio=(),
            on_step: Callable | None = None,
-           pacer: Callable | None = _eval_point) -> tuple:
+           pacer: Callable | _Budget | None = ROW_BUDGET) -> tuple:
     """Video and audio latents after ``steps`` forwards from the noise
     ``video`` and ``audio``. ``sigmas`` {"video", "audio"}, float32 tables
     of ``steps`` + 1 entries each, replaces the schedule of ``shifts``.
     ``on_step(i, n)`` runs after each forward. ``pacer`` runs at each
-    pause point inside a forward; the default evaluates there, which
-    bounds the graph to one block."""
+    pause point inside a forward. The default is a ``RowBudget`` that
+    starts again with each forward, and None runs each forward as one
+    graph."""
     sig = (schedule.stream_sigmas(steps, shifts) if sigmas is None
            else sigmas)
     sv, sa = sig["video"], sig["audio"]
@@ -59,6 +98,9 @@ def sample(model, video: mx.array, audio: mx.array, text: mx.array, layout,
                          f"audio")
     xv, xa = video.astype(mx.float32), audio.astype(mx.float32)
     n = len(sv) - 1
+    budget = None
+    if isinstance(pacer, _Budget):
+        budget = pacer = RowBudget(layout.rows, EVAL_ROWS)
     with pacing.paced(pacer):
         for i in range(n):
             plan = model.plan(layout, stream_time(sv[i]), stream_time(sa[i]))
@@ -69,6 +111,8 @@ def sample(model, video: mx.array, audio: mx.array, text: mx.array, layout,
             xv = xv + float(sv[i + 1] - sv[i]) * vv
             xa = xa + float(sa[i + 1] - sa[i]) * va
             mx.eval(xv, xa)
+            if budget is not None:
+                budget.reset()
             if on_step is not None:
                 on_step(i, n)
     return xv, xa

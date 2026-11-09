@@ -293,6 +293,59 @@ def test_a_run_steps_each_stream_on_its_own_schedule(tiny, monkeypatch,
     assert seen[0] == (0.0, 0.0)
 
 
+@pytest.mark.parametrize("size, frames, text, rows, every", [
+    ((1344, 768), 362, 25, 109087, 1),
+    ((1344, 768), 124, 188, 37898, 1),
+    ((1344, 768), 124, 1, 37711, 1),
+    ((768, 768), 124, 188, 21914, 2),
+    ((672, 384), 124, 188, 9926, 4),
+    ((512, 512), 22, 188, 2054, 16),
+], ids=["1344x768x362", "1344x768x124", "1344x768x124-short-caption",
+         "768x768x124", "672x384x124", "512x512x22"])
+def test_the_default_pacer_evaluates_on_the_clips_rows(size, frames, text,
+                                                       rows, every):
+    """Every point of a clip of 32768 rows or more evaluates, whatever its
+    caption, and a smaller clip evaluates every ceil(32768 / rows)
+    points."""
+    vs, aus = hf.latent_shapes(frames, *size)
+    lay = layout.pack(hf.TIMELINE, text, *vs[2:], aus[3])
+    assert lay.rows == rows
+    hit = []
+    budget = api.RowBudget(lay.rows, evaluate=hit.append)
+    for i in range(48):
+        budget((i,))
+    assert hit == list(range(every - 1, 48, every))
+
+
+def test_a_run_counts_the_layouts_rows_and_starts_each_step_again(
+        tiny, monkeypatch):
+    """The default pacer of a run counts each point as the layout's rows
+    and starts again after each forward, so each step evaluates at the
+    same points."""
+    vs, aus = hf.latent_shapes(5, 64, 64)
+    lay = layout.pack(hf.TIMELINE, 8, *vs[2:], aus[3])
+    monkeypatch.setattr(api, "EVAL_ROWS", 3 * lay.rows)
+    hit, made = [], []
+    real = api.RowBudget
+
+    def budget(rows, threshold):
+        made.append((rows, threshold))
+        return real(rows, threshold,
+                    evaluate=lambda *a: hit.append(int(a[0].item())))
+
+    def fake(self, video, audio, *a, **k):
+        for i in range(8):
+            pacing.point(mx.array(i))
+        return mx.zeros(video.shape), mx.zeros(audio.shape)
+
+    monkeypatch.setattr(api, "RowBudget", budget)
+    monkeypatch.setattr(hm.H3Transformer, "__call__", fake)
+    api.sample(tiny, mx.zeros(vs), mx.zeros(aus), mx.zeros((1, 8, 64)), lay,
+               steps=2, shifts=hf.SHIFTS)
+    assert made == [(lay.rows, 3 * lay.rows)]
+    assert hit == [2, 5, 2, 5]
+
+
 def test_float16_is_refused(tiny):
     with pytest.raises(hm.H3DtypeError, match="bfloat16 or float32"):
         hm.H3Transformer(TINY).act_dtype = mx.float16
