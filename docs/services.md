@@ -158,7 +158,8 @@ launch.
 ## Embeddings
 
 Embeddings turn text, and with EmbeddingGemma 2 also images, audio and
-video, into vectors for search. They need no extra. `gmlx init` sets up
+video, into vectors for search. Video input needs ffmpeg or the
+[`video` extra](installation.md#optional-features). `gmlx init` sets up
 EmbeddingGemma 2, a GGUF that the server never downloads, so pull it and
 its media projector first. On M3 and later Macs:
 
@@ -282,7 +283,7 @@ it. To embed a longer clip, up to about 5 minutes in one item, lift the cut:
 
 With the projector loaded, EmbeddingGemma 2 holds about 1.2 GB. A request
 at the default settings adds up to about 0.5 GB while it runs, an image at
-1120 adds about 1.1 GB, and a long clip with the cut lifted about 2.3 GB.
+1120 adds about 1.1 GB, and a long clip with the cut lifted about 1.6 GB.
 
 ### Chat messages and vLLM requests
 

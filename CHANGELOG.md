@@ -27,12 +27,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Qwen3-Embedding. See
   [Search prompts and shorter vectors](docs/services.md#search-prompts-and-shorter-vectors).
 - Gemma 4 image and video input takes less memory.
+- With ffmpeg installed, the server reads video input with it, so chat and
+  embeddings models get the frames their reference code gets. OpenCV reads
+  video only when ffmpeg is missing.
 
 ### Fixed
 
-- Gemma 4 audio from a GGUF projector now matches the reference model. The
-  audio encoder scaled its attention queries wrongly and saw one frame too
-  many.
+- Gemma 4 audio input now matches the reference model. The audio encoder
+  saw one frame too many, and with a GGUF projector it also scaled its
+  attention queries wrongly.
+- A video request to a server with neither ffmpeg nor OpenCV gets a 400
+  that names both installs, not a 500.
 
 ## [0.5.5] - 2026-11-08
 
