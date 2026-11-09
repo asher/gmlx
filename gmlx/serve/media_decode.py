@@ -266,14 +266,24 @@ def ffmpeg_resample(audio, rate: int, target: int):
         from mlx_audio.utils import resample_audio
 
         return resample_audio(audio, rate, target)
-    cutoff = 0.97
-    half = math.ceil(16 / (min(1.0, up / down) * cutoff)) * up
-    # scipy's firwin with a ("kaiser", 9.0) window: a windowed sinc at unit
-    # gain.
-    band = cutoff / max(up, down)
+    # swr's cutoff 0.97 of the lower Nyquist, capped at the input's own
+    # Nyquist when upsampling; 32 taps per input sample at that band.
+    factor = min(up / down * 0.97, 1.0)
+    half = math.ceil(16 / factor) * up
+    band = factor / up
     taps = band * np.sinc(band * np.arange(-half, half + 1)) * np.kaiser(2 * half + 1, 9.0)
     taps /= taps.sum()
-    return resample_poly(np.asarray(audio, dtype=np.float64), up, down, window=taps)
+    x = np.asarray(audio, dtype=np.float64)
+    if len(x) < 2:
+        return resample_poly(x, up, down, window=taps)
+    # swr mirrors the clip for the filter to read past its ends: the start
+    # without its first sample, the end with its last.
+    pad = math.ceil(math.ceil(16 / factor) / down) * down
+    x = np.concatenate([np.pad(x, (pad, 0), mode="reflect"),
+                        np.pad(x, (0, pad), mode="symmetric")[len(x):]])
+    y = resample_poly(x, up, down, window=taps)
+    start = pad * up // down
+    return y[start:start + math.ceil((len(x) - 2 * pad) * up / down)]
 
 
 def load_audio(file, sr: int, field: str = "audio",

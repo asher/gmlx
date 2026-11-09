@@ -821,6 +821,25 @@ def test_ffmpeg_mode_mixes_stereo_down_as_ffmpeg_does():
     np.testing.assert_allclose(ffmpeg, want * 0.5 ** 0.5, atol=1e-6)
 
 
+@pytest.mark.parametrize("rate", [8000, 11025, 22050, 44100, 48000])
+def test_ffmpeg_resample_matches_torchcodec(rate):
+    # Recorded by scripts/embedder_oracle/ffmpeg_resample_reference.py.
+    # 8 and 11.025 kHz upsample, where FFmpeg widens the band to the input's
+    # Nyquist; the clip edges check its mirrored ends.
+    path = os.path.join(os.path.dirname(__file__), "..", "fixtures", "ffmpeg_resample",
+                        "reference.npz")
+    with np.load(path) as z:
+        x, ref = z[f"in.{rate}"].astype(np.float32) / 32768, z[f"out.{rate}"]
+    y = md.ffmpeg_resample(x, rate, 16000)
+    # torchcodec's length moves by a sample with how the decoder splits the
+    # clip into packets.
+    assert abs(len(y) - len(ref)) <= 1
+    n = min(len(y), len(ref))
+    y, ref = y[:n], ref[:n].astype(np.float64)
+    snr = 10 * np.log10(np.sum(ref ** 2) / np.sum((y - ref) ** 2))
+    assert snr > 90, snr
+
+
 def test_ffmpeg_resample_keeps_the_passband_and_cuts_above_nyquist():
     # A 1 kHz tone passes; a 9 kHz tone, above the new Nyquist, does not
     # fold back into the band.
