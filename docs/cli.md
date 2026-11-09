@@ -73,7 +73,7 @@ gmlx init --from-hf-cache                  # models already in the Hugging Face 
 | `--disk-cache [GB]` | On in the wizard, else off | Enable the on-disk prompt cache with this cap for each model, 50 GB when the flag is bare. |
 | `--with-stt [MODEL]` | Off | Configure speech-to-text, with `whisper-turbo` when the flag is bare. |
 | `--with-tts [MODEL]` | Off | Configure text-to-speech, with `kokoro` when the flag is bare. |
-| `--with-embeddings [MODEL]` | Off | Configure embeddings, with `qwen3-embed-0.6b` when the flag is bare. |
+| `--with-embeddings [MODEL]` | Off | Configure embeddings, with `embeddinggemma-2-gguf` when the flag is bare. |
 | `--with-rerank [MODEL]` | Off | Configure reranking, with `qwen3-rerank-0.6b` when the flag is bare. |
 | `--install`, `--no-install` | Ask in the wizard, else off | Install the extras the chosen services need, or never offer to. |
 | `--default-model ID` | None | A request that omits a model uses this one. |
@@ -211,7 +211,7 @@ These flags enable the services in
 | `--stt [MODEL]` | Off | Serve speech-to-text at `POST /v1/audio/transcriptions`, with `whisper-turbo` when bare. MODEL can be a served model that hears audio. |
 | `--tts [MODEL]` | Off | Serve text-to-speech at `POST /v1/audio/speech`, with `kokoro` when the flag is bare. |
 | `--embeddings [MODEL]` | Off | Serve embeddings at `POST /v1/embeddings`, with `qwen3-embed-0.6b` when the flag is bare. |
-| `--embeddings-mmproj MMPROJ` | The preset's or a paired one | The media projector of an EmbeddingGemma 2 GGUF, or `false` for text only. |
+| `--embeddings-mmproj MMPROJ` | The preset's, or one beside the model | The media projector of an EmbeddingGemma 2 GGUF, or `false` for text only. |
 | `--rerank [MODEL]` | Off | Serve reranking at `POST /v1/rerank`, with `qwen3-rerank-0.6b` when the flag is bare. |
 
 Each completed request logs a line with the endpoint, model, token counts,

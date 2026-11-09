@@ -157,32 +157,189 @@ launch.
 
 ## Embeddings
 
-Embeddings turn text into vectors for search. They need no extra. The
-default model is a GGUF that the server never downloads, so pull it first:
+Embeddings turn text, and with EmbeddingGemma 2 also images, audio and
+video, into vectors for search. They need no extra. `gmlx init` sets up
+EmbeddingGemma 2, a GGUF that the server never downloads, so pull it and
+its media projector first. On M3 and later Macs:
 
 ```sh
-gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
+gmlx pull hf:unsloth/embeddinggemma-2-GGUF/embeddinggemma-2-Q8_0.gguf mmproj-BF16.gguf
 ```
 
-Set `server.embeddings`, restart, and send text:
+On M1 and M2 Macs, pull `mmproj-F16.gguf` in place of `mmproj-BF16.gguf`.
+Then set the model, restart, and send text:
+
+```yaml
+server:
+  embeddings: embeddinggemma-2-gguf
+```
 
 ```sh
 curl localhost:8080/v1/embeddings -H 'content-type: application/json' \
   -d '{"model": "text-embedding-3-small", "input": ["hello", "world"]}'
 ```
 
-`input` is a string or a list of strings. `encoding_format` is `float` (the
-default) or `base64`. Vectors come back normalized to length 1. Input longer
-than the model's context is cut to fit, and the OpenAI `dimensions` field is
-ignored.
+`input` is a string or a list of strings, one vector each.
+`encoding_format` is `float` (the default) or `base64`. Vectors come back
+normalized to length 1. Input longer than the model's context is cut to
+fit.
+
+- [Images, audio and video](#images-audio-and-video)
+- [Search prompts and shorter vectors](#search-prompts-and-shorter-vectors)
+- [Image detail and audio length](#image-detail-and-audio-length)
+- [Chat messages and vLLM requests](#chat-messages-and-vllm-requests)
+- [Text-only EmbeddingGemma 2](#text-only-embeddinggemma-2)
+- [Embeddings models](#embeddings-models)
+
+### Images, audio and video
+
+EmbeddingGemma 2 puts text, images, audio and video in one vector space, so
+a text query finds a matching photo or clip. Send media as content parts. A
+list of parts inside `input` is one item, and it returns one vector:
+
+```sh
+curl localhost:8080/v1/embeddings -H 'content-type: application/json' -d @- <<EOF
+{"input": [["A photo of my bike: ",
+            {"type": "image", "base64": "$(base64 -i bike.jpg)"}]]}
+EOF
+```
+
+A flat list of parts returns one vector per part, so
+`"input": [{"type": "image", ...}, {"type": "text", ...}]` gives two
+vectors. To index a library, send each photo, clip or passage as its own
+item, and search it with text.
+
+| Kind | Part types |
+|------|------------|
+| Text | `text` |
+| Image | `image_url`, `input_image`, or `image` with `image`, `url`, `path` or `base64` |
+| Audio | `input_audio`, `audio_url`, or `audio` with `audio`, `url`, `path` or `base64` |
+| Video | `video_url`, `input_video`, or `video` with `video`, `url`, `path` or `base64` |
+
+Send media as in chat requests, inline as base64 or as a file in the
+server's media folder. See [Media in requests](api.md#media-in-requests).
+One request holds up to 64 media items. A video is sampled at 1 frame per
+second, up to 32 frames.
+
+In an item with media, `<|image|>`, `<|audio|>` and `<|video|>` in the
+text mark where each medium goes, in order. In an item without media they
+are plain text.
+
+### Search prompts and shorter vectors
+
+`prompt_name` puts the model's task prompt in front of each item, as
+sentence-transformers does. Use `query` for search queries and `document`
+for the passages you index:
+
+```json
+{"input": "how do I fix a flat tire?", "prompt_name": "query"}
+```
+
+The names come from the model's sentence-transformers configuration.
+EmbeddingGemma 1 and 2 and Qwen3-Embedding take them, and another name gets
+a 400. The prompts are written for text.
+
+`dimensions` returns a shorter vector, cut and normalized again. Shorter
+vectors make a smaller index at some cost in quality:
+
+| Model | `dimensions` |
+|-------|--------------|
+| EmbeddingGemma 1 and 2 | 768, 512, 256 or 128 |
+| Qwen3-Embedding | 32 up to the model's width |
+
+Other models ignore `dimensions`.
+
+### Image detail and audio length
+
+Each image and each video frame becomes a number of tokens, up to a budget.
+One item holds 8,192 tokens, so the budget sets the detail and how much
+fits. Set it per request in `mm_processor_kwargs`: `max_soft_tokens` sets
+both, and `images_kwargs` or `videos_kwargs` set one.
+
+```json
+{"input": [[{"type": "image", "base64": "..."}]],
+ "mm_processor_kwargs": {"images_kwargs": {"max_soft_tokens": 560}}}
+```
+
+| Budget | Square image | 16:9 image | 32-frame 16:9 video |
+|--------|--------------|------------|---------------------|
+| 70 | 64 | 66 | 2,178 |
+| 140 | 121 | 120 | 3,906 (the video default) |
+| 280 | 256 | 264 (the image default) | 8,514, too long |
+| 560 | 529 | 527 | too long |
+| 1120 | 1,089 | 1,100 | too long |
+
+The budget is a maximum, because each image side rounds down to a
+multiple of 48 pixels. An item whose media take more than 8,192 tokens gets a 400 that
+gives its token count.
+
+Each audio clip is cut at 30 seconds, as the model's reference code cuts
+it. To embed a longer clip, up to about 5 minutes in one item, lift the cut:
+
+```json
+{"mm_processor_kwargs": {"audio_kwargs": {"truncation": false}}}
+```
+
+With the projector loaded, EmbeddingGemma 2 holds about 1.2 GB. A request
+at the default settings adds up to about 0.5 GB while it runs, an image at
+1120 adds about 1.1 GB, and a long clip with the cut lifted about 2.3 GB.
+
+### Chat messages and vLLM requests
+
+EmbeddingGemma 2 also takes the request forms of vLLM's embeddings API. A
+conversation in `messages`, or a list of role messages in `input`, returns
+one vector. A list of conversations returns one vector each:
+
+```json
+{"messages": [{"role": "system", "content": "title: none | text: "},
+              {"role": "user", "content": [
+                {"type": "text", "text": "a red bike"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}]}]}
+```
+
+A few behaviors differ from vLLM:
+
+- `add_special_tokens` is true by default on conversations too, so their
+  vectors match sentence-transformers. vLLM's default there is false.
+- An input longer than the context is cut whether `truncate_prompt_tokens`
+  is unset or -1. vLLM refuses it when the field is unset.
+- A vLLM field set to a value gmlx cannot honor, such as `embed_dtype` or
+  `truncation_side: left`, gets a 400 that names the field.
+
+### Text-only EmbeddingGemma 2
+
+The server needs the projector to embed media. It uses the preset's
+projector for your Mac, or one in the model's folder that fits the model.
+For another projector, set
+[`server.embeddings_mmproj`](config.md#serverembeddings_mmproj) or
+`--embeddings-mmproj`. To run text only and skip the 1 GB projector, set it
+to `false`:
+
+```yaml
+server:
+  embeddings: embeddinggemma-2-gguf
+  embeddings_mmproj: false
+```
+
+When the server finds no projector, it runs text only and logs why:
+
+```text
+[server] embeddings: text only (no mmproj found; run gmlx pull hf:unsloth/embeddinggemma-2-GGUF/mmproj-BF16.gguf)
+```
+
+Media requests then get a 400 with the same reason.
+
+### Embeddings models
 
 `server.embeddings` takes a GGUF alias, a `*.gguf` path or an
-`hf:<org>/<repo>/<file>.gguf` reference. The dimension is the width of each
-vector, and the context is the most input tokens the model reads:
+`hf:<org>/<repo>/<file>.gguf` reference. `true` selects
+`qwen3-embed-0.6b`. The dimension is the width of each vector, and the
+context is the most input tokens the model reads:
 
 | Alias | Repository, Q8_0 | Dimension | Context | Notes |
 |-------|------------------|-----------|---------|-------|
-| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF` | 1024 | 32K | Default. Small, fast and multilingual, about 0.6 GB. |
+| `embeddinggemma-2-gguf` | `unsloth/embeddinggemma-2-GGUF` | 768 | 8K | Text, images, audio and video, from Google. About 0.3 GB, plus 1 GB for media. |
+| `qwen3-embed-0.6b` | `Qwen/Qwen3-Embedding-0.6B-GGUF` | 1024 | 32K | Small, fast and multilingual, about 0.6 GB |
 | `qwen3-embed-4b` | `Qwen/Qwen3-Embedding-4B-GGUF` | 2560 | 32K | Better retrieval, about 4.3 GB |
 | `qwen3-embed-8b` | `Qwen/Qwen3-Embedding-8B-GGUF` | 4096 | 32K | Best retrieval of the family and the largest index, about 8 GB |
 | `embeddinggemma-gguf` | `ggml-org/embeddinggemma-300M-GGUF` | 768 | 2K | Small multilingual encoder from Google, about 0.3 GB |
@@ -191,18 +348,24 @@ vector, and the context is the most input tokens the model reads:
 
 The server also runs safetensors encoders, from an alias, a Hugging Face
 repository or a local folder. An MLX checkpoint, plain or quantized, runs on
-the encoders built into gmlx, which cover EmbeddingGemma, BERT,
+the encoders built into gmlx, which cover EmbeddingGemma 1 and 2, BERT,
 XLM-RoBERTa, ModernBERT and Qwen3-Embedding. These download once when they
 are not in the cache:
 
 | Alias | Repository | Dimension | Context | Notes |
 |-------|------------|-----------|---------|-------|
+| `embeddinggemma-2` | `mlx-community/embeddinggemma-2-8bit` | 768 | 8K | Text, images, audio and video, about 1.2 GB |
 | `embeddinggemma` | `mlx-community/embeddinggemma-300m-8bit` | 768 | 2K | Small multilingual model from Google, about 0.3 GB |
 | `arctic-l` | `mlx-community/snowflake-arctic-embed-l-v2.0-8bit` | 1024 | 8K | Multilingual, long inputs |
 | `nomic-embed` | `mlx-community/nomicai-modernbert-embed-base-8bit` | 768 | 8K | English, long inputs |
 | `bge-m3` | `mlx-community/bge-m3-mlx-8bit` | 1024 | 8K | Multilingual, long inputs |
 
+An EmbeddingGemma 2 checkpoint carries its own media towers, so it takes no
+projector setting.
+
 Choose a GGUF model unless you want an encoder for its size or languages.
+
+### How the server checks a model
 
 The server checks the model at startup, from a safetensors encoder's
 `config.json` or from a GGUF's header, and a model that fails the check
@@ -245,8 +408,8 @@ does. One that sets `<arch>.attention.causal` to false, as Nemotron-3-Embed
 does, runs without the causal mask, so each token attends to the whole
 input.
 
-EmbeddingGemma never runs in float16, which its model card rules out. It
-runs in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
+EmbeddingGemma 1 and 2 never run in float16, which their model cards rule
+out. They run in bfloat16, or in float32 where [`server.dtype`](config.md#serverdtype)
 gives float16.
 
 A cached encoder loads with no network access when its own files or its
