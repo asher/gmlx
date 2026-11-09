@@ -464,6 +464,62 @@ def check_audio_data(value, field: str) -> None:
         raise MediaRefused(f"{field} must be {want}") from None
 
 
+def check_audio(value, field: str, tally: Tally | None = None) -> None:
+    """An audio reference: a ``data:audio/`` URI, an allowed URL or a file
+    in the media folder."""
+    if not isinstance(value, str):
+        raise MediaRefused(f"{field} must be a string")
+    if tally is not None:
+        tally.item()
+    if value.startswith("data:"):
+        if _data_uri(value, "audio", field) is None:
+            raise MediaRefused(f"{field} must be a base64 data:audio/... URI")
+        return
+    _refuse_reference(field, value, "a base64 data:audio/... URI")
+
+
+def _check_path(value, field: str, want: str, tally: Tally) -> None:
+    """A ``path`` key: a file in the media folder, never a URL."""
+    if not isinstance(value, str):
+        raise MediaRefused(f"{field} must be a string")
+    tally.item()
+    if _inline_only.get() or media_parts(value) is None:
+        raise path_refusal(field, want)
+
+
+def _check_base64(value, field: str, kind: str, tally: Tally) -> None:
+    """A ``base64`` key: bare base64 of an image, audio clip or video."""
+    if not isinstance(value, str):
+        raise MediaRefused(f"{field} must be a string")
+    if _over_media_bytes(len(value) // 4 * 3 - 3):
+        raise _too_large(field)
+    try:
+        data = b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise MediaRefused(f"{field} must be base64 {kind} data") from None
+    if _over_media_bytes(len(data)):
+        raise _too_large(field)
+    if kind == "image":
+        tally.image(data, field)
+        return
+    tally.item()
+    if kind == "video" and not _video_container(data):
+        raise MediaRefused(f"{field} holds no MP4, QuickTime, Matroska, WebM or "
+                           "AVI video")
+
+
+def _check_keyed(d: dict, kind: str, tally: Tally) -> None:
+    """The ``url``, ``path`` and ``base64`` keys of a Hugging Face style
+    ``image``, ``audio`` or ``video`` part."""
+    check = {"image": check_image, "audio": check_audio, "video": check_video}[kind]
+    if d.get("url") is not None:
+        check(d["url"], f"{kind}.url", tally)
+    if d.get("path") is not None:
+        _check_path(d["path"], f"{kind}.path", f"a base64 data:{kind}/... URI", tally)
+    if d.get("base64") is not None:
+        _check_base64(d["base64"], f"{kind}.base64", kind, tally)
+
+
 def reference_refusal(field: str, value: str, want: str) -> MediaRefused:
     """The refusal for a reference that is neither inline data, an allowed
     URL nor a file in the media folder."""
@@ -535,6 +591,7 @@ def _check_part(d: dict, tally: Tally) -> None:
             else:
                 raise MediaRefused(f"image.source.type {stype!r} is not supported. "
                                    "Use base64.")
+        _check_keyed(d, "image", tally)
     elif kind in _VIDEO_PART_TYPES:
         for key in ("video", "video_url"):
             ref = d.get(key)
@@ -542,11 +599,23 @@ def _check_part(d: dict, tally: Tally) -> None:
                 ref = ref.get("url")
             if ref is not None:
                 check_video(ref, key, tally)
+        if kind == "video":
+            _check_keyed(d, "video", tally)
     elif kind == "input_audio":
         audio = d.get("input_audio")
         if isinstance(audio, dict) and audio.get("data") is not None:
             check_audio_data(audio["data"], "input_audio.data")
             tally.item()
+    elif kind == "audio_url":
+        ref = d.get("audio_url")
+        if isinstance(ref, dict):
+            ref = ref.get("url")
+        if ref is not None:
+            check_audio(ref, "audio_url", tally)
+    elif kind == "audio":
+        if d.get("audio") is not None:
+            check_audio(d["audio"], "audio", tally)
+        _check_keyed(d, "audio", tally)
 
 
 def _check_edit_image(value, field: str, tally: Tally) -> None:

@@ -739,3 +739,56 @@ def test_the_gate_reads_a_forms_text_part_past_a_mib():
     headers = Headers({"content-type": f"multipart/form-data; boundary={b}"})
     assert asyncio.run(mg.multipart_text_fields(headers, raw)) == [
         ("prompt", text)]
+
+
+# The embeddings part types: audio_url, and the url, path and base64 keys
+# of Hugging Face style image, audio and video parts.
+
+def _embed(part):
+    return {"input": [[part]]}
+
+
+def test_embeddings_parts_in_the_media_folder_pass(media_root):
+    for part in (
+            {"type": "audio_url", "audio_url": {"url": f"{media_root}/a.wav"}},
+            {"type": "audio", "audio": f"{media_root}/a.wav"},
+            {"type": "audio", "url": f"file://{media_root}/a.wav"},
+            {"type": "audio", "path": f"{media_root}/a.wav"},
+            {"type": "image", "path": f"{media_root}/a.png"},
+            {"type": "image", "url": f"{media_root}/a.png"},
+            {"type": "video", "path": f"{media_root}/v.mp4"},
+            {"type": "video", "url": f"{media_root}/v.mp4"}):
+        _check(_embed(part), path="/v1/embeddings")
+
+
+@pytest.mark.parametrize("part, words", [
+    ({"type": "audio_url", "audio_url": {"url": "/etc/a.wav"}}, "cp -c FILE"),
+    ({"type": "audio", "path": "/etc/a.wav"}, "cp -c FILE"),
+    ({"type": "audio", "path": "relative.wav"}, "cp -c FILE"),
+    ({"type": "image", "path": "https://example.com/a.png"}, "cp -c FILE"),
+    ({"type": "audio", "url": "https://example.com/a.wav"}, "names a URL"),
+    ({"type": "video", "url": "http://example.com/v.mp4"}, "names a URL"),
+    ({"type": "audio_url", "audio_url": {"url": "data:image/png;base64,AA=="}},
+     "data:audio"),
+    ({"type": "image", "base64": "not base64!"}, "base64 image data"),
+    ({"type": "video", "base64": base64.b64encode(b"#EXTM3U\nhttp://x\n").decode()},
+     "holds no MP4"),
+])
+def test_embeddings_parts_the_server_does_not_open_are_refused(media_root, part, words):
+    with pytest.raises(mg.MediaRefused, match=words):
+        _check(_embed(part), path="/v1/embeddings")
+
+
+def test_embeddings_base64_parts_count_toward_the_request(monkeypatch):
+    b64 = base64.b64encode(PNG.getvalue()).decode()
+    monkeypatch.setattr(mg, "MEDIA_MAX_ITEMS", 2)
+    _check({"input": [[{"type": "image", "base64": b64}]] * 2}, path="/v1/embeddings")
+    with pytest.raises(mg.MediaRefused, match="over the limit of 2"):
+        _check({"input": [[{"type": "image", "base64": b64}]] * 3},
+               path="/v1/embeddings")
+
+
+def test_a_path_key_is_refused_in_a_launch_session(media_root):
+    with pytest.raises(mg.MediaRefused, match="only inline"):
+        _check(_embed({"type": "image", "path": f"{media_root}/a.png"}),
+               inline_only=True, path="/v1/embeddings")

@@ -80,22 +80,31 @@ def test_the_mismatch_message_never_names_a_local_folder():
     assert "'embeddinggemma'" in str(exc.value)
 
 
-# _normalize_input
-def test_normalize_input_string_and_list():
-    assert emb._normalize_input("hello") == ["hello"]
-    assert emb._normalize_input(["a", "b"]) == ["a", "b"]
+# embeddings_request.items
+def _texts(value):
+    from gmlx.serve.embeddings_request import items
+
+    found, chat = items({"input": value})
+    assert not chat
+    return ["".join(item.parts) for item in found]
 
 
-def test_normalize_input_rejects_bad_shapes():
+def test_input_string_and_list():
+    assert _texts("hello") == ["hello"]
+    assert _texts(["a", "b"]) == ["a", "b"]
+
+
+def test_input_rejects_bad_shapes():
     for bad, match in [
-        (None, "'input' is required"),
+        (None, "exactly one of the fields 'input' and 'messages'"),
         ("   ", "must not be empty"),
         ([], "empty list"),
-        ([1, 2], "list of strings"),
-        (42, "must be a string or a list"),
+        ([1, 2], "token ids"),
+        ([[1, 2]], "token ids"),
+        (42, "must be a string, a content part or a list"),
     ]:
         with pytest.raises(emb.EmbeddingsRequestError, match=match):
-            emb._normalize_input(bad)
+            _texts(bad)
 
 
 # encode_embedding
@@ -120,7 +129,7 @@ def _stub_embed(monkeypatch, matrix, n_tokens=7):
                         classmethod(lambda cls, p: ("MODEL", "TOK")))
     cap = {}
 
-    def fake_embed(model_obj, tokenizer, texts):
+    def fake_embed(model_obj, tokenizer, texts, add_special_tokens=True):
         cap.update(model=model_obj, tok=tokenizer, texts=list(texts))
         return np.asarray(matrix, dtype=np.float32), n_tokens
 
@@ -680,7 +689,8 @@ class _FakeBatchTok:
         self.model_max_length = model_max_length
         self.calls = []
 
-    def __call__(self, texts, *, padding, truncation, max_length, return_tensors):
+    def __call__(self, texts, *, padding, truncation, max_length, return_tensors,
+                 add_special_tokens=True):
         self.calls.append(dict(n=len(texts), padding=padding,
                                truncation=truncation, max_length=max_length,
                                return_tensors=return_tensors))
@@ -742,7 +752,8 @@ def test_run_embeddings_gguf_backend(monkeypatch):
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "causal", False)
     cap = {}
 
-    def fake_embed(model_obj, tok, texts, pooling="last", causal=True):
+    def fake_embed(model_obj, tok, texts, pooling="last", causal=True,
+                   add_special_tokens=True):
         cap.update(model=model_obj, tok=tok, texts=list(texts), pooling=pooling,
                    causal=causal)
         return np.asarray([[0.5, -0.5]], dtype=np.float32), 4

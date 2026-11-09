@@ -301,7 +301,13 @@ def audio_features(samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         from gmlx._vendor.mlx_vlm.models.gemma4.audio_feature_extractor import (
             Gemma4AudioFeatureExtractor,
         )
-        _EXTRACTOR = Gemma4AudioFeatureExtractor()
+        import warnings
+
+        with warnings.catch_warnings():
+            # The 128-bin mel bank at a 512-point FFT leaves a filter empty,
+            # as the reference extractor does.
+            warnings.filterwarnings("ignore", message="At least one mel filter")
+            _EXTRACTOR = Gemma4AudioFeatureExtractor()
     out = _EXTRACTOR(np.asarray(samples, dtype=np.float32), max_length=None,
                      truncation=False)
     return out["input_features"][0][None], out["input_features_mask"][0][None]

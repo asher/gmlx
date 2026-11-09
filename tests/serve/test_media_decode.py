@@ -274,7 +274,8 @@ def test_the_container_files_mlx_audio_hands_ffmpeg_go_to_ffmpeg(tmp_path,
                                                                 monkeypatch, name):
     seen = []
 
-    def decode(source, field="audio", sample_rate=None, nchannels=None):
+    def decode(source, field="audio", sample_rate=None, nchannels=None,
+               max_seconds=None):
         seen.append((source, sample_rate, nchannels))
         return np.zeros(4, dtype=np.int16), sample_rate or 8000, nchannels or 1
     monkeypatch.setattr(media_programs, "decode", decode)
@@ -289,7 +290,8 @@ def test_the_container_files_mlx_audio_hands_ffmpeg_go_to_ffmpeg(tmp_path,
 def test_the_container_bytes_mlx_audio_hands_ffmpeg_go_to_ffmpeg(monkeypatch, head):
     seen = []
 
-    def decode(source, field="audio", sample_rate=None, nchannels=None):
+    def decode(source, field="audio", sample_rate=None, nchannels=None,
+               max_seconds=None):
         seen.append(source)
         return np.zeros(4, dtype=np.int16), 8000, 1
     monkeypatch.setattr(media_programs, "decode", decode)
@@ -303,7 +305,7 @@ def test_ffmpeg_decodes_to_the_target_rate_and_channels(monkeypatch):
     the samples at the target."""
     seen = []
 
-    def run(argv, data, limit):
+    def run(argv, data, limit, keep=False):
         seen.append(argv)
         return 0, bytearray(b"\0\0" * 8), b""
     monkeypatch.setattr(media_programs, "_run_bounded", run)
@@ -385,7 +387,7 @@ def test_an_endless_ffmpeg_decode_is_stopped_at_the_limit(endless_ffmpeg):
 def test_ffmpeg_gets_a_time_limit_past_the_sample_limit(tmp_path, monkeypatch):
     seen = []
 
-    def run(argv, data, limit):
+    def run(argv, data, limit, keep=False):
         seen.append((argv, limit))
         return 0, bytearray(b"\0\0"), b""
     monkeypatch.setattr(media_programs, "_run_bounded", run)
@@ -759,3 +761,49 @@ def test_video_without_opencv_names_the_video_extra(monkeypatch):
     monkeypatch.setattr(extras, "install_route", lambda: extras.ROUTE_PIP)
     with pytest.raises(ImportError, match=r"needs OpenCV: .*gmlx\[video\]"):
         md.read_video("/nonexistent.mp4")
+
+
+# The stop limit: an embeddings audio clip decodes only to its cut.
+
+def test_flac_silence_stops_at_the_cut_without_a_refusal(installed, monkeypatch):
+    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
+    # 6.5 million samples past the limit, cut at 30 s of 8 kHz.
+    data = flac_silence(100)
+    audio = md.load_audio(io.BytesIO(data), 8000, max_seconds=30)
+    assert len(audio) == 30 * 8000
+    # A 16 kHz clip that needs no resample is still a copy of the cut.
+    data = flac_silence(20, rate=16000)
+    audio = md.load_audio(io.BytesIO(data), 16000, max_seconds=2)
+    assert len(audio) == 32000
+
+
+def test_a_cut_past_the_sample_limit_keeps_the_limit(installed, monkeypatch):
+    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
+    with pytest.raises(MediaRefused, match="the limit for one audio clip"):
+        md.load_audio(io.BytesIO(flac_silence(100)), 8000, max_seconds=10_000)
+
+
+def test_ffmpeg_stops_at_the_cut(endless_ffmpeg):
+    samples, rate, channels = media_programs.decode(b"OggS" + b"\0" * 64,
+                                                    max_seconds=1.5)
+    assert (rate, channels) == (48000, 2)
+    assert len(samples) == 72000 * 2
+    assert _gone(int((endless_ffmpeg / "ffmpeg.pid").read_text()))
+
+
+def test_ffmpeg_gets_the_cut_as_its_time_limit(monkeypatch):
+    seen = []
+
+    def run(argv, data, limit, keep=False):
+        seen.append((argv, limit))
+        return 0, bytearray(b"\0\0" * 10), b""
+    monkeypatch.setattr(media_programs, "_run_bounded", run)
+    monkeypatch.setattr(media_programs, "program", lambda name: name)
+    probe = b'{"streams": [{"sample_rate": "16000", "channels": 1, "duration": "9000"}]}'
+    monkeypatch.setattr(media_programs, "_run", lambda argv, data: type(
+        "P", (), {"returncode": 0, "stderr": b"", "stdout": probe})())
+    # A header that names a long clip is no refusal under a cut.
+    media_programs.decode(b"x", max_seconds=30.25)
+    argv, limit = seen[0]
+    assert argv[argv.index("-t") + 1] == "30.25"
+    assert limit == 2 * (16000 * 30 + 4000)

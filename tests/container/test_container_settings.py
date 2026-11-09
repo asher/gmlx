@@ -1938,6 +1938,7 @@ def test_tool_servers_templates_and_service_models_inside_a_share_warn(home):
             f" env: {{PYTHONPATH: '/opt/x:{proj}/lib'}}}}\n"
             f"    - {{name: far, url: 'http://127.0.0.1:9/mcp'}}\n"
             f"server:\n  embeddings: {proj}/embed.gguf\n  tts: {proj}/voice\n"
+            f"  embeddings_mmproj: {proj}/mmproj-BF16.gguf\n"
             f"  stt: whisper-turbo\n"
             f"  assistants:\n    helper: {{model: m, mcp: [{{name: own, command:"
             f" [uv, run, --directory, '{proj}', srv]}}]}}\n"
@@ -1957,6 +1958,7 @@ def test_tool_servers_templates_and_service_models_inside_a_share_warn(home):
             f"the embeddings model ~/src/proj/embed.gguf is inside the read-write share, so the "
             f"client can replace it {load}",
             "the tts model ~/src/proj/voice is inside",
+            "the embeddings projector ~/src/proj/mmproj-BF16.gguf is inside",
             "the chat template file ~/src/proj/t.jinja is inside",
             "the chat template file ~/src/proj/o.jinja is inside"):
         assert any(w.startswith(f"[launch] warning: {line}") for w in out), line

@@ -1099,6 +1099,53 @@ def find_retrieval_models(dirs, *, recursive=True):
     return embedders, rerankers
 
 
+def pick_projector(paths: list[str]) -> str | None:
+    """The projector to load of several for one model: BF16 on chips that
+    run bfloat16 natively (M3 and later), F16 on M1 and M2, then any other
+    in name order. Weights stay 16-bit at rest in each chip's own type."""
+    from .dtypes import has_native_bfloat16
+
+    want = ("BF16", "F16") if has_native_bfloat16() else ("F16", "BF16")
+
+    def rank(path: str) -> tuple:
+        tag = (quant_tag(os.path.basename(path)) or "").upper()
+        return (want.index(tag) if tag in want else len(want), path)
+
+    return min(paths, key=rank) if paths else None
+
+
+def embedder_mmproj_beside(path: str) -> str | None:
+    """The projector beside an EmbeddingGemma 2 GGUF: an mmproj in its
+    folder whose vision and audio towers project to the model's width. A
+    chat model's projector projects to another width, so it never pairs
+    here. Of several, :func:`pick_projector` picks one."""
+    from gmlx.load.embedder_mmproj import mmproj_mismatch
+    from gmlx.load.gguf_meta import read_int
+    from gmlx.load.headerscan import scan_gguf
+
+    ap = os.path.abspath(path)
+    width = read_int(scan_gguf(ap, include_tensors=False).kv,
+                     "gemma-embedding2.embedding_length")
+    if not width:
+        return None
+    folder = os.path.dirname(ap)
+    found = []
+    for name in sorted(os.listdir(folder)):
+        fp = os.path.join(folder, name)
+        if not name.lower().endswith(".gguf") or fp == ap or not os.path.isfile(fp):
+            continue
+        c = classify_gguf(fp)
+        if c is None or c.kind != "mmproj":
+            continue
+        try:
+            kv = scan_gguf(fp, include_tensors=False).kv
+        except Exception:                   # noqa: BLE001 (an unreadable file)
+            continue
+        if mmproj_mismatch(kv, int(width)) is None:
+            found.append(fp)
+    return pick_projector(found)
+
+
 # Hugging Face cache scan
 def _pick_cache_revision(repo):
     """Pick the cache revision to surface for ``repo`` and a portable ref name for it:
@@ -1981,7 +2028,8 @@ CONFIG_DOCS_URL = f"{DOCS_URL}config.html"
 
 def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s,
                            stt, tts, embeddings, rerank, ttl_s,
-                           default_model, disk_cache, disk_cache_gb) -> list[str]:
+                           default_model, disk_cache, disk_cache_gb,
+                           embeddings_mmproj=None) -> list[str]:
     """The server block: the bind, the model folders and the chosen values."""
     lines = ["server:", "  host: 127.0.0.1", f"  port: {int(port or 8080)}"]
     if dirs:
@@ -1997,6 +2045,10 @@ def _scaffold_server_block(dirs, *, hf_cache, port, token_queue_timeout_s,
                        ("rerank", rerank)):
         if value:
             lines.append(f"  {key}: {value}")
+        if key == "embeddings" and value and embeddings_mmproj is not None:
+            lines.append("  embeddings_mmproj: "
+                         + ("false" if embeddings_mmproj is False
+                            else str(embeddings_mmproj)))
     lines.append("  defaults:")
     lines.append(f"    ttl_s: {_fmt_num(900 if ttl_s is None else ttl_s)}")
     if default_model:
@@ -2086,6 +2138,7 @@ def scaffold_yaml(models: list[ModelCfg], *, model_dirs,
                   hf_cache: bool = False,
                   disk_cache: bool = False, disk_cache_gb=None,
                   stt=None, tts=None, embeddings=None, rerank=None,
+                  embeddings_mmproj=None,
                   default_model=None, aliases=None, ttl_s=None,
                   token_queue_timeout_s=None, talk=None, port=None) -> str:
     """Emit a starter YAML config from discovered models. The file holds only a
@@ -2096,7 +2149,8 @@ def scaffold_yaml(models: list[ModelCfg], *, model_dirs,
     ``server.hf_cache: true`` (set by ``init --from-hf-cache`` so the
     cache-resident entries resolve).
 
-    ``stt`` / ``tts`` / ``embeddings`` / ``rerank`` write ``server.<svc>``;
+    ``stt`` / ``tts`` / ``embeddings`` / ``rerank`` write ``server.<svc>``,
+    and ``embeddings_mmproj`` (a path, or False) ``server.embeddings_mmproj``;
     ``ttl_s`` and ``token_queue_timeout_s`` write their server keys (``0`` =>
     never / wait forever); ``default_model`` writes ``server.defaults.model``;
     ``aliases`` (``{name: id}``) writes an ``aliases:`` block. ``disk_cache`` turns
@@ -2123,6 +2177,7 @@ def scaffold_yaml(models: list[ModelCfg], *, model_dirs,
         dirs, hf_cache=hf_cache, port=port,
         token_queue_timeout_s=token_queue_timeout_s,
         stt=stt, tts=tts, embeddings=embeddings, rerank=rerank, ttl_s=ttl_s,
+        embeddings_mmproj=embeddings_mmproj,
         default_model=default_model, disk_cache=disk_cache,
         disk_cache_gb=disk_cache_gb)
     if aliases:

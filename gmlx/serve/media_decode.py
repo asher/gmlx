@@ -110,10 +110,12 @@ def _miniaudio_info(data: bytes):
 
 
 def _miniaudio_decode(source, field: str, rate: int | None = None,
-                      channels: int | None = None) -> tuple[bytearray, int, int]:
+                      channels: int | None = None,
+                      max_seconds: float | None = None) -> tuple[bytearray, int, int]:
     """16-bit samples, the sample rate and the channel count of ``source``,
     bytes or a file path, decoded by miniaudio at ``rate`` with ``channels``
-    channels, each the file's own when not given, as mlx-audio decodes it."""
+    channels, each the file's own when not given, as mlx-audio decodes it.
+    With ``max_seconds``, the decode stops after that many seconds."""
     import miniaudio
 
     if isinstance(source, str):
@@ -125,10 +127,15 @@ def _miniaudio_decode(source, field: str, rate: int | None = None,
     for r in (native, rate):
         if not 0 < r <= mg.AUDIO_MAX_RATE:
             raise mg.audio_rate_refusal(field, r)
+    stop = None
+    if max_seconds is not None and math.ceil(max_seconds * rate) * channels \
+            <= mg.AUDIO_MAX_SAMPLES:
+        stop = 2 * math.ceil(max_seconds * rate) * channels
     # The length in the header refuses a long clip before the decode. A
     # header can give no length or a wrong one, so the decode stops at the
     # limit too.
-    if math.ceil(int(info.num_frames) * rate / native) * channels > mg.AUDIO_MAX_SAMPLES:
+    if stop is None and (math.ceil(int(info.num_frames) * rate / native) * channels
+                         > mg.AUDIO_MAX_SAMPLES):
         raise mg.audio_too_long(field, rate, channels)
     if isinstance(source, str):
         stream = miniaudio.stream_file(source, miniaudio.SampleFormat.SIGNED16, channels,
@@ -141,6 +148,9 @@ def _miniaudio_decode(source, field: str, rate: int | None = None,
     try:
         for chunk in stream:
             pcm += chunk
+            if stop is not None and len(pcm) >= stop:
+                del pcm[stop:]
+                break
             if len(pcm) > limit:
                 raise mg.audio_too_long(field, rate, channels)
     finally:
@@ -171,11 +181,13 @@ def _downsample(samples, rate: int, target: int, channels: int):
 
 def read_audio(file, always_2d: bool = False, dtype: str = "float64",
                sample_rate: int | None = None, nchannels: int | None = None,
-               field: str = "audio"):
+               field: str = "audio", max_seconds: float | None = None):
     """Read audio as mlx-audio's ``audio_io.read`` does, from a file path or
     a BytesIO, at ``sample_rate`` with ``nchannels`` channels when given,
     and give the samples and the sample rate. The decode stops at
-    :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples."""
+    :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples, or with
+    ``max_seconds`` after that many seconds, and then gives the start of a
+    longer clip."""
     import numpy as np
 
     if sample_rate is not None and sample_rate <= 0:
@@ -194,7 +206,8 @@ def read_audio(file, always_2d: bool = False, dtype: str = "float64",
     normalized = False
     if use_ffmpeg:
         samples, rate, channels = media_programs.decode(
-            source, field, sample_rate=sample_rate, nchannels=nchannels)
+            source, field, sample_rate=sample_rate, nchannels=nchannels,
+            max_seconds=max_seconds)
     else:
         if isinstance(source, str):
             native = int(_file_info(source).sample_rate)
@@ -203,7 +216,8 @@ def read_audio(file, always_2d: bool = False, dtype: str = "float64",
         if sample_rate is not None and sample_rate < native:
             # mlx-audio decodes at the file's rate and downsamples through
             # its FIR resampler.
-            pcm, rate, channels = _miniaudio_decode(source, field, None, nchannels)
+            pcm, rate, channels = _miniaudio_decode(source, field, None, nchannels,
+                                                    max_seconds)
             if math.ceil(len(pcm) // 2 // channels * sample_rate / rate) * channels \
                     > mg.AUDIO_MAX_SAMPLES:
                 raise mg.audio_too_long(field, sample_rate, channels)
@@ -211,7 +225,8 @@ def read_audio(file, always_2d: bool = False, dtype: str = "float64",
                                   sample_rate, channels)
             rate, normalized = sample_rate, True
         else:
-            pcm, rate, channels = _miniaudio_decode(source, field, sample_rate, nchannels)
+            pcm, rate, channels = _miniaudio_decode(source, field, sample_rate,
+                                                    nchannels, max_seconds)
             samples = np.frombuffer(pcm, dtype=np.int16)
     if channels > 1 and samples.ndim == 1:
         samples = samples.reshape(-1, channels)
@@ -236,11 +251,13 @@ def _file_info(path: str):
     return miniaudio.get_file_info(path)
 
 
-def load_audio(file, sr: int, field: str = "audio"):
+def load_audio(file, sr: int, field: str = "audio",
+               max_seconds: float | None = None):
     """mlx-vlm's ``load_audio`` for a BytesIO or an array: mono float32
     samples at ``sr``. Audio that resampling to ``sr`` would take past
     :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples is refused before
-    the resample.
+    the resample. With ``max_seconds``, only the start of a longer clip is
+    decoded and resampled.
 
     mlx-vlm resamples a clip of several channels along the channel axis and
     mixes it down after, which leaves it at its own rate and takes minutes
@@ -254,7 +271,8 @@ def load_audio(file, sr: int, field: str = "audio"):
     from mlx_audio.utils import resample_audio
 
     charge(field)
-    audio, rate = read_audio(file, dtype="float32", field=field)
+    audio, rate = read_audio(file, dtype="float32", field=field,
+                             max_seconds=max_seconds)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     if rate != sr:

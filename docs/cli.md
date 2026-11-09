@@ -211,6 +211,7 @@ These flags enable the services in
 | `--stt [MODEL]` | Off | Serve speech-to-text at `POST /v1/audio/transcriptions`, with `whisper-turbo` when bare. MODEL can be a served model that hears audio. |
 | `--tts [MODEL]` | Off | Serve text-to-speech at `POST /v1/audio/speech`, with `kokoro` when the flag is bare. |
 | `--embeddings [MODEL]` | Off | Serve embeddings at `POST /v1/embeddings`, with `qwen3-embed-0.6b` when the flag is bare. |
+| `--embeddings-mmproj MMPROJ` | The preset's or a paired one | The media projector of an EmbeddingGemma 2 GGUF, or `false` for text only. |
 | `--rerank [MODEL]` | Off | Serve reranking at `POST /v1/rerank`, with `qwen3-rerank-0.6b` when the flag is bare. |
 
 Each completed request logs a line with the endpoint, model, token counts,

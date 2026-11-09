@@ -290,6 +290,34 @@ def test_the_ffmpeg_note_says_why_the_server_has_no_ffmpeg(monkeypatch, tmp_path
             "from a shell whose PATH holds your ffmpeg.") in notes
 
 
+@pytest.mark.parametrize("media, mmproj", [("", None), ("n", False)])
+def test_wizard_embeddings_default_is_embeddinggemma_2(monkeypatch, tmp_path,
+                                                        media, mmproj):
+    # The first row is EmbeddingGemma 2. Declining media writes
+    # embeddings_mmproj: false; accepting leaves the server to find the
+    # preset's projector.
+    import yaml
+
+    monkeypatch.setattr(discovery, "scan_dirs", _fake_scan([]))
+    monkeypatch.setattr(wizard, "_hf_cache_has_gguf", lambda: False)
+    out = tmp_path / "cfg.yaml"
+    io = _ScriptIO([
+        "", "",          # no scan dir, recurse
+        "n",             # disk cache
+        "n", "n",        # decline stt / tts
+        "y",             # configure embeddings
+        "",              # the default row
+        media,           # images, audio and video too?
+        "n",             # decline reranking
+        "", "", "", "",  # ttl / timeout / output / write
+    ])
+    outcome = wizard.run_wizard(default_out=str(out), io=io)
+    cfg = config.build_config(yaml.safe_load(outcome.text))
+    preset = wizard.embeddings.embedding_preset("embeddinggemma-2-gguf")
+    assert cfg.embeddings == preset["quants"]["Q8_0"]
+    assert cfg.embeddings_mmproj is mmproj
+
+
 def test_wizard_embeddings_preset_quant_and_rerank_inherits(monkeypatch, tmp_path):
     """Pick a GGUF embedder preset + a non-default quant, then a reranker whose
     quant defaults to the embedder's chosen rung - the written config carries both
@@ -303,7 +331,7 @@ def test_wizard_embeddings_preset_quant_and_rerank_inherits(monkeypatch, tmp_pat
         "n",             # disk cache
         "n", "n",        # decline stt / tts
         "y",             # configure embeddings
-        "2",             # pick qwen3-embed-4b (2nd preset row)
+        "3",             # pick qwen3-embed-4b (3rd preset row)
         "3",             # quant -> Q6_K (3rd rung)
         "y",             # configure reranking
         "1",             # reranker size -> qwen3-rerank-0.6b

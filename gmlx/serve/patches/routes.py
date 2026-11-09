@@ -926,11 +926,13 @@ def install_audio_voices_route(tts_model: str | None) -> None:
                           include_in_schema=False)
 
 
-def install_embeddings_route(embeddings_model: str | None) -> None:
+def install_embeddings_route(embeddings_model: str | None, media=None) -> None:
     """Add OpenAI-compatible ``POST /v1/embeddings`` backed by
     :mod:`gmlx.serve.embeddings`. ``embeddings_model`` is the resolved model
     (a GGUF path, repo id or local dir) from ``ServerCfg.embeddings``; None =>
     no route (404). This is what ``gmlx launch open-webui`` points RAG at.
+    ``media`` is where EmbeddingGemma 2 finds its towers
+    (``embeddings.resolve_media``).
 
     The JSON parse stays on the event loop; the embedding pass (the model's Metal
     work) dispatches from Starlette's threadpool to the service's single worker
@@ -956,11 +958,8 @@ def install_embeddings_route(embeddings_model: str | None) -> None:
             return err
         try:
             payload = await run_in_threadpool(
-                embeddings_mod.run_embeddings, body.get("input"),
-                configured_model=embeddings_model,
-                model=str(body.get("model") or ""),
-                encoding_format=str(body.get("encoding_format") or ""),
-            )
+                embeddings_mod.run_embeddings,
+                configured_model=embeddings_model, body=body, media=media)
         except embeddings_mod.EmbeddingsModelError as exc:
             # The configured model cannot load: a server-side 501, logged
             # like the route's other server-side errors.
@@ -1063,7 +1062,7 @@ def install_service_routes(cfg) -> None:
     install_audio_translation_route(stt)
     install_audio_speech_route(tts)
     install_audio_voices_route(tts)
-    install_embeddings_route(embeddings)
+    install_embeddings_route(embeddings, getattr(cfg, "embeddings_media", None))
     install_rerank_route(rerank)
     from .images import install_image_routes
     install_image_routes(cfg)

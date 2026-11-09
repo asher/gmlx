@@ -505,7 +505,8 @@ def _print_report(v: dict) -> None:
     elif v.get("mmproj") and v["codecs_loadable"]:
         print("  => mmproj companion: a vision/audio projector, not a standalone")
         print("     model - pair it with its LLM GGUF: --mmproj on run/chat/serve,")
-        print("     or `mmproj:` per model in the server config.")
+        print("     or `mmproj:` per model in the server config. For an")
+        print("     EmbeddingGemma 2 embedder: server.embeddings_mmproj.")
     elif v.get("adapter") and v["codecs_loadable"]:
         print("  => adapter companion: a LoRA adapter, not a standalone model -")
         print("     attach it to its base GGUF: --adapter on run/chat/serve, or")

@@ -420,9 +420,10 @@ def test_embeddings_route_embeds(monkeypatch):
 
     captured = {}
 
-    def fake_run(inputs, *, configured_model, model, encoding_format):
-        captured.update(inputs=inputs, configured=configured_model,
-                        model=model, fmt=encoding_format)
+    def fake_run(*, configured_model, body, media):
+        captured.update(inputs=body["input"], configured=configured_model,
+                        model=body["model"], fmt=body["encoding_format"],
+                        media=media)
         return {"object": "list",
                 "data": [{"object": "embedding", "index": 0,
                           "embedding": [0.1, 0.2]}],
@@ -440,7 +441,8 @@ def test_embeddings_route_embeds(monkeypatch):
     assert body["data"][0]["embedding"] == [0.1, 0.2]
     assert body["model"] == EMB_REPO
     assert captured == {"inputs": ["hi", "yo"], "configured": EMB_REPO,
-                        "model": "text-embedding-3-small", "fmt": "float"}
+                        "model": "text-embedding-3-small", "fmt": "float",
+                        "media": None}
 
 
 def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
@@ -448,7 +450,7 @@ def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
 
     import gmlx.serve.embeddings as emb
 
-    def boom(inputs, **kw):
+    def boom(**kw):
         raise emb.EmbeddingsRequestError(400, "field 'input' is required")
 
     monkeypatch.setattr(emb, "run_embeddings", boom)
@@ -521,7 +523,7 @@ def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
 
     import gmlx.serve.embeddings as emb
 
-    def boom(inputs, **kw):
+    def boom(**kw):
         raise FileNotFoundError("[Errno 2] No such file: '/lib/e.gguf'")
 
     monkeypatch.setattr(emb, "run_embeddings", boom)

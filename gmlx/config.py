@@ -8,7 +8,7 @@ no mlx), so it loads and tests on any machine.
 
 Shape (see ``docs/config.md`` for the full reference)::
 
-    server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
+    server:    {host, port, api_key, no_auth, media_urls, cors_origins, model_dirs, budget_gb, max_models, hf_cache, cache, defaults, stt, tts, embeddings, embeddings_mmproj, rerank, systemone, menubar, token_queue_timeout_s, prefill_step_size, dtype, decode_prefill_ratio, prefill_tick_ms, cache_limit_gb, family_defaults, stochastic_mtp, gpu_keepwarm, assistants, assistant_allow_remote}
     profiles:  {<name>: {extends, sampling, load, cache, system}}
     rules:     [{match: <glob>, profile: <name>}]
     models:    {<id>: {path, profile, family, profiles, mmproj, asr, draft_gguf, adapter, adapters, stream, moe_experts, moe_expert_mass, moe_miss_shed, moe_layer_shed, moe_prestage, stream_fast_disk, speculative, speculative_width_cap, context_copy, rope_scaling, overrides, pin, ttl_s}}
@@ -136,7 +136,8 @@ _TOP_KEYS = frozenset({"server", "profiles", "rules", "models", "aliases",
 _SERVER_KEYS = frozenset({"host", "port", "api_key", "no_auth", "media_urls",
                           "cors_origins", "model_dirs",
                           "budget_gb", "max_models", "hf_cache", "cache",
-                          "defaults", "stt", "tts", "embeddings", "rerank",
+                          "defaults", "stt", "tts", "embeddings",
+                          "embeddings_mmproj", "rerank",
                           "systemone", "menubar", "token_queue_timeout_s", "prefill_step_size",
                           "dtype",
                           "decode_prefill_ratio", "prefill_tick_ms",
@@ -1039,13 +1040,19 @@ class ServerCfg:
     # model dir, or `true` for the default alias - resolved by
     # tts.resolve_tts_model at serve time.
     tts: str | None = None
-    # Optional text-embeddings model (POST /v1/embeddings). A GGUF embedder
-    # (alias `qwen3-embed-0.6b`, a *.gguf path, or hf:<org>/<repo>/<file>.gguf,
-    # loaded by the runtime), or a safetensors encoder (alias `embeddinggemma`
-    # or `bge-m3`, an HF MLX repo, or a local dir). `true` means the default
-    # alias, the GGUF `qwen3-embed-0.6b`. Neither needs an extra.
+    # Optional embeddings model (POST /v1/embeddings). A GGUF embedder
+    # (alias `qwen3-embed-0.6b` or `embeddinggemma-2-gguf`, a *.gguf path, or
+    # hf:<org>/<repo>/<file>.gguf, loaded by the runtime), or a safetensors
+    # encoder (alias `embeddinggemma-2` or `bge-m3`, an HF MLX repo, or a
+    # local dir). `true` means the default alias, the GGUF `qwen3-embed-0.6b`;
+    # `gmlx init` sets up `embeddinggemma-2-gguf`. Neither needs an extra.
     # embeddings.resolve_embeddings_model resolves it at serve time.
     embeddings: str | None = None
+    # The media projector of an EmbeddingGemma 2 GGUF: a *.gguf path or an
+    # hf: ref, or False for text only. Unset takes the preset's projector
+    # for this Mac, or one beside the model. embeddings.resolve_media
+    # resolves it at serve time.
+    embeddings_mmproj: str | bool | None = None
     # Optional reranker model (POST /v1/rerank; Cohere/Jina shape). A Qwen3-Reranker
     # GGUF (alias `qwen3-rerank-0.6b`, a *.gguf path, or hf:<org>/<repo>/<file>.gguf)
     # - a causal Qwen3 LM scored by its yes/no logits, loaded by the runtime (no
@@ -2424,6 +2431,17 @@ def _validate_thinking_budget(where: str, sampling: dict) -> None:
         raise ConfigError(
             f"{where} sampling.thinking_budget_message must be a string "
             f"(got {message!r})")
+
+
+def _embeddings_mmproj(value):
+    """``server.embeddings_mmproj``: a GGUF path or ``hf:`` ref, or False."""
+    if value is None or value is False:
+        return value
+    if value is True or not isinstance(value, str) or not value.strip():
+        raise ConfigError(
+            "server.embeddings_mmproj must be a GGUF projector path or hf: "
+            f"ref, or false for text only (got {value!r})")
+    return value.strip()
 
 
 def _validate_server_dtype(dtype):
@@ -3871,6 +3889,7 @@ def build_config(doc: dict) -> ServerCfg:
         stt=False if srv.get("stt") is False else (srv.get("stt") or None),
         tts=srv.get("tts") or None,   # raw; resolved (aliases etc.) at serve time
         embeddings=srv.get("embeddings") or None,   # raw; resolved at serve time
+        embeddings_mmproj=_embeddings_mmproj(srv.get("embeddings_mmproj")),
         rerank=srv.get("rerank") or None,           # raw; resolved at serve time
         systemone=_parse_systemone(srv.get("systemone")),
         api_key=str(srv["api_key"]) if srv.get("api_key") else None,

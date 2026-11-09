@@ -3567,7 +3567,8 @@ def _expand(path: str, cwd: str) -> str:
 def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
     """The files the server config names that gmlx reads or runs on the Mac:
     model files, chat template files, the local models of the embeddings,
-    rerank, tts and stt services, and the programs and path arguments of
+    rerank, tts and stt services and the embeddings projector, and the
+    programs and path arguments of
     the stdio tool servers. They are made absolute the way the server
     resolves them from ``cwd``, with their links kept, and never read. Each
     comes with a phrase that names it at ``{path}``, and with when gmlx next
@@ -3599,15 +3600,17 @@ def _model_paths(cfg, cwd: str) -> list[tuple[str, str, str]]:
         if isinstance(t, str) and t.strip() and "{" not in t:
             out.append((os.path.abspath(os.path.join(cwd, t)),
                         "the chat template file {path} is", load))
-    for key in ("embeddings", "rerank", "tts", "stt"):
+    for key in ("embeddings", "rerank", "tts", "stt", "embeddings_mmproj"):
         value = getattr(cfg, key, None)
         if not isinstance(value, str) or not value.strip():
             continue
         v = value.strip()
         if v.lower().startswith("hf:"):
             continue
-        if v.lower().endswith(".gguf"):
-            out.append((model_file(v), f"the {key} model {{path}} is", load))
+        what = ("the embeddings projector {path} is" if key == "embeddings_mmproj"
+                else f"the {key} model {{path}} is")
+        if v.lower().endswith(".gguf") or key == "embeddings_mmproj":
+            out.append((model_file(v), what, load))
             continue
         local = os.path.expanduser(v)
         if os.path.isabs(local) or os.path.isdir(os.path.join(cwd, local)):
