@@ -2630,8 +2630,9 @@ def _lora_epilogue_kwargs(lo, idx, dtype):
     ``None`` when the in-op epilogue cannot take this call (older kq build,
     CPU device, a rank x k intermediate past the kernel's bound, or a
     streaming swap), in which case the caller computes the delta with plain
-    ops. Under a swap the stack is the arena, and kq wants one table row
-    per stack row, not per adapter expert."""
+    ops. Under a swap the stack is the arena, and kq rejects ``lora_a``
+    whose leading dim differs from the stack's row count, with
+    ``lora_table`` or without, so the slot-to-expert table cannot ride."""
     if not _KQ_LORA_EPILOGUE or _lora_on_cpu() or lo.owner is not None:
         return None
     t, k = idx.shape

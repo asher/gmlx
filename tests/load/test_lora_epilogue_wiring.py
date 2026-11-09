@@ -94,9 +94,10 @@ def test_mix_exit_gets_tables_no_table_no_rows_in_static_mode(epilogue_on):
 
 
 def test_a_streaming_swap_takes_the_plain_op_delta(epilogue_on):
-    """Under a swap the routing ids are arena slots, and kq wants one table
-    row per stack row, so the exit gets no LoRA operands and the delta maps
-    slots through the owner table with plain ops."""
+    """Under a swap the routing ids are arena slots. kq rejects tables whose
+    leading dim differs from the arena's slot count, even with a slot
+    table, so the exit gets no LoRA operands and the delta maps slots
+    through the owner table with plain ops."""
     glu, lo = _fused_lora_container()
     if not glu._kq_mix_scores:
         pytest.skip("build without gather_qmv_mix_ns_kq")
