@@ -1299,6 +1299,12 @@ def _lift_cache_stash(gb) -> None:
         _retire_rows(gb)[gb.uids[0]] = stash
 
 
+def _speaks(gb, uid) -> bool:
+    from gmlx.serve import speech_rows
+
+    return speech_rows.speaks(gb, uid)
+
+
 def _plain_step_tick(gb, out) -> None:
     """Per-token accounting + snapshot tick for stock-path retire rows.
 
@@ -1328,6 +1334,12 @@ def _plain_step_tick(gb, out) -> None:
     for i, uid in enumerate(gb.uids):
         stash = reg.get(uid)
         if stash is None or "gen" not in stash:
+            continue
+        if _speaks(gb, uid):
+            # A spoken reply's token ids do not describe its KV: a frame
+            # fed its codes, not its token. It leaves no decode snapshot
+            # and no retirement entry.
+            reg.pop(uid, None)
             continue
         tok = rows[i] if i < len(rows) else None
         if tok is None:
