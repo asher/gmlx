@@ -371,8 +371,10 @@ def test_video_frames_sample_as_the_reference(name, want):
     # The indices transformers' EmbeddingGemma2VideoProcessor.sample_frames
     # picks from torchcodec's metadata of the same file.
     from gmlx._vendor.mlx_vlm.utils import VideoSampling
-    from gmlx.serve import media_decode
+    from gmlx.serve import media_decode, media_programs
 
+    if not (media_programs.find("ffmpeg") and media_programs.find("ffprobe")):
+        pytest.importorskip("cv2", reason="no video decoder: neither ffmpeg nor OpenCV")
     path = _ORACLE.parent / "embeddinggemma2_reference" / "media" / name
     frames, meta = media_decode.read_video(
         str(path), sampling=VideoSampling(fps=proc.VIDEO_FPS, max_frames=proc.VIDEO_MAX_FRAMES),
