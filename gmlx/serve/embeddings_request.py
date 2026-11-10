@@ -21,7 +21,7 @@ This module reads no media and loads no model.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .embeddings_errors import EmbeddingsRequestError
 
@@ -73,7 +73,6 @@ class Request:
     mm_processor_kwargs: dict | None = None
     add_special_tokens: bool = True
     chat: bool = False
-    ignored: list = field(default_factory=list)
 
     @property
     def has_media(self) -> bool:
@@ -306,9 +305,6 @@ _PINNED = {
     "priority": ((None, 0), "0", "gmlx has no priority scheduling"),
 }
 
-# Fields read for bookkeeping only.
-_IGNORED = ("request_id", "cache_salt", "user")
-
 
 def _same(a, b) -> bool:
     return type(a) is type(b) and a == b
@@ -355,5 +351,4 @@ def parse(body: dict) -> Request:
     return Request(items=found, encoding_format=fmt, dimensions=dims,
                    prompt_name=prompt_name, mm_processor_kwargs=kwargs,
                    add_special_tokens=_bool(body, "add_special_tokens", True),
-                   chat=chat,
-                   ignored=[k for k in _IGNORED if body.get(k) is not None])
+                   chat=chat)
