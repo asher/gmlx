@@ -62,6 +62,10 @@ dependencies = [
     # The copy's server imports mlx_audio at module top on every serve. It
     # also brings miniaudio and tqdm, which the copy imports.
     "mlx-audio>=0.5.2",
+    # Direct imports: resample_poly for embeddings audio and
+    # linear_sum_assignment for Nemotron-H alignment. mlx-audio's floor;
+    # both exist there.
+    "scipy>=1.10.0",
     # The first release with granite_speech5, which the Granite Speech
     # companion is ported from and tested against. The old <5.13 ceiling
     # (AutoTokenizer.register() vs mlx-lm's NewlineTokenizer) no longer
