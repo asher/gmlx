@@ -727,13 +727,19 @@ def _counted_budget(monkeypatch, made, hit=None):
     monkeypatch.setattr(vapi, "RowBudget", Budget)
 
 
-def _counted_caption(monkeypatch, chat):
-    """``video_service.caption`` recording the checks each call runs."""
+def _counted_caption(monkeypatch, chat, inside=None):
+    """``video_service.caption`` recording the checks each call runs, and
+    holding an entry in ``inside`` while it runs."""
     real, points = vs.caption, []
+    inside = [] if inside is None else inside
 
     def caption(*a, **k):
         before = len(chat)
-        out = real(*a, **k)
+        inside.append(True)
+        try:
+            out = real(*a, **k)
+        finally:
+            inside.pop()
         points.append(len(chat) - before)
         return out
 
@@ -784,17 +790,19 @@ def test_an_av_steps_forward_evaluates_on_its_rows_with_its_checks(
         host, monkeypatch, size, frames, text, rows, every):
     """The AV step's budget on a clip's layout: the step's checks at each
     of a forward's points, and an evaluation every ceil(32768 / rows)
-    points, as the CLI's. Nothing else evaluates a forward's point, and
-    the next step counts from its own start."""
+    points, as the CLI's. Nothing else evaluates a forward's point, the
+    caption's point evaluates, and the next step counts from its own
+    start."""
     from gmlx.serve import gpu_share
 
-    made, chat, hit = [], [], []
+    made, chat, hit, inside = [], [], [], []
     _counted_budget(monkeypatch, made, hit)
     monkeypatch.setattr(gpu_share, "pacer", lambda: chat.append)
-    captioned = _counted_caption(monkeypatch, chat)
-    real, points = mx.eval, []
+    captioned = _counted_caption(monkeypatch, chat, inside)
+    real, points, shapes = mx.eval, [], []
     monkeypatch.setattr(mx, "eval", lambda *a: (
-        points.extend(x for x in a if x.ndim == 0), real(*a)))
+        points.extend(x for x in a if x.ndim == 0),
+        shapes.extend(tuple(x.shape) for x in a if inside), real(*a)))
 
     def denoise_step(model, video, audio, *a, **k):
         for i in range(50):
@@ -815,6 +823,9 @@ def test_an_av_steps_forward_evaluates_on_its_rows_with_its_checks(
     assert captioned[0] > 0 and captioned[1] == 0
     assert len(chat) == captioned[0] + 2 * 50
     assert points == []
+    # The first call's caption: its refiner point, then its own result.
+    assert shapes == [(1, text, TINY["ffn_dim"]),
+                      (1, text, TINY["hidden_size"])]
 
 
 def test_a_runs_first_step_counts_the_clips_decodes(host):
