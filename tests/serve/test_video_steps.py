@@ -727,16 +727,31 @@ def _counted_budget(monkeypatch, made, hit=None):
     monkeypatch.setattr(vapi, "RowBudget", Budget)
 
 
+def _counted_caption(monkeypatch, chat):
+    """``video_service.caption`` recording the checks each call runs."""
+    real, points = vs.caption, []
+
+    def caption(*a, **k):
+        before = len(chat)
+        out = real(*a, **k)
+        points.append(len(chat) - before)
+        return out
+
+    monkeypatch.setattr(vs, "caption", caption)
+    return points
+
+
 def test_an_av_step_runs_its_checks_at_every_point_on_the_row_budget(
         host, monkeypatch):
     """The pack's AV step hands its forward a row budget of the step's own
-    rows, whose checks are the step's: chat's share at every point, and
-    the run's interrupt."""
+    rows, whose checks are the step's: chat's share at every point, the
+    caption's points too, and the run's interrupt."""
     from gmlx.serve import gpu_share
 
     made, chat, seen = [], [], {}
     _counted_budget(monkeypatch, made)
     monkeypatch.setattr(gpu_share, "pacer", lambda: chat.append)
+    captioned = _counted_caption(monkeypatch, chat)
     real = vs.av_step
 
     def av_step(*a, **k):
@@ -754,7 +769,8 @@ def test_an_av_step_runs_its_checks_at_every_point_on_the_row_budget(
                       audio.shape[3])
     (budget,) = made
     assert (budget.rows, budget.threshold) == (lay.rows, vapi.EVAL_ROWS)
-    assert budget.calls == len(chat) > 0
+    assert captioned[0] > 0 and budget.calls > 0
+    assert captioned[0] + budget.calls == len(chat)
     assert isinstance(seen["pacer"], vapi.Budget)
     steps.STATE.interrupt(run)
     with pytest.raises(steps.StepInterrupted):
@@ -768,12 +784,17 @@ def test_an_av_steps_forward_evaluates_on_its_rows_with_its_checks(
         host, monkeypatch, size, frames, text, rows, every):
     """The AV step's budget on a clip's layout: the step's checks at each
     of a forward's points, and an evaluation every ceil(32768 / rows)
-    points, as the CLI's."""
+    points, as the CLI's. Nothing else evaluates a forward's point, and
+    the next step counts from its own start."""
     from gmlx.serve import gpu_share
 
     made, chat, hit = [], [], []
     _counted_budget(monkeypatch, made, hit)
     monkeypatch.setattr(gpu_share, "pacer", lambda: chat.append)
+    captioned = _counted_caption(monkeypatch, chat)
+    real, points = mx.eval, []
+    monkeypatch.setattr(mx, "eval", lambda *a: (
+        points.extend(x for x in a if x.ndim == 0), real(*a)))
 
     def denoise_step(model, video, audio, *a, **k):
         for i in range(50):
@@ -782,15 +803,18 @@ def test_an_av_steps_forward_evaluates_on_its_rows_with_its_checks(
 
     monkeypatch.setattr(vapi, "denoise_step", denoise_step)
     vsh, ash = hf.latent_shapes(frames, *size)
-    budget = vapi.Budget(steps.step_pacer(None, 0))
-    _on_worker(lambda: vs.av_step(
-        host.served, mx.zeros(vsh), mx.zeros(ash), 600.0, SHIFTS, 1.0,
-        mx.zeros((1, text, TINY["text_dim"])), f"rows{rows}", None,
-        pacer=budget))
-    (made_budget,) = made
-    assert made_budget.rows == rows
-    assert hit == list(range(every - 1, 50, every))
-    assert len(chat) == 50
+    for _ in range(2):
+        budget = vapi.Budget(steps.step_pacer(None, 0))
+        _on_worker(lambda: vs.av_step(
+            host.served, mx.zeros(vsh), mx.zeros(ash), 600.0, SHIFTS, 1.0,
+            mx.zeros((1, text, TINY["text_dim"])), f"rows{rows}", None,
+            pacer=budget))
+    assert [b.rows for b in made] == [rows, rows]
+    each = list(range(every - 1, 50, every))
+    assert hit == each + each
+    assert captioned[0] > 0 and captioned[1] == 0
+    assert len(chat) == captioned[0] + 2 * 50
+    assert points == []
 
 
 def test_a_runs_first_step_counts_the_clips_decodes(host):

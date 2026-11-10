@@ -1865,7 +1865,9 @@ def test_the_jobs_sampler_evaluates_on_the_row_budget_with_its_checks(
         tmp_path, monkeypatch, size, frames, text, rows, every):
     """A job's sampler evaluates on the clip's rows as the CLI does,
     every ceil(32768 / rows) points and again from each step's start, and
-    runs chat's share at every point."""
+    runs chat's share at every point. Nothing else evaluates a point."""
+    import mlx.core as mx
+
     from gmlx.serve import gpu_share
 
     hit, chat, order = [], [], []
@@ -1876,10 +1878,14 @@ def test_the_jobs_sampler_evaluates_on_the_row_budget_with_its_checks(
     monkeypatch.setattr(gpu_share, "pacer", lambda: chat.append)
     store, clock, driver = _store(tmp_path)
     job = _clip_job(store)
+    real, points = mx.eval, []
+    monkeypatch.setattr(mx, "eval", lambda *a: (
+        points.extend(x for x in a if x.ndim == 0), real(*a)))
     vj._clip_part(job, store, hold, store.clip(job.id))
     each = list(range(every - 1, 50, every))
     assert hit == each + each
     assert len(chat) == 2 * 50
+    assert points == []
 
 
 def test_a_job_stops_at_its_next_point_between_two_evaluations(
@@ -1898,6 +1904,24 @@ def test_a_job_stops_at_its_next_point_between_two_evaluations(
     with pytest.raises(JobStopped):
         vj._clip_part(job, store, hold, store.clip(job.id))
     assert dit.last == 4 and hit == []
+
+
+def test_a_job_stopped_at_an_evaluation_point_stops_before_it_evaluates(
+        tmp_path, monkeypatch):
+    """At 2054 rows point 15 is the budget's first evaluation. A stop set
+    after point 14 stops the job there before the evaluation runs."""
+    from gmlx.serve.image_service import JobStopped
+
+    hit, order = [], []
+    dit = _Points(at=lambda i: i == 14 and job.stop.set())
+    generate, lay = _sampling(monkeypatch, (512, 512), 22, 188, dit, hit)
+    assert lay.rows == 2054
+    hold = _clip_part_stubs(monkeypatch, order, generate)
+    store, clock, driver = _store(tmp_path)
+    job = _clip_job(store)
+    with pytest.raises(JobStopped):
+        vj._clip_part(job, store, hold, store.clip(job.id))
+    assert dit.last == 15 and hit == []
 
 
 def test_the_decode_paces_and_stops_between_its_pieces(tmp_path,

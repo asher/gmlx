@@ -799,8 +799,9 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
     audio_scale). ``anchors`` are the placed ``layout.AnchorRows`` of the
     anchor rows ``cond`` (``anchor_cond``) and ``spans`` the vision spans
     of ``feats``. ``int8`` is the step's setting, else the entry's.
-    ``pacer`` runs at the forward's pause points, an ``api.Budget`` on the
-    step's rows. Returns (video, audio, caption cache hit)."""
+    ``pacer``, an ``api.Budget``, runs at every pause point: on the
+    caption it evaluates at each point, and in the forward on the step's
+    rows. Returns (video, audio, caption cache hit)."""
     import mlx.core as mx
 
     from gmlx.image import pacing
@@ -826,7 +827,8 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
                       tuple(spans))
     prev = install.activate(pipe, tid)
     try:
-        text, hit = caption(served, key, feats, tid)
+        with pacing.paced(pacer):
+            text, hit = caption(served, key, feats, tid)
         with pacing.paced(api.forward_pacer(pacer, lay)):
             vv, va = api.denoise_step(pipe.dit, xv, xa,
                                       {"video": sv, "audio": sa}, text, lay,
