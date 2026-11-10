@@ -543,3 +543,13 @@ def test_uninstall_restores_every_function(sinks):
     assert rerank.load_image is not wrapped
     ms.install()
     assert _UTILS.load_image is not sinks["load_image"]
+
+
+def test_the_sampling_log_line_does_not_hold_an_inline_clip():
+    """A client can send a clip inline. The info line that reports the
+    sampled frames names its media type and length, never its bytes."""
+    uri = _uri(MP4 * 4000, "video/mp4")
+    name = _UTILS._video_log_name(uri)
+    assert name == f"data:video/mp4;base64,<{len(uri) - 22} characters>"
+    assert _UTILS._video_log_name("/media/clip.mp4") == "/media/clip.mp4"
+    assert _UTILS._video_log_name(MP4) == f"<{len(MP4)} bytes>"
