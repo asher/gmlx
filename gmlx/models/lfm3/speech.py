@@ -196,19 +196,44 @@ class DepthDecoder(nn.Module):
                      order: Optional[mx.array] = None) -> mx.array:
         """The codes of one frame per row of ``hidden``, ``[rows,
         codebooks]`` int32. ``key`` seeds the reveal order and every
-        draw. ``seen`` is :meth:`penalty_mask` (one for all rows, or
-        ``[rows, codebooks, codebook_size]``). ``order`` fixes the reveal
-        order, ``[rows, codebooks]``, for tests.
+        draw. One key draws for all rows. ``[rows, 2]`` keys give each
+        row its own stream, so a row's codes do not depend on the rows
+        beside it, and one row draws what the single key draws. ``seen``
+        is :meth:`penalty_mask` (one for all rows, or ``[rows, codebooks,
+        codebook_size]``). ``order`` fixes the reveal order, ``[rows,
+        codebooks]``, for tests.
 
         The passes build as one graph: nothing is evaluated here."""
         cfg = self.config
         rows, books = hidden.shape[0], cfg.num_codebooks
         temperature = cfg.temperature if temperature is None else temperature
         top_k = cfg.top_k if top_k is None else top_k
-        keys = mx.random.split(key, len(cfg.schedule) + 1)
+        draws = len(cfg.schedule) + 1
+        if key.ndim == 2:
+            if key.shape[0] != rows:
+                raise ValueError(
+                    f"{key.shape[0]} keys for {rows} rows of hidden states")
+            row_keys = [mx.random.split(key[i], draws) for i in range(rows)]
+
+            def uniform():
+                return mx.concatenate([
+                    mx.random.uniform(shape=(1, books), key=k[0])
+                    for k in row_keys], axis=0)
+
+            def categorical(scores, index):
+                return mx.concatenate([
+                    mx.random.categorical(scores[i:i + 1], key=k[index + 1])
+                    for i, k in enumerate(row_keys)], axis=0)
+        else:
+            keys = mx.random.split(key, draws)
+
+            def uniform():
+                return mx.random.uniform(shape=(rows, books), key=keys[0])
+
+            def categorical(scores, index):
+                return mx.random.categorical(scores, key=keys[index + 1])
         if order is None:
-            order = mx.argsort(
-                mx.random.uniform(shape=(rows, books), key=keys[0]), axis=-1)
+            order = mx.argsort(uniform(), axis=-1)
         # The pass that reveals each codebook, from its place in the order.
         place = mx.argsort(order, axis=-1)
         ends = np.cumsum(cfg.schedule)
@@ -236,8 +261,7 @@ class DepthDecoder(nn.Module):
                     # Codes scoring at least the k-th best, ties included.
                     kth = mx.sort(scores, axis=-1)[..., -top_k][..., None]
                     scores = mx.where(scores < kth, -mx.inf, scores)
-                drawn = mx.random.categorical(
-                    scores * (1.0 / temperature), key=keys[index + 1])
+                drawn = categorical(scores * (1.0 / temperature), index)
             codes = mx.where(reveal_pass == index, drawn.astype(mx.int32),
                              codes)
         return codes

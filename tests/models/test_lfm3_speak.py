@@ -279,14 +279,94 @@ def test_a_text_slot_masks_the_placeholders_and_a_text_reply_the_markers(
                             text_only=text_only)
         logits = np.asarray(model.speech_text_logits(state, hidden))
         assert logits.shape == (1, VOCAB)
-        assert set(np.flatnonzero(np.isneginf(logits[0]))) == masked
+        # The model's finite mask, never -inf.
+        assert np.isfinite(logits).all()
+        assert set(np.flatnonzero(logits[0] < -1.0e4)) == masked
+
+
+def test_a_mixed_batch_gives_each_row_its_own_mask(model):
+    """A row that does not speak takes the plain forward's logits. A
+    speaking row keeps the mode markers open, or closed in text mode."""
+    lm = model.language_model
+    lm.set_suppressed_tokens(
+        [IMAGE, VIDEO, AUDIO_IN, AUDIO_OUT, AUDIO_START, MIXED_START])
+    try:
+        hidden = mx.array(np.random.default_rng(3).standard_normal(
+            (3, 24)).astype(np.float32))
+        got = model.speech_logits(hidden, [None, False, True])
+        assert got.dtype == lm.head(hidden).dtype
+        assert mx.array_equal(got[0], lm.head(hidden)[0])
+        got = np.asarray(got)
+        assert np.isfinite(got).all()
+        placeholders = {IMAGE, VIDEO, AUDIO_IN, AUDIO_OUT}
+        assert set(np.flatnonzero(got[1] < -1.0e4)) == placeholders
+        assert set(np.flatnonzero(got[2] < -1.0e4)) == placeholders | {
+            AUDIO_START, MIXED_START}
+        # The rows are cached by kind, and a second call is the same.
+        again = np.asarray(model.speech_logits(hidden, [None, False, True]))
+        assert np.array_equal(got, again)
+    finally:
+        lm.set_suppressed_tokens([])
+
+
+def test_a_masked_logit_survives_a_typical_p_sampler(model):
+    """The typical-p filter multiplies each probability by its log
+    probability. An infinite mask makes that entropy a NaN, and the
+    filter then keeps an arbitrary set. With the finite mask the filter
+    keeps what it keeps on the open tokens alone."""
+    from gmlx._vendor.mlx_vlm.sample_utils import apply_typical_p
+
+    masked = [IMAGE, VIDEO, AUDIO_IN, AUDIO_OUT, AUDIO_START, MIXED_START]
+    is_open = np.ones(VOCAB, dtype=bool)
+    is_open[masked] = False
+    hidden = mx.array(np.random.default_rng(4).standard_normal(
+        (1, 24)).astype(np.float32))
+    logits = model.speech_logits(hidden, [True]).astype(mx.float32)
+    logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
+    kept = np.asarray(apply_typical_p(logprobs, 0.9))[0]
+    assert not np.isnan(kept).any()
+    assert not np.isfinite(kept[masked]).any()
+
+    alone = mx.array(np.asarray(logits)[:, is_open])
+    alone = alone - mx.logsumexp(alone, axis=-1, keepdims=True)
+    want = np.isfinite(np.asarray(apply_typical_p(alone, 0.9))[0])
+    assert want.any() and not want.all()
+    assert np.isfinite(kept[is_open]).tolist() == want.tolist()
+
+
+def test_each_row_of_a_frame_step_reads_its_own_state_and_key(
+        model, monkeypatch):
+    """Two speaking rows in one step: each row's codes are the codes it
+    draws alone, with its own penalty history and its own key."""
+    cfg = model.config.speech_config
+    rng = np.random.default_rng(6)
+    states = [SpeechState(cfg, AUDIO) for _ in range(2)]
+    for _ in range(2):
+        states[1].take_frame(rng.integers(0, CODES - 1, BOOKS))
+    hidden = mx.array(rng.standard_normal((2, 24)).astype(np.float32))
+    keys = mx.stack([mx.random.key(31), mx.random.key(32)])
+    fixed = mx.random.normal((2, BOOKS, CODES), key=mx.random.key(7))
+    which = [[0, 1]]
+    monkeypatch.setattr(
+        model.depth_decoder, "logits",
+        lambda hidden, codes, masked: fixed[mx.array(which[0])])
+    codes, embedding = model.speech_step(states, hidden, keys)
+    assert codes.shape == (2, BOOKS) and embedding.shape == (2, 1, 24)
+    for row in range(2):
+        which[0] = [row]
+        alone, _ = model.speech_step(
+            [states[row]], hidden[row:row + 1], keys[row:row + 1])
+        assert np.asarray(alone)[0].tolist() == \
+            np.asarray(codes)[row].tolist(), row
+    with pytest.raises(ValueError, match="1 states and 2 keys"):
+        model.speech_step(states[:1], hidden, keys)
 
 
 def test_one_end_code_makes_the_whole_frame_the_end(model, monkeypatch):
     _never_ends(model, monkeypatch, end_at=0)
     state = SpeechState(model.config.speech_config, AUDIO)
     codes, embedding = model.speech_step(
-        state, mx.ones((1, 24)), mx.random.key(0))
+        [state], mx.ones((1, 24)), mx.random.key(0)[None])
     assert np.asarray(codes).tolist() == [[CODES - 1] * BOOKS]
     assert embedding.shape == (1, 1, 24)
     want = model.depth_decoder.feedback_embedding(codes)
@@ -342,7 +422,8 @@ def test_a_frames_embedding_is_the_text_models_next_input(monkeypatch):
     key = mx.random.key(9)
     for _ in range(4):
         key, frame_key = mx.random.split(key)
-        codes, embedding = model.speech_step(state, hidden, frame_key)
+        codes, embedding = model.speech_step(
+            [state], hidden, frame_key[None])
         state.take_frame(np.asarray(codes)[0])
         want.append(np.asarray(codes)[0].tolist())
         hidden = lm.model(mx.zeros((1, 1), dtype=mx.int32), cache,

@@ -155,6 +155,36 @@ def test_a_key_fixes_the_frame(depth):
     assert any(not mx.array_equal(first, o) for o in others)
 
 
+def test_a_key_per_row_makes_a_rows_frame_its_own(depth, monkeypatch):
+    """With a key per row, a row draws the same codes alone and beside
+    another row. The scores are fixed per row, so only the draws can
+    differ."""
+    fixed = mx.random.normal((3, BOOKS, CODES), key=mx.random.key(5))
+    which = [[0, 1, 2]]
+    monkeypatch.setattr(
+        depth, "logits",
+        lambda hidden, codes, masked: fixed[mx.array(which[0])])
+    keys = mx.stack([mx.random.key(k) for k in (21, 22, 23)])
+    hidden = _hidden(3)
+    together = np.asarray(depth.sample_frame(hidden, keys))
+    for row in range(3):
+        which[0] = [row]
+        alone = np.asarray(depth.sample_frame(
+            hidden[row:row + 1], keys[row:row + 1]))
+        assert alone[0].tolist() == together[row].tolist(), row
+        # One row with its key draws what the single key draws.
+        single = np.asarray(depth.sample_frame(hidden[row:row + 1],
+                                               keys[row]))
+        assert single.tolist() == alone.tolist(), row
+    which[0] = [0, 1]
+    pair = np.asarray(depth.sample_frame(hidden[:2], keys[:2]))
+    assert pair.tolist() == together[:2].tolist()
+    # One key for all rows ties a row's draws to its place in the batch.
+    assert len({tuple(r) for r in together.tolist()}) == 3
+    with pytest.raises(ValueError, match="2 keys for 3 rows"):
+        depth.sample_frame(hidden, keys[:2])
+
+
 def test_top_k_draws_only_the_best_codes(depth):
     hidden = _hidden(1)
     order = mx.arange(BOOKS)[None]

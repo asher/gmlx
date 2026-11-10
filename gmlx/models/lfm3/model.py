@@ -406,16 +406,23 @@ class Model(nn.Module):
     def suppressed_tokens(self) -> tuple:
         return self._suppressed
 
+    def suppress_bias(self, dtype) -> Optional[mx.array]:
+        """The bias row :meth:`head` adds to logits of ``dtype``. None
+        when no token is suppressed."""
+        if not self._suppressed:
+            return None
+        bias = self._suppress_bias.get(dtype)
+        if bias is None:
+            bias = self._suppress_bias[mx.float32].astype(dtype)
+        return bias
+
     def head(self, h: mx.array, suppress: bool = True) -> mx.array:
         if self.args.tie_word_embeddings:
             logits = self.model.embed_tokens.as_linear(h)
         else:
             logits = self.lm_head(h)
         if suppress and self._suppressed:
-            bias = self._suppress_bias.get(logits.dtype)
-            if bias is None:
-                bias = self._suppress_bias[mx.float32].astype(logits.dtype)
-            logits = logits + bias
+            logits = logits + self.suppress_bias(logits.dtype)
         return logits
 
     def __call__(

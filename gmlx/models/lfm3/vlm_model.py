@@ -34,6 +34,7 @@ from gmlx._vendor.mlx_vlm.models.base import (
 
 from . import speak
 from .audio import AudioConfig, AudioEncoder, AudioProjector
+from .model import _SUPPRESS_BIAS
 from .model import Model as TextModel
 from .model import ModelArgs
 from .speech import CodecDecoder, DepthDecoder, SpeechConfig
@@ -149,6 +150,7 @@ class Model(nn.Module):
             if fp32:
                 self.audio_encoder.stream_dtype = mx.float32
         self._speech_biases: dict = {}
+        self._speech_bias_rows: dict = {}
         if config.speech_config is not None:
             self.depth_decoder = DepthDecoder(config.speech_config)
             self.codec_decoder = CodecDecoder(config.speech_config)
@@ -297,7 +299,10 @@ class Model(nn.Module):
                 ids += [speech.audio_start_token_id,
                         speech.mixed_start_token_id]
             bias = mx.zeros((cfg.text_config.vocab_size,), dtype=mx.float32)
-            bias[mx.array([int(i) for i in ids if i is not None])] = -mx.inf
+            # The model's finite mask: a masked logit never makes a NaN in
+            # a sampler that multiplies a probability by its logarithm.
+            bias[mx.array([int(i) for i in ids if i is not None])] = \
+                _SUPPRESS_BIAS
             mx.eval(bias)
             self._speech_biases[text_only] = bias
         return bias
@@ -307,15 +312,58 @@ class Model(nn.Module):
         logits = self.language_model.head(hidden, suppress=False)
         return logits.astype(mx.float32) + self._speech_bias(state.text_only)
 
-    def speech_step(self, state, hidden: mx.array, key: mx.array):
-        """A speech slot: ``(codes, embedding)``. ``codes`` is ``[rows,
-        codebooks]``, with every code the end code once one is.
-        ``embedding`` is the text model's next input, ``[rows, 1,
+    def speech_logits(self, hidden: mx.array, kinds) -> mx.array:
+        """The text logits of a batch that holds a speaking row, ``[rows,
+        vocab]`` in the head's dtype. ``kinds`` has one entry per row of
+        ``hidden``: None for a row that does not speak, which takes the
+        mask of a plain forward, False for a reply that may speak and
+        True for one in explicit text mode."""
+        lm = self.language_model
+        logits = lm.head(hidden, suppress=False)
+        key = (tuple(kinds), logits.dtype)
+        bias = self._speech_bias_rows.get(key)
+        if bias is None:
+            rows = []
+            for kind in kinds:
+                if kind is None:
+                    row = lm.suppress_bias(logits.dtype)
+                    if row is None:
+                        row = mx.zeros((logits.shape[-1],),
+                                       dtype=logits.dtype)
+                else:
+                    row = self._speech_bias(bool(kind)).astype(logits.dtype)
+                rows.append(row)
+            bias = mx.stack(rows)
+            mx.eval(bias)
+            if len(self._speech_bias_rows) >= 64:
+                self._speech_bias_rows.clear()
+            self._speech_bias_rows[key] = bias
+        return logits + bias
+
+    def speech_step(self, states, hidden: mx.array, keys: mx.array):
+        """A speech slot for a batch of speaking rows: ``(codes,
+        embedding)``. ``states`` holds one state per row of ``hidden``
+        and ``keys`` one key per row, ``[rows, 2]``. Each row's penalty
+        reads its own frames and each row draws from its own key, so a
+        row's codes do not depend on the rows beside it. ``codes`` is
+        ``[rows, codebooks]``, with every code of a row the end code once
+        one is. ``embedding`` is the text model's next input, ``[rows, 1,
         hidden]``. Nothing is evaluated here."""
         depth = self.depth_decoder
-        end = depth.config.eos_code
-        codes = depth.sample_frame(
-            hidden, key, depth.penalty_mask(state.history))
+        cfg = depth.config
+        if len(states) != hidden.shape[0] or keys.shape[0] != len(states):
+            raise ValueError(
+                f"{len(states)} states and {keys.shape[0]} keys for "
+                f"{hidden.shape[0]} rows of hidden states")
+        masks = [depth.penalty_mask(state.history) for state in states]
+        seen = None
+        if any(mask is not None for mask in masks):
+            blank = mx.zeros((cfg.num_codebooks, cfg.codebook_size),
+                             dtype=mx.bool_)
+            seen = mx.stack([blank if mask is None else mask
+                             for mask in masks])
+        codes = depth.sample_frame(hidden, keys, seen)
+        end = cfg.eos_code
         codes = mx.where(
             mx.any(codes == end, axis=-1, keepdims=True), end, codes)
         return codes, depth.feedback_embedding(codes)[:, None, :]

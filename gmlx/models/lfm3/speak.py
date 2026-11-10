@@ -267,7 +267,8 @@ def speech_slots(
             with mx.stream(generation_stream):
                 keys = mx.random.split(key)
                 key = keys[0]
-                codes, embedding = model.speech_step(state, hidden, keys[1])
+                codes, embedding = model.speech_step(
+                    [state], hidden, keys[1][None])
                 pending = [codes, key]
                 if not last:
                     hidden = lm.model(no_ids, prompt_cache, embedding)[:, -1]
