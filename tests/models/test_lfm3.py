@@ -299,6 +299,25 @@ def test_chunked_prefill_matches_one_pass():
     np.testing.assert_allclose(_np(got), _np(full), rtol=0, atol=1.5e-2)
 
 
+def test_wide_prefill_chunk_evaluates_per_layer_and_matches():
+    """A chunk of PREFILL_EVAL_ROWS or more evaluates each layer as it
+    finishes. The output and the decode after it match the lazy pass."""
+    from gmlx.models.lfm3.model import PREFILL_EVAL_ROWS
+
+    model = _model(seed=14)
+    rng = np.random.default_rng(15)
+    n = PREFILL_EVAL_ROWS + 6
+    tokens = rng.integers(1, model.args.vocab_size, n + 1).tolist()
+    full = model(mx.array([tokens]))
+    cache = model.make_cache()
+    got = model(mx.array([tokens[:n]]), cache=cache)
+    step = model(mx.array([tokens[n:]]), cache=cache)
+    mx.eval(full, got, step)
+    np.testing.assert_allclose(_np(got), _np(full[:, :n]), rtol=0, atol=2e-2)
+    np.testing.assert_allclose(_np(step[0, 0]), _np(full[0, n]),
+                               rtol=0, atol=2e-2)
+
+
 def test_left_padded_batch_matches_unpadded_rows():
     """A left-padded row matches the same prompt run alone, on prefill and
     on decode."""

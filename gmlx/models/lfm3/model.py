@@ -50,6 +50,11 @@ SLIDING = "sliding_attention"
 FULL = "full_attention"
 LAYER_TYPES = (CONV, SLIDING, FULL)
 
+# A prefill chunk at least this wide evaluates each layer as it finishes,
+# so one chunk does not hold every layer's intermediates at once. Decode
+# and speculative verify rounds stay one lazy graph.
+PREFILL_EVAL_ROWS = 64
+
 # A rope_freqs factor at or above this leaves its dimension unrotated.
 # llama.cpp's converter writes 1e30 there.
 _UNROTATED_FACTOR = 1e29
@@ -322,6 +327,7 @@ class Lfm3Model(nn.Module):
     ):
         h = self.embed_tokens(inputs) if input_embeddings is None \
             else input_embeddings
+        per_layer = cache is not None and h.shape[1] >= PREFILL_EVAL_ROWS
         if cache is None:
             cache = [None] * len(self.layers)
 
@@ -341,6 +347,12 @@ class Lfm3Model(nn.Module):
             if hidden_sink is not None and index in capture:
                 hidden_sink.append(h)
             h = layer(h, masks[layer.layer_type], c)
+            if per_layer:
+                # The conv tail is a leaf of its own. Attention evaluates
+                # its keys and values with its output.
+                tail = c[0] if layer.layer_type == CONV and c is not None \
+                    else None
+                mx.eval(h, *([tail] if tail is not None else []))
 
         return self.norm(h)
 
