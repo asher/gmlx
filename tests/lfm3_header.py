@@ -89,6 +89,55 @@ def find_vision_pair(gguf_dir, gguf_index) -> tuple[str, str] | None:
     return None
 
 
+def stream_distance(got, want) -> tuple[float, float]:
+    """Relative RMS error and one minus the mean cosine over the feature
+    rows."""
+    got = np.asarray(got, dtype=np.float64)
+    want = np.asarray(want, dtype=np.float64)
+    cosine = (got * want).sum(-1) / (
+        np.linalg.norm(got, axis=-1) * np.linalg.norm(want, axis=-1))
+    return (float(np.linalg.norm(got - want) / np.linalg.norm(want)),
+            float(1.0 - cosine.mean()))
+
+
+def greedy_tokens(model, input_ids, steps: int,
+                  **inputs) -> tuple[list[int], list[bool]]:
+    """The first ``steps`` greedy tokens after a prompt with media, and
+    for each step whether its two best logits were a near tie: at most
+    two steps of the 16-bit logits apart."""
+    import mlx.core as mx
+
+    ids = mx.array(np.asarray(input_ids).reshape(1, -1))
+    pixel_values = inputs.pop("pixel_values", None)
+    embeds = model.get_input_embeddings(
+        ids, pixel_values, **inputs).inputs_embeds
+    cache = model.make_cache()
+    logits = model.language_model(ids, inputs_embeds=embeds,
+                                  cache=cache).logits
+    tokens, ties = [], []
+    for _ in range(steps):
+        row = logits[0, -1].astype(mx.float32)
+        second, best = (float(v) for v in mx.sort(row)[-2:].tolist())
+        # bfloat16 keeps 8 significant bits.
+        step = 2.0 ** (np.floor(np.log2(max(abs(best), 1e-6))) - 7)
+        ties.append(best - second <= 2 * step)
+        token = mx.argmax(row)
+        tokens.append(int(token.item()))
+        logits = model.language_model(token.reshape(1, 1),
+                                      cache=cache).logits
+    return tokens, ties
+
+
+def same_answer_up_to_a_tie(a, b) -> bool:
+    """Whether two ``greedy_tokens`` results agree, or first differ at a
+    step that one of them holds as a near tie. After such a step the two
+    are different continuations."""
+    for i, (x, y) in enumerate(zip(a[0], b[0])):
+        if x != y:
+            return a[1][i] or b[1][i]
+    return True
+
+
 def load_as_f16_projector(text_path, projector_path):
     """Load the pair as an M1 or M2 does with the F16 projector: call
     under ``GMLX_ACTIVATION_DTYPE=float16``. The activation cast never

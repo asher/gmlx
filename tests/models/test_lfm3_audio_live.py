@@ -11,10 +11,17 @@ checkpoint in float32: two clips, their spectrograms, their projected
 features alone and as one batch, and the token ids of a prompt holding
 both.
 
-The encoder runs its 16-bit weights in a 16-bit stream by default. The
-float32 stream is held to a tight floor, which is what shows that the
-port is the same function. The floors were set before the first
-comparison, at the values the vision tower holds.
+The float32 stream is held to a tight floor, which is what shows that
+the port is the same function.
+
+The encoder runs its 16-bit weights in a 16-bit stream by default, as
+the vendor's checkpoint does. The fixture also holds the batch's
+features from the vendor's model in bfloat16. The 16-bit stream is held
+to that recording: it may be at most ``STREAM_MARGIN`` times as far from
+the float32 features as the vendor's own 16-bit model is. The margin was
+set before the first comparison. A second test checks that the 16-bit
+and float32 streams give the same greedy answer tokens up to the first
+near tie of the two best logits.
 """
 
 from __future__ import annotations
@@ -38,8 +45,8 @@ FIXTURE = Path(__file__).parent.parent / "fixtures/lfm3_oracle/audio.npz"
 # The fixture stores spectrograms and features as float16.
 MEL_MAX_ABS = 2e-3
 F32_REL_RMS = 1e-3
-STREAM_REL_RMS = 0.06
-STREAM_MEAN_COSINE = 0.998
+STREAM_MARGIN = 1.5
+GREEDY_TOKENS = 32
 
 
 @pytest.fixture(scope="module")
@@ -139,17 +146,44 @@ def test_a_float32_stream_gives_the_reference_features(loaded, ref, what):
     assert rel <= F32_REL_RMS, rel
 
 
+def _holds_the_16_bit_recording(got, ref) -> None:
+    from tests.lfm3_header import stream_distance
+
+    rel, miss = stream_distance(got, ref["batch_features"])
+    ref_rel, ref_miss = stream_distance(ref["batch_features_bf16"],
+                                        ref["batch_features"])
+    assert rel <= STREAM_MARGIN * ref_rel, (rel, ref_rel)
+    assert miss <= STREAM_MARGIN * ref_miss, (miss, ref_miss)
+
+
 @_NEEDS_GPU
-@pytest.mark.parametrize("what", ["clip0", "clip1", "batch"])
-def test_the_default_stream_holds_the_16_bit_floor(loaded, ref, what):
+def test_the_default_stream_holds_the_reference_16_bit_model(loaded, ref):
     model, extractor = loaded[0], loaded[2].feature_extractor
-    waves = _waves(ref)
-    pre = extractor(waves if what == "batch" else [waves[int(what[-1])]])
-    got = _features(model, pre)
+    got = _features(model, extractor(_waves(ref)))
     assert np.isfinite(got).all()
-    rel, cosine = _distance(got, ref[f"{what}_features"])
-    assert rel <= STREAM_REL_RMS and cosine >= STREAM_MEAN_COSINE, \
-        (rel, cosine)
+    _holds_the_16_bit_recording(got, ref)
+
+
+@_NEEDS_GPU
+def test_the_16_bit_and_float32_streams_give_the_same_answer(loaded, ref):
+    """The greedy tokens after the recorded two-clip prompt, with the
+    encoder in each stream. The two may part only where the best two
+    logits are a near tie."""
+    from tests.lfm3_header import greedy_tokens, same_answer_up_to_a_tie
+
+    model = loaded[0]
+    pre = loaded[2].feature_extractor(_waves(ref))
+    inputs = {"input_features": mx.array(pre["input_features"]),
+              "feature_attention_mask": pre["feature_attention_mask"]}
+    default = greedy_tokens(model, ref["prompt_ids"], GREEDY_TOKENS, **inputs)
+    model.audio_encoder.stream_dtype = mx.float32
+    try:
+        exact = greedy_tokens(model, ref["prompt_ids"], GREEDY_TOKENS,
+                              **inputs)
+    finally:
+        model.audio_encoder.stream_dtype = None
+    assert same_answer_up_to_a_tie(default, exact), (default[0], exact[0])
+    assert default[0][:8] == exact[0][:8]
 
 
 @_NEEDS_GPU
@@ -173,9 +207,7 @@ def test_a_float16_stream_does_not_overflow(gguf_dir, gguf_index, ref,
     assert features.dtype == mx.float16
     got = np.asarray(features.astype(mx.float32))
     assert np.isfinite(got).all()
-    rel, cosine = _distance(got, ref["batch_features"])
-    assert rel <= STREAM_REL_RMS and cosine >= STREAM_MEAN_COSINE, \
-        (rel, cosine)
+    _holds_the_16_bit_recording(got, ref)
 
 
 def test_a_prompt_with_two_clips_is_the_reference_token_ids(loaded, ref):

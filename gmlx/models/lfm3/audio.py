@@ -20,7 +20,8 @@ Ported from Liquid AI's ``feature_extraction_lfm3_omni.py`` and
 
 A clip is encoded whole, from a zero state, as the reference's offline
 path does. The encoder runs in the activation dtype on 16-bit weights.
-The spectrogram, the norms, RoPE and the convolution sums run in float32.
+The spectrogram, the norms, RoPE, the convolution sums and the projector
+run in float32.
 """
 
 from __future__ import annotations
@@ -388,12 +389,19 @@ class AudioProjector(nn.Module):
         self.linear_2 = nn.Linear(out, out)
 
     def _pass(self, x: mx.array) -> mx.array:
-        dtype = x.dtype
+        """Float32 on the 16-bit weights. In a bfloat16 stream these two
+        matmuls are over half of the features' distance from the float32
+        reference, and they are 6 million weights."""
+        dtype, f32 = x.dtype, mx.float32
         x = mx.fast.layer_norm(
-            x.astype(mx.float32), self.layer_norm.weight.astype(mx.float32),
-            self.layer_norm.bias.astype(mx.float32),
-            self.layer_norm.eps).astype(dtype)
-        return self.linear_2(nn.gelu(self.linear_1(x)))
+            x.astype(f32), self.layer_norm.weight.astype(f32),
+            self.layer_norm.bias.astype(f32), self.layer_norm.eps)
+        for linear in (self.linear_1, self.linear_2):
+            x = mx.addmm(linear.bias.astype(f32), x,
+                         linear.weight.astype(f32).T)
+            if linear is self.linear_1:
+                x = nn.gelu(x)
+        return x.astype(dtype)
 
     def __call__(self, x: mx.array) -> mx.array:
         """``x`` is ``[tokens, hidden]``. A long clip runs

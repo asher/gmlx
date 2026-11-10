@@ -16,6 +16,10 @@ audio (1.31 s and 0.52 s, neither a whole number of frames):
 - the token ids of a prompt holding both clips, as the chat template and
   the reference processor write them.
 
+It then casts the model to bfloat16, the dtype the checkpoint stores,
+and records the batch's features again (``batch_features_bf16``). That
+is the reference's own 16-bit result.
+
 Spectrograms and features are stored as float16.
 """
 
@@ -82,6 +86,13 @@ def main() -> None:
     enc = processor(text=[text], audio=waves, sampling_rate=RATE,
                     return_tensors="pt")
     out["prompt_ids"] = enc["input_ids"].numpy().reshape(-1)
+
+    model.to(torch.bfloat16)
+    with torch.no_grad():
+        feats = model.get_audio_features(
+            pre["input_features"].to(torch.bfloat16),
+            pre["feature_attention_mask"])
+    out["batch_features_bf16"] = feats.float().numpy().astype(np.float16)
 
     np.savez_compressed(out_path, **out)
     for key, value in out.items():

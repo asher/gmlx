@@ -13,6 +13,10 @@ It records, in float32 on the CPU:
 - the token ids of an image prompt and a video prompt, as the chat
   template and the reference processor write them.
 
+It then casts the tower and the projector to bfloat16, the dtype the
+checkpoint stores, and records the features of the same patches again
+(``*_features_bf16``). That is the reference's own 16-bit result.
+
 Features are stored as float16.
 """
 
@@ -60,11 +64,11 @@ def main() -> None:
     model = AutoModel.from_pretrained(
         model_dir, trust_remote_code=True, dtype=torch.float32).eval()
 
-    def features(pixel_values, grid) -> np.ndarray:
+    def features(pixel_values, grid, dtype=torch.float32) -> np.ndarray:
         with torch.no_grad():
             hidden = model.vision_tower(
-                pixel_values.float(), grid_thw=grid).last_hidden_state
-            return model.multi_modal_projector(hidden).numpy()
+                pixel_values.to(dtype), grid_thw=grid).last_hidden_state
+            return model.multi_modal_projector(hidden).float().numpy()
 
     out: dict = {}
     pixels = image()
@@ -106,6 +110,15 @@ def main() -> None:
         text=[text], videos=[torch.from_numpy(frames)],
         video_metadata=[meta], do_sample_frames=False, return_tensors="pt")
     out["clip_prompt_ids"] = enc["input_ids"].numpy().reshape(-1)
+
+    model.vision_tower.to(torch.bfloat16)
+    model.multi_modal_projector.to(torch.bfloat16)
+    out["image_features_bf16"] = features(
+        pre["pixel_values"], pre["image_grid_thw"],
+        torch.bfloat16).astype(np.float16)
+    out["clip_features_bf16"] = features(
+        vid["pixel_values_videos"], vid["video_grid_thw"],
+        torch.bfloat16).astype(np.float16)
 
     np.savez_compressed(out_path, **out)
     for key, value in out.items():

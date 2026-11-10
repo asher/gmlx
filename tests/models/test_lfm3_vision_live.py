@@ -9,11 +9,18 @@ GGUF and its ``lfm3vl`` projector, in any subfolder.
 checkpoint in float32: an image and a clip, their patches, their projected
 features, and the token ids of one prompt for each.
 
+The float32 stream is held to a tight floor, which is what shows that
+the port is the same function.
+
 The tower runs its 16-bit weights in a 16-bit stream by default, as the
-vendor's checkpoint does. The features then differ from the float32
-recording by a few percent, the same distance the vendor's own 16-bit
-tower is from it. The float32 stream is held to a tight floor, which is
-what shows that the port is the same function.
+vendor's checkpoint does. The fixture also holds the features of the
+vendor's tower in bfloat16. The 16-bit stream is held to that recording:
+it may be at most ``STREAM_MARGIN`` times as far from the float32
+features as the vendor's own 16-bit tower is. The margin was set before
+the first comparison. A second test checks that the 16-bit and float32
+streams give the same greedy answer tokens up to the first near tie of
+the two best logits. On the image prompt they part at such a tie, where
+the vendor's own 16-bit and float32 towers part too.
 """
 
 from __future__ import annotations
@@ -36,8 +43,8 @@ FIXTURE = Path(__file__).parent.parent / "fixtures/lfm3_oracle/vision.npz"
 
 # The fixture stores features as float16, which bounds the float32 floor.
 F32_REL_RMS = 1e-3
-STREAM_REL_RMS = 0.06
-STREAM_MEAN_COSINE = 0.998
+STREAM_MARGIN = 1.5
+GREEDY_TOKENS = 32
 
 
 @pytest.fixture(scope="module")
@@ -134,15 +141,61 @@ def test_a_float32_stream_gives_the_reference_features(loaded, ref, what):
     assert rel <= F32_REL_RMS, rel
 
 
+def _holds_the_16_bit_recording(got, ref, what) -> None:
+    from tests.lfm3_header import stream_distance
+
+    rel, miss = stream_distance(got, ref[f"{what}_features"])
+    ref_rel, ref_miss = stream_distance(ref[f"{what}_features_bf16"],
+                                        ref[f"{what}_features"])
+    assert rel <= STREAM_MARGIN * ref_rel, (what, rel, ref_rel)
+    assert miss <= STREAM_MARGIN * ref_miss, (what, miss, ref_miss)
+
+
 @_NEEDS_GPU
 @pytest.mark.parametrize("what", ["image", "clip"])
-def test_the_default_stream_holds_the_16_bit_floor(loaded, ref, what):
+def test_the_default_stream_holds_the_reference_16_bit_tower(loaded, ref,
+                                                             what):
     model = loaded[0]
     got = _features(model, ref[f"{what}_pixel_values"], ref[f"{what}_grid"])
     assert np.isfinite(got).all()
-    rel, cosine = _distance(got, ref[f"{what}_features"])
-    assert rel <= STREAM_REL_RMS and cosine >= STREAM_MEAN_COSINE, \
-        (rel, cosine)
+    _holds_the_16_bit_recording(got, ref, what)
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("what", ["image", "clip"])
+def test_the_16_bit_and_float32_streams_give_the_same_answer(loaded, ref,
+                                                             what):
+    """The greedy tokens after the recorded prompt, with the tower in
+    each stream. The two may part only where the best two logits are a
+    near tie."""
+    from tests.lfm3_header import greedy_tokens, same_answer_up_to_a_tie
+
+    model = loaded[0]
+    key = "pixel_values" if what == "image" else "pixel_values_videos"
+    grid = "image_grid_thw" if what == "image" else "video_grid_thw"
+    inputs = {key: mx.array(ref[f"{what}_pixel_values"]),
+              grid: ref[f"{what}_grid"]}
+    ids = ref[f"{what}_prompt_ids"]
+    default = greedy_tokens(model, ids, GREEDY_TOKENS, **inputs)
+    model.vision_tower.stream_dtype = mx.float32
+    try:
+        exact = greedy_tokens(model, ids, GREEDY_TOKENS, **inputs)
+    finally:
+        model.vision_tower.stream_dtype = None
+    assert same_answer_up_to_a_tie(default, exact), (default[0], exact[0])
+    # The towers agree on the start of the answer.
+    assert default[0][:8] == exact[0][:8]
+
+
+def test_the_debug_switch_runs_the_towers_in_float32(pair, monkeypatch):
+    from gmlx.load.vlm import load_vlm_model
+    from gmlx.models.lfm3.vlm_model import TOWER_FP32_ENV
+
+    monkeypatch.setenv(TOWER_FP32_ENV, "1")
+    model, _config, _processor = load_vlm_model(*pair)
+    assert model.vision_tower.stream_dtype == mx.float32
+    if getattr(model, "audio_encoder", None) is not None:
+        assert model.audio_encoder.stream_dtype == mx.float32
 
 
 def test_prompts_are_the_reference_token_ids(loaded, ref):
@@ -177,7 +230,7 @@ def test_prompts_are_the_reference_token_ids(loaded, ref):
         ref["clip_prompt_ids"].tolist()
 
 
-_MARKS = r"AAA|BBB|CCC|DDD|<\|image\|>|<\|video\|>"
+_MARKS = r"AAA|BBB|CCC|DDD|EEE|<\|image\|>|<\|video\|>|<\|audio\|>"
 
 
 def _marks(tok, messages, **kw) -> list[str]:
@@ -188,15 +241,17 @@ def _marks(tok, messages, **kw) -> list[str]:
 
 
 def test_the_shipped_template_is_what_the_serve_render_lists_say(loaded):
-    """The serve render keeps three lists by model type. Each says what
-    the shipped template does: it renders a media item where the message
-    holds it, it renders an image inside a tool turn, and it takes a tool
-    call's arguments as a mapping and not as a JSON string."""
+    """The serve render keeps lists by model type. Each says what the
+    shipped template does: it renders an image, a video and an audio item
+    where the message holds it, it renders an image inside a tool turn,
+    and it takes a tool call's arguments as a mapping and not as a JSON
+    string."""
     from gmlx.serve.patches import render
 
     tok = loaded[2].tokenizer
     model_type = loaded[1]["model_type"]
     assert model_type in render._IN_PLACE_IMAGES
+    assert model_type in render._IN_PLACE_VIDEOS
     assert model_type in render._TOOL_IMAGES
     assert model_type in render._DICT_TOOL_ARGUMENTS
 
@@ -208,6 +263,16 @@ def test_the_shipped_template_is_what_the_serve_render_lists_say(loaded):
         text("CCC"), {"type": "video"}, text("DDD")]}
     assert _marks(tok, [user]) == [
         "AAA", "<|image|>", "BBB", "<|image|>", "CCC", "<|video|>", "DDD"]
+    hears = loaded[1].get("audio_config") is not None
+    assert (model_type in render._IN_PLACE_AUDIO) == hears
+    if hears:
+        heard = {"role": "user", "content": [
+            text("AAA"), {"type": "audio"}, text("BBB"), {"type": "video"},
+            {"type": "audio"}, text("EEE")]}
+        assert _marks(tok, [heard, {"role": "assistant", "content": "CCC"},
+                            {"role": "user", "content": "DDD"}]) == [
+            "AAA", "<|audio|>", "BBB", "<|video|>", "<|audio|>", "EEE",
+            "CCC", "DDD"]
 
     tools = [{"type": "function", "function": {
         "name": "shot", "description": "Take a screenshot.",
@@ -244,6 +309,4 @@ def test_a_float16_stream_does_not_overflow(pair, ref, monkeypatch):
         assert features.dtype == mx.float16, what
         got = np.asarray(features.astype(mx.float32))
         assert np.isfinite(got).all(), what
-        rel, cosine = _distance(got, ref[f"{what}_features"])
-        assert rel <= STREAM_REL_RMS and cosine >= STREAM_MEAN_COSINE, \
-            (what, rel, cosine)
+        _holds_the_16_bit_recording(got, ref, what)

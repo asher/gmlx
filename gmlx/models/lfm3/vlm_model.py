@@ -18,6 +18,7 @@ the token positions.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -42,6 +43,10 @@ MODEL_TYPES = ("lfm3_omni", "lfm3_vl")
 
 __all__ = ["AudioConfig", "LanguageModel", "Model", "ModelConfig",
            "TextConfig", "VisionConfig"]
+
+# "1" runs the vision tower and the speech encoder in a float32 stream on
+# their 16-bit weights, to tell a 16-bit rounding effect from a defect.
+TOWER_FP32_ENV = "GMLX_LFM3_TOWER_FP32"
 
 
 @dataclass
@@ -120,6 +125,10 @@ class Model(nn.Module):
         if config.audio_config is not None:
             self.audio_encoder = AudioEncoder(config.audio_config)
             self.audio_projector = AudioProjector(config.audio_config)
+        if os.environ.get(TOWER_FP32_ENV) == "1":
+            self.vision_tower.stream_dtype = mx.float32
+            if config.audio_config is not None:
+                self.audio_encoder.stream_dtype = mx.float32
         # The serve engine runs the language model alone and reads the
         # media ids off its config (gmlx.cache.apc_media).
         for name in ("image_token_id", "video_token_id"):
