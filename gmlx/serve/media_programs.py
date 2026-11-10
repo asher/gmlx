@@ -164,7 +164,8 @@ def _run_into(argv: list[str], buffer) -> tuple[int, int, bytes] | None:
     def read(fd: int) -> bool:
         nonlocal filled
         while filled < len(view):
-            n = os.readv(fd, [view[filled:]])
+            # macOS refuses a read of 2 GiB or more.
+            n = os.readv(fd, [view[filled:filled + (1 << 30)]])
             if n == 0:
                 return False
             filled += n

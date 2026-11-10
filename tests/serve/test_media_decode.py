@@ -717,6 +717,15 @@ def test_ffmpeg_reads_what_torchcodec_gives_transformers(path, want, ffmpeg_read
     assert hashlib.sha256(frames.tobytes()).hexdigest() == want["sha256"]
 
 
+def test_a_turned_clip_gives_frames_mlx_takes(ffmpeg_reader):
+    import mlx.core as mx
+
+    path = os.path.join(_FIXTURES, "video_decode", "rot90.mp4")
+    frames, _ = md.read_video(path, frame_sampler=lambda m, **k: [0, 8])
+    assert all(s > 0 for s in frames.strides), frames.strides
+    assert np.array_equal(np.array(mx.array(frames)), frames)
+
+
 def test_ffmpeg_gives_a_frame_picked_twice_twice(ffmpeg_reader):
     path = os.path.join(_FIXTURES, "video_decode", "rot90.mp4")
     frames, meta = md.read_video(path, frame_sampler=lambda m, **k: [3, 3, 5])

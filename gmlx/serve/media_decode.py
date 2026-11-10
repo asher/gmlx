@@ -603,7 +603,10 @@ def _read_video_ffmpeg(video_path: str, resolved, frame_sampler):
         count = next((k for k, i in enumerate(picked) if i not in position), n)
         kept = picked[:count]
         frames = decoded[[position[i] for i in kept]]
-    video_np = np.rot90(frames, turns, axes=(1, 2)).transpose(0, 3, 1, 2)
+    if turns:
+        # A turned view has negative strides, which mx.array refuses.
+        frames = np.ascontiguousarray(np.rot90(frames, turns, axes=(1, 2)))
+    video_np = frames.transpose(0, 3, 1, 2)
     metadata = VideoMetadata(total_num_frames=total_frames, fps=video_fps,
                              frames_indices=kept, height=shown[1], width=shown[0],
                              duration=duration)
