@@ -18,6 +18,20 @@ H3_IDENTITY_FASTH3 = "h3_identity_fasth3.json"
 FASTH3_FV_GEOMETRY = "fasth3_fv_geometry.npz"
 
 
+# Clips at each pacing regime of the row budget (api.EVAL_ROWS 32768):
+# (size, frames, text rows, packed rows, points between evaluations).
+ROW_REGIMES = [
+    ((1344, 768), 362, 25, 109087, 1),
+    ((1344, 768), 124, 188, 37898, 1),
+    ((1344, 768), 124, 1, 37711, 1),
+    ((768, 768), 124, 188, 21914, 2),
+    ((672, 384), 124, 188, 9926, 4),
+    ((512, 512), 22, 188, 2054, 16),
+]
+ROW_REGIME_IDS = ["1344x768x362", "1344x768x124", "1344x768x124-short-caption",
+                  "768x768x124", "672x384x124", "512x512x22"]
+
+
 # The size of the stock Qwen3-VL-32B GGUF's vocabulary as the stub lays it
 # out: past MiniMax's seven ids.
 N_VOCAB = 151676

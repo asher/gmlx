@@ -6,6 +6,7 @@ tests run on mlx-kquant's ops on a NAX GPU, and everywhere on reference
 ops written from the ops' formula in MLX."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import re
@@ -117,14 +118,14 @@ def test_a_gpu_without_nax_is_refused_and_one_with_nax_converts(
 def test_fasth3_converts_its_linears_and_refuses_int8_attention(
         linears_load, monkeypatch):
     """FastH3 runs its video sparse attention with int8 linears: the load
-    gate counts H3's 200 block linears, not the gates, and they convert.
-    Int8 attention on top is refused, since it replaces dense attention
-    only, so the gate's hint names int8 off alone."""
+    gate counts H3's 200 block linears and the 50 VSA gates, and they
+    convert. Int8 attention on top is refused, since it replaces dense
+    attention only, so the gate's hint names int8 off alone."""
     vsa_kernel(monkeypatch)
     int8_kernel(monkeypatch)
     model = linears_load(fast=True)
     (k,) = linears_load.loads
-    assert k["gate_extra"] == 8_441_753_600 + 5 * 28672 * 5376 + 4 * 28672
+    assert k["gate_extra"] == 9_286_144_000 + 5 * 28672 * 5376 + 4 * 28672
     assert k["gate_hint"] == "Run with int8 off, or try a smaller DiT quant"
     assert linears_load.converted == [hf.FAMILY.int8_linears]
     assert model._linears == "int8"
@@ -219,10 +220,19 @@ def _identify(path, *, family=None, variant=None):
         view=view)
 
 
-def _load(monkeypatch, path: str, linears: str | None = None):
+def _identify_fast(path, *, family=None, variant=None):
+    """The tiny file with a VSA gate in each block, as FastH3."""
+    vid = _identify(path)
+    return dataclasses.replace(
+        vid, variant=hf.FASTH3,
+        config={**vid.config, "vsa_sparsity": hf.VSA_SPARSITY})
+
+
+def _load(monkeypatch, path: str, linears: str | None = None,
+          identify=_identify):
     """The tiny DiT, with the loader's default linears when ``linears`` is
     None. For int8 the refusal sees a NAX GPU during the load only."""
-    monkeypatch.setattr(vloader, "identify_dit", _identify)
+    monkeypatch.setattr(vloader, "identify_dit", identify)
     kw = {} if linears is None else {"linears": linears}
     with monkeypatch.context() as m:
         if linears == "int8":
@@ -402,6 +412,46 @@ def test_the_conversion_makes_each_block_linear_int8(tiny_gguf, monkeypatch,
         assert mx.mean(diff == 0).item() >= CODE_AGREEMENT, path
 
 
+_GATES = [f"blocks.{i}.attn.to_gate_compress" for i in range(DEPTH)]
+
+
+def _fasth3_gguf(tmp_path) -> str:
+    """The tiny GGUF with FastH3's VSA gate, Q4_K, in each block."""
+    from image_fixtures import write_gguf
+
+    tensors = _tiny_tensors()
+    rng = np.random.default_rng(1)
+    for g in _GATES:
+        w = (rng.standard_normal((256, 256)) / 16).astype(np.float32)
+        tensors[f"{g}.weight"] = (np.array(kq.quantize(mx.array(w),
+                                                       "q4_k")[0]), "Q4_K")
+    return write_gguf(tmp_path / "fasth3-tiny.gguf", tensors, arch=None)
+
+
+def test_fasth3s_gates_load_as_kquant_leaves_and_convert_to_int8(
+        tmp_path, monkeypatch, ops):
+    """FastH3's VSA gate in each block loads as a K-quant leaf, as qkv_proj
+    does, and converts to int8 with the block linears: its codes and
+    scales are int8_quantize_rows of the file's float32 gate."""
+    gates = _GATES
+    path = _fasth3_gguf(tmp_path)
+    vsa_kernel(monkeypatch)
+    file = _load(monkeypatch, path, "file", identify=_identify_fast)
+    model = _load(monkeypatch, path, "int8", identify=_identify_fast)
+    before, mods = dict(file.named_modules()), dict(model.named_modules())
+    assert all(type(before[g]) is KQuantLinear for g in gates)
+    assert sorted(p for p, m in mods.items()
+                  if isinstance(m, Int8Linear)) == sorted(_PATHS + gates)
+    for g in gates:
+        base, leaf = before[g], mods[g]
+        w = kq.dequantize(base["weight"], base["scales"], base.kquant_type,
+                          mx.float32)
+        codes, scales = kq.int8_quantize_rows(w)
+        assert leaf.act_group is None
+        assert mx.array_equal(leaf.weight, codes)
+        assert mx.array_equal(leaf.scales, scales.reshape(-1))
+
+
 def _spy(monkeypatch) -> list:
     """Each Int8Linear call's (path-free) group, input and output."""
     calls = []
@@ -569,6 +619,153 @@ def test_a_lora_runs_on_the_int8_base_as_its_product_and_the_stock_delta(
             assert not mx.array_equal(leaf(x), leaf.base(x)), path
     finally:
         install.restore(pipe, prev)
+
+
+def _gate_lora(path, seed: int, qkv: bool = True) -> str:
+    """A bf16 LoRA in ComfyUI's form on each block's VSA gate, and on
+    each block's qkv_proj when ``qkv``, rank 4, alpha 4."""
+    from lora_fixtures import write_keys
+
+    rng = np.random.default_rng(seed)
+    dims = {"attn.to_gate_compress": (256, 256), "attn.qkv_proj": (768, 256)}
+    keys = {}
+    for i in range(DEPTH):
+        for leaf, (out, inp) in dims.items():
+            if leaf == "attn.qkv_proj" and not qkv:
+                continue
+            stem = f"diffusion_model.blocks.{i}.{leaf}"
+            for role, shape in (("lora_A", (4, inp)), ("lora_B", (out, 4))):
+                w = rng.standard_normal(shape) * 0.05
+                keys[f"{stem}.{role}.weight"] = mx.array(
+                    w.astype(np.float32)).astype(mx.bfloat16)
+            keys[f"{stem}.alpha"] = np.asarray(4.0, np.float32)
+    return write_keys(path, keys)
+
+
+def _stock_delta(path, leaf: str, x: mx.array, strength: float):
+    """strength x alpha / rank x B A x of the file's pair on ``leaf``, in
+    float32 from the file's values."""
+    w = mx.load(path)
+    stem = f"diffusion_model.{leaf}"
+    a = w[f"{stem}.lora_A.weight"].astype(mx.float32)
+    b = w[f"{stem}.lora_B.weight"].astype(mx.float32)
+    scale = strength * float(w[f"{stem}.alpha"].item()) / a.shape[0]
+    return scale * ((x.astype(mx.float32) @ a.T) @ b.T)
+
+
+def _fasth3_pipe(monkeypatch, path, linears):
+    vsa_kernel(monkeypatch)
+    model = _load(monkeypatch, path, linears, identify=_identify_fast)
+    return pipeline.VideoPipeline(dit=model, family=hf.FAMILY,  # type: ignore[arg-type]
+                                  variant=hf.FASTH3, log=lambda *a: None)
+
+
+def _near(got: mx.array, want: mx.array) -> bool:
+    """Within two bf16 roundings of the output's largest value: the
+    delta's and the add's."""
+    err = mx.abs(got.astype(mx.float32) - want).max().item()
+    return err <= 2 * 2.0 ** -8 * mx.abs(want).max().item()
+
+
+@pytest.mark.parametrize("linears", ["file", "int8"])
+def test_a_lora_on_fasth3s_gates_runs_through_the_cli_on_each_gate(
+        tmp_path, monkeypatch, ops, linears):
+    """``gmlx video generate --adapter`` takes a LoRA with pairs on
+    FastH3's VSA gates beside its qkv pairs: the vet passes, each gate
+    leaf, a K-quant leaf at off and an Int8Linear at linears, returns its
+    base product plus the stock delta, and the qkv pairs apply too. A
+    second file stacks on the same gates."""
+    from gmlx.image.lora import install
+    from gmlx.image.lora.install import linear_leaves
+
+    pipe = _fasth3_pipe(monkeypatch, _fasth3_gguf(tmp_path), linears)
+    base_type = Int8Linear if linears == "int8" else KQuantLinear
+    assert all(type(linear_leaves(pipe.dit)[g]) is base_type
+               for g in _GATES)
+    one = _gate_lora(tmp_path / "one.safetensors", 4)
+    two = _gate_lora(tmp_path / "two.safetensors", 6, qkv=False)
+    alone = pipeline.adapter_table(pipe, [(one, 0.8)])
+    stack = pipeline.adapter_table(pipe, [(one, 0.8), (two, 0.5)])
+    rng = np.random.default_rng(5)
+    x = mx.array(rng.standard_normal((1, 70, 256)).astype(np.float32)
+                 ).astype(mx.bfloat16)
+    for tid, files in ((alone, [(one, 0.8)]),
+                       (stack, [(one, 0.8), (two, 0.5)])):
+        prev = install.activate(pipe, tid)
+        try:
+            mods = dict(pipe.dit.named_modules())
+            for leaf in _GATES + [g.replace("to_gate_compress", "qkv_proj")
+                                  for g in _GATES]:
+                m = mods[leaf]
+                assert isinstance(m, install.ImageLoRALinear), leaf
+                assert isinstance(m.base, base_type), leaf
+                want = m.base(x).astype(mx.float32)
+                for f, st in files:
+                    if leaf.endswith("qkv_proj") and f == two:
+                        continue
+                    want = want + _stock_delta(f, leaf, x, st)
+                got = m(x)
+                assert _near(got, want), leaf
+                assert not mx.array_equal(got, m.base(x)), leaf
+        finally:
+            install.restore(pipe, prev)
+
+
+@pytest.mark.parametrize("linears", ["file", "int8"])
+def test_the_pack_and_the_cli_apply_a_gate_pair_alike(tmp_path,
+                                                      monkeypatch, ops,
+                                                      linears):
+    """The pack's patch rows of a file's gate pairs, and the CLI's table
+    of the same file, give each gate the same output bit for bit: both
+    take the pair in its own form, a bf16 pair with no band."""
+    from gmlx.image.api import define_patch_table
+    from gmlx.image.lora import install
+    from gmlx.image.lora import patch_table as pt
+
+    pipe = _fasth3_pipe(monkeypatch, _fasth3_gguf(tmp_path), linears)
+    path = _gate_lora(tmp_path / "gate.safetensors", 4, qkv=False)
+    cli = pipeline.adapter_table(pipe, [(path, 0.8)])
+    w = mx.load(path)
+    rows = []
+    for g in _GATES:
+        stem = f"diffusion_model.{g}"
+        key = install.register_pair(pipe, w[f"{stem}.lora_A.weight"],
+                                    w[f"{stem}.lora_B.weight"])
+        rows.append({"key": f"{stem}.weight", "band": None,
+                     "patches": [{"adapter": key, "strength": 0.8,
+                                  "alpha": float(w[f"{stem}.alpha"].item())}]})
+    pack = define_patch_table(pipe, pt.plans_from_patches(hf.FAMILY, rows))
+    rng = np.random.default_rng(5)
+    x = mx.array(rng.standard_normal((1, 70, 256)).astype(np.float32)
+                 ).astype(mx.bfloat16)
+    out = {}
+    for name, tid in (("cli", cli), ("pack", pack)):
+        prev = install.activate(pipe, tid)
+        try:
+            mods = dict(pipe.dit.named_modules())
+            for g in _GATES:
+                f = mods[g]._state.factors(g, x.dtype)
+                assert isinstance(f, install._Own), (name, g, f)
+                out[name, g] = mods[g](x)
+        finally:
+            install.restore(pipe, prev)
+    for g in _GATES:
+        assert mx.array_equal(out["cli", g], out["pack", g]), g
+
+
+def test_a_serve_entry_vets_a_gate_lora_on_fasth3_and_refuses_it_on_h3(
+        tmp_path):
+    """A serve entry vets its adapters on the header's config: a gate
+    LoRA passes on FastH3's file and is refused by name on h3's."""
+    from gmlx.image.lora import UnsupportedAdapterError
+
+    path = _fasth3_gguf(tmp_path)
+    lora = _gate_lora(tmp_path / "gate.safetensors", 4)
+    pipeline.vet_adapter(hf.FAMILY, dict(_identify_fast(path).config), lora)
+    with pytest.raises(UnsupportedAdapterError,
+                       match="targets FastH3's attention gate") as e:
+        pipeline.vet_adapter(hf.FAMILY, dict(_identify(path).config), lora)
+    assert e.value.kind == "FastH3 gate"
 
 
 def test_an_int8_load_and_forward_leave_the_file_as_it_was(tiny_gguf,

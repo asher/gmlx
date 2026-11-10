@@ -792,16 +792,19 @@ def anchor_cond(served: ServedVideo, refs, rows, held: dict) -> tuple:
 def av_step(served: ServedVideo, video, audio, timestep: float,
             shifts: dict, scale: float, feats, key: str, table: str | None,
             *, anchors=(), cond=((), ()), spans=(),
-            int8: str | None = None):
+            int8: str | None = None, pacer=None):
     """One step of the pack's MiniMax-H3 model: the video and audio
     velocity f32 of the latents as ComfyUI's sampler carries them, at its
     ``timestep``, with the audio carried at ``scale`` (the payload's
     audio_scale). ``anchors`` are the placed ``layout.AnchorRows`` of the
     anchor rows ``cond`` (``anchor_cond``) and ``spans`` the vision spans
-    of ``feats``. ``int8`` is the step's setting, else the entry's. Returns
-    (video, audio, caption cache hit)."""
+    of ``feats``. ``int8`` is the step's setting, else the entry's.
+    ``pacer``, an ``api.Budget``, runs at every pause point: on the
+    caption it evaluates at each point, and in the forward on the step's
+    rows. Returns (video, audio, caption cache hit)."""
     import mlx.core as mx
 
+    from gmlx.image import pacing
     from gmlx.image.lora import install
     from gmlx.video import api, layout
 
@@ -824,10 +827,12 @@ def av_step(served: ServedVideo, video, audio, timestep: float,
                       tuple(spans))
     prev = install.activate(pipe, tid)
     try:
-        text, hit = caption(served, key, feats, tid)
-        vv, va = api.denoise_step(pipe.dit, xv, xa,
-                                  {"video": sv, "audio": sa}, text, lay,
-                                  cond_video=cond[0], cond_audio=cond[1])
+        with pacing.paced(pacer):
+            text, hit = caption(served, key, feats, tid)
+        with pacing.paced(api.forward_pacer(pacer, lay)):
+            vv, va = api.denoise_step(pipe.dit, xv, xa,
+                                      {"video": sv, "audio": sa}, text, lay,
+                                      cond_video=cond[0], cond_audio=cond[1])
     finally:
         install.restore(pipe, prev)
     vv = vv.astype(mx.float32)

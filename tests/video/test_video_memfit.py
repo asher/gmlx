@@ -783,15 +783,26 @@ def test_the_int8_dit_counts_each_block_linear_from_the_header():
     assert memfit.int8_delta(hf.FAMILY, pre) == H3_INT8_DELTA
 
 
-def test_the_fasth3_file_converts_its_block_linears_and_not_its_gates():
+# FastH3's: H3's and its 50 VSA gates, each 7168 x 5376 Q4_K, at one int8
+# byte a weight and a float32 scale an output row.
+FASTH3_INT8_DELTA = 9_286_144_000
+
+
+def test_the_fasth3_file_converts_its_block_linears_and_its_gates():
     """The FastH3 file carries the wan label and a VSA gate in each block.
-    Its 200 block linears convert and its gates do not, so it holds H3's
-    delta."""
-    from video_fixtures import fasth3_view
+    Its 200 block linears and its 50 gates convert, 844,390,400 bytes over
+    H3's delta, and H3's header still holds H3's delta. fc1 stays the
+    largest conversion."""
+    from video_fixtures import H3_HEADER, fasth3_view, fixture_view
 
     view = fasth3_view()
-    assert len(memfit._int8_matrices(hf.FAMILY, view)) == 4 * 50
-    assert memfit.int8_delta(hf.FAMILY, view) == H3_INT8_DELTA
+    assert len(memfit._int8_matrices(hf.FAMILY, view)) == 5 * 50
+    gate = 7168 * 5376 + 4 * 7168 - 7168 * 5376 * 144 // 256
+    assert FASTH3_INT8_DELTA == H3_INT8_DELTA + 50 * gate
+    assert memfit.int8_delta(hf.FAMILY, view) == FASTH3_INT8_DELTA
+    assert memfit.int8_transient(hf.FAMILY, view) == H3_INT8_TRANSIENT
+    assert memfit.int8_delta(hf.FAMILY, fixture_view(H3_HEADER)) == (
+        H3_INT8_DELTA)
 
 
 def test_the_dit_bytes_of_int8_linears_are_the_file_and_the_delta(
@@ -888,5 +899,38 @@ def test_int8_linears_make_the_clips_the_video_page_gives(
             budget=capacity.ram_budget_bytes(mac * GiB))
 
     fits, over = _INT8_MACS[mac]
+    assert all(plan(*shape).fits for shape in fits)
+    assert not any(plan(*shape).fits for shape in over)
+
+
+# The same table's fasth3 column: FastH3 at int8 linears on its measured
+# files, its gates converted, with the first table's fasth3 prompt.
+_FASTH3_INT8_MACS = {
+    32: ((), ((32, 32, hf.MIN_FRAMES),)),
+    36: (((512, 512, 22),), ((1344, 768, 124), (768, 768, 124))),
+    48: (((768, 768, 124),), ((1344, 768, 124), (768, 768, 243))),
+    64: (((1344, 768, 243), (768, 768, 362)), ((1344, 768, 362),)),
+    96: (((1344, 768, 362),), ()),
+}
+
+
+@pytest.mark.parametrize("mac", list(_FASTH3_INT8_MACS))
+def test_fasth3_at_int8_linears_makes_the_clips_the_video_page_gives(
+        monkeypatch, no_overcommit, mac):
+    from gmlx.image import text_encoder
+    from video_fixtures import fasth3_view
+
+    monkeypatch.setattr(memfit, "file_bytes", lambda p: FAST["files"][p])
+    monkeypatch.setattr(text_encoder, "_header_view",
+                        lambda p: fasth3_view())
+
+    def plan(w, h, f):
+        return memfit.plan_run(
+            hf.FAMILY, dit="dit", encoder="encoder", vae="vae",
+            audio_vae="audio_vae", frames=f, width=w, height=h, text=25,
+            variant=hf.FASTH3, linears="int8",
+            budget=capacity.ram_budget_bytes(mac * GiB))
+
+    fits, over = _FASTH3_INT8_MACS[mac]
     assert all(plan(*shape).fits for shape in fits)
     assert not any(plan(*shape).fits for shape in over)
