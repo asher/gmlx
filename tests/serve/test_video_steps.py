@@ -548,14 +548,14 @@ def test_a_step_runs_the_int8_it_names_over_the_entrys(request,
 
 
 @pytest.mark.parametrize("case", ["value", "list", "object", "linears", "all",
-                                  "sparse", "kq", "nax"])
+                                  "sparse", "sparse_all", "kq", "nax"])
 def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
         host, monkeypatch, case):
     """A value off the list, a JSON list or object in its place, linears
-    or all on an entry at off, and int8
-    attention on the variant with sparse attention, on a kq with no
-    sdpa_qk8 or on a GPU with no NAX units, are the step's 400 with the
-    run's own text and the field named."""
+    or all on an entry at off, and int8 attention on the variant with
+    sparse attention (at off, or as all on an entry at int8 linears), on
+    a kq with no sdpa_qk8 or on a GPU with no NAX units, are the step's
+    400 with the run's own text and the field named."""
     import dataclasses
 
     import mlx_kquant as kq
@@ -565,9 +565,10 @@ def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
     int8_kernel(monkeypatch, nax=case != "nax")
     if case == "kq":
         monkeypatch.setattr(kq, "sdpa_qk8", None)
-    variant = hf.FASTH3 if case == "sparse" else "fl2va"
+    variant = hf.FASTH3 if case.startswith("sparse") else "fl2va"
     monkeypatch.setattr(host.served, "plan", dataclasses.replace(
-        host.served.plan, variant=variant))
+        host.served.plan, variant=variant,
+        int8="linears" if case == "sparse_all" else host.served.plan.int8))
     what = f"MiniMax-H3 {variant} runs with int8 attention"
     rule = ("this model's entry loads its DiT at int8 off, so a request "
             "names int8 off or attention, not {0}; set the entry's "
@@ -578,6 +579,8 @@ def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
             "linears": rule.format("linears"), "all": rule.format("all"),
             "sparse": "MiniMax-H3 fasth3 runs video sparse attention, and "
             "int8 attention applies to dense attention only",
+            "sparse_all": "MiniMax-H3 fasth3 runs video sparse attention, "
+            "and int8 attention applies to dense attention only",
             "kq": f"{what}, and the installed mlx-kquant {kq.__version__} "
             "has no sdpa_qk8; update mlx-kquant to 0.5.10 or later",
             "nax": f"{what}, whose kernel needs a GPU with NAX units (M5 or "
@@ -585,12 +588,12 @@ def test_a_step_refuses_an_int8_it_cannot_run_naming_it(
     video, audio, feats = _clip()
     c = _client()
     row = {"cond": c.put(feats)}
+    sent = {"value": "int4", "list": ["all"], "object": {},
+            "linears": "linears", "all": "all",
+            "sparse_all": "all"}.get(case, "attention")
     with pytest.raises(StepsClientError) as e:
         c.av_step("h3", None, video, audio, 600.0, row, shifts=SHIFTS,
-                  audio_scale=SCALE,
-                  int8={"value": "int4", "list": ["all"], "object": {},
-                        "linears": "linears", "all": "all"}.get(case,
-                                                                "attention"))
+                  audio_scale=SCALE, int8=sent)
     assert e.value.status == 400
     assert e.value.body == {"error": want, "param": "int8"}
 

@@ -535,20 +535,19 @@ messages:
   0.5.11 or later`: the installed mlx-kquant has no int8 kernel. Update
   gmlx, which brings the mlx-kquant it needs.
 - `MiniMax-H3 fasth3 runs video sparse attention, and int8 attention
-  applies to dense attention only`, or `..., and int8 linears run on
-  variants with dense attention only`: run `fasth3` at `off`, or the clip
-  on `h3`.
+  applies to dense attention only`: run `fasth3` at `off` or `linears`,
+  or the clip on `h3`.
 - `this model's entry loads its DiT at int8 off, so a request names int8
   off or attention, not linears; set the entry's defaults.int8 to run
   linears`: the linear layers are converted as the DiT loads, so a job or
   a ComfyUI loader can change the attention only. Set `defaults.int8` on
   the entry, or add a second entry on the same files at the value you
   want.
-- A memory refusal that names `int8 off or attention`: the clip or the
-  DiT does not fit with the int8 weights of `linears` or `all`, which
-  [take more memory](video.md#faster-clips-with-int8). Run at `off` or
-  `attention`, which keep the file's weights, or make the clip smaller.
-  The text depends on where the check runs:
+- A memory refusal that names `int8 off or attention`, or `int8 off` on
+  `fasth3`: the clip or the DiT does not fit with the int8 weights of
+  `linears` or `all`, which [take more memory](video.md#faster-clips-with-int8).
+  Run at the value the message names, which keeps the file's weights, or
+  make the clip smaller. The text depends on where the check runs:
   - `this clip does not fit in memory: ... Run with int8 off or
     attention, which keep the file's linears, or try a smaller size or a
     shorter clip`, from `gmlx video generate`, and from `gmlx video

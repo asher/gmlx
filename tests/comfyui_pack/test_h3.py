@@ -508,6 +508,21 @@ class Int8(Base):
             "WARNING:gmlx:gmlx: this gmlx server has no int8 setting, so 'h3' runs as its "
             "entry says; update it"] * 2)
 
+    def test_fasth3_runs_int8_linears_and_refuses_int8_all(self):
+        """FastH3 on an entry at int8 linears runs its steps at linears,
+        and all is refused at the first step with the server's text."""
+        self.stub.int8("linears")
+        self.first_step(self.loaded("linears", FID))
+        got = {e["int8"] for e in self.stub.events("av_step")}
+        self.assertEqual(got, {"linears"})
+        self.stub.reset()
+        with self.assertRaises(C.GmlxError) as e:
+            self.first_step(self.loaded("all", FID))
+        self.assertEqual(str(e.exception), "gmlx: the step failed (400): MiniMax-H3 fasth3 runs "
+                         "video sparse attention, and int8 attention applies to dense attention "
+                         "only")
+        self.assertEqual(self.stub.events("av_step"), [])
+
     def test_a_refused_int8_shows_the_servers_text(self):
         with self.assertRaises(C.GmlxError) as e:
             self.first_step(self.loaded("attention", FID))

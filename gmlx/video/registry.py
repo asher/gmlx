@@ -273,22 +273,26 @@ def attention_refusal(fam: VideoFamily, variant: str,
     return None
 
 
+def int8_fallback(fam: VideoFamily, variant: str) -> str:
+    """The int8 settings that keep the file's linears on ``variant``: off
+    alone where its sparse attention refuses int8 attention."""
+    row = fam.variant_row(variant)
+    return "off" if row is not None and row.vsa_sparsity else (
+        "off or attention")
+
+
 def linears_refusal(fam: VideoFamily, variant: str,
                     linears: str) -> str | None:
     """Why this install or Mac does not run ``variant`` with ``linears``,
     or None. mlx-kquant's ``int8_quantize_rows`` and ``int8_matmul`` run
-    int8 linears, the matmul on a GPU with NAX units (M5 and later). A
-    variant with video sparse attention does not take them."""
+    int8 linears, the matmul on a GPU with NAX units (M5 and later), with
+    dense or video sparse attention."""
     if linears == "file":
         return None
     import mlx_kquant as kq
 
     if not fam.int8_linears:
         return f"gmlx runs {fam.title} with its file's linears only"
-    row = fam.variant_row(variant)
-    if row is not None and row.vsa_sparsity:
-        return (f"{fam.title} {variant} runs video sparse attention, and "
-                f"int8 linears run on variants with dense attention only")
     what = f"{fam.title} {variant} runs with int8 linears"
     if (getattr(kq, "int8_matmul", None) is None
             or getattr(kq, "int8_quantize_rows", None) is None):

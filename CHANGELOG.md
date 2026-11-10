@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `fasth3` runs `--int8 linears`, which it refused. See
+  [Faster clips with int8](docs/video.md#faster-clips-with-int8).
+
 ## [0.5.5] - 2026-11-08
 
 ### Added
