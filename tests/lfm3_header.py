@@ -92,6 +92,24 @@ def find_vision_pair(gguf_dir, gguf_index) -> tuple[str, str] | None:
     return None
 
 
+def find_audio_only_pair(gguf_dir, gguf_index) -> tuple[str, str] | None:
+    """The (text GGUF, projector) of a real LFM3 model that hears and has
+    no vision tower, matched as ``find_vision_pair`` matches."""
+    from gmlx.load.headerscan import scan_gguf
+
+    texts: dict = {}
+    for path in gguf_index.get(ARCH, ()):
+        kv = scan_gguf(path, include_tensors=False).kv
+        texts.setdefault(kv.get("general.basename"), path)
+    for path in sorted(gguf_dir.rglob("*mmproj*.gguf")):
+        kv = scan_gguf(str(path), include_tensors=False).kv
+        if (kv.get("clip.audio.projector_type") == "lfm3a"
+                and "clip.vision.projector_type" not in kv
+                and kv.get("general.basename") in texts):
+            return texts[kv["general.basename"]], str(path)
+    return None
+
+
 def stream_distance(got, want) -> tuple[float, float]:
     """Relative RMS error and one minus the mean cosine over the feature
     rows."""
@@ -142,18 +160,19 @@ def same_answer_up_to_a_tie(a, b) -> bool:
 
 
 def load_as_f16_projector(text_path, projector_path):
-    """Load the pair as an M1 or M2 does with the F16 projector: call
-    under ``GMLX_ACTIVATION_DTYPE=float16``. The activation cast never
-    visits BF16 tensors, so a BF16 projector's matrices are cast here.
-    Without that the mix of float16 and bfloat16 runs a float32 stream,
-    which cannot overflow."""
+    """Load the pair as an M1 or M2 does with F16 files: call under
+    ``GMLX_ACTIVATION_DTYPE=float16``. The activation cast never visits
+    BF16 tensors, so the BF16 matrices of the projector, and of a BF16
+    text model, are cast here. Without that the mix of float16 and
+    bfloat16 runs a float32 stream, which cannot overflow."""
     import mlx.core as mx
     from mlx.utils import tree_flatten, tree_unflatten
 
     from gmlx.load.vlm import load_vlm_model
 
     model, config, processor = load_vlm_model(text_path, projector_path)
-    for name in ("vision_tower", "multi_modal_projector", "audio_encoder",
+    for name in ("language_model", "vision_tower", "multi_modal_projector",
+                 "audio_encoder",
                  "audio_projector", "depth_decoder", "codec_decoder"):
         module = getattr(model, name, None)
         if module is not None:

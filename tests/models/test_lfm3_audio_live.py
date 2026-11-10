@@ -267,3 +267,117 @@ def test_a_video_with_its_soundtrack_is_the_reference_token_ids(loaded):
     # The encoder gets the clips in prompt order, the soundtrack between.
     assert np.asarray(out["feature_attention_mask"]).sum(-1).tolist() == \
         rec["mixed_frames"].tolist()
+
+
+# -- a model that hears and has no vision tower -------------------------------
+
+@pytest.fixture(scope="module")
+def audio_only_pair(gguf_dir, gguf_index):
+    from tests.lfm3_header import find_audio_only_pair
+
+    found = find_audio_only_pair(gguf_dir, gguf_index)
+    if found is None:
+        pytest.skip("no LFM3-Audio model with its projector under "
+                    "KQUANT_TEST_GGUF_DIR")
+    return found
+
+
+@pytest.fixture(scope="module")
+def audio_only(audio_only_pair):
+    from gmlx.load.vlm import load_vlm_model
+
+    return load_vlm_model(*audio_only_pair)
+
+
+def test_an_audio_only_load_fills_every_parameter(audio_only_pair, capsys):
+    from gmlx.load.headerscan import scan_gguf
+    from gmlx.load.vlm import load_vlm_model
+
+    kv = scan_gguf(audio_only_pair[1], include_tensors=False).kv
+    model, config, _processor = load_vlm_model(*audio_only_pair, verbose=True)
+    log = capsys.readouterr().out
+    assert "redundant" not in log, log
+    assert " 0 skipped" in log, log
+    assert config["model_type"] == "lfm3_audio"
+    assert getattr(model, "vision_tower", None) is None
+    assert len(model.audio_encoder.layers) == kv["clip.audio.block_count"]
+    assert len(model.depth_decoder.layers) == \
+        kv["clip.gen.audio.block_count"]
+    assert model.speech_capabilities() is not None
+
+
+_MARKS = r"AAA|BBB|CCC|DDD|EEE|<\|image\|>|<\|video\|>|<\|audio\|>"
+
+
+def _marks(tok, messages, **kw) -> list[str]:
+    import re
+
+    return re.findall(_MARKS, tok.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False, **kw))
+
+
+def test_the_audio_only_template_is_what_the_serve_render_lists_say(
+        audio_only):
+    """The shipped template renders an audio item where the message holds
+    it, and takes a tool call's arguments as a mapping and not as a JSON
+    string."""
+    from gmlx.serve.patches import render
+
+    tok = audio_only[2].tokenizer
+    model_type = audio_only[1]["model_type"]
+    assert model_type in render._IN_PLACE_AUDIO
+    assert model_type in render._DICT_TOOL_ARGUMENTS
+    assert model_type not in render._IN_PLACE_VIDEOS
+    assert model_type not in render._IN_PLACE_IMAGES
+
+    def text(value):
+        return {"type": "text", "text": value}
+
+    heard = {"role": "user", "content": [
+        text("AAA"), {"type": "audio"}, text("BBB"), {"type": "audio"},
+        text("EEE")]}
+    assert _marks(tok, [heard, {"role": "assistant", "content": "CCC"},
+                        {"role": "user", "content": [
+                            {"type": "audio"}, text("DDD")]}]) == [
+        "AAA", "<|audio|>", "BBB", "<|audio|>", "EEE", "CCC", "<|audio|>",
+        "DDD"]
+
+    tools = [{"type": "function", "function": {
+        "name": "shot", "description": "Take a screenshot.",
+        "parameters": {"type": "object", "properties": {
+            "window": {"type": "string"}}}}}]
+
+    def turns(arguments):
+        return [
+            {"role": "user", "content": [text("AAA")]},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "shot", "arguments": arguments}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": [text("BBB")]}]
+
+    assert _marks(tok, turns({"window": "main"}), tools=tools) == [
+        "AAA", "BBB"]
+    with pytest.raises(Exception, match="mapping"):
+        _marks(tok, turns('{"window": "main"}'), tools=tools)
+
+
+def test_an_audio_only_prompt_gives_each_clip_its_tokens(audio_only):
+    """Two clips of 1 s and 2.5 s: each marker becomes its own clip's
+    tokens, 12.5 a second, in the order of the message."""
+    from gmlx.models.lfm3.audio import num_audio_tokens
+
+    _model, config, processor = audio_only
+    text = processor.tokenizer.apply_chat_template(
+        [{"role": "user", "content": [
+            {"type": "audio"}, {"type": "text", "text": "AAA"},
+            {"type": "audio"}]}],
+        add_generation_prompt=True, tokenize=False)
+    clips = [np.zeros(16000, np.float32), np.zeros(40000, np.float32)]
+    out = processor(text=[text], audio=clips, add_special_tokens=False)
+    ids = np.asarray(out["input_ids"]).reshape(-1)
+    runs = [len(run) for run in np.split(
+        ids, np.flatnonzero(np.diff(ids == config["audio_token_id"])) + 1)
+        if run[0] == config["audio_token_id"]]
+    assert runs == [num_audio_tokens(16000), num_audio_tokens(40000)]
+    assert runs[0] < runs[1]
+    assert np.asarray(out["input_features"]).shape[0] == 2

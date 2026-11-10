@@ -90,7 +90,7 @@ _IN_PLACE_IMAGES = frozenset((
 _IN_PLACE_VIDEOS = frozenset(("lfm3_omni", "lfm3_vl"))
 # The same for an audio clip. Other types keep the stock rebuild, which
 # puts every clip after the text of the last user message.
-_IN_PLACE_AUDIO = frozenset(("lfm3_omni",))
+_IN_PLACE_AUDIO = frozenset(("lfm3_omni", "lfm3_audio"))
 # Image items as the client and the stock rebuild write them.
 _IMAGE_ITEMS = ("image", "image_url", "input_image")
 # The marker of a clip a chat completions message sent. The stock rebuild

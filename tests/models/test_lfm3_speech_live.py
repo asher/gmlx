@@ -341,10 +341,28 @@ def _edits(a: list, b: list) -> int:
 
 
 def test_the_model_transcribes_the_sentence_it_spoke(loaded):
+    _round_trip(loaded[0], loaded[2])
+
+
+def test_an_audio_only_model_transcribes_the_sentence_it_spoke(
+        gguf_dir, gguf_index):
+    """LFM3-Audio: the speech generator and the encoder with no vision
+    tower beside them."""
+    from gmlx.load.vlm import load_vlm_model
+    from tests.lfm3_header import find_audio_only_pair
+
+    found = find_audio_only_pair(gguf_dir, gguf_index)
+    if found is None:
+        pytest.skip("no LFM3-Audio model with its projector under "
+                    "KQUANT_TEST_GGUF_DIR")
+    model, _config, processor = load_vlm_model(*found)
+    _round_trip(model, processor)
+
+
+def _round_trip(model, processor) -> None:
     from gmlx.models.lfm3 import speak
     from gmlx.serve.media_decode import ffmpeg_resample
 
-    model, _config, processor, _pair_ = loaded
     tok = processor.tokenizer
     spoken = speak.generate_speech(
         model, processor, speak.tts_prompt(tok, ROUND_TRIP, "female"),

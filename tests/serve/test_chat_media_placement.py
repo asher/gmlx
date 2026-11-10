@@ -138,7 +138,7 @@ class _Gemma4:
 
 
 def _processor(model_type):
-    if model_type in ("lfm3_omni", "lfm3_vl"):
+    if model_type in ("lfm3_omni", "lfm3_vl", "lfm3_audio"):
         return _lfm3_processor(model_type)
     if model_type == "gemma4":
         return _Gemma4(model_type)
@@ -250,6 +250,7 @@ def _order(prompt, *wanted):
 
 
 _LFM3 = ("lfm3_omni", "lfm3_vl")
+_HEARS = ("lfm3_omni", "lfm3_audio")
 
 
 @pytest.mark.parametrize("model_type", _LFM3)
@@ -307,13 +308,14 @@ def test_a_video_first_message_renders_as_before(route, stock, model_type):
         stock(model_type, messages).prompt
 
 
-def test_a_clip_renders_where_its_message_holds_it(route):
+@pytest.mark.parametrize("model_type", _HEARS)
+def test_a_clip_renders_where_its_message_holds_it(route, model_type):
     turn1 = [{"role": "system", "content": "Be brief."},
              {"role": "user", "content": [_clip(), _text("What is said?")]}]
     turn2 = turn1 + [
         {"role": "assistant", "content": "A forecast."},
         {"role": "user", "content": [_text("And in this one?"), _clip()]}]
-    first, second = route("lfm3_omni", turn1), route("lfm3_omni", turn2)
+    first, second = route(model_type, turn1), route(model_type, turn2)
     _order(first.prompt, "Be brief.", _AUDIO, "What is said?")
     _order(second.prompt, _AUDIO, "What is said?", "A forecast.",
            "And in this one?", _AUDIO)
@@ -321,10 +323,11 @@ def test_a_clip_renders_where_its_message_holds_it(route):
     assert (first.audio, second.audio) == (1, 2)
 
 
-def test_a_clip_alone_is_the_whole_user_turn(route):
+@pytest.mark.parametrize("model_type", _HEARS)
+def test_a_clip_alone_is_the_whole_user_turn(route, model_type):
     """The transcription form: a system prompt and a turn that holds
     only the clip."""
-    call = route("lfm3_omni", [
+    call = route(model_type, [
         {"role": "system", "content": "Perform ASR in English."},
         {"role": "user", "content": [_clip()]}])
     assert f"<|im_start|>user\n{_AUDIO}<|im_end|>" in call.prompt
@@ -386,9 +389,10 @@ def test_the_lists_hold_the_checked_types():
     """A type renders a video or a clip in place only after a check
     through the route on its real processor class."""
     assert render._IN_PLACE_VIDEOS == {"lfm3_omni", "lfm3_vl"}
-    assert render._IN_PLACE_AUDIO == {"lfm3_omni"}
+    assert render._IN_PLACE_AUDIO == {"lfm3_omni", "lfm3_audio"}
     assert render._IN_PLACE_VIDEOS <= render._IN_PLACE_IMAGES
-    assert render._IN_PLACE_AUDIO <= render._IN_PLACE_IMAGES
+    # LFM3-Audio takes no image, so it has no image order to keep.
+    assert render._IN_PLACE_AUDIO - {"lfm3_audio"} <= render._IN_PLACE_IMAGES
 
 
 def test_a_responses_message_gets_no_video_mark():
