@@ -83,14 +83,11 @@ def _run(argv: list[str], data: bytes | None) -> subprocess.CompletedProcess[byt
 _STDERR_KEEP = 64 << 10
 
 
-def _run_bounded(argv: list[str], data: bytes | None, limit: int,
-                 keep: bool = False) -> tuple[int, bytearray, bytes] | None:
-    """Run ``argv`` with ``data`` on its input, and give its exit code, its
-    output and the start of its error output. When the output passes
-    ``limit`` bytes, the program is stopped and the result is None, so a
-    small input that decodes to a large output never fills the memory.
-    With ``keep``, the result is then the first ``limit`` bytes, as from a
-    program that stopped there."""
+def _run_reading(argv: list[str], data: bytes | None, read) -> tuple[int, bool, bytes]:
+    """Run ``argv`` with ``data`` on its input while ``read(fd)`` reads its
+    output. ``read`` returns True to stop the program, when the output
+    passes what the caller takes. Gives the exit code, whether it was
+    stopped, and the start of the error output."""
     proc = subprocess.Popen(
         argv, stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -114,14 +111,9 @@ def _run_bounded(argv: list[str], data: bytes | None, limit: int,
         helpers.append(threading.Thread(target=feed, daemon=True))
     for t in helpers:
         t.start()
-    out = bytearray()
     over = False
     try:
-        while chunk := os.read(proc.stdout.fileno(), 1 << 20):
-            out += chunk
-            if len(out) > limit:
-                over = True
-                break
+        over = read(proc.stdout.fileno())
     except BaseException:
         proc.kill()
         raise
@@ -133,11 +125,53 @@ def _run_bounded(argv: list[str], data: bytes | None, limit: int,
             t.join()
         proc.stdout.close()
         proc.stderr.close()
+    return proc.returncode, over, bytes(errors)
+
+
+def _run_bounded(argv: list[str], data: bytes | None, limit: int,
+                 keep: bool = False) -> tuple[int, bytearray, bytes] | None:
+    """Run ``argv`` with ``data`` on its input, and give its exit code, its
+    output and the start of its error output. When the output passes
+    ``limit`` bytes, the program is stopped and the result is None, so a
+    small input that decodes to a large output never fills the memory.
+    With ``keep``, the result is then the first ``limit`` bytes, as from a
+    program that stopped there."""
+    out = bytearray()
+
+    def read(fd: int) -> bool:
+        while chunk := os.read(fd, 1 << 20):
+            out.extend(chunk)
+            if len(out) > limit:
+                return True
+        return False
+
+    code, over, errors = _run_reading(argv, data, read)
     if over:
         if keep:
-            return 0, out[:limit], bytes(errors)
+            return 0, out[:limit], errors
         return None
-    return proc.returncode, out, bytes(errors)
+    return code, out, errors
+
+
+def _run_into(argv: list[str], buffer) -> tuple[int, int, bytes] | None:
+    """Run ``argv`` with no input and read its output into ``buffer``, such
+    as a numpy array's memory, with no copy. Gives the exit code, the bytes
+    written and the start of the error output. When the output passes the
+    buffer, the program is stopped and the result is None."""
+    view = memoryview(buffer).cast("B")
+    filled = 0
+
+    def read(fd: int) -> bool:
+        nonlocal filled
+        while filled < len(view):
+            n = os.readv(fd, [view[filled:]])
+            if n == 0:
+                return False
+            filled += n
+        return bool(os.read(fd, 1))
+
+    code, over, errors = _run_reading(argv, None, read)
+    return None if over else (code, filled, errors)
 
 
 def _limit_seconds(rate: int, channels: int) -> str:

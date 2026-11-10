@@ -738,15 +738,15 @@ def test_ffmpeg_charges_the_frames_before_it_decodes_one(monkeypatch, ffmpeg_rea
     path = os.path.join(_FIXTURES, "video_decode", "vfr.mp4")
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 9 * 160 * 120)
     ran = []
-    bounded = media_programs._run_bounded
+    reading = media_programs._run_reading
 
-    def run_bounded(argv, *args, **kwargs):
+    def run_reading(argv, *args, **kwargs):
         ran.append(os.path.basename(argv[0]))
-        return bounded(argv, *args, **kwargs)
-    monkeypatch.setattr(media_programs, "_run_bounded", run_bounded)
+        return reading(argv, *args, **kwargs)
+    monkeypatch.setattr(media_programs, "_run_reading", run_reading)
     with pytest.raises(MediaRefused, match="video of 10 frames of 160x120 pixels brings"):
         md.read_video(path, frame_sampler=lambda m, **k: list(range(10)))
-    assert "ffmpeg" not in ran
+    assert "ffprobe" in ran and "ffmpeg" not in ran
 
 
 def test_without_a_decoder_a_chat_video_is_a_400(installed, monkeypatch, opencv_reader):

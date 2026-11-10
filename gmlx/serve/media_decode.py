@@ -578,29 +578,32 @@ def _read_video_ffmpeg(video_path: str, resolved, frame_sampler):
     # CLI before, so the frames come unturned and turn here.
     wanted = sorted(set(indices.tolist()))
     pick = _select(wanted)
-    frame_bytes = width * height * 3
-    run = media_programs._run_bounded(
+    # The frames decode straight into the array the caller gets: the
+    # result is a view of it, as from OpenCV, and holds no second copy.
+    decoded = np.empty((len(wanted), height, width, 3), dtype=np.uint8)
+    run = media_programs._run_into(
         [ffmpeg, "-v", "error", "-nostdin", "-protocol_whitelist", "file",
          "-noautorotate", "-i", "file:" + video_path, "-map", "0:v:0",
          "-vf", f"select='{pick}'", "-fps_mode", "passthrough",
-         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-        None, len(wanted) * frame_bytes)
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], decoded)
     if run is None:
         raise ValueError("The frames of the video change size.")
-    code, out, errors = run
-    got = len(out) // frame_bytes
+    code, filled, errors = run
+    got = filled // (width * height * 3)
     if code or not got:
         detail = errors.decode("utf-8", "replace").strip().splitlines()
         raise ValueError(f"Cannot read video: {detail[-1] if detail else 'no frames'}")
-    decoded = np.frombuffer(bytes(out[:got * frame_bytes]), dtype=np.uint8).reshape(
-        got, height, width, 3)
-    # A file with fewer frames than its packets ends part-way.
-    position = {f: k for k, f in enumerate(wanted[:got])}
     picked = indices.tolist()
-    count = next((k for k, i in enumerate(picked) if i not in position), n)
-    kept = picked[:count]
-    frames = np.rot90(decoded[[position[i] for i in kept]], turns, axes=(1, 2))
-    video_np = np.ascontiguousarray(frames.transpose(0, 3, 1, 2))
+    if picked == wanted[:got]:
+        kept, frames = picked, decoded[:got]
+    else:
+        # A frame picked twice, or a file with fewer frames than its
+        # packets, which ends part-way.
+        position = {f: k for k, f in enumerate(wanted[:got])}
+        count = next((k for k, i in enumerate(picked) if i not in position), n)
+        kept = picked[:count]
+        frames = decoded[[position[i] for i in kept]]
+    video_np = np.rot90(frames, turns, axes=(1, 2)).transpose(0, 3, 1, 2)
     metadata = VideoMetadata(total_num_frames=total_frames, fps=video_fps,
                              frames_indices=kept, height=shown[1], width=shown[0],
                              duration=duration)
