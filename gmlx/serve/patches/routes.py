@@ -971,7 +971,10 @@ def install_embeddings_route(embeddings_model: str | None, media=None) -> None:
             return _aux_error(exc.status_code, str(exc), err_type=getattr(
                 exc, "err_type", "invalid_request_error"))
         except FileNotFoundError as exc:
-            return _aux_model_file_missing("/v1/embeddings", "server.embeddings",
+            key = ("server.embeddings_mmproj"
+                   if isinstance(exc, embeddings_mod.ProjectorFileMissing)
+                   else "server.embeddings")
+            return _aux_model_file_missing("/v1/embeddings", key,
                                            embeddings_model, started, exc)
         except Exception as exc:
             return _aux_server_error("/v1/embeddings", embeddings_model,

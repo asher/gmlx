@@ -86,6 +86,10 @@ def _audio(ref: MediaRef, options: proc.Options, max_tokens: int) -> proc.Audio:
                 400, f"{ref.field} is longer than {keep // proc.AUDIO_RATE} s, the "
                      "longest clip one input holds")
         samples = np.array(samples[:keep])
+    if proc.audio_tokens(len(samples)) == 0:
+        raise EmbeddingsRequestError(
+            400, f"{ref.field} is too short to embed: {len(samples)} samples at "
+                 f"{proc.AUDIO_RATE} Hz")
     return proc.Audio(np.ascontiguousarray(samples, dtype=np.float32))
 
 

@@ -221,6 +221,60 @@ def test_a_video_without_a_decoder_is_a_400(served, monkeypatch):
     assert ei.value.status_code == 400
 
 
+@pytest.mark.parametrize("data", [
+    _wav(1)[:40],                                       # a WAV cut short
+    base64.b64encode(b"fLaC" + b"\0" * 200).decode(),
+    base64.b64encode(b"ID3" + b"\0" * 200).decode(),   # an MP3 tag and no frames
+])
+def test_damaged_audio_is_a_400(served, data):
+    with pytest.raises(emb.EmbeddingsRequestError, match="cannot be decoded as audio") as ei:
+        _run({"input": {"type": "audio", "base64": data}})
+    assert ei.value.status_code == 400
+
+
+@pytest.mark.parametrize("seconds", [0, 100 / 16000])
+def test_audio_too_short_for_a_token_is_a_400(served, seconds):
+    with pytest.raises(emb.EmbeddingsRequestError, match="too short to embed") as ei:
+        _run({"input": {"type": "audio", "base64": _wav(seconds)}})
+    assert ei.value.status_code == 400
+
+
+def test_the_shortest_audio_with_a_token_embeds(served):
+    from gmlx.models.embedders import gemma_embedding2_processor as p
+
+    n = next(n for n in range(1000) if p.audio_tokens(n))
+    out = _run({"input": {"type": "audio", "base64": _wav(n / 16000)}})
+    assert out["data"][0]["embedding"]
+
+
+def test_a_failed_tower_load_loads_again_on_the_next_request(served, tiny, monkeypatch):
+    _, towers = tiny
+    calls = []
+
+    def load(m, t, s):
+        calls.append(1)
+        if len(calls) == 1:
+            raise MemoryError("out of memory")
+        return towers
+    monkeypatch.setattr(emb, "_load_towers", load)
+    body = {"input": {"type": "image_url", "image_url": {"url": _png(96, 48)}},
+            "mm_processor_kwargs": {"max_soft_tokens": 70}}
+    with pytest.raises(RuntimeError, match="out of memory"):
+        _run(body)
+    out = _run(body)
+    assert len(calls) == 2 and out["data"][0]["embedding"]
+
+
+def test_a_projector_gone_from_disk_names_its_key(served, monkeypatch, tmp_path):
+    def load(m, t, s):
+        raise FileNotFoundError(s.path)
+    monkeypatch.setattr(emb, "_load_towers", load)
+    with pytest.raises(emb.ProjectorFileMissing):
+        _run({"input": {"type": "image_url", "image_url": {"url": _png(96, 48)}},
+              "mm_processor_kwargs": {"max_soft_tokens": 70}},
+             media=emb.MediaSetting(path=str(tmp_path / "mmproj-BF16.gguf")))
+
+
 def test_a_projector_that_does_not_fit_is_named_once(served, monkeypatch):
     def bad(*a):
         raise ValueError("its vision projection_dim is 640, and the text "

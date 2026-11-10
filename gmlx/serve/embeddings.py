@@ -956,6 +956,10 @@ def media_refusal(reason: str) -> str:
     return f"media is not supported: the embeddings model runs text-only ({reason})"
 
 
+class ProjectorFileMissing(FileNotFoundError):
+    """The embeddings model's projector file is gone from disk."""
+
+
 class _TowersHolder:
     """The towers of the loaded EmbeddingGemma 2, loaded on its first media
     request. ``model_path`` keys them by model and projector; ``reason``
@@ -969,14 +973,21 @@ class _TowersHolder:
     def attach(cls, model_obj, target: str, setting: MediaSetting) -> None:
         key = f"{target}\0{setting.path}"
         if cls.model_path != key:
-            cls.model, cls.reason, cls.model_path = None, None, key
+            # The key is kept once the towers load or the projector is
+            # found not to fit. Any other failure loads again next time.
+            cls.model, cls.reason, cls.model_path = None, None, None
             try:
                 cls.model = _load_towers(model_obj, target, setting)
+            except FileNotFoundError as exc:
+                if setting.path is not None and not os.path.exists(setting.path):
+                    raise ProjectorFileMissing(str(exc)) from exc
+                raise
             except ValueError as exc:
                 name = os.path.basename(setting.path or target)
                 cls.reason = f"{name} is not a projector for this model: {exc}"
                 print(f"[server] embeddings: {media_refusal(cls.reason)}",
                       file=sys.stderr)
+            cls.model_path = key
         if cls.reason is not None:
             raise EmbeddingsRequestError(400, media_refusal(cls.reason))
         model_obj.towers = cls.model

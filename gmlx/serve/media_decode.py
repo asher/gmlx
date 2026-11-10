@@ -179,6 +179,38 @@ def _downsample(samples, rate: int, target: int, channels: int):
                                  chunk_duration_seconds=_RESAMPLE_CHUNK_DURATION_SECONDS)
 
 
+def _read_miniaudio(source, field: str, sample_rate: int | None,
+                    nchannels: int | None, max_seconds: float | None):
+    """:func:`read_audio`'s decode of WAV, FLAC, MP3 and Vorbis: the
+    samples, the rate, the channel count, and whether the samples are
+    floats already. A file miniaudio cannot decode is refused."""
+    import miniaudio
+    import numpy as np
+
+    try:
+        if isinstance(source, str):
+            native = int(_file_info(source).sample_rate)
+        else:
+            native = int(_miniaudio_info(source).sample_rate)
+        if sample_rate is not None and sample_rate < native:
+            # mlx-audio decodes at the file's rate and downsamples through
+            # its FIR resampler.
+            pcm, rate, channels = _miniaudio_decode(source, field, None, nchannels,
+                                                    max_seconds)
+            if math.ceil(len(pcm) // 2 // channels * sample_rate / rate) * channels \
+                    > mg.AUDIO_MAX_SAMPLES:
+                raise mg.audio_too_long(field, sample_rate, channels)
+            samples = _downsample(np.frombuffer(pcm, dtype=np.int16), rate,
+                                  sample_rate, channels)
+            return samples, sample_rate, channels, True
+        pcm, rate, channels = _miniaudio_decode(source, field, sample_rate,
+                                                nchannels, max_seconds)
+        return np.frombuffer(pcm, dtype=np.int16), rate, channels, False
+    except miniaudio.MiniaudioError:
+        raise mg.MediaRefused(f"{field} cannot be decoded as audio: the file is "
+                              "damaged or cut short") from None
+
+
 def read_audio(file, always_2d: bool = False, dtype: str = "float64",
                sample_rate: int | None = None, nchannels: int | None = None,
                field: str = "audio", max_seconds: float | None = None):
@@ -209,25 +241,8 @@ def read_audio(file, always_2d: bool = False, dtype: str = "float64",
             source, field, sample_rate=sample_rate, nchannels=nchannels,
             max_seconds=max_seconds)
     else:
-        if isinstance(source, str):
-            native = int(_file_info(source).sample_rate)
-        else:
-            native = int(_miniaudio_info(source).sample_rate)
-        if sample_rate is not None and sample_rate < native:
-            # mlx-audio decodes at the file's rate and downsamples through
-            # its FIR resampler.
-            pcm, rate, channels = _miniaudio_decode(source, field, None, nchannels,
-                                                    max_seconds)
-            if math.ceil(len(pcm) // 2 // channels * sample_rate / rate) * channels \
-                    > mg.AUDIO_MAX_SAMPLES:
-                raise mg.audio_too_long(field, sample_rate, channels)
-            samples = _downsample(np.frombuffer(pcm, dtype=np.int16), rate,
-                                  sample_rate, channels)
-            rate, normalized = sample_rate, True
-        else:
-            pcm, rate, channels = _miniaudio_decode(source, field, sample_rate,
-                                                    nchannels, max_seconds)
-            samples = np.frombuffer(pcm, dtype=np.int16)
+        samples, rate, channels, normalized = _read_miniaudio(
+            source, field, sample_rate, nchannels, max_seconds)
     if channels > 1 and samples.ndim == 1:
         samples = samples.reshape(-1, channels)
     if dtype in ("float32", "float64"):

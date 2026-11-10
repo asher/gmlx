@@ -537,6 +537,24 @@ def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
     assert "sync-models" in err["message"]
 
 
+def test_embeddings_route_missing_projector_names_its_key(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.embeddings as emb
+
+    def boom(**kw):
+        raise emb.ProjectorFileMissing("[Errno 2] No such file: '/lib/mmproj-BF16.gguf'")
+
+    monkeypatch.setattr(emb, "run_embeddings", boom)
+    sp.install_embeddings_route(EMB_REPO)
+    client = TestClient(_APP.app)
+    r = client.post("/v1/embeddings", json={"input": "hi"})
+    assert r.status_code == 404
+    err = r.json()["error"]
+    assert err["type"] == "model_file_missing"
+    assert "server.embeddings_mmproj" in err["message"]
+
+
 def test_models_endpoint_delists_missing_gguf_service(monkeypatch, tmp_path):
     # A GGUF-backed embeddings service whose file is gone must vanish from
     # /v1/models like a chat entry would - and come back with the file.

@@ -906,6 +906,16 @@ def test_ffmpeg_mode_mixes_stereo_down_as_ffmpeg_does():
     np.testing.assert_allclose(ffmpeg, want * 0.5 ** 0.5, atol=1e-6)
 
 
+@pytest.mark.parametrize("data", [b"RIFF\x24\x7d\x00\x00WAVEfmt ", b"fLaC" + b"\0" * 200,
+                                  b"ID3" + b"\0" * 200])
+@pytest.mark.parametrize("ffmpeg", [False, True])
+def test_audio_miniaudio_cannot_decode_is_refused(data, ffmpeg):
+    # A WAV cut short, a FLAC or an MP3 with nothing after its header: a
+    # refusal, the 400 of chat and embeddings, not miniaudio's own error.
+    with md.decode_pass(), pytest.raises(MediaRefused, match="cannot be decoded as audio"):
+        md.load_audio(io.BytesIO(data), 16000, "input_audio", ffmpeg=ffmpeg)
+
+
 @pytest.mark.parametrize("rate", [8000, 11025, 22050, 44100, 48000])
 def test_ffmpeg_resample_matches_torchcodec(rate):
     # Recorded by scripts/embedder_oracle/ffmpeg_resample_reference.py.
