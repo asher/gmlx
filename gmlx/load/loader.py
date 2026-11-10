@@ -2070,6 +2070,13 @@ def load_model(
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
     _detect_xtml_thinking(tokenizer, raw_tokenizer, _log)
+    if config.get("model_type") == "lfm3":
+        # The head masks the speech markers and the media placeholders,
+        # so no text path can sample them.
+        from gmlx.models.lfm3.model import suppressed_token_ids
+
+        model.set_suppressed_tokens(
+            suppressed_token_ids(raw_tokenizer.get_vocab()))
 
     materialize_module_arrays(model)
     wait_for_populate(pf.shards, log=_log)

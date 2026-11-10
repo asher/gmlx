@@ -482,3 +482,67 @@ def test_remap_covers_every_wire_tensor_onto_real_params():
         assert dec.hf_name in params, (name, dec.hf_name)
         mapped.add(dec.hf_name)
     assert mapped == params
+
+
+def test_suppressed_ids_come_from_the_vocabulary():
+    from gmlx.models.lfm3.model import suppressed_token_ids
+
+    vocab = {"a": 0, "<|audio_start|>": 7, "<|mixed_start|>": 9,
+             "<|audio_out|>": 30, "<|image|>": 28, "<|text_start|>": 8}
+    assert suppressed_token_ids(vocab) == [7, 9, 28, 30]
+    assert suppressed_token_ids({"a": 0}) == []
+
+
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16, mx.float16])
+def test_head_masks_the_suppressed_tokens_on_every_forward(dtype):
+    """The mask sits in the head, so a prefill, a cached decode step and a
+    batch all carry it. The other logits do not move."""
+    model = _model(seed=16)
+    model.set_dtype(dtype)
+    ids = [7, 9, 30]
+    keep = [i for i in range(model.args.vocab_size) if i not in ids]
+    tokens = mx.array(_TOKENS)[None]
+    raw = _np(model(tokens))
+    model.set_suppressed_tokens(ids)
+    assert model.suppressed_tokens == (7, 9, 30)
+    assert not [k for k, _ in tree_flatten(model.parameters())
+                if "suppress" in k]
+
+    got = _np(model(tokens))
+    assert np.isfinite(got).all()
+    assert got[..., ids].max() < -2.0e4
+    np.testing.assert_allclose(got[..., keep], raw[..., keep],
+                               rtol=0, atol=1e-6)
+
+    cache = model.make_cache()
+    model(tokens[:, :5], cache=cache)
+    step = _np(model(tokens[:, 5:6], cache=cache))
+    assert step[..., ids].max() < -2.0e4
+    assert int(step[0, -1].argmax()) not in ids
+
+    batch = _np(model(mx.concatenate([tokens, tokens])))
+    assert batch[..., ids].max() < -2.0e4
+
+    # The speech path reads the unmasked logits.
+    hidden = model.model(tokens)
+    np.testing.assert_allclose(_np(model.head(hidden, suppress=False)), raw,
+                               rtol=0, atol=1e-6)
+
+
+def test_masked_head_traces_with_no_evaluation():
+    """A compiled forward must not evaluate, so the bias rows exist
+    before the trace."""
+    model = _model(seed=17)
+    model.set_suppressed_tokens([3, 4])
+    tokens = mx.array(_TOKENS)[None]
+    compiled = mx.compile(lambda t: model(t))
+    np.testing.assert_allclose(_np(compiled(tokens)), _np(model(tokens)),
+                               rtol=0, atol=1e-4)
+
+
+def test_suppressed_ids_outside_the_vocabulary_are_refused():
+    model = Model(_tiny_args())
+    with pytest.raises(ValueError, match="outside the vocabulary"):
+        model.set_suppressed_tokens([model.args.vocab_size])
+    model.set_suppressed_tokens([])
+    assert model.suppressed_tokens == ()

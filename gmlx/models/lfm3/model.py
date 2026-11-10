@@ -55,6 +55,14 @@ LAYER_TYPES = (CONV, SLIDING, FULL)
 # and speculative verify rounds stay one lazy graph.
 PREFILL_EVAL_ROWS = 64
 
+# The tokens that switch a reply to speech, and the media placeholders. A
+# text reply must not sample them, on any path, so the head masks them.
+# The speech path asks the head for the unmasked logits.
+MODE_MARKERS = ("<|audio_start|>", "<|mixed_start|>", "<|audio_out|>")
+MEDIA_PLACEHOLDERS = ("<|image|>", "<|video|>", "<|audio|>")
+# Finite in every 16-bit float type, so a masked logit never makes a NaN.
+_SUPPRESS_BIAS = -3.0e4
+
 # A rope_freqs factor at or above this leaves its dimension unrotated.
 # llama.cpp's converter writes 1e30 there.
 _UNROTATED_FACTOR = 1e29
@@ -88,6 +96,13 @@ class ModelArgs(BaseModelArgs):
         bad = sorted(set(self.layer_types) - set(LAYER_TYPES))
         if bad:
             raise ValueError(f"lfm3: unknown layer types {bad}")
+
+
+def suppressed_token_ids(vocab: dict) -> list[int]:
+    """The ids of the mode markers and media placeholders that ``vocab``
+    (token text to id) holds."""
+    return sorted(int(vocab[t]) for t in MODE_MARKERS + MEDIA_PLACEHOLDERS
+                  if t in vocab)
 
 
 def rotated_dims_from_factors(factors, head_dim: int) -> int:
@@ -363,13 +378,45 @@ class Model(nn.Module):
         self.args = args
         self.model_type = args.model_type
         self.model = Lfm3Model(args)
+        self._suppressed: tuple = ()
+        self._suppress_bias: dict = {}
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 
-    def head(self, h: mx.array) -> mx.array:
+    def set_suppressed_tokens(self, ids) -> None:
+        """Mask ``ids`` in every text reply. The loader passes the mode
+        markers and media placeholders of the file's vocabulary."""
+        ids = sorted({int(i) for i in ids})
+        if any(i < 0 or i >= self.args.vocab_size for i in ids):
+            raise ValueError(
+                f"lfm3: a suppressed token id is outside the vocabulary of "
+                f"{self.args.vocab_size}: {ids}")
+        self._suppressed = tuple(ids)
+        # One bias row per float type, built here so a traced forward
+        # evaluates nothing.
+        self._suppress_bias = {}
+        if ids:
+            row = mx.zeros((self.args.vocab_size,), dtype=mx.float32)
+            row[mx.array(ids)] = _SUPPRESS_BIAS
+            for dtype in (mx.float32, mx.bfloat16, mx.float16):
+                self._suppress_bias[dtype] = row.astype(dtype)
+            mx.eval(list(self._suppress_bias.values()))
+
+    @property
+    def suppressed_tokens(self) -> tuple:
+        return self._suppressed
+
+    def head(self, h: mx.array, suppress: bool = True) -> mx.array:
         if self.args.tie_word_embeddings:
-            return self.model.embed_tokens.as_linear(h)
-        return self.lm_head(h)
+            logits = self.model.embed_tokens.as_linear(h)
+        else:
+            logits = self.lm_head(h)
+        if suppress and self._suppressed:
+            bias = self._suppress_bias.get(logits.dtype)
+            if bias is None:
+                bias = self._suppress_bias[mx.float32].astype(logits.dtype)
+            logits = logits + bias
+        return logits
 
     def __call__(
         self,
