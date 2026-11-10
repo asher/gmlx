@@ -40,7 +40,7 @@ def add_args(ap) -> None:
         default=None,
         metavar="NAME",
         help="With --tts: the language of the text, as a name or a code "
-        "(French, fr). Default: American English.",
+        "(French, fr). Default: the model reads it from the text.",
     )
 
 

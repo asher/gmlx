@@ -241,14 +241,10 @@ def _log_softmax(x: np.ndarray) -> np.ndarray:
     return x - np.log(np.exp(x).sum(axis=-1, keepdims=True))
 
 
-def test_a_replayed_sentence_picks_the_references_codes(loaded):
-    from gmlx.load.headerscan import scan_gguf
-
-    model, _config, _processor, pair = loaded
-    tts = np.load(TTS_FIXTURE)
-    file_type = scan_gguf(pair[0], include_tensors=False).kv.get(
-        "general.file_type")
-    kind = "16-bit" if file_type in FLOAT_FILE_TYPES else "quantized"
+def _replay(model, tts) -> np.ndarray:
+    """The first-pass logits of every frame of the recorded sentence,
+    ``[frames + 1, codebooks, codes]``, with the recorded frames fed
+    back through the text model."""
     depth, lm = model.depth_decoder, model.language_model
     ids = mx.array(tts["input_ids"][None].astype(np.int32))
     codes = mx.array(tts["codes"].astype(np.int32))
@@ -263,8 +259,18 @@ def test_a_replayed_sentence_picks_the_references_codes(loaded):
     hidden = hidden[0, ids.shape[1] - 1:]
     assert hidden.shape[0] == frames + 1
     blank = mx.zeros((frames + 1, depth.config.num_codebooks), dtype=mx.int32)
-    logits = np.asarray(depth.logits(hidden, blank, blank == 0))
+    return np.asarray(depth.logits(hidden, blank, blank == 0))
 
+
+def _text_kind(pair) -> str:
+    from gmlx.load.headerscan import scan_gguf
+
+    file_type = scan_gguf(pair[0], include_tensors=False).kv.get(
+        "general.file_type")
+    return "16-bit" if file_type in FLOAT_FILE_TYPES else "quantized"
+
+
+def _holds_the_replay(logits, tts, kind) -> None:
     agreement = float((logits.argmax(-1) == tts["top1"]).mean())
     assert agreement >= float(tts["top1_bf16"].mean()) \
         - REPLAY_TOP1_SLACK[kind], kind
@@ -274,10 +280,50 @@ def test_a_replayed_sentence_picks_the_references_codes(loaded):
     divergence = float((np.exp(want) * (want - got)).sum(-1).mean())
     assert divergence <= REPLAY_KL_MARGIN[kind] * float(
         tts["kl_bf16"][at].mean()), kind
+
+
+def test_a_replayed_sentence_picks_the_references_codes(loaded):
+    model, _config, _processor, pair = loaded
+    tts = np.load(TTS_FIXTURE)
+    logits = _replay(model, tts)
+    _holds_the_replay(logits, tts, _text_kind(pair))
     # The reference ended the audio after the last frame.
-    end = depth.config.eos_code
+    end = model.config.speech_config.eos_code
     assert (tts["top1"][-1] == end).any()
     assert (logits[-1].argmax(-1) == end).any()
+
+
+def test_the_codec_decodes_the_spoken_frames(model, stream):
+    tts = np.load(TTS_FIXTURE)
+    count = tts["audio"].size // model.config.speech_config.frame_samples
+    codes = tts["codes"][:count]
+    vendor = _rel(tts["audio_bf16"], tts["audio"])
+    assert _rel(model.codec_decoder.decode(codes), tts["audio"]) <= \
+        STREAM_MARGIN * vendor
+    stream(mx.float32)
+    assert _snr_db(model.codec_decoder.decode(codes), tts["audio"]) >= \
+        AUDIO_F32_SNR_DB
+
+
+def test_a_float16_replay_does_not_overflow(gguf_dir, gguf_index,
+                                            monkeypatch):
+    """The sentence on real hidden states and real codes, with the text
+    model, the depth decoder and the codec in float16."""
+    from tests.lfm3_header import load_as_f16_projector
+
+    pair = _pair(gguf_dir, gguf_index)
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float16")
+    f16 = load_as_f16_projector(*pair)[0]
+    tts = np.load(TTS_FIXTURE)
+    lm = f16.language_model
+    assert lm.model(mx.array([[1]]), None).dtype == mx.float16
+    logits = _replay(f16, tts)
+    assert np.isfinite(logits).all()
+    _holds_the_replay(logits, tts, _text_kind(pair))
+    polar = f16.codec_decoder.polar(mx.array(tts["codes"].astype(np.int32)))
+    assert np.isfinite(np.asarray(polar)).all()
+    audio = f16.codec_decoder.decode(tts["codes"])
+    assert np.isfinite(audio).all() and np.abs(audio).max() <= 4.0
 
 
 def _words(text: str) -> list:

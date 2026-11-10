@@ -42,6 +42,8 @@ MODES = (TEXT, AUDIO, INTERLEAVED)
 
 VOICES = ("female", "male")
 TTS_TEMPLATE = "tts"
+# The card's speech instruction without its language.
+TTS_ANY = "Perform TTS using a {voice} voice."
 # The card's system prompt for a spoken reply with its transcript.
 INTERLEAVED_SYSTEM = "Respond with interleaved text and audio."
 
@@ -159,22 +161,30 @@ def start(config: SpeechConfig, last_token: int, mode: Optional[str] = None,
 
 def tts_prompt(tokenizer, text: str, voice: Optional[str] = None,
                language: Optional[str] = None) -> str:
-    """The model's ``tts`` template around ``text``. The template takes a
-    language code or name and defaults to American English."""
+    """The prompt that makes the model read ``text`` aloud. With a
+    ``language``, a code or a name, it is the model's ``tts`` template.
+    Without one it is the card's instruction with the language left out,
+    and the model reads the language from the text. A reply to it starts
+    in the ``audio`` mode."""
+    if voice is not None and voice.lower() not in VOICES:
+        raise ValueError(
+            f"voice {voice!r} is not one of {', '.join(VOICES)}")
+    if not language:
+        return tokenizer.apply_chat_template(
+            [{"role": "system",
+              "content": TTS_ANY.format(voice=(voice or VOICES[0]).lower())},
+             {"role": "user", "content": text}],
+            add_generation_prompt=True, tokenize=False)
     source = (getattr(tokenizer, "gguf_named_templates", None) or {}).get(
         TTS_TEMPLATE)
     if not source:
         raise ValueError("this model's GGUF has no tts chat template")
-    if voice is not None and voice.lower() not in VOICES:
-        raise ValueError(
-            f"voice {voice!r} is not one of {', '.join(VOICES)}")
     from transformers.utils.chat_template_utils import _compile_jinja_template
 
     return _compile_jinja_template(source).render(
         messages=[{"role": "user", "content": text}],
         bos_token=getattr(tokenizer, "bos_token", None) or "",
-        **({"voice": voice} if voice else {}),
-        **({"language": language} if language else {}))
+        language=language, **({"voice": voice} if voice else {}))
 
 
 @dataclass

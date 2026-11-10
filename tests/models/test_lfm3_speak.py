@@ -432,13 +432,33 @@ _STAND_IN = ("{{ bos_token }}[{{ language | default('none') }}|"
              "{{ voice | default('none') }}] {{ messages[0]['content'] }}")
 
 
-def test_the_tts_prompt_is_the_models_named_template():
+def test_a_named_language_uses_the_models_tts_template():
     tok = SimpleNamespace(gguf_named_templates={"tts": _STAND_IN},
                           bos_token="<s>")
-    assert speak.tts_prompt(tok, "Hello.") == "<s>[none|none] Hello."
+    assert speak.tts_prompt(tok, "Hello.", language="en") == \
+        "<s>[en|none] Hello."
     assert speak.tts_prompt(tok, "Hello.", "male", "fr") == \
         "<s>[fr|male] Hello."
     with pytest.raises(ValueError, match="'robot' is not one of female, male"):
         speak.tts_prompt(tok, "Hello.", "robot")
     with pytest.raises(ValueError, match="no tts chat template"):
-        speak.tts_prompt(SimpleNamespace(gguf_named_templates={}), "Hello.")
+        speak.tts_prompt(SimpleNamespace(gguf_named_templates={}), "Hello.",
+                         language="fr")
+
+
+def test_no_language_uses_the_instruction_without_one():
+    seen = {}
+
+    def template(messages, **kw):
+        seen["messages"], seen["kw"] = messages, kw
+        return "RENDERED"
+
+    tok = SimpleNamespace(apply_chat_template=template)
+    assert speak.tts_prompt(tok, "Hello.") == "RENDERED"
+    assert seen["messages"] == [
+        {"role": "system", "content": "Perform TTS using a female voice."},
+        {"role": "user", "content": "Hello."}]
+    assert seen["kw"] == {"add_generation_prompt": True, "tokenize": False}
+    speak.tts_prompt(tok, "Hello.", "Male")
+    assert seen["messages"][0]["content"] == \
+        "Perform TTS using a male voice."

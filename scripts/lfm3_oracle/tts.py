@@ -20,11 +20,15 @@ file holds:
 - ``kl_bf16`` and ``top1_bf16``: how far the checkpoint in bfloat16, the
   dtype it stores, is from the float32 run on the same frames. The
   divergence is KL(float32 || bfloat16) per frame, averaged over the
-  codebooks.
+  codebooks;
+- ``audio``: the codec's float32 audio of the first ``AUDIO_FRAMES``
+  frames, and ``audio_bf16`` the same from the codec in the dtype it
+  stores.
 """
 
 from __future__ import annotations
 
+import copy
 import sys
 
 import numpy as np
@@ -35,6 +39,7 @@ TEXT = "The children built a small boat and sailed it across the pond."
 SYSTEM = "Perform TTS in American English using a female voice."
 SEED = 7
 LOGIT_FRAMES = 8
+AUDIO_FRAMES = 16
 
 
 def main() -> None:
@@ -79,6 +84,13 @@ def main() -> None:
     kl = (log_p.exp() * (log_p - log_q)).sum(-1).mean(-1)
     agree = (exact.argmax(-1) == rounded.argmax(-1)).double().mean(-1)
     frames = np.linspace(0, count, LOGIT_FRAMES).round().astype(np.int64)
+    codec = processor.audio_tokenizer.eval()
+    grid = codes[:AUDIO_FRAMES].T[None]
+    with torch.no_grad():
+        audio_bf16 = codec.decode(
+            grid, return_dict=True).audio_values[0].float().numpy()
+        audio = copy.deepcopy(codec).float().decode(
+            grid, return_dict=True).audio_values[0].float().numpy()
     out = {
         "input_ids": prompt[0].numpy().astype(np.int32),
         "codes": codes.numpy().astype(np.int16),
@@ -87,6 +99,8 @@ def main() -> None:
         "logits": exact[frames].numpy().astype(np.float16),
         "kl_bf16": kl.numpy().astype(np.float32),
         "top1_bf16": agree.numpy().astype(np.float32),
+        "audio": audio.reshape(-1).astype(np.float32),
+        "audio_bf16": audio_bf16.reshape(-1).astype(np.float16),
     }
     np.savez_compressed(out_path, **out)
     for key, value in out.items():
