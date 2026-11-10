@@ -1,6 +1,7 @@
 """``/v1/audio/transcriptions`` and ``/v1/audio/translations`` answered by a
 served chat model that hears audio through its own speech encoder
-(Nemotron 3.5 Transcribe).
+(Nemotron 3.5 Transcribe). An LFM3 model with audio input answers through
+:mod:`gmlx.serve.native_stt_lfm3`.
 
 The route decodes the upload once and checks it for silence. It then sends
 one chat turn, the model card's instruction and the clip, through the chat
@@ -72,11 +73,25 @@ def native_id(value) -> str | None:
     return v[len(PREFIX):] if v.startswith(PREFIX) else None
 
 
-def hears(model_field: str) -> bool:
-    """Whether ``model_field`` names a served model with a speech encoder."""
-    from .patches.native_audio import _is_native
+def adapter(model_field: str) -> str | None:
+    """The STT adapter of the served model ``model_field`` names
+    (:func:`gmlx.serve.stt.stt_adapter`), or None."""
+    from . import bridge_vlm as serving
+    from .stt import stt_adapter
 
-    return _is_native(model_field)
+    try:
+        _, spec = serving.resolve_request_model(
+            model_field, profile_field=serving.get_request_profile())
+    except Exception:  # noqa: BLE001  the caller answers the error
+        return None
+    return stt_adapter(getattr(spec, "path", None),
+                       getattr(spec, "mmproj", None))
+
+
+def hears(model_field: str) -> bool:
+    """Whether ``model_field`` names a served model that answers the STT
+    routes itself."""
+    return adapter(model_field) is not None
 
 
 def target(model_field: str, configured: str | None) -> str | None:
@@ -478,6 +493,11 @@ async def answer(http_request, form, model_id: str, audio_bytes: bytes,
 
     if not audio_bytes:
         raise STTRequestError(400, "multipart field 'file' is required")
+    if adapter(model_id) == "lfm3":
+        from . import native_stt_lfm3
+
+        return await native_stt_lfm3.answer(http_request, form, model_id,
+                                            audio_bytes, filename, task)
     fields = _fields(form, task)
     audio = await asyncio.to_thread(decode, audio_bytes, filename)
     result = await run(http_request, model_id, audio, task, fields)

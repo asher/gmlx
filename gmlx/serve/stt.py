@@ -88,11 +88,29 @@ def is_native(model) -> bool:
     return str(model or "").startswith(NATIVE_PREFIX)
 
 
-def native_models(cfg) -> list[str]:
-    """The ids of the configured chat models that hear audio through their
-    own speech encoder."""
-    from gmlx.load.discovery import is_speech_encoder
+# The text archs with an STT adapter for a projector that takes audio.
+# Other families with an audio encoder (Gemma 4) answer audio in chat only.
+_AUDIO_IN_ADAPTERS = {"lfm3": "lfm3"}
 
+
+def stt_adapter(path, mmproj) -> str | None:
+    """The name of the STT adapter of a chat model and its projector, or
+    None: ``nemotron`` for a Nemotron speech encoder, ``lfm3`` for an LFM3
+    model whose projector takes audio."""
+    from gmlx.load.discovery import header_meta, projector_caps
+
+    caps = projector_caps(mmproj)
+    if caps.speech_encoder:
+        return "nemotron"
+    if not caps.audio_in or not path:
+        return None
+    meta = header_meta(str(path))
+    return _AUDIO_IN_ADAPTERS.get((meta or {}).get("arch"))
+
+
+def native_models(cfg) -> list[str]:
+    """The ids of the configured chat models that answer the STT routes
+    themselves."""
     from .bridge_vlm import _resolve_served
 
     out = []
@@ -101,7 +119,7 @@ def native_models(cfg) -> list[str]:
             rm = _resolve_served(mid, cfg)
         except Exception:  # noqa: BLE001  a skipped model hears nothing
             continue
-        if is_speech_encoder(rm.mmproj):
+        if stt_adapter(rm.path, rm.mmproj):
             out.append(mid)
     return out
 

@@ -623,6 +623,52 @@ def is_speech_encoder(path) -> bool:
     return bool(meta) and meta.get("arch") in _arch_table.NATIVE_ASR_ENCODER_ARCHES
 
 
+@dataclass(frozen=True)
+class Caps:
+    """What a projector GGUF gives its text model: image and video input,
+    audio input, speech output. ``speech_encoder`` is a Nemotron speech
+    encoder, which pairs by checkpoint id."""
+
+    vision: bool = False
+    audio_in: bool = False
+    speech_out: bool = False
+    speech_encoder: bool = False
+
+
+_NO_CAPS = Caps()
+_CAPS_MEMO: dict = {}
+
+
+def projector_caps(path) -> Caps:
+    """The :class:`Caps` of the projector at ``path``, from its header. A
+    missing or unreadable file has none."""
+    if not path:
+        return _NO_CAPS
+    ap = os.path.abspath(os.path.expanduser(str(path)))
+    try:
+        st = os.stat(ap)
+    except OSError:
+        return _NO_CAPS
+    key = (ap, st.st_mtime_ns, st.st_size)
+    caps = _CAPS_MEMO.get(key)
+    if caps is None:
+        from .headerscan import scan_gguf
+
+        try:
+            kv = scan_gguf(ap, include_tensors=False).kv
+        except Exception:  # noqa: BLE001  not a GGUF
+            caps = _NO_CAPS
+        else:
+            caps = Caps(
+                vision=bool(kv.get("clip.has_vision_encoder")),
+                audio_in=bool(kv.get("clip.has_audio_encoder")),
+                speech_out=bool(kv.get("clip.has_gen_audio_encoder")),
+                speech_encoder=kv.get("general.architecture")
+                in _arch_table.NATIVE_ASR_ENCODER_ARCHES)
+        _CAPS_MEMO[key] = caps
+    return caps
+
+
 def find_speech_encoder(path: str) -> str | None:
     """The speech encoder GGUF in the folder of the text model at ``path``
     whose NeMo checkpoint id is the model's, or None: Nemotron 3.5

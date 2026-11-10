@@ -159,3 +159,23 @@ def load_as_f16_projector(text_path, projector_path):
                 for k, v in tree_flatten(module.parameters())
                 if v.dtype == mx.bfloat16]))
     return model, config, processor
+
+
+def write_projector_header(path, *, arch: str = "clip", vision: bool = False,
+                           audio: bool = False, speech: bool = False) -> str:
+    """Write a projector GGUF that holds only the keys saying what it
+    gives its text model, and return its path."""
+    import gguf
+
+    w = gguf.GGUFWriter(str(path), arch)
+    for key, on in (("clip.has_vision_encoder", vision),
+                    ("clip.has_audio_encoder", audio),
+                    ("clip.has_gen_audio_encoder", speech)):
+        if on:
+            w.add_bool(key, True)
+    w.add_tensor("a.weight", np.zeros(1, dtype=np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return str(path)
