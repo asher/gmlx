@@ -85,6 +85,12 @@ class SpeechConfig(BaseModelConfig):
     # An interleaved reply alternates this many text tokens and frames.
     interleaved_n_text: int = 6
     interleaved_n_audio: int = 12
+    # The tokens that steer a reply between text and speech, from the
+    # text model's vocabulary.
+    audio_start_token_id: Optional[int] = None
+    mixed_start_token_id: Optional[int] = None
+    text_end_token_id: Optional[int] = None
+    audio_out_token_id: Optional[int] = None
 
     @property
     def eos_code(self) -> int:

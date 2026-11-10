@@ -32,6 +32,7 @@ from gmlx._vendor.mlx_vlm.models.base import (
     LanguageModelOutput,
 )
 
+from . import speak
 from .audio import AudioConfig, AudioEncoder, AudioProjector
 from .model import Model as TextModel
 from .model import ModelArgs
@@ -147,6 +148,7 @@ class Model(nn.Module):
             self.audio_projector = AudioProjector(config.audio_config)
             if fp32:
                 self.audio_encoder.stream_dtype = mx.float32
+        self._speech_biases: dict = {}
         if config.speech_config is not None:
             self.depth_decoder = DepthDecoder(config.speech_config)
             self.codec_decoder = CodecDecoder(config.speech_config)
@@ -256,6 +258,82 @@ class Model(nn.Module):
                 self.vision_features(videos, grid), embeds, input_ids,
                 "video")
         return InputEmbeddingsFeatures(inputs_embeds=embeds)
+
+    # -- speech output ---------------------------------------------------
+    # One reply's state is a speak.SpeechState. Each step of the text
+    # model gives a hidden state, [rows, hidden], that fills one slot.
+
+    def speech_capabilities(self) -> Optional[dict]:
+        """What the model's speech output is, or None when it has none."""
+        cfg = self.config.speech_config
+        if cfg is None:
+            return None
+        return {
+            "sample_rate": cfg.sample_rate,
+            "frame_samples": cfg.frame_samples,
+            "voices": list(speak.VOICES),
+            "modes": list(speak.MODES),
+        }
+
+    def speech_start(self, last_token: int, mode: Optional[str] = None,
+                     end_of_turn=()):
+        """``(state, marker)`` for a reply to a prompt that ends in
+        ``last_token``: see :func:`speak.start`."""
+        if self.config.speech_config is None:
+            raise ValueError("this LFM3 model has no speech generator")
+        return speak.start(self.config.speech_config, last_token, mode,
+                           end_of_turn)
+
+    def _speech_bias(self, text_only: bool) -> mx.array:
+        """The head bias of a reply that may speak: the placeholders are
+        masked, and the mode markers only in an explicit text reply."""
+        bias = self._speech_biases.get(text_only)
+        if bias is None:
+            cfg = self.config
+            speech = cfg.speech_config
+            ids = [cfg.image_token_id, cfg.video_token_id,
+                   cfg.audio_token_id, speech.audio_out_token_id]
+            if text_only:
+                ids += [speech.audio_start_token_id,
+                        speech.mixed_start_token_id]
+            bias = mx.zeros((cfg.text_config.vocab_size,), dtype=mx.float32)
+            bias[mx.array([int(i) for i in ids if i is not None])] = -mx.inf
+            mx.eval(bias)
+            self._speech_biases[text_only] = bias
+        return bias
+
+    def speech_text_logits(self, state, hidden: mx.array) -> mx.array:
+        """The logits of a text slot, ``[rows, vocab]`` float32."""
+        logits = self.language_model.head(hidden, suppress=False)
+        return logits.astype(mx.float32) + self._speech_bias(state.text_only)
+
+    def speech_step(self, state, hidden: mx.array, key: mx.array):
+        """A speech slot: ``(codes, embedding)``. ``codes`` is ``[rows,
+        codebooks]``, with every code the end code once one is.
+        ``embedding`` is the text model's next input, ``[rows, 1,
+        hidden]``. Nothing is evaluated here."""
+        depth = self.depth_decoder
+        end = depth.config.eos_code
+        codes = depth.sample_frame(
+            hidden, key, depth.penalty_mask(state.history))
+        codes = mx.where(
+            mx.any(codes == end, axis=-1, keepdims=True), end, codes)
+        return codes, depth.feedback_embedding(codes)[:, None, :]
+
+    def speech_audio(self, state, codes):
+        """The samples one more frame of ``codes`` adds to the reply."""
+        if state.stream is None:
+            state.stream = self.codec_decoder.new_stream()
+        return self.codec_decoder.decode(codes, state.stream, finalize=False)
+
+    def speech_flush(self, state):
+        """The samples held back for the frames that never came, or None
+        when no audio is open."""
+        stream, state.stream = state.stream, None
+        if stream is None or not stream.started:
+            return None
+        return self.codec_decoder.decode(
+            [], stream, finalize=True)
 
     @property
     def layers(self):

@@ -414,6 +414,20 @@ are refused:
 | `--no-asr` | Off | Pair no speech companion. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
 
+These flags save speech, on a model with speech output:
+
+```sh
+gmlx run omni.gguf --mmproj mmproj.gguf --speech-out reply.wav --prompt "Why is the sky blue?"
+gmlx run omni.gguf --mmproj mmproj.gguf --tts --speech-out hello.wav --prompt "Good morning."
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--speech-out FILE.wav` | None | Save the reply as speech in this WAV file. The reply's text still prints. |
+| `--tts` | Off | With `--speech-out`: read the prompt's text aloud and give no answer. |
+| `--voice NAME` | `female` | With `--tts`: the voice, `female` or `male`. |
+| `--speech-language NAME` | American English | With `--tts`: the language of the text, as a name or a code such as `French` or `fr`. |
+
 These flags inspect and benchmark:
 
 | Flag | Default | Meaning |

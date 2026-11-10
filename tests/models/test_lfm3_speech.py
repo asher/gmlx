@@ -374,6 +374,24 @@ def test_config_synth_keeps_the_cards_sampling_without_the_keys():
             cfg.repetition_window) == (0.4, 0, 1.2, 64)
 
 
+def test_config_synth_reads_the_steering_tokens_from_the_vocabulary():
+    from gmlx.load import vlm
+
+    vocab = ["<unk>"] * 5 + ["<|audio_start|>", "<|text_end|>",
+                             "<|mixed_start|>", "<|audio_out|>"]
+    cfg = SpeechConfig.from_dict(vlm._synthesize_lfm3_speech_config(
+        {"hidden_size": 24}, _META, _shapes(),
+        {"tokenizer.ggml.tokens": vocab}))
+    assert (cfg.audio_start_token_id, cfg.text_end_token_id,
+            cfg.mixed_start_token_id, cfg.audio_out_token_id) == (5, 6, 7, 8)
+    with pytest.raises(ValueError, match=r"no <\|audio_out\|> token"):
+        vlm._synthesize_lfm3_speech_config(
+            {"hidden_size": 24}, _META, _shapes(),
+            {"tokenizer.ggml.tokens": vocab[:-1]})
+    # Without a vocabulary the ids stay unset.
+    assert SpeechConfig.from_dict(_synth()).audio_start_token_id is None
+
+
 def test_config_synth_refuses_another_generator():
     from gmlx.load import vlm
 

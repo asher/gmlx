@@ -242,6 +242,7 @@ include = [
     "gmlx/cache/snapshot.py",
     "gmlx/commands/capture.py",
     "gmlx/commands/cli.py",
+    "gmlx/commands/speech_run.py",
     "gmlx/distill/eval.py",
     "gmlx/distill/student.py",
     "gmlx/gen/benchmarks.py",

@@ -2760,7 +2760,7 @@ def _synthesize_lfm3_vlm_config(
         config["audio_token_id"] = token_id
     if mm_meta.get("clip.has_gen_audio_encoder"):
         config["speech_config"] = _synthesize_lfm3_speech_config(
-            text_config, mm_meta, shapes)
+            text_config, mm_meta, shapes, llm_meta)
     return config
 
 
@@ -2790,17 +2790,27 @@ def _synthesize_lfm3_audio_only_config(text_config: dict, mm_meta: dict,
         "video_token_id": _gguf_token_id(llm_meta, VIDEO_TOKEN),
         "audio_token_id": audio_id,
         **({"speech_config": _synthesize_lfm3_speech_config(
-            text_config, mm_meta, shapes)}
+            text_config, mm_meta, shapes, llm_meta)}
            if mm_meta.get("clip.has_gen_audio_encoder") else {}),
     }
 
 
+_LFM3_SPEECH_TOKENS = (
+    ("audio_start_token_id", "<|audio_start|>"),
+    ("mixed_start_token_id", "<|mixed_start|>"),
+    ("text_end_token_id", "<|text_end|>"),
+    ("audio_out_token_id", "<|audio_out|>"),
+)
+
+
 def _synthesize_lfm3_speech_config(text_config: dict, mm_meta: dict,
-                                   shapes: dict) -> dict:
+                                   shapes: dict,
+                                   llm_meta: dict | None = None) -> dict:
     """The LFM3 speech generator read from ``clip.gen.audio.*``. The
     codebook count and size, the codec's layer kinds and its head counts
     have no metadata key, so they follow the tensors. The codec's other
-    sizes are the reference codec's (llama.cpp clip.cpp, lfm3a_gen)."""
+    sizes are the reference codec's (llama.cpp clip.cpp, lfm3a_gen).
+    ``llm_meta`` gives the ids of the tokens that steer a reply."""
     from gmlx.models.lfm3.model import CONV, SLIDING
 
     proj = _mm(mm_meta, "clip.gen.audio.projector_type")
@@ -2813,6 +2823,15 @@ def _synthesize_lfm3_speech_config(text_config: dict, mm_meta: dict,
                  "a.gen.wav.tfm.out_proj.bias"):
         if name not in shapes:
             raise ValueError(f"lfm3a_gen: missing tensor {name}")
+    tokens = {}
+    if llm_meta is not None:
+        for field, token in _LFM3_SPEECH_TOKENS:
+            token_id = _gguf_token_id(llm_meta, token)
+            if token_id is None:
+                raise ValueError(
+                    f"the projector has a speech generator but the text "
+                    f"GGUF has no {token} token")
+            tokens[field] = token_id
     # [hidden, codes, codebooks] in GGUF order.
     hidden, codes, books = (int(d) for d in shapes["a.gen.code.embd.weight"])
     config: dict = {
@@ -2826,6 +2845,7 @@ def _synthesize_lfm3_speech_config(text_config: dict, mm_meta: dict,
         "projection_dim": _mm_int(mm_meta, key + "projection_dim"),
         "num_codebooks": books,
         "codebook_size": codes,
+        **tokens,
     }
     if config["hidden_size"] != hidden:
         raise ValueError(
