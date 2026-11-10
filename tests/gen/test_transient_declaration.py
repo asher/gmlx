@@ -152,7 +152,32 @@ def test_other_model_types_declare_nothing():
         assert transient_declaration({"model_type": mt, "head_dim": 128}) \
             is None
     assert transient_declaration({"head_dim": 128}) is None
-    assert sorted(pd._TRANSIENT_DECLARATIONS) == ["lfm3"]
+    assert sorted(pd._TRANSIENT_DECLARATIONS) == [
+        "lfm3", "lfm3_omni", "lfm3_vl"]
+
+
+@pytest.mark.parametrize("model_type", ["lfm3_omni", "lfm3_vl"])
+def test_a_model_with_its_projector_declares_as_the_text_model(
+        monkeypatch, model_type):
+    """The boot table reads the text header, and the runtime the loaded
+    container. Both price the same model, so both declare the same. The
+    container's lookup imports its own module."""
+    cfg = {"model_type": model_type, "text_config": dict(LFM3_CFG)}
+    monkeypatch.setattr(pd, "_TRANSIENT_DECLARATIONS", {})
+    monkeypatch.setattr(pd, "_DECLARATION_IMPORTS", set())
+    imported = []
+    import importlib
+
+    def fake_import(name):
+        imported.append(name)
+        pd.register_transient_declaration(model_type,
+                                          pd.head_dim_declaration)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+    assert transient_declaration(cfg) == DECL
+    assert imported == ["gmlx.models.lfm3.vlm_model"]
+    assert model_type in pd._SCORE_PROFILES
+    assert pd._SCORE_PROFILES[model_type] is pd._SCORE_PROFILES["lfm3"]
 
 
 def test_a_built_model_declares_through_its_args():
@@ -494,17 +519,42 @@ def _idle_gen(model, costs):
 # -- the price agrees with the runtime on real caches (GPU) ----------------
 
 def _tiny_lfm3():
-    from gmlx.models.lfm3.model import CONV, FULL, SLIDING, Model, ModelArgs
+    from gmlx.models.lfm3.model import Model
 
-    args = ModelArgs(
+    model = Model(_tiny_args())
+    model.config = SimpleNamespace(model_type="lfm3",
+                                   num_attention_heads=HEADS, head_dim=128)
+    return model
+
+
+def _tiny_args():
+    from gmlx.models.lfm3.model import CONV, FULL, SLIDING, ModelArgs
+
+    return ModelArgs(
         model_type="lfm3", hidden_size=64, num_hidden_layers=5,
         intermediate_size=96, num_attention_heads=HEADS,
         num_key_value_heads=4, head_dim=128, vocab_size=32,
         layer_types=[CONV, CONV, FULL, CONV, SLIDING], sliding_window=256)
-    model = Model(args)
-    model.config = SimpleNamespace(model_type="lfm3",
-                                   num_attention_heads=HEADS, head_dim=128)
-    return model
+
+
+def _tiny_omni():
+    """The text model inside its container, as a load with a projector
+    builds it."""
+    from gmlx.models.lfm3.vision import CONV, FULL, VisionConfig
+    from gmlx.models.lfm3.vlm_model import Model, ModelConfig
+
+    vision = VisionConfig(
+        hidden_size=32, intermediate_size=48, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, patch_size=4,
+        layer_types=[CONV, FULL], projector_hidden_size=40,
+        projection_dim=64)
+    return Model(ModelConfig(
+        text_config=_tiny_args(), vision_config=vision,
+        model_type="lfm3_omni", image_token_id=30, video_token_id=29,
+        vocab_size=32))
+
+
+_MODELS = pytest.mark.parametrize("build", [_tiny_lfm3, _tiny_omni])
 
 
 def _caches(model, rows: int):
@@ -529,8 +579,9 @@ def _caches(model, rows: int):
 @pytest.mark.parametrize("rows", [0, 1, 2])
 @pytest.mark.parametrize("ctx", [4096, 16384, 32768])
 @pytest.mark.parametrize("step", [2048, 8192])
-def test_the_declared_price_is_the_runtime_price(rows, ctx, step):
-    model = _tiny_lfm3()
+@_MODELS
+def test_the_declared_price_is_the_runtime_price(rows, ctx, step, build):
+    model = build()
     decl = transient_declaration(model)
     runtime = pd.score_transient_bytes(
         model, _caches(model, rows), ctx, prefill_rows=rows or None,
@@ -543,8 +594,9 @@ def test_the_declared_price_is_the_runtime_price(rows, ctx, step):
 
 @gpu
 @pytest.mark.parametrize("rows", [0, 1, 2])
-def test_the_declaration_agrees_with_the_profile(rows):
-    model = _tiny_lfm3()
+@_MODELS
+def test_the_declaration_agrees_with_the_profile(rows, build):
+    model = build()
     profile = pd.resolve_score_profile(model, _caches(model, rows))
     decl = transient_declaration(model)
     assert profile is not None
@@ -587,3 +639,88 @@ def test_boot_table_contexts_pass_preflight_and_idle_admission(
         projected, head, _parts = sm.project_admission(gen, pending)
         assert projected <= head
     cap.clear_table()
+
+
+# -- Omni loaded with its projector (integration) ---------------------------
+
+@pytest.fixture(scope="module")
+def omni(gguf_dir, gguf_index):
+    """``(text path, projector path, model)`` of a real LFM3 model loaded
+    with its projector."""
+    from gmlx.load.vlm import load_vlm_model
+    from tests.lfm3_header import find_vision_pair
+
+    found = find_vision_pair(gguf_dir, gguf_index)
+    if found is None:
+        pytest.skip("no LFM3 model with its lfm3vl projector under "
+                    "KQUANT_TEST_GGUF_DIR")
+    model, _config, _processor = load_vlm_model(*found)
+    return found[0], found[1], model
+
+
+@gpu
+@pytest.mark.integration
+@pytest.mark.parametrize("rows", [0, 1, 2])
+def test_the_loaded_pair_prices_as_its_text_header_does(omni, rows):
+    """The boot table reads the text header. The runtime reads the model
+    loaded with its projector. The two declare the same, the profile on
+    real caches agrees, and the declared price is the runtime's."""
+    import gmlx.serve.capacity as cap
+
+    text, _mmproj, model = omni
+    cfg, _costs, heads, fp16 = cap.boot_costs(text)
+    decl = transient_declaration(cfg)
+    assert decl == transient_declaration(model) == DECL
+    assert fp16 and heads == pd.score_heads(model) == HEADS
+    caches = _caches(model, rows)
+    profile = pd.resolve_score_profile(model, caches)
+    assert profile is not None
+    assert profile.fused_min_step == pd.fused_min_rows(decl.head_dim) == 9
+    assert profile.fused_mask_bytes == fused_mask_bytes(rows)
+    for ctx in (4096, 16384, 32768):
+        runtime = pd.score_transient_bytes(
+            model, caches, ctx, prefill_rows=rows or None, base_step=2048)
+        idle = pd.score_transient_bytes(
+            model, None, ctx, prefill_rows=rows or None, base_step=2048)
+        declared = declared_transient_bytes(decl, heads, True, ctx, rows,
+                                            None, 2048)
+        assert declared == pytest.approx(runtime, rel=0.01)
+        if rows:
+            assert idle == declared
+
+
+@gpu
+@pytest.mark.integration
+@pytest.mark.parametrize("cls", [8, 16])
+def test_boot_contexts_hold_on_the_loaded_pair(monkeypatch, omni, cls):
+    """What the boot table gives at widths 1 and 2 for the text file and
+    its projector, the request preflight and an idle engine's admission
+    both take, on the model loaded with that projector."""
+    import gmlx.device as device
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.mem_preflight as mp
+    import gmlx.serve.memory as sm
+
+    text, mmproj, model = omni
+    ws = _class_box(monkeypatch, cls)
+    weights = float(os.path.getsize(text) + os.path.getsize(mmproj))
+    table = cap.derive_table(text, weight_bytes=weights)
+    _cfg, costs, _heads, _fp16 = cap.boot_costs(text)
+    reserve = sm.admit_reserve_bytes(ws)
+    drained = ws - weights - reserve
+    idle = ws - weights
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: idle)
+    monkeypatch.setattr(device, "metal_value", lambda name: ws)
+    try:
+        for width in (1, 2):
+            ctx = table["max_ctx"][width]
+            assert ctx > 8192
+            assert mp._need_bytes(model, costs, ctx) <= drained
+            gen = _idle_gen(model, costs)
+            pending = [(uid, [0] * ctx, 0, {}, None, None)
+                       for uid in range(width)]
+            projected, head, _parts = sm.project_admission(gen, pending)
+            assert projected <= head
+    finally:
+        model.pop("_kq_boot_kv_costs", None)
+        cap.clear_table()

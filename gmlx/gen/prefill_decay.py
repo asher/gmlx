@@ -233,9 +233,10 @@ def _declaration_provider(model_type: str):
         import importlib
 
         with contextlib.suppress(Exception):
-            from gmlx.models.owned import OWNED_LM_MODELS
+            from gmlx.models.owned import OWNED_LM_MODELS, OWNED_VLM_MODELS
 
-            module = OWNED_LM_MODELS.get(model_type)
+            module = (OWNED_LM_MODELS.get(model_type)
+                      or OWNED_VLM_MODELS.get(model_type))
             if module:
                 importlib.import_module(module)
     return _TRANSIENT_DECLARATIONS.get(model_type)
