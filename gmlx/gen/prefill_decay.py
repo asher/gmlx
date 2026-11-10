@@ -222,9 +222,10 @@ _DECLARATION_IMPORTS: set[str] = set()
 
 
 def _declaration_provider(model_type: str):
-    """A model package registers its declaration when it is imported. A
+    """A model registers its declaration when its code is imported. A
     header reader runs before any model is built, so import the owned
-    model's package once."""
+    model's module once. That runs its package too, so either may
+    register."""
     if (model_type not in _TRANSIENT_DECLARATIONS
             and model_type not in _DECLARATION_IMPORTS):
         _DECLARATION_IMPORTS.add(model_type)
@@ -236,7 +237,7 @@ def _declaration_provider(model_type: str):
 
             module = OWNED_LM_MODELS.get(model_type)
             if module:
-                importlib.import_module(module.rsplit(".", 1)[0])
+                importlib.import_module(module)
     return _TRANSIENT_DECLARATIONS.get(model_type)
 
 
@@ -250,7 +251,8 @@ def fused_mask_bytes(rows: int) -> int:
 
 def declared_transient_bytes(decl: TransientDeclaration | None, heads: int,
                              kv_fp16: bool, ctx: int, rows: int,
-                             cap: float | None, base: int) -> float | None:
+                             cap: float | None, base: int, *,
+                             hold_at_cap: bool = False) -> float | None:
     """The fused prefill transient at ``ctx`` tokens for a declared model
     type, or None when the declaration does not apply and the reader's own
     dense price stands: no declaration, a quantized or KVarN cache, a head
@@ -259,7 +261,12 @@ def declared_transient_bytes(decl: TransientDeclaration | None, heads: int,
     ``rows`` is the cache the prompt runs on: 0 for a single-row plain
     cache, else the rows of a batch cache. ``base`` is the chunk step the
     prefill runs from, and ``cap`` the body score cap (None reads this
-    Mac's). The price is the runtime's own, so the two cannot differ."""
+    Mac's). The price is the runtime's own, so the two cannot differ.
+
+    The runtime price drops by half at each context where the cap halves
+    the step. ``hold_at_cap`` keeps the price at the cap from the first
+    such context on, so it never falls as ``ctx`` grows. A reader that
+    searches for the largest context that fits needs that."""
     if decl is None or not kv_fp16 or not heads:
         return None
     if not env_bool("GMLX_PREFILL_SCORE_PROFILE", True):
@@ -270,7 +277,13 @@ def declared_transient_bytes(decl: TransientDeclaration | None, heads: int,
     profile = ScoreTransientProfile(
         heads=int(heads), bytes_per_elem=2, fused_min_step=fused,
         fused_mask_bytes=fused_mask_bytes(rows))
-    return _transient_price(profile, int(ctx), int(heads), int(base), cap)
+    if cap is None:
+        cap = _body_cap_bytes()
+    price = _transient_price(profile, int(ctx), int(heads), int(base), cap)
+    undecayed = profile.fused_mask_bytes * int(base) * (int(ctx) + int(base))
+    if hold_at_cap and undecayed > cap:
+        price = max(price, float(cap))
+    return price
 
 
 def runtime_kv_fp16(model) -> bool:

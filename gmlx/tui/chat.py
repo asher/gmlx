@@ -3528,11 +3528,11 @@ def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
         b = _ChatBackend()
         b.config = {}
         return b
-    from gmlx.commands.tool_preflight import check_or_exit
+    from gmlx.commands.tool_preflight import args_kv_fp16, check_or_exit
 
     check_or_exit(args.gguf,
                   streaming=getattr(args, "stream_experts", False),
-                  kv_fp16=not getattr(args, "kv_bits", None))
+                  kv_fp16=args_kv_fp16(args))
     from gmlx.serve.memory import apply_local_cache_limit
 
     apply_local_cache_limit(

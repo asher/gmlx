@@ -1392,11 +1392,11 @@ def _run_bench_depths(args) -> int:
         convs = _load_chat_dataset(ds_id, ds_split)
         print(f"[bench] {len(convs)} conversations loaded")
 
-    from .tool_preflight import check_or_exit
+    from .tool_preflight import args_kv_fp16, check_or_exit
 
     check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
                   streaming=getattr(args, "stream_experts", False),
-                  kv_fp16=not getattr(args, "kv_bits", None))
+                  kv_fp16=args_kv_fp16(args))
     drafter = None
     _check_cli_adapter(args)
     if speculative:
@@ -1681,7 +1681,7 @@ def _run_generate(args) -> int:
     )
     from gmlx.gen.generation import generate
     from gmlx.load.loader import load_model
-    from .tool_preflight import check_or_exit
+    from .tool_preflight import args_kv_fp16, check_or_exit
 
     # Parse before the model load so a JSON typo fails fast.
     template_kwargs = fold_thinking_flag(
@@ -1689,7 +1689,7 @@ def _run_generate(args) -> int:
     logit_bias = parse_logit_bias(args.logit_bias)
     check_or_exit(args.gguf,
                   streaming=getattr(args, "stream_experts", False),
-                  kv_fp16=not getattr(args, "kv_bits", None))
+                  kv_fp16=args_kv_fp16(args))
     companion = _audio_companion(args)
 
     from gmlx.gen.thinking_budget import install_finish_thinking_key

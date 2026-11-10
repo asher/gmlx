@@ -117,8 +117,18 @@ def _need_at(weights: float, costs, heads: int | None, ctx: int, *,
     return weights + kv + transient
 
 
+def args_kv_fp16(args) -> bool:
+    """Whether a tool's flags leave the KV cache plain 16-bit: no
+    --kv-bits, and a scheme other than kvarn, which packs at its own
+    default width with no --kv-bits."""
+    if getattr(args, "kv_bits", None) is not None:
+        return False
+    scheme = getattr(args, "kv_quant_scheme", None) or ""
+    return str(scheme).lower() != "kvarn"
+
+
 def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
-             limit: float | None = None, kv_fp16: bool = True,
+             limit: float | None = None, kv_fp16: bool = False,
              rows: int = 0) -> dict | None:
     """Fit estimate for serving ``ctx_tokens`` of context (default: the
     model's trained context) on this box, or None when any input cannot
@@ -193,7 +203,7 @@ def refusal_text(est: dict) -> str:
 
 
 def check_or_exit(gguf_path: str, ctx_tokens: int | None = None,
-                  streaming: bool = False, *, kv_fp16: bool = True,
+                  streaming: bool = False, *, kv_fp16: bool = False,
                   rows: int = 0):
     """Refuse (SystemExit 2, numbers on stderr) when the configuration
     definitively cannot fit; otherwise return the estimate (or None

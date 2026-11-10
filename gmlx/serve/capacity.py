@@ -160,14 +160,16 @@ def _transient_bytes(heads: int | None, depth: int, *, decl=None,
     """The prefill score transient at ``depth`` for ``rows`` prompts that
     prefill together: the declared fused price when the model type has
     one that applies (``decl``, ``kv_fp16``), else the dense price, which
-    is the same at every width."""
+    is the same at every width. The declared price is held at the cap, so
+    it never falls with depth and the table's search is sound."""
     from gmlx.commands.tool_preflight import _SCORE_CHUNK
     from gmlx.gen.prefill_decay import declared_transient_bytes
 
     if not heads:
         return 0.0
     declared = declared_transient_bytes(
-        decl, heads, kv_fp16, depth, rows, None, _SCORE_CHUNK)
+        decl, heads, kv_fp16, depth, rows, None, _SCORE_CHUNK,
+        hold_at_cap=True)
     if declared is not None:
         return declared
     step = min(_SCORE_CHUNK, max(1, depth))

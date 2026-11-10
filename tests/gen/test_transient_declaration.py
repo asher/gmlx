@@ -97,6 +97,27 @@ def test_the_cap_halves_the_step_of_a_wide_batch():
     assert over == 33 * 1024 * (28000 + 1024)
 
 
+@pytest.mark.parametrize("rows", [4, 32])
+def test_the_held_price_never_falls(rows):
+    """The runtime price drops by half where the cap halves the step. The
+    held price stays at the cap from there, so a search over the context
+    is sound. It is never under the runtime price, and it is the runtime
+    price until the mask first passes the cap."""
+    def price(ctx, hold):
+        return declared_transient_bytes(DECL, HEADS, True, ctx, rows, CAP,
+                                        2048, hold_at_cap=hold)
+
+    edge = int(CAP // ((rows + 1) * 2048)) - 2048
+    assert price(edge + 1, False) < price(edge, False) <= CAP
+    last = 0.0
+    for ctx in range(1024, 1 << 21, 997):
+        held, runtime = price(ctx, True), price(ctx, False)
+        assert held >= last and held >= runtime
+        assert held == (runtime if ctx <= edge else max(runtime, CAP))
+        last = held
+    assert last > CAP
+
+
 @pytest.mark.parametrize("kw", [
     dict(decl=None),
     dict(kv_fp16=False),
@@ -236,9 +257,11 @@ def calls(monkeypatch):
     """Record every call of the declared price and answer 1 byte."""
     seen = []
 
-    def spy(decl, heads, kv_fp16, ctx, rows, cap, base):
+    def spy(decl, heads, kv_fp16, ctx, rows, cap, base, *,
+            hold_at_cap=False):
         seen.append(SimpleNamespace(decl=decl, heads=heads, kv_fp16=kv_fp16,
-                                    ctx=ctx, rows=rows, cap=cap, base=base))
+                                    ctx=ctx, rows=rows, cap=cap, base=base,
+                                    hold=hold_at_cap))
         return 1.0
 
     monkeypatch.setattr(pd, "declared_transient_bytes", spy)
@@ -274,7 +297,38 @@ def test_boot_passes_the_width_it_prices(monkeypatch, shipped, calls):
     assert cap.derive_table(shipped, weight_bytes=2e9) is not None
     assert {c.rows for c in calls} == set(cap._WIDTHS)
     assert all(c.decl == DECL and c.kv_fp16 and c.heads == HEADS
-               and c.cap is None and c.base == 2048 for c in calls)
+               and c.cap is None and c.base == 2048 and c.hold
+               for c in calls)
+
+
+def test_no_context_under_a_wide_boot_answer_is_refused(monkeypatch, shipped):
+    """Width 32 on a 32 GiB Mac holds enough KV for the mask to pass the
+    cap. The weights put the budget line between the price at the cap and
+    the halved price just past it, where an unheld search can answer above
+    contexts that do not fit."""
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.mem_preflight as mp
+    import gmlx.serve.memory as sm
+
+    ws = _class_box(monkeypatch, 32)
+    two_gb = pd.cap_bytes_for(ws)
+    edge = int(two_gb // (33 * 2048)) - 2048
+    _cfg, costs, _heads, _fp16 = cap.boot_costs(shipped)
+    room = cap.ceiling_bytes(ws) - sm.admit_reserve_bytes(ws)
+    weights = room - 32 * mp.prompt_kv_bytes(costs, edge) - 0.75 * two_gb
+    assert weights > 0
+
+    def fits(ctx: int) -> bool:
+        tr = declared_transient_bytes(DECL, HEADS, True, ctx, 32, None, 2048)
+        return weights + 32 * mp.prompt_kv_bytes(costs, ctx) + tr <= room
+
+    # The trap: a band under the edge does not fit, one past it does.
+    assert not fits(edge) and fits(edge + 64)
+    top = cap.derive_table(shipped, weight_bytes=weights)["max_ctx"][32]
+    assert 0 < top < edge
+    assert all(fits(ctx) for ctx in range(top % 16, top + 1, 16))
+    assert fits(top)
+    cap.clear_table()
 
 
 def test_boot_prices_a_quantized_window_dense(monkeypatch, shipped):
@@ -294,20 +348,68 @@ def test_run_and_chat_price_one_prompt_on_a_plain_cache(
     import gmlx.commands.tool_preflight as tp
 
     monkeypatch.setattr(tp, "working_set_bytes", lambda: 16e9)
-    assert tp.estimate(shipped, 32768) is not None
+    assert tp.estimate(shipped, 32768, kv_fp16=True) is not None
     assert calls and all(c.rows == 0 and c.kv_fp16 and c.decl == DECL
-                         and c.base == tp._SCORE_CHUNK for c in calls)
-    calls.clear()
-    tp.estimate(shipped, 32768, kv_fp16=False)
-    assert calls and not any(c.kv_fp16 for c in calls)
+                         and c.base == tp._SCORE_CHUNK and not c.hold
+                         for c in calls)
+    for kw in ({"kv_fp16": False}, {}):
+        calls.clear()
+        tp.estimate(shipped, 32768, **kw)
+        assert calls and not any(c.kv_fp16 for c in calls)
+
+
+@pytest.mark.parametrize("flags, fp16", [
+    ({}, True),
+    ({"kv_quant_scheme": "uniform"}, True),
+    ({"kv_quant_scheme": "auto"}, True),
+    ({"kv_bits": 8}, False),
+    ({"kv_bits": 8, "kv_quant_scheme": "uniform"}, False),
+    ({"kv_quant_scheme": "kvarn"}, False),
+    ({"kv_bits": 4, "kv_quant_scheme": "kvarn"}, False),
+])
+def test_the_kv_flags_say_whether_the_cache_is_plain(flags, fp16):
+    """kvarn packs at its own default width with no --kv-bits."""
+    from gmlx.commands.tool_preflight import args_kv_fp16
+
+    assert args_kv_fp16(SimpleNamespace(**flags)) is fp16
+
+
+@pytest.mark.parametrize("argv", [
+    ["run", "--prompt", "hi"],
+    ["run", "--bench-depths", "1024"],
+    ["chat"],
+])
+@pytest.mark.parametrize("flags, fp16", [
+    ([], True),
+    (["--kv-bits", "8"], False),
+    (["--kv-quant-scheme", "kvarn"], False),
+])
+def test_the_fit_check_of_each_tool_reads_the_kv_flags(
+        monkeypatch, shipped, argv, flags, fp16):
+    import gmlx.commands.tool_preflight as tp
+    from gmlx.commands.cli import umbrella_main
+
+    seen = []
+
+    def spy(path, ctx_tokens=None, streaming=False, **kw):
+        seen.append(kw)
+        raise SystemExit(7)
+
+    monkeypatch.setattr(tp, "check_or_exit", spy)
+    try:
+        code = umbrella_main([argv[0], shipped, *argv[1:], *flags])
+    except SystemExit as exc:
+        code = exc.code
+    assert code == 7
+    assert seen == [{"kv_fp16": fp16}]
 
 
 def test_kv_bits_makes_the_fit_check_dense(monkeypatch, shipped):
     import gmlx.commands.tool_preflight as tp
 
     monkeypatch.setattr(tp, "working_set_bytes", lambda: 16e9)
-    fused = tp.estimate(shipped, 32768)
-    dense = tp.estimate(shipped, 32768, kv_fp16=False)
+    fused = tp.estimate(shipped, 32768, kv_fp16=True)
+    dense = tp.estimate(shipped, 32768)
     assert dense["need"] - fused["need"] == pytest.approx(
         _dense(32768) - HEADS * 8 * (32768 + 8) * 2.0)
 
