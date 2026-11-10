@@ -203,7 +203,7 @@ def model_plan(scans, env: dict | None = None) -> ModelPlan:
         with loadlog.quiet():
             priced = boot_costs(None, env, scans=scans)
         if priced is not None:
-            cfg, costs, _ = priced
+            cfg, costs, _, _ = priced
             costs = tuple(costs)
             trained = _int(cfg.get("max_position_embeddings"))
             activation = prefill_activation_bytes(cfg)

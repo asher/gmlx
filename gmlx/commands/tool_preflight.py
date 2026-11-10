@@ -98,18 +98,28 @@ def _kv_costs(cfg: dict):
     return kv_layer_costs(SimpleNamespace(config=cfg))
 
 
-def _need_at(weights: float, costs, heads: int | None, ctx: int) -> float:
+def _need_at(weights: float, costs, heads: int | None, ctx: int, *,
+             decl=None, kv_fp16: bool = False, rows: int = 0) -> float:
+    """Bytes a prompt of ``ctx`` tokens needs. ``decl`` and ``kv_fp16``
+    price a declared model type's fused transient on the cache the tool
+    builds: ``rows`` 0 for one prompt on a plain cache, else the rows of
+    a batch."""
+    from gmlx.gen.prefill_decay import declared_transient_bytes
     from gmlx.serve.mem_preflight import prompt_kv_bytes
 
     kv = prompt_kv_bytes(costs, ctx)
     transient = 0.0
     if heads:
-        transient = heads * _SCORE_CHUNK * (ctx + _SCORE_CHUNK) * 2.0
+        transient = declared_transient_bytes(
+            decl, heads, kv_fp16, ctx, rows, None, _SCORE_CHUNK)
+        if transient is None:
+            transient = heads * _SCORE_CHUNK * (ctx + _SCORE_CHUNK) * 2.0
     return weights + kv + transient
 
 
 def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
-             limit: float | None = None) -> dict | None:
+             limit: float | None = None, kv_fp16: bool = True,
+             rows: int = 0) -> dict | None:
     """Fit estimate for serving ``ctx_tokens`` of context (default: the
     model's trained context) on this box, or None when any input cannot
     be read (the caller must treat None as permit). ``limit`` is the
@@ -140,11 +150,15 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
             trained = cfg.get("max_position_embeddings")
             ctx = min(4096, trained) if isinstance(trained, int) \
                 and trained > 0 else 4096
-        need = _need_at(weights, costs, heads, ctx)
+        from gmlx.gen.prefill_decay import transient_declaration
+
+        price = dict(decl=transient_declaration(cfg), kv_fp16=kv_fp16,
+                     rows=rows)
+        need = _need_at(weights, costs, heads, ctx, **price)
         lo, hi = 0, 1 << 22
         while lo < hi:  # largest context that fits, admit-side
             mid = (lo + hi + 1) // 2
-            if _need_at(weights, costs, heads, mid) <= ws:
+            if _need_at(weights, costs, heads, mid, **price) <= ws:
                 lo = mid
             else:
                 hi = mid - 1
@@ -179,7 +193,8 @@ def refusal_text(est: dict) -> str:
 
 
 def check_or_exit(gguf_path: str, ctx_tokens: int | None = None,
-                  streaming: bool = False):
+                  streaming: bool = False, *, kv_fp16: bool = True,
+                  rows: int = 0):
     """Refuse (SystemExit 2, numbers on stderr) when the configuration
     definitively cannot fit; otherwise return the estimate (or None
     when skipped). Under GMLX_OVERCOMMIT=1 it is judged against physical
@@ -194,7 +209,8 @@ def check_or_exit(gguf_path: str, ctx_tokens: int | None = None,
         limit = ram_bytes()
         if not limit:
             return None
-    est = estimate(gguf_path, ctx_tokens, limit=limit)
+    est = estimate(gguf_path, ctx_tokens, limit=limit, kv_fp16=kv_fp16,
+                   rows=rows)
     if est is not None and not est["fits"]:
         print(f"error: {refusal_text(est)}", file=sys.stderr)
         raise SystemExit(2)

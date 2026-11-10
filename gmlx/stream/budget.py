@@ -437,7 +437,7 @@ def kv_room_bytes(gguf_path: str | None, env: dict | None = None,
         ws = working_set_bytes()
         if priced is None or not ws:
             return price_room(None, None, 0, 0, depth=depth)
-        cfg, costs, _ = priced
+        cfg, costs, _, _ = priced
         return price_room(costs, cfg.get("max_position_embeddings"), ws,
                           _cap_bytes(),
                           prefill_activation_bytes(cfg, step, resident),

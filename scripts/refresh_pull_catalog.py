@@ -58,6 +58,7 @@ from gmlx.load.discovery import (_classify_meta, declared_base_ids,  # noqa: E40
                                  _target_ids)
 from gmlx.load.config_synth import supported_arches, trained_context_cap  # noqa: E402
 from gmlx.load.gguf_meta import read_int, read_string  # noqa: E402
+from gmlx.gen.prefill_decay import transient_declaration  # noqa: E402
 from gmlx.load.headerscan import scan_bytes  # noqa: E402
 from gmlx.load.preflight import shard_names  # noqa: E402
 from gmlx.load.repo_files import (file_for_quant, is_companion, model_files,  # noqa: E402,F401
@@ -348,10 +349,12 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     pref_quant = next((q for q, t, _f in chosen if (t or q) == seed.preferred), None)
     scans = scans_by_quant.get(pref_quant) or next(iter(scans_by_quant.values()))
     got = boot_costs(None, env={}, scans=scans)
-    kv_cost, heads = (), 0
+    kv_cost, heads, fused_head_dim = (), 0, 0
     if got:
-        _cfg, costs, heads = got
+        cfg, costs, heads, _kv_fp16 = got
         kv_cost = catalog.serialise_costs(costs).costs
+        decl = transient_declaration(cfg)
+        fused_head_dim = int(decl.head_dim) if decl else 0
     else:
         problems.append(f"{seed.name}: boot_costs priced nothing from the header")
     trained_ctx = recorded_context(scans[0].kv, arch)
@@ -450,6 +453,8 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     }
     if asr is not None:
         facts["asr"] = asr
+    if fused_head_dim:
+        facts["prefill_fused_head_dim"] = fused_head_dim
     if c["license"] == "other" and not seed.license_note:
         problems.append(f"{seed.name}: license is other ({c['license_name']}); the seed "
                         "needs a license_note")
@@ -470,6 +475,9 @@ def facts_text(facts: dict) -> str:
             lines.append(f"        {key!r}: {f[key]!r},")
         if f.get("asr"):
             lines.append(f"        'asr': {f['asr']!r},")
+        if f.get("prefill_fused_head_dim"):
+            lines.append("        'prefill_fused_head_dim': "
+                         f"{f['prefill_fused_head_dim']!r},")
         lines.append("        'rungs': (")
         for r in f["rungs"]:
             lines.append(f"            {tuple(r)!r},")

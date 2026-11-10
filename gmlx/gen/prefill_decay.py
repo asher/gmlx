@@ -145,6 +145,146 @@ def register_score_profile(model_type: str, provider: Callable) -> None:
     _SCORE_PROFILES[model_type] = provider
 
 
+class TransientDeclaration(NamedTuple):
+    """What a model type states from its config alone: its prefill
+    attention is stock SDPA at this head dim, on plain 16-bit KV. A reader
+    with no model and no cache (the boot table, the fit check, the pull
+    picker, an idle engine) prices the fused transient from it."""
+
+    head_dim: int
+
+
+# model_type -> from_config(config) -> TransientDeclaration | None. Only a
+# declared model type prices below dense with no cache to inspect.
+_TRANSIENT_DECLARATIONS: dict[str, Callable] = {}
+
+
+def register_transient_declaration(model_type: str,
+                                   from_config: Callable) -> None:
+    _TRANSIENT_DECLARATIONS[model_type] = from_config
+
+
+def _config_value(cfg, name: str):
+    """``name`` from a config dict or object, its text config, or a
+    model's args."""
+    for c in (cfg, _attr(cfg, "text_config"), _attr(cfg, "args")):
+        v = _attr(c, name)
+        if v is not None:
+            return v
+    return None
+
+
+def _attr(obj, name: str):
+    """``name`` from a config dict, a config object or a module. A module
+    and an attribute dict are dicts too, so the attribute is read first."""
+    if obj is None:
+        return None
+    if type(obj) is dict:
+        return obj.get(name)
+    try:
+        value = getattr(obj, name, None)
+    except Exception:
+        value = None
+    if value is None and isinstance(obj, dict):
+        value = obj.get(name)
+    return value
+
+
+def head_dim_declaration(config) -> TransientDeclaration | None:
+    """The declaration of a model type whose every attention layer has the
+    config's ``head_dim``."""
+    dim = _config_value(config, "head_dim")
+    return TransientDeclaration(int(dim)) if dim else None
+
+
+def transient_declaration(model_or_config) -> TransientDeclaration | None:
+    """The declaration of a model or of a synthesized config, or None when
+    its model type registers none."""
+    own = None if type(model_or_config) is dict \
+        else _attr(model_or_config, "config")
+    for cfg in (own, model_or_config):
+        if cfg is None:
+            continue
+        mt = _config_value(cfg, "model_type")
+        provider = _declaration_provider(mt) if isinstance(mt, str) else None
+        if provider is None:
+            continue
+        try:
+            decl = provider(cfg)
+        except Exception:
+            decl = None
+        if decl is not None:
+            return decl
+    return None
+
+
+_DECLARATION_IMPORTS: set[str] = set()
+
+
+def _declaration_provider(model_type: str):
+    """A model package registers its declaration when it is imported. A
+    header reader runs before any model is built, so import the owned
+    model's package once."""
+    if (model_type not in _TRANSIENT_DECLARATIONS
+            and model_type not in _DECLARATION_IMPORTS):
+        _DECLARATION_IMPORTS.add(model_type)
+        import contextlib
+        import importlib
+
+        with contextlib.suppress(Exception):
+            from gmlx.models.owned import OWNED_LM_MODELS
+
+            module = OWNED_LM_MODELS.get(model_type)
+            if module:
+                importlib.import_module(module.rsplit(".", 1)[0])
+    return _TRANSIENT_DECLARATIONS.get(model_type)
+
+
+def fused_mask_bytes(rows: int) -> int:
+    """Mask bytes per score element of a fused chunk. A batch cache of
+    ``rows`` rows masks with a [B, 1, step, S] bool array, built beside
+    its [step, S] comparison. A single-row plain cache (``rows`` 0) masks
+    with none."""
+    return int(rows) + 1 if rows else 0
+
+
+def declared_transient_bytes(decl: TransientDeclaration | None, heads: int,
+                             kv_fp16: bool, ctx: int, rows: int,
+                             cap: float | None, base: int) -> float | None:
+    """The fused prefill transient at ``ctx`` tokens for a declared model
+    type, or None when the declaration does not apply and the reader's own
+    dense price stands: no declaration, a quantized or KVarN cache, a head
+    dim MLX does not run fused, or GMLX_PREFILL_SCORE_PROFILE=0.
+
+    ``rows`` is the cache the prompt runs on: 0 for a single-row plain
+    cache, else the rows of a batch cache. ``base`` is the chunk step the
+    prefill runs from, and ``cap`` the body score cap (None reads this
+    Mac's). The price is the runtime's own, so the two cannot differ."""
+    if decl is None or not kv_fp16 or not heads:
+        return None
+    if not env_bool("GMLX_PREFILL_SCORE_PROFILE", True):
+        return None
+    fused = fused_min_rows(decl.head_dim)
+    if not fused:
+        return None
+    profile = ScoreTransientProfile(
+        heads=int(heads), bytes_per_elem=2, fused_min_step=fused,
+        fused_mask_bytes=fused_mask_bytes(rows))
+    return _transient_price(profile, int(ctx), int(heads), int(base), cap)
+
+
+def runtime_kv_fp16(model) -> bool:
+    """Whether the model's caches hold plain 16-bit KV, from the policy
+    serve stamps on it. A model with no policy runs fp16. A scheme that
+    either the single-row or the batched stack takes prices dense."""
+    pol = _attr(model, "_gmlx_kv_policy")
+    if pol is None:
+        return True
+    return not any(
+        _attr(_attr(pol, mode), "verdict") in ("full", "partial")
+        for mode in ("single", "batched"))
+
+
 def resolve_score_profile(model, prompt_cache) -> Optional[ScoreTransientProfile]:
     """Look up and invoke the arch's profile provider; None keeps the dense
     model. Re-resolved per chunk so runtime kernel disables take effect on
@@ -269,12 +409,10 @@ def fused_attention_profile(model, prompt_cache):
         lp = getattr(c, "left_padding", None)
         if isinstance(lp, mx.array):
             batch_rows = max(batch_rows, int(lp.size))
-    # A batch cache masks with a [B, 1, step, S] bool array, built beside
-    # its [step, S] comparison.
     return ScoreTransientProfile(
         heads=score_heads(model), bytes_per_elem=2,
         fused_min_step=max(rows),
-        fused_mask_bytes=batch_rows + 1 if batch_rows else 0)
+        fused_mask_bytes=fused_mask_bytes(batch_rows))
 
 
 def _walk_caches(prompt_cache):
@@ -813,17 +951,26 @@ def score_transient_bytes(model, prompt_cache, depth: int,
         from gmlx.cache.kv_cache import KVCache
 
         rows = int(prefill_rows or 1)
+        if not cpu_default_device():
+            # A declared model type runs fused on the batch cache the
+            # request will get, so the fused price is the price.
+            declared = declared_transient_bytes(
+                transient_declaration(model), heads, runtime_kv_fp16(model),
+                depth, rows, None, _run_base(model, None, base_step, rows))
+            if declared is not None:
+                return declared
         dense = _transient_price(
             None, depth, heads, _run_base(model, None, base_step, rows))
         probe = resolve_score_profile(model, [KVCache()])
         if probe is None or not probe.fused_min_step:
             return dense
-        probe = probe._replace(fused_mask_bytes=int(prefill_rows or 1) + 1)
+        probe = probe._replace(fused_mask_bytes=fused_mask_bytes(rows))
         return max(dense, _transient_price(
             probe, depth, heads, _run_base(model, probe, base_step, rows)))
     profile = resolve_score_profile(model, prompt_cache)
     if profile is not None and profile.fused_min_step and prefill_rows:
-        profile = profile._replace(fused_mask_bytes=int(prefill_rows) + 1)
+        profile = profile._replace(
+            fused_mask_bytes=fused_mask_bytes(int(prefill_rows)))
     return _transient_price(
         profile, depth, heads,
         _run_base(model, profile, base_step, int(prefill_rows or 1)))
@@ -857,8 +1004,12 @@ def _run_base(model, profile, base: int | None, rows: int = 1) -> int:
 
 
 def _transient_price(profile: ScoreTransientProfile | None, depth: int,
-                     heads: int, base: int) -> float:
-    step = decayed_step(base, depth, heads, profile=profile)
+                     heads: int, base: int,
+                     cap: float | None = None) -> float:
+    """``cap`` is the body score cap, None for this Mac's."""
+    if cap is None:
+        cap = _body_cap_bytes()
+    step = decayed_step(base, depth, heads, cap=cap, profile=profile)
     if profile is not None:
         h, bpe, div = (profile.heads, profile.bytes_per_elem,
                        profile.depth_divisor)
@@ -877,7 +1028,7 @@ def _transient_price(profile: ScoreTransientProfile | None, depth: int,
     # A chunk cut under the fused width runs unfused: whole while it fits
     # the cap, else at most the floor chunk.
     min_step = max(1, env_int("GMLX_PREFILL_MIN_STEP", 256))
-    cut = min(scores(fused - 1), max(_body_cap_bytes(), scores(min_step)))
+    cut = min(scores(fused - 1), max(cap, scores(min_step)))
     return max(held, cut)
 
 

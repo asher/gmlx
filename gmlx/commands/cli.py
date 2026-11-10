@@ -1395,7 +1395,8 @@ def _run_bench_depths(args) -> int:
     from .tool_preflight import check_or_exit
 
     check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
-                  streaming=getattr(args, "stream_experts", False))
+                  streaming=getattr(args, "stream_experts", False),
+                  kv_fp16=not getattr(args, "kv_bits", None))
     drafter = None
     _check_cli_adapter(args)
     if speculative:
@@ -1687,7 +1688,8 @@ def _run_generate(args) -> int:
         args, parse_template_config(args.chat_template_config))
     logit_bias = parse_logit_bias(args.logit_bias)
     check_or_exit(args.gguf,
-                  streaming=getattr(args, "stream_experts", False))
+                  streaming=getattr(args, "stream_experts", False),
+                  kv_fp16=not getattr(args, "kv_bits", None))
     companion = _audio_companion(args)
 
     from gmlx.gen.thinking_budget import install_finish_thinking_key

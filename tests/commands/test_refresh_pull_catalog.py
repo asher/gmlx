@@ -165,7 +165,7 @@ def test_dense_entry_records_tiers_costs_and_the_tower(refresh, dense_repo, monk
     scans = refresh.scans_for("org/dense", "Model-Q6_K.gguf", "abcdef1234567890", None)
     costs = catalog.kv_costs(catalog.KvCost(facts["kv_cost"]))
     for env in ({}, {"MLX_VLM_GGUF_SPECULATIVE": "1"}):
-        _cfg, want, heads = boot_costs(None, env=env, scans=scans)
+        _cfg, want, heads, _fp16 = boot_costs(None, env=env, scans=scans)
         assert sorted(map(repr, costs)) == sorted(map(repr, want))
         assert facts["heads"] == heads == 4
     assert facts["trained_ctx"] == 1024

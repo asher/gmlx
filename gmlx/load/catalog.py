@@ -109,6 +109,7 @@ class Model:
     kv_cost: KvCost | None = None
     heads: int = 0
     trained_ctx: int = 0
+    prefill_fused_head_dim: int = 0  # prefill attention runs fused at this head dim; 0 prices dense
     preferred_at: tuple = ()         # (memory class, tier) pairs, over preferred on that class
     head_from_class: int = 0         # the smallest memory class that keeps the native head on
 
@@ -444,6 +445,7 @@ def _build(seed: Seed, facts: dict) -> Model:
         drafter=drafter, asr=asr, ignored_files=seed.ignored_files,
         kv_cost=KvCost(tuple(tuple(row) for row in kv)) if kv else None,
         heads=facts.get("heads", 0), trained_ctx=facts.get("trained_ctx", 0),
+        prefill_fused_head_dim=facts.get("prefill_fused_head_dim", 0),
         preferred_at=seed.preferred_at, head_from_class=seed.head_from_class)
 
 
@@ -696,10 +698,27 @@ def context_estimate(m: Model, r: Rung, box: Box, addon: int, speculative: bool)
     costs = kv_costs(m.kv_cost)
     fixed = resident_bytes(m, r, speculative) + addon
 
-    def fits(t: int) -> bool:
+    decl = None
+    if m.prefill_fused_head_dim:
+        from gmlx.gen.prefill_decay import TransientDeclaration
+
+        decl = TransientDeclaration(m.prefill_fused_head_dim)
+
+    def transient(t: int) -> float:
+        # One served row, as the boot table prices width 1. The recorded
+        # cost row is fp16 KV.
+        if decl is not None:
+            from gmlx.gen.prefill_decay import declared_transient_bytes
+
+            declared = declared_transient_bytes(
+                decl, m.heads, True, t, 1, box.cap, 2048)
+            if declared is not None:
+                return declared
         s = min(2048, t)
-        return (fixed + prompt_kv_bytes(costs, t)
-                + min(box.cap, m.heads * s * (t + s) * 2) <= box.ceiling)
+        return min(box.cap, m.heads * s * (t + s) * 2)
+
+    def fits(t: int) -> bool:
+        return fixed + prompt_kv_bytes(costs, t) + transient(t) <= box.ceiling
 
     top = m.trained_ctx // K
     if top < 1 or not fits(K):
