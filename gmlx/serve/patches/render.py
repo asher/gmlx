@@ -80,8 +80,22 @@ _IN_PLACE_IMAGES = frozenset((
     "minicpmv4_6", "minicpmv4_7", "minimax_m3_vision", "lfm3_omni",
     "lfm3_vl",
 ))
+# The model types whose chat template renders a video item where the
+# content list holds it, and whose processor expands the video markers of
+# the prompt in order, one video each. For these a chat completions
+# request keeps each video in the message and at the place the client
+# sent it. Other types keep the stock rebuild, which puts every video of
+# the request at the start of every message. A type joins after a check
+# through the route on its real processor class.
+_IN_PLACE_VIDEOS = frozenset(("lfm3_omni", "lfm3_vl"))
+# The same for an audio clip. Other types keep the stock rebuild, which
+# puts every clip after the text of the last user message.
+_IN_PLACE_AUDIO = frozenset(("lfm3_omni",))
 # Image items as the client and the stock rebuild write them.
 _IMAGE_ITEMS = ("image", "image_url", "input_image")
+# The marker of a clip a chat completions message sent. The stock rebuild
+# does not read it.
+_SENT_AUDIO = "sent_audio"
 # The model types whose chat template renders an image item of a tool
 # message in that tool turn.
 _TOOL_IMAGES = frozenset((
@@ -269,6 +283,80 @@ def _images_in_place(built: dict, sent: dict) -> dict:
     return {**built, "content": out + audio}
 
 
+def _sent_media(message, kind: str) -> int:
+    """The ``kind`` markers of a user message the chat route placed."""
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return 0
+    content = message.get("content")
+    if not isinstance(content, list):
+        return 0
+    return sum(isinstance(part, dict) and part.get("type") == kind
+               for part in content)
+
+
+def _media_in_place(built: dict, sent: dict, kinds: dict) -> dict:
+    """``built`` with its text, images, videos and clips in the order
+    ``sent`` holds them. ``kinds`` maps a marker type of ``sent`` to the
+    item the template reads.
+
+    Text parts between two media items join as the stock text extraction
+    joins them, and the message's leading and trailing space is stripped.
+    Returns ``built`` unchanged when ``sent`` holds none of ``kinds``, or
+    when the images ``built`` holds are not the ones ``sent`` holds.
+    """
+    content, parts = built.get("content"), sent.get("content")
+    if not isinstance(parts, list) or not any(
+            isinstance(item, dict) and item.get("type") in kinds
+            for item in parts):
+        return built
+    items = content if isinstance(content, list) else []
+    images = [item for item in items
+              if isinstance(item, dict) and item.get("type") in _IMAGE_ITEMS]
+    texts = [item for item in items
+             if isinstance(item, dict) and item.get("type") == "text"]
+    seq: list = []
+    run: list[str] = []
+    pics = iter(images)
+    for item in parts:
+        kind = item.get("type") if isinstance(item, dict) else None
+        if kind in _TEXT_PARTS:
+            text = item.get("text", "") or item.get("content", "")
+            if text:
+                run.append(text)
+            continue
+        if kind in _IMAGE_ITEMS:
+            media = next(pics, None)
+            if media is None:
+                return built
+        elif kind in kinds:
+            media = {"type": kinds[kind]}
+        else:
+            continue
+        if run:
+            seq.append(" ".join(run))
+            run = []
+        seq.append(media)
+    if next(pics, None) is not None:
+        return built
+    if run:
+        seq.append(" ".join(run))
+    runs = [i for i, part in enumerate(seq) if isinstance(part, str)]
+    if runs:
+        seq[runs[0]] = seq[runs[0]].lstrip()
+        seq[runs[-1]] = seq[runs[-1]].rstrip()
+    out = []
+    for part in seq:
+        if not isinstance(part, str):
+            out.append(part)
+        elif part:
+            shaped = {**texts[0], "text": part} if texts else {
+                "type": "text", "text": part, "content": part}
+            if "content" in shaped:
+                shaped["content"] = part
+            out.append(shaped)
+    return {**built, "content": out}
+
+
 def _decode_tool_arguments(msgs: list) -> None:
     """Decode ``tool_calls[*].function.arguments`` from the OpenAI wire form
     (a JSON string) into a mapping, in place.
@@ -334,10 +422,29 @@ def install_faithful_history() -> None:
                 prompt = _tool_images_to_user(
                     prompt, str(cfg.get("model_type") or "").lower()
                     in prompt_utils.MODEL_CONFIG)
+            # The videos and clips this render places itself: every one of
+            # the request has a marker in the message that sent it.
+            placed: dict = {}
+            rebuild_kwargs, rebuild_audios = kwargs, num_audios
+            if isinstance(prompt, list):
+                video = kwargs.get("video")
+                videos = (video if isinstance(video, list)
+                          else [] if video is None else [video])
+                if (videos and cfg.get("model_type") in _IN_PLACE_VIDEOS
+                        and sum(_sent_media(m, "video") for m in prompt)
+                        == len(videos)):
+                    placed["video"] = "video"
+                    rebuild_kwargs = {k: v for k, v in kwargs.items()
+                                      if k != "video"}
+                if (num_audios and cfg.get("model_type") in _IN_PLACE_AUDIO
+                        and sum(_sent_media(m, _SENT_AUDIO) for m in prompt)
+                        == num_audios):
+                    placed[_SENT_AUDIO] = "audio"
+                    rebuild_audios = 0
             msgs = orig(processor, config, prompt,
                         add_generation_prompt=add_generation_prompt,
                         return_messages=True, num_images=num_images,
-                        num_audios=num_audios, **kwargs)
+                        num_audios=rebuild_audios, **rebuild_kwargs)
             if not isinstance(msgs, list):
                 # A wrapped render that ignores return_messages (test
                 # fakes, exotic overrides) already produced final output.
@@ -355,7 +462,9 @@ def install_faithful_history() -> None:
                         if extra:
                             built = msgs[i] = {**extra, **built}
                         if in_place:
-                            msgs[i] = _images_in_place(built, sent)
+                            built = msgs[i] = _images_in_place(built, sent)
+                        if placed:
+                            msgs[i] = _media_in_place(built, sent, placed)
             if cfg.get("model_type") == "gpt_oss":
                 # The harmony template reads prior-turn reasoning from a
                 # ``thinking`` key; alias the OpenAI-style spelling so
@@ -466,6 +575,14 @@ def _install_nested_in_place(prompt_utils) -> None:
 # Content part types, as mlx-vlm's text extraction reads them.
 _IMAGE_PARTS = ("image_url", "input_image")
 _TEXT_PARTS = ("text", "input_text", "output_text")
+# The parts the chat route reads a video from.
+_VIDEO_PARTS = ("input_video", "video_url", "video")
+
+
+def _video_reference(item):
+    """The video the chat route reads from a part, or None."""
+    openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+    return openai._extract_video_reference(item)
 _PLACEMENT_FLAG = "_kq_chat_image_placement"
 
 
@@ -479,10 +596,16 @@ class _PlacedMedia(_PlacedImages):
     message (a model that hears audio through its own speech encoder)."""
 
 
+class _PlacedParts(_PlacedImages):
+    """A chat completions user message's content that holds a video or a
+    clip. Its markers say where the client put each one."""
+
+
 def _placed_content(content) -> list:
     """Text parts and one ``{"type": "image"}`` marker per image, in
     content order, as the Responses route builds a message. The stock
-    text extraction reads the same text from it."""
+    text extraction reads the same text from it. ``_PlacedParts`` content
+    also gets one marker per video and per clip the chat route reads."""
     out = []
     for item in content:
         if not isinstance(item, dict):
@@ -492,6 +615,11 @@ def _placed_content(content) -> list:
             out.append({"type": "image"})
         elif kind == "input_audio" and isinstance(content, _PlacedMedia):
             out.append({"type": "audio"})
+        elif kind == "input_audio" and isinstance(content, _PlacedParts):
+            out.append({"type": _SENT_AUDIO})
+        elif kind in _VIDEO_PARTS and isinstance(content, _PlacedParts):
+            if _video_reference(item):
+                out.append({"type": "video"})
         elif kind in _TEXT_PARTS:
             text = item.get("text", "") or item.get("content", "")
             if text:
@@ -512,7 +640,13 @@ def install_chat_image_placement() -> None:
     marks each user message whose content holds an image, and the chat
     route's text extraction returns the marked content as text parts and
     image markers, which the render counts per message. Text-only content
-    takes the stock extraction. Idempotent.
+    takes the stock extraction.
+
+    A user message that holds a video or a clip is marked too, and its
+    markers say where each one sat. The render places them for the model
+    types of ``_IN_PLACE_VIDEOS`` and ``_IN_PLACE_AUDIO``. The stock
+    rebuild does not read the markers, so every other type renders as
+    before. Idempotent.
     """
     openai = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
     stock = openai.extract_text_from_content
@@ -534,11 +668,15 @@ def install_chat_image_placement() -> None:
         async def endpoint(request, http_request):
             for message in getattr(request, "messages", None) or ():
                 content = getattr(message, "content", None)
-                if (getattr(message, "role", None) == "user"
-                        and isinstance(content, list)
-                        and any(isinstance(item, dict)
-                                and item.get("type") in _IMAGE_PARTS
-                                for item in content)):
+                if (getattr(message, "role", None) != "user"
+                        or not isinstance(content, list)
+                        or isinstance(content, _PlacedImages)):
+                    continue
+                kinds = {item.get("type") for item in content
+                         if isinstance(item, dict)}
+                if kinds & {"input_audio", *_VIDEO_PARTS}:
+                    message.content = _PlacedParts(content)
+                elif kinds & set(_IMAGE_PARTS):
                     message.content = _PlacedImages(content)
             return await original(request, http_request)
         return endpoint
