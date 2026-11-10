@@ -390,6 +390,113 @@ def test_a_model_without_the_encoder_refuses_audio():
         proc(text=["<|audio|>"], audio=[_clip(400)])
 
 
+# -- a video's soundtrack ------------------------------------------------------
+
+_INDICES = (0, 15, 30, 45, 60, 75, 89)
+
+
+def _video_meta():
+    from gmlx._vendor.mlx_vlm.utils import VideoMetadata
+
+    return VideoMetadata(total_num_frames=90, fps=30.0,
+                         frames_indices=list(_INDICES))
+
+
+def _frames():
+    return np.zeros((7, 3, 96, 160), dtype=np.uint8)
+
+
+def _runs(ids, keep=(29, 33)) -> list:
+    """``(token, count)`` for each run of the video (29) and audio (33)
+    tokens. Any other token ends a run."""
+    out: list = []
+    last = None
+    for i in (int(i) for i in ids):
+        if i in keep and i == last:
+            out[-1][1] += 1
+        elif i in keep:
+            out.append([i, 1])
+        last = i
+    return [(token, count) for token, count in out]
+
+
+def test_a_soundtrack_is_cut_at_each_groups_first_frame():
+    """The groups of the clip start at 0, 1, 2 and 2.97 s, and a token
+    covers 0.08 s."""
+    from gmlx.models.lfm3.processing import soundtrack_bounds
+
+    def bounds(tokens):
+        return soundtrack_bounds(tokens, _INDICES, 30.0, 2, 4, 0.08)
+
+    assert AudioFeatureExtractor.seconds_per_token == 0.08
+    assert bounds(38) == [0, 12, 25, 37, 38]
+    # A soundtrack that ends early leaves the later groups without sound.
+    assert bounds(11) == [0, 11, 11, 11, 11]
+    assert bounds(20) == [0, 12, 20, 20, 20]
+    # One that runs past the last frame gives the rest to the last group.
+    assert bounds(90) == [0, 12, 25, 37, 90]
+
+
+def test_each_group_is_followed_by_its_piece_of_the_soundtrack():
+    from gmlx.models.lfm3.processing import video_expansion
+
+    group = "<|vision_start|><|video|><|video|><|vision_end|>"
+    assert video_expansion(2, [0.25, 1.0], [0, 3, 4]) == (
+        "<|vision_start|><0.2 seconds>" + group + "<|audio|>" * 3
+        + "<1.0 seconds>" + group + "<|audio|><|vision_end|>")
+    assert "<|audio|>" not in video_expansion(2, [0.25, 1.0])
+
+
+def test_a_video_with_a_soundtrack_holds_its_audio_tokens():
+    proc = _processor()
+    out = proc(videos=[_frames()], video_metadata=[_video_meta()],
+               soundtracks=[_clip(48000)], text=["<|video|> hi"])
+    assert _runs(np.array(out["input_ids"])[0]) == [
+        (29, 15), (33, 12), (29, 15), (33, 13), (29, 15), (33, 12),
+        (29, 15), (33, 1)]
+    assert np.array(out["input_features"]).shape == (1, 128, 299)
+
+
+def test_the_encoder_gets_soundtracks_and_clips_in_prompt_order():
+    proc = _processor()
+    out = proc(videos=[_frames(), _frames()],
+               video_metadata=[_video_meta(), _video_meta()],
+               soundtracks=[None, _clip(14000)],
+               audio=[_clip(8333), _clip(1680)],
+               text=["<|audio|> hi <|video|> hi <|video|> hi <|audio|>"])
+    assert _runs(np.array(out["input_ids"])[0]) == [
+        (33, 7), (29, 15), (29, 15), (29, 15), (29, 15),
+        (29, 15), (33, 11), (29, 15), (29, 15), (29, 15), (33, 2)]
+    assert np.array(out["feature_attention_mask"]).sum(-1).tolist() == [
+        51, 86, 9]
+
+
+def test_a_video_without_sound_is_written_as_before():
+    proc = _processor()
+    kwargs = dict(videos=[_frames()], video_metadata=[_video_meta()],
+                  text=["<|video|> hi"])
+    plain = np.array(proc(**kwargs)["input_ids"]).tolist()
+    for tracks in ([None], [np.zeros(0, np.float32)]):
+        out = proc(soundtracks=tracks, **kwargs)
+        assert np.array(out["input_ids"]).tolist() == plain
+        assert "input_features" not in out
+
+
+def test_the_processor_refuses_soundtracks_it_cannot_pair():
+    proc = _processor()
+    with pytest.raises(ValueError, match="2 soundtracks for 1 videos"):
+        proc(videos=[_frames()], video_metadata=[_video_meta()],
+             soundtracks=[_clip(400), _clip(400)], text=["<|video|>"])
+    with pytest.raises(ValueError, match="mono clips"):
+        proc(videos=[_frames()], video_metadata=[_video_meta()],
+             soundtracks=[np.zeros((2, 400), np.float32)],
+             text=["<|video|>"])
+    silent = _processor(**{"clip.has_audio_encoder": False})
+    with pytest.raises(ValueError, match="no audio encoder"):
+        silent(videos=[_frames()], video_metadata=[_video_meta()],
+               soundtracks=[_clip(400)], text=["<|video|>"])
+
+
 def test_the_input_pipeline_keeps_every_clip_at_16_khz():
     """``prepare_inputs`` loads at the extractor's rate and keeps the
     clips after the first only for a processor that says it takes them."""

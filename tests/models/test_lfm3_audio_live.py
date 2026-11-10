@@ -221,3 +221,47 @@ def test_a_prompt_with_two_clips_is_the_reference_token_ids(loaded, ref):
     assert np.asarray(out["input_ids"]).reshape(-1).tolist() == \
         ref["prompt_ids"].tolist()
     assert np.asarray(out["input_features"]).shape == (2, 128, 130)
+
+
+SOUNDTRACK = Path(__file__).parent.parent / "fixtures/lfm3_oracle/soundtrack.npz"
+
+
+def test_a_video_with_its_soundtrack_is_the_reference_token_ids(loaded):
+    """``scripts/lfm3_oracle/soundtrack.py`` records the reference
+    processor with ``use_audio_in_video``. The ids depend on the frame
+    geometry and the clip lengths only, so the media are zeros."""
+    from gmlx._vendor.mlx_vlm.utils import VideoMetadata
+
+    rec = np.load(SOUNDTRACK)
+    processor = loaded[2]
+    frames = np.zeros(tuple(rec["shape"]), dtype=np.uint8)
+
+    def encode(content, soundtrack, clips=None):
+        text = processor.tokenizer.apply_chat_template(
+            [{"role": "user", "content": content}],
+            add_generation_prompt=True, tokenize=False)
+        meta = VideoMetadata(
+            total_num_frames=int(rec["total"]), fps=float(rec["fps"]),
+            frames_indices=rec["indices"].tolist())
+        return processor(
+            text=[text], videos=[frames], video_metadata=[meta],
+            soundtracks=[np.zeros(soundtrack, dtype=np.float32)],
+            audio=clips, add_special_tokens=False)
+
+    question = {"type": "text", "text": "What happens?"}
+    for name in ("full", "short"):
+        out = encode([{"type": "video"}, question],
+                     int(rec[f"{name}_samples"]))
+        assert np.asarray(out["input_ids"]).reshape(-1).tolist() == \
+            rec[f"{name}_ids"].tolist(), name
+
+    before, track, after = (int(n) for n in rec["mixed_samples"])
+    out = encode([{"type": "audio"}, {"type": "video"}, question,
+                  {"type": "audio"}], track,
+                 [np.zeros(before, dtype=np.float32),
+                  np.zeros(after, dtype=np.float32)])
+    assert np.asarray(out["input_ids"]).reshape(-1).tolist() == \
+        rec["mixed_ids"].tolist()
+    # The encoder gets the clips in prompt order, the soundtrack between.
+    assert np.asarray(out["feature_attention_mask"]).sum(-1).tolist() == \
+        rec["mixed_frames"].tolist()

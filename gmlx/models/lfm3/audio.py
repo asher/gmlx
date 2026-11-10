@@ -156,6 +156,8 @@ class AudioFeatureExtractor:
     of each clip's own frames."""
 
     sampling_rate = SAMPLE_RATE
+    # The time one encoder token covers.
+    seconds_per_token = HOP_LENGTH * STRIDE / SAMPLE_RATE
     model_input_names = ["input_features", "feature_attention_mask"]
 
     def __init__(self, num_mel_bins: int = 128):

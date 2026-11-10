@@ -26,7 +26,7 @@ the reference does.
 from __future__ import annotations
 
 import math
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 from transformers.image_processing_utils import ImageProcessingMixin
@@ -303,12 +303,32 @@ def image_expansion(soft_tokens: int) -> str:
     return VISION_START + IMAGE_TOKEN * soft_tokens + VISION_END
 
 
-def video_expansion(soft_tokens: int, timestamps: Sequence[float]) -> str:
-    """One group per temporal slice, inside one pair of markers."""
-    groups = "".join(
-        f"<{t:.1f} seconds>" + VISION_START + VIDEO_TOKEN * soft_tokens
-        + VISION_END
-        for t in timestamps)
+def soundtrack_bounds(tokens: int, indices: Sequence[int], fps: float,
+                      temporal_patch_size: int, groups: int,
+                      seconds_per_token: float) -> list:
+    """Where a soundtrack of ``tokens`` encoder tokens is cut, one piece
+    per frame group: each cut is at the time of a group's first frame.
+    ``groups + 1`` rising values from 0 to ``tokens``."""
+    starts = [int(i) / fps
+              for i in list(indices)[::temporal_patch_size]][:groups]
+    bounds = ([0]
+              + [min(tokens, round(start / seconds_per_token))
+                 for start in starts[1:]]
+              + [tokens])
+    return [max(bounds[:i + 1]) for i in range(len(bounds))]
+
+
+def video_expansion(soft_tokens: int, timestamps: Sequence[float],
+                    bounds: Optional[Sequence[int]] = None) -> str:
+    """One group per temporal slice, inside one pair of markers. With
+    ``bounds`` (:func:`soundtrack_bounds`), each group is followed by its
+    piece of the soundtrack, as bare audio tokens."""
+    groups = ""
+    for i, t in enumerate(timestamps):
+        groups += (f"<{t:.1f} seconds>" + VISION_START
+                   + VIDEO_TOKEN * soft_tokens + VISION_END)
+        if bounds is not None:
+            groups += AUDIO_TOKEN * (bounds[i + 1] - bounds[i])
     return VISION_START + groups + VISION_END
 
 
@@ -335,14 +355,21 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
 
         def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
                 self, images=None, text=None, videos=None, audio=None,
-                fps=None, video_metadata=None, **kwargs):
+                fps=None, video_metadata=None, soundtracks=None, **kwargs):
+            """``soundtracks`` holds one entry per video: its sound as
+            mono samples at the encoder's rate, or None for a video
+            without sound."""
             # The input pipeline hands over only the arguments this
             # signature names, so the video ones are named. The frame
             # times come from the metadata, and fps is not read.
             del fps
             if audio is not None and not isinstance(audio, (list, tuple)):
                 audio = [audio]
-            if audio and self.feature_extractor is None:
+            if soundtracks is not None and all(
+                    track is None or len(track) == 0
+                    for track in soundtracks):
+                soundtracks = None
+            if (audio or soundtracks) and self.feature_extractor is None:
                 raise ValueError("this LFM3 model has no audio encoder")
             metadata = video_metadata
             if text is None:
@@ -372,6 +399,20 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
                 image_text = [
                     image_expansion(self.image_processor.soft_tokens(grid))
                     for grid in pre["image_grid_thw"]]
+            if soundtracks is not None and len(soundtracks) != (
+                    len(videos) if videos else 0):
+                raise ValueError(
+                    f"received {len(soundtracks)} soundtracks for "
+                    f"{len(videos) if videos else 0} videos")
+            tracks = [None if track is None or len(track) == 0
+                      else self._clip(track)
+                      for track in soundtracks or ()]
+            clips = [self._clip(clip) for clip in audio or ()]
+            fe = self.feature_extractor
+            if clips or tracks:
+                # The encoder's clips in prompt order: a video's
+                # soundtrack sits at its video, between the clips.
+                data.update(fe(self._in_prompt_order(text, clips, tracks)))
             video_text: list = []
             if videos:
                 if metadata is None or len(metadata) != len(videos):
@@ -381,27 +422,48 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
                         "frame indices and the clip's fps")
                 pre = self.video_processor.preprocess(videos)
                 data.update(pre)
-                for grid, meta in zip(pre["video_grid_thw"], metadata):
-                    video_text.append(self._video_text(grid, meta))
-            audio_text: list = []
-            if audio:
-                clips = [np.asarray(clip, dtype=np.float32) for clip in audio]
-                for clip in clips:
-                    if clip.ndim != 1 or clip.size == 0:
-                        raise ValueError(
-                            "LFM3 audio input takes mono clips with at "
-                            f"least one sample, got shape {clip.shape}")
-                fe = self.feature_extractor
-                data.update(fe(clips))
-                audio_text = [audio_expansion(fe.tokens(clip.size))
-                              for clip in clips]
+                for i, (grid, meta) in enumerate(
+                        zip(pre["video_grid_thw"], metadata)):
+                    track = tracks[i] if tracks else None
+                    video_text.append(self._video_text(
+                        grid, meta,
+                        None if track is None else fe.tokens(track.size)))
+            audio_text = [audio_expansion(fe.tokens(clip.size))
+                          for clip in clips]
             text = self._expand(text, image_text, video_text, audio_text)
 
             kwargs.pop("return_tensors", None)
             return BatchFeature(
                 data=to_mlx({**self.tokenizer(text, **kwargs), **data}))
 
-        def _video_text(self, grid, meta) -> str:
+        @staticmethod
+        def _clip(samples) -> np.ndarray:
+            clip = np.asarray(samples, dtype=np.float32)
+            if clip.ndim != 1 or clip.size == 0:
+                raise ValueError(
+                    "LFM3 audio input takes mono clips with at least one "
+                    f"sample, got shape {clip.shape}")
+            return clip
+
+        @staticmethod
+        def _in_prompt_order(texts, clips, tracks) -> list:
+            import re
+
+            ordered = []
+            clip, video = iter(clips), 0
+            for t in texts:
+                for m in re.finditer(
+                        re.escape(VIDEO_TOKEN) + "|" + re.escape(AUDIO_TOKEN),
+                        t):
+                    if m.group(0) == AUDIO_TOKEN:
+                        ordered.append(next(clip))
+                        continue
+                    if video < len(tracks) and tracks[video] is not None:
+                        ordered.append(tracks[video])
+                    video += 1
+            return ordered
+
+        def _video_text(self, grid, meta, soundtrack_tokens=None) -> str:
             fps = getattr(meta, "fps", None)
             indices = getattr(meta, "frames_indices", None)
             if indices is None or fps is None or not (
@@ -409,11 +471,17 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
                 raise ValueError(
                     "LFM3 prompts carry frame timestamps: video_metadata "
                     "must hold the sampled frame indices and a positive fps")
-            stamps = frame_timestamps(
-                indices, round(float(fps), 6),
-                self.video_processor.temporal_patch_size)[:int(grid[0])]
+            fps = round(float(fps), 6)
+            temporal = self.video_processor.temporal_patch_size
+            stamps = frame_timestamps(indices, fps, temporal)[:int(grid[0])]
+            bounds = None
+            if soundtrack_tokens is not None:
+                fe = self.feature_extractor
+                bounds = soundtrack_bounds(
+                    soundtrack_tokens, indices, fps, temporal, int(grid[0]),
+                    fe.seconds_per_token)
             return video_expansion(
-                self.video_processor.soft_tokens(grid), stamps)
+                self.video_processor.soft_tokens(grid), stamps, bounds)
 
         @staticmethod
         def _expand(texts, image_text, video_text, audio_text=()):
