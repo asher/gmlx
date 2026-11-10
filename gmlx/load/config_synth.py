@@ -2488,6 +2488,16 @@ def lfm3_context_cap(kv) -> int | None:
     return LFM3_SPEECH_CONTEXT if "tts" in names else None
 
 
+def trained_context_cap(kv) -> int | None:
+    """The cap gmlx sets under a GGUF's trained context, from its header
+    KV, or None when the file has none. Every reader of the trained
+    context applies it: the synthesized config, the serve capacity and
+    the pull catalog."""
+    if _read_string(kv, "general.architecture") == "lfm3":
+        return lfm3_context_cap(kv)
+    return None
+
+
 def _synth_lfm3(meta, shapes, config: dict) -> None:
     """Synthesize an lfm3 config from an 'lfm3'-arch GGUF.
 

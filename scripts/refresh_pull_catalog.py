@@ -56,7 +56,7 @@ from gmlx.load.catalog import MEMORY_CLASSES, TIERS, Seed  # noqa: E402
 from gmlx.load.discovery import (_classify_meta, declared_base_ids,  # noqa: E402
                                  _drafter_kind, _looks_like_drafter,
                                  _target_ids)
-from gmlx.load.config_synth import supported_arches  # noqa: E402
+from gmlx.load.config_synth import supported_arches, trained_context_cap  # noqa: E402
 from gmlx.load.gguf_meta import read_int, read_string  # noqa: E402
 from gmlx.load.headerscan import scan_bytes  # noqa: E402
 from gmlx.load.preflight import shard_names  # noqa: E402
@@ -243,6 +243,14 @@ def _streams_from(mp, ram_classes=MEMORY_CLASSES) -> tuple:
     return streams_from, ladder
 
 
+def recorded_context(kv, arch: str) -> int:
+    """The trained context the catalog records: the header's, under the
+    cap gmlx serves the file at."""
+    ctx = int(read_int(kv, f"{arch}.context_length") or 0)
+    cap = trained_context_cap(kv)
+    return min(ctx, cap) if cap else ctx
+
+
 def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     """``(facts, problems, notes)`` for one seed. ``recorded`` is the
     current FACTS row, which names the compact quants to keep. Every repo
@@ -346,7 +354,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
         kv_cost = catalog.serialise_costs(costs).costs
     else:
         problems.append(f"{seed.name}: boot_costs priced nothing from the header")
-    trained_ctx = int(read_int(scans[0].kv, f"{arch}.context_length") or 0)
+    trained_ctx = recorded_context(scans[0].kv, arch)
     params = read_string(scans[0].kv, "general.size_label") or ""
     n_params = sum(math.prod(t.shape) for s in scans for t in s.tensors)
     model_cls = _classify_meta(scans[0].kv, basename=os.path.basename(chosen[0][2]),

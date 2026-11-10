@@ -931,6 +931,11 @@ def trained_context_length(gguf_path) -> int | None:
                         if k.endswith(".context_length")), None)
         if isinstance(raw, (int, float)) and int(raw) > 0:
             value = int(raw)
+            from gmlx.load.config_synth import trained_context_cap
+
+            cap = trained_context_cap(kv)
+            if cap:
+                value = min(value, cap)
     except Exception:
         _log.debug("context_length scan failed for %s", gguf_path, exc_info=True)
     _CTX_CACHE[gguf_path] = (mtime, value)
