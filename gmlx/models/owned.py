@@ -56,6 +56,9 @@ OWNED_LM_MODELS = {
     # llama.cpp LLM_ARCH_GRANITE_SWITCH; the upstream class is built for the
     # HF checkpoint (separate projections, a learned switch layer).
     "granite_switch": "gmlx.models.granite_switch.model",
+    # llama.cpp LLM_ARCH_LFM3; the mlx-lm lfm2 class has no sliding-window
+    # layers, output gate, sandwich norms or partial rotation.
+    "lfm3": "gmlx.models.lfm3.model",
     # mlx-lm nemotron_h, with per-layer MoE sizes (Nemotron-3.5-Bolt) and
     # llama.cpp's fp32 routing.
     "nemotron_h": "gmlx.models.nemotron_h.model",

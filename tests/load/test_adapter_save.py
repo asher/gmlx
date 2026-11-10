@@ -122,6 +122,8 @@ _OWNED = {
                    ("model.layers.1.mlp.shared_experts.down_proj", "blk.1.ffn_down_shexp.weight", IN)],
     "kimi-k3": [("model.layers.0.self_attn.b_proj", "blk.0.ssm_beta.weight", IN),
                 ("model.layers.1.mlp.down_proj", "blk.1.ffn_down.weight", IN)],
+    "lfm3": [("model.layers.0.conv.in_proj", "blk.0.shortconv.in_proj.weight", IN),
+             ("model.layers.2.self_attn.gate_proj", "blk.2.attn_gate.weight", IN)],
     "minimax-m3": [("model.layers.0.self_attn.o_proj", "blk.0.attn_output.weight", IN),
                    ("model.layers.1.block_sparse_moe.shared_experts.up_proj", "blk.1.ffn_up_shexp.weight", IN)],
     "muse-glimmer": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),

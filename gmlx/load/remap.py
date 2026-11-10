@@ -231,6 +231,11 @@ ARCH_ALIAS = {
     # so Q/K pass through un-permuted. The FLINT block claims every tensor,
     # including the per-head sinks, which no canonical enum carries.
     "flint": "FLINT",
+    # Liquid AI LFM3 (llama.cpp 'lfm3'): NeoX rope, so Q/K pass through
+    # un-permuted. The LFM3 block claims every tensor: the canonical map
+    # homes attn_gate on qwen3.5's linear_attn, and gguf-py's shortconv
+    # names target the mlx-lm lfm2 class.
+    "lfm3": "LFM3",
     "ricursive": "RICURSIVE",
     # IBM Granite Switch (llama.cpp 'graniteswitch'): NORM rope with Q/K rows
     # permuted inside the fused attn_qkv at conversion, so the class runs
@@ -770,6 +775,54 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.mlp.switch_mlp.up_proj.weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
          "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+    ],
+    "LFM3": [
+        # Every tensor is claimed here. A layer carries either the shortconv
+        # tensors or the attention ones. attn_gate is one row per head.
+        # shortconv.conv holds the depthwise taps as [channels, width].
+        # llama.cpp creates the NVFP4 input scales and never reads them.
+        (re.compile(r"^token_embd\.weight$"),
+         "model.embed_tokens.weight", "passthrough"),
+        (re.compile(r"^output_norm\.weight$"),
+         "model.norm.weight", "passthrough"),
+        (re.compile(r"^output\.weight$"),
+         "lm_head.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.post_attention_norm\.weight$"),
+         "model.layers.{bid}.post_attn_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.post_ffw_norm\.weight$"),
+         "model.layers.{bid}.post_ffw_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate\.weight$"),
+         "model.layers.{bid}.mlp.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_up\.weight$"),
+         "model.layers.{bid}.mlp.up_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down\.weight$"),
+         "model.layers.{bid}.mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_(?:gate|up|down)\.input_scale$"),
+         None, "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_norm\.weight$"),
+         "model.layers.{bid}.self_attn.q_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_norm\.weight$"),
+         "model.layers.{bid}.self_attn.k_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
+         "model.layers.{bid}.self_attn.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.shortconv\.conv\.weight$"),
+         "model.layers.{bid}.conv.kernel", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.shortconv\.in_proj\.weight$"),
+         "model.layers.{bid}.conv.in_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.shortconv\.out_proj\.weight$"),
+         "model.layers.{bid}.conv.out_proj.weight", "passthrough"),
     ],
     "FLINT": [
         # Every tensor is claimed here. attn_sinks is one logit per head and

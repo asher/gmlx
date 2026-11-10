@@ -1712,6 +1712,74 @@ def test_beam_unknown_tensor_fails():
     assert d("beam", "blk.0.not_a_beam_tensor.weight").kind == FAIL
 
 
+# lfm3: every tensor is claimed by the LFM3 block, all passthrough (NeoX
+# rope, so no qk permute).
+_LFM3_ROWS = (
+    ("token_embd.weight", "model.embed_tokens.weight"),
+    ("output_norm.weight", "model.norm.weight"),
+    ("output.weight", "lm_head.weight"),
+    ("blk.0.attn_norm.weight", "model.layers.0.input_layernorm.weight"),
+    ("blk.0.post_attention_norm.weight", "model.layers.0.post_attn_norm.weight"),
+    ("blk.0.ffn_norm.weight", "model.layers.0.post_attention_layernorm.weight"),
+    ("blk.0.post_ffw_norm.weight", "model.layers.0.post_ffw_norm.weight"),
+    ("blk.0.ffn_gate.weight", "model.layers.0.mlp.gate_proj.weight"),
+    ("blk.0.ffn_up.weight", "model.layers.0.mlp.up_proj.weight"),
+    ("blk.0.ffn_down.weight", "model.layers.0.mlp.down_proj.weight"),
+    ("blk.0.shortconv.conv.weight", "model.layers.0.conv.kernel"),
+    ("blk.0.shortconv.in_proj.weight", "model.layers.0.conv.in_proj.weight"),
+    ("blk.0.shortconv.out_proj.weight", "model.layers.0.conv.out_proj.weight"),
+    ("blk.2.attn_q.weight", "model.layers.2.self_attn.q_proj.weight"),
+    ("blk.2.attn_k.weight", "model.layers.2.self_attn.k_proj.weight"),
+    ("blk.2.attn_v.weight", "model.layers.2.self_attn.v_proj.weight"),
+    ("blk.2.attn_output.weight", "model.layers.2.self_attn.o_proj.weight"),
+    ("blk.2.attn_q_norm.weight", "model.layers.2.self_attn.q_norm.weight"),
+    ("blk.2.attn_k_norm.weight", "model.layers.2.self_attn.k_norm.weight"),
+    ("blk.2.attn_gate.weight", "model.layers.2.self_attn.gate_proj.weight"),
+)
+
+
+@pytest.mark.parametrize("gguf, hf", _LFM3_ROWS)
+def test_lfm3_rows(gguf, hf):
+    r = d("lfm3", gguf)
+    assert r.kind == MAP and r.hf_name == hf, (gguf, r.reason)
+    assert r.transform == "passthrough"
+
+
+def test_lfm3_rope_freqs_is_an_expected_skip():
+    assert d("lfm3", "rope_freqs.weight").kind == SKIP
+
+
+@pytest.mark.parametrize("name", ["ffn_gate", "ffn_up", "ffn_down"])
+def test_lfm3_nvfp4_scales(name):
+    """The NVFP4 files carry a weight scale and an input scale per FFN
+    weight. The weight scale follows its weight. llama.cpp never reads the
+    input scale, so it is dropped by the LFM3 block, not as Unsloth
+    metadata."""
+    w = d("lfm3", f"blk.3.{name}.weight")
+    s = d("lfm3", f"blk.3.{name}.scale")
+    assert s.kind == MAP
+    assert s.hf_name == w.hf_name[:-len("weight")] + "out_scale"
+    i = d("lfm3", f"blk.3.{name}.input_scale")
+    assert i.kind == SKIP and "arch-priority" in i.reason
+
+
+def test_lfm3_canonical_fallback_would_misload(monkeypatch):
+    """Without the LFM3 block the canonical map homes the gate on another
+    module and the conv taps on the mlx-lm lfm2 class's names."""
+    from gmlx.load.remap import ARCH_PRIORITY_OVERRIDES
+
+    monkeypatch.delitem(ARCH_PRIORITY_OVERRIDES, "LFM3")
+    for gguf, hf in (("blk.2.attn_gate.weight",
+                      "model.layers.2.self_attn.gate_proj.weight"),
+                     ("blk.0.shortconv.conv.weight",
+                      "model.layers.0.conv.kernel")):
+        assert d("lfm3", gguf).hf_name != hf
+
+
+def test_lfm3_unknown_tensor_fails():
+    assert d("lfm3", "blk.0.not_an_lfm3_tensor.weight").kind == FAIL
+
+
 # k2-horizon: every tensor is claimed by the K2_HORIZON block, all passthrough.
 _K2_HORIZON_ROWS = (
     ("token_embd.weight", "model.embed_tokens.weight"),

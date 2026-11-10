@@ -3572,3 +3572,124 @@ def test_the_checks_before_a_load_print_no_synthesized_config(capsys):
                                                    tensors=[])])
     assert cfg["model_type"] == "llama"
     assert "[config] synthesized" not in capsys.readouterr().out
+
+
+# lfm3
+
+# A short schedule in the shipped order: conv, conv, full, conv, sliding.
+_LFM3_KV_HEADS = [0, 0, 2, 0, 2]
+_LFM3_SLIDING = [False, False, False, False, True]
+_LFM3_TYPES = ["conv", "conv", "full_attention", "conv", "sliding_attention"]
+
+
+def _lfm3_meta() -> dict:
+    arch = "lfm3"
+    m = _base_meta(arch)
+    m[f"{arch}.block_count"] = 5
+    m[f"{arch}.attention.head_count_kv"] = list(_LFM3_KV_HEADS)
+    m[f"{arch}.attention.value_length"] = 16
+    m[f"{arch}.attention.sliding_window"] = 3
+    m[f"{arch}.attention.sliding_window_pattern"] = list(_LFM3_SLIDING)
+    m[f"{arch}.rope.freq_base"] = 1000000.0
+    m[f"{arch}.rope.freq_base_swa"] = 10000.0
+    m[f"{arch}.shortconv.l_cache"] = 7
+    m[f"{arch}.context_length"] = 128000
+    return m
+
+
+_LFM3_SHAPES = {
+    "rope_freqs.weight": [8],
+    "blk.0.post_attention_norm.weight": [64],
+    "blk.0.post_ffw_norm.weight": [64],
+}
+
+
+def test_lfm3_synth_fields():
+    c = synthesize_config(_lfm3_meta(), tensor_shapes=_LFM3_SHAPES)
+    assert c["model_type"] == "lfm3"
+    assert c["layer_types"] == _LFM3_TYPES
+    # The first layer has no KV heads; the count comes from the attention
+    # layers.
+    assert c["num_key_value_heads"] == 2
+    assert c["sliding_window"] == 3
+    assert (c["rope_theta"], c["rope_theta_swa"]) == (1000000.0, 10000.0)
+    assert c["conv_L_cache"] == 7
+    assert c["head_dim"] == 16
+    assert c["use_sandwich_norm"] is True
+    assert c["tie_word_embeddings"]
+    assert c["max_position_embeddings"] == 128000
+
+
+def test_lfm3_synth_instantiates():
+    from gmlx.models.lfm3.model import Model, ModelArgs
+
+    c = synthesize_config(_lfm3_meta(), tensor_shapes=_LFM3_SHAPES)
+    model, args = _get_classes(c)
+    assert model is Model and args is ModelArgs
+    m = Model(ModelArgs.from_dict(c))
+    mx.eval(m.parameters())
+    assert m(mx.array([[1, 2, 3]])).shape == (1, 3, VOCAB)
+    assert [ly.layer_type for ly in m.layers] == _LFM3_TYPES
+    assert m.layers[0].conv.kernel.shape == (64, 7)
+    assert m.layers[2].self_attn.gate_proj.weight.shape == (4, 64)
+
+
+def test_lfm3_synth_without_post_norms():
+    c = synthesize_config(_lfm3_meta(), tensor_shapes={})
+    assert c["use_sandwich_norm"] is False
+    with pytest.raises(ValueError, match="both post norms or neither"):
+        synthesize_config(_lfm3_meta(), tensor_shapes={
+            "blk.0.post_ffw_norm.weight": [64]})
+
+
+def test_lfm3_speaking_file_is_capped_at_its_trained_context():
+    from gmlx.load.config_synth import LFM3_SPEECH_CONTEXT, lfm3_context_cap
+
+    m = _lfm3_meta()
+    assert lfm3_context_cap(m) is None
+    m["tokenizer.chat_templates"] = ["tts", "asr"]
+    assert lfm3_context_cap(m) == LFM3_SPEECH_CONTEXT == 32768
+    c = synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+    assert c["max_position_embeddings"] == 32768
+    # A context under the cap stays.
+    m["lfm3.context_length"] = 4096
+    c = synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+    assert c["max_position_embeddings"] == 4096
+
+
+def test_lfm3_decision_file_is_refused():
+    m = _lfm3_meta()
+    m["lfm3.attention.causal"] = False
+    with pytest.raises(NotImplementedError,
+                       match="d1 decision models are not supported yet"):
+        synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+    m["lfm3.attention.causal"] = True
+    assert synthesize_config(m, tensor_shapes=_LFM3_SHAPES)["model_type"] == "lfm3"
+
+
+@pytest.mark.parametrize("key, value, match", [
+    ("attention.head_count_kv", [0, 0, 2, 0], "entries for 5 layers"),
+    ("attention.head_count_kv", [0, 0, 2, 0, 4], "one KV head count"),
+    ("attention.sliding_window_pattern", [False] * 5, "requires sliding"),
+    ("attention.sliding_window_pattern", [True, False, False, False, True],
+     "short convolution"),
+    ("attention.sliding_window", 0, "must be positive"),
+    ("attention.value_length", 8, "value_length"),
+    ("shortconv.l_cache", 1, "at least 2"),
+])
+def test_lfm3_synth_refusals(key, value, match):
+    m = _lfm3_meta()
+    m[f"lfm3.{key}"] = value
+    with pytest.raises((ValueError, NotImplementedError), match=match):
+        synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+
+
+@pytest.mark.parametrize("key", [
+    "attention.sliding_window", "attention.sliding_window_pattern",
+    "rope.freq_base_swa", "shortconv.l_cache", "attention.key_length",
+])
+def test_lfm3_synth_requires(key):
+    m = _lfm3_meta()
+    del m[f"lfm3.{key}"]
+    with pytest.raises(ValueError, match=key.replace(".", r"\.")):
+        synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
