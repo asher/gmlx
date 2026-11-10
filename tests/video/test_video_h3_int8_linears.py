@@ -661,8 +661,8 @@ def _fasth3_pipe(monkeypatch, path, linears):
 
 
 def _near(got: mx.array, want: mx.array) -> bool:
-    """Within two bf16 roundings of the output's largest value: the base
-    product's and the add's."""
+    """Within two bf16 roundings of the output's largest value: the
+    delta's and the add's."""
     err = mx.abs(got.astype(mx.float32) - want).max().item()
     return err <= 2 * 2.0 ** -8 * mx.abs(want).max().item()
 

@@ -14,12 +14,15 @@ projection's rows. ComfyUI reads these names bare, under
 ``diffusion_model.`` and as ``lora_unet_`` underscores, and drops every
 other spelling.
 
-``refusal`` names the files gmlx does not run: a LoRA in DiffSynth's form
-(keys with ``.default.``), whose qkv order and fc1 halves gmlx has not
-read; one with ``.config`` keys, which ComfyUI reads as a module's config,
-such as int8 or sparse attention in a block; one whose head pairs have a
-multiple of the head's rows, as a PDD LoRA grows each head into a bank of
-heads; and on a file without FastH3's gate, one with a pair on it.
+``refusal`` names the files gmlx does not run:
+
+- a LoRA in DiffSynth's form (keys with ``.default.``), whose qkv order
+  and fc1 halves gmlx has not read
+- one with ``.config`` keys, which ComfyUI reads as a module's config,
+  such as int8 or sparse attention in a block
+- one whose head pairs have a multiple of the head's rows, as a PDD LoRA
+  grows each head into a bank of heads
+- on a file without FastH3's gate, one with a pair on it
 """
 
 from __future__ import annotations
@@ -122,7 +125,8 @@ def refusal(header: dict, config: dict) -> tuple[str, str] | None:
         under = _underscore_index(gates)
         for k in keys:
             split = _split(k)
-            if split is not None and _dit_target(split[0], gates, under):
+            if split is not None and split[1] != "alpha" \
+                    and _dit_target(split[0], gates, under):
                 return (f"its pair {k} targets FastH3's attention gate, "
                         "which the model's file does not have",
                         "FastH3 gate")

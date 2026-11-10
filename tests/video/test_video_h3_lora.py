@@ -239,13 +239,26 @@ def test_a_lora_gmlx_does_not_run_is_refused_by_name(tmp_path, extra, kind,
         assert not pipe.adapter_files and len(pipe.patch_tables) == 1
 
 
-def test_a_lora_on_gates_alone_is_refused_by_name_on_h3(tmp_path):
+@pytest.mark.parametrize("stem, down, up", [
+    ("diffusion_model.blocks.1.attn.to_gate_compress", ".lora_A.weight",
+     ".lora_B.weight"),
+    ("blocks.1.attn.to_gate_compress", ".lora_A.weight", ".lora_B.weight"),
+    ("lora_unet_blocks_1_attn_to_gate_compress", ".lora_down.weight",
+     ".lora_up.weight"),
+], ids=["diffusion-model", "bare", "lora-unet"])
+def test_a_lora_on_gates_alone_is_refused_by_name_on_h3(tmp_path, stem,
+                                                        down, up):
     """A file whose only pairs are on FastH3's gates names the gate on a
-    model without it, rather than another model."""
-    path = write_keys(tmp_path / "gate.safetensors", _GATE_PAIR)
+    model without it, rather than another model, in each spelling ComfyUI
+    reads. The message names the pair's down key, not its alpha."""
+    path = write_keys(tmp_path / "gate.safetensors", {
+        stem + ".alpha": np.asarray(4.0, np.float32),
+        stem + down: np.zeros((4, TINY["hidden_size"]), np.float32),
+        stem + up: np.zeros((INNER, 4), np.float32)})
     pipe = _pipe(_params())
-    with pytest.raises(UnsupportedAdapterError,
-                       match="which the model's file does not have") as e:
+    with pytest.raises(UnsupportedAdapterError, match=re.escape(
+            f"its pair {stem}{down} targets FastH3's attention gate, which "
+            "the model's file does not have")) as e:
         pipeline.adapter_table(pipe, [(path, 1.0)])
     assert e.value.kind == "FastH3 gate"
     assert not pipe.adapter_files and len(pipe.patch_tables) == 1
