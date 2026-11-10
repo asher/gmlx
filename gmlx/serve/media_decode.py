@@ -236,6 +236,8 @@ def read_audio(file, always_2d: bool = False, dtype: str = "float64",
     else:
         raise TypeError(f"Unsupported file type: {type(file)}")
     normalized = False
+    # Shaped (frames,) or (frames, channels) by the file.
+    samples: np.ndarray
     if use_ffmpeg:
         samples, rate, channels = media_programs.decode(
             source, field, sample_rate=sample_rate, nchannels=nchannels,
