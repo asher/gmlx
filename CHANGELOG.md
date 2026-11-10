@@ -41,6 +41,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A video request to a server with neither ffmpeg nor OpenCV gets a 400
   that names both installs, not a 500.
 - A damaged WAV, FLAC or MP3 file in a request gets a 400, not a 500.
+- `gmlx video generate` and `gmlx serve` apply a LoRA's pairs on FastH3's
+  attention gates, which they refused.
 
 ## [0.5.5] - 2026-11-08
 

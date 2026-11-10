@@ -5,7 +5,9 @@ target, such as lightx2v's Turbo LoRAs. Every linear leaf of the DiT maps
 to itself: in each block and each token refiner block ``attn.qkv_proj``,
 ``attn.out_proj``, ``mlp.fc1`` and ``mlp.fc2``, in each block
 ``adaln_proj.linear``, and outside the blocks ``condition_proj``, the two
-patch projections, the two output heads and the final adaLN linear. A
+patch projections, the two output heads and the final adaLN linear.
+FastH3 (config ``vsa_sparsity``) adds ``attn.to_gate_compress`` in each
+block, its VSA gate, and only FastH3's files have that module. A
 pair on the fused qkv covers the whole weight, as those files write it:
 one A over the three ranks, and a B that is zero outside each
 projection's rows. ComfyUI reads these names bare, under
@@ -15,9 +17,9 @@ other spelling.
 ``refusal`` names the files gmlx does not run: a LoRA in DiffSynth's form
 (keys with ``.default.``), whose qkv order and fc1 halves gmlx has not
 read; one with ``.config`` keys, which ComfyUI reads as a module's config,
-such as int8 or sparse attention in a block; and one whose head pairs
-have a multiple of the head's rows, as a PDD LoRA grows each head into a
-bank of heads.
+such as int8 or sparse attention in a block; one whose head pairs have a
+multiple of the head's rows, as a PDD LoRA grows each head into a bank of
+heads; and on a file without FastH3's gate, one with a pair on it.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from gmlx.image.lora.reader import (LoraKeyMap, _dit_target, _split,
 
 _LEAVES = ("attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2")
 _BLOCK_ONLY = ("adaln_proj.linear",)
+_GATE = "attn.to_gate_compress"
 _HEADS = ("final_layer.video_out", "final_layer.audio_out")
 _TOP = ("condition_proj", "video_patch_proj", "audio_patch_proj",
         "final_layer.adaln_proj.linear") + _HEADS
@@ -63,10 +66,19 @@ def _spell(prefix: str, name: str) -> str:
                      else name)
 
 
+def _gates(config: dict) -> tuple:
+    """The VSA gate of each block, as FastH3's config has them."""
+    blocks, _ = _counts(config)
+    return tuple(f"blocks.{i}.{_GATE}" for i in range(blocks))
+
+
 def lora_map(config: dict) -> LoraKeyMap:
     blocks, refiner = _counts(config)
     names = list(_TOP)
-    for group, count, leaves in (("blocks", blocks, _LEAVES + _BLOCK_ONLY),
+    block = _LEAVES + _BLOCK_ONLY
+    if config.get("vsa_sparsity"):
+        block += (_GATE,)
+    for group, count, leaves in (("blocks", blocks, block),
                                  ("token_refiner.blocks", refiner, _LEAVES)):
         names += [f"{group}.{i}.{leaf}" for i in range(count)
                   for leaf in leaves]
@@ -105,6 +117,15 @@ def refusal(header: dict, config: dict) -> tuple[str, str] | None:
     if cfg:
         return (f"it sets a module config ({cfg[0]}), such as the attention "
                 "method of a block, which gmlx does not apply", "config")
+    if not config.get("vsa_sparsity"):
+        gates = {g: (g, None) for g in _gates(config)}
+        under = _underscore_index(gates)
+        for k in keys:
+            split = _split(k)
+            if split is not None and _dit_target(split[0], gates, under):
+                return (f"its pair {k} targets FastH3's attention gate, "
+                        "which the model's file does not have",
+                        "FastH3 gate")
     rows = _head_rows(config)
     for head, k, shape in _head_ups(header):
         n = rows[head]
