@@ -1023,6 +1023,74 @@ def _lfm3_audio_target(name: str, arr):
     tgt = _LFM3_A_BLK_SUBMAP.get(sub)
     return None if tgt is None else (f"{pre}.{tgt}.{leaf}", arr)
 
+# The speech generator (projector ``lfm3a_gen``): the depth decoder
+# (``a.gen.code.*``) and the codec decoder (``a.gen.wav.*``), on the text
+# model's layer class (gmlx.models.lfm3.speech).
+_LFM3_GEN_BLK_SUBMAP = {
+    "ln1": "input_layernorm",
+    "ln2": "post_attention_layernorm",
+    "attn_post_norm": "post_attn_norm",
+    "ffn_post_norm": "post_ffw_norm",
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_out": "self_attn.o_proj",
+    "attn_gate": "self_attn.gate_proj",
+    "attn_q_norm": "self_attn.q_norm",
+    "attn_k_norm": "self_attn.k_norm",
+    "conv_pw1": "conv.in_proj",
+    "conv_pw2": "conv.out_proj",
+    "ffn_gate": "mlp.gate_proj",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+}
+_LFM3_GEN_TOP_MAP = {
+    "a.gen.code.proj_in.weight": "depth_decoder.proj_in.weight",
+    "a.gen.code.proj_in.bias": "depth_decoder.proj_in.bias",
+    "a.gen.code.output_norm.weight": "depth_decoder.norm.weight",
+    "a.gen.wav.quant.first.out_proj.weight": "codec_decoder.quant_out.weight",
+    "a.gen.wav.quant.first.out_proj.bias": "codec_decoder.quant_out.bias",
+    "a.gen.wav.tfm.in_proj.weight": "codec_decoder.in_proj.weight",
+    "a.gen.wav.tfm.in_proj.bias": "codec_decoder.in_proj.bias",
+    "a.gen.wav.tfm.out_proj.weight": "codec_decoder.out_proj.weight",
+    "a.gen.wav.tfm.out_proj.bias": "codec_decoder.out_proj.bias",
+    "a.gen.wav.tfm.output_norm.weight": "codec_decoder.norm.weight",
+}
+# Tables the model reads as arrays, not through a Linear.
+_LFM3_GEN_TABLES = {
+    "a.gen.code.embd.weight": "depth_decoder.embeddings",
+    "a.gen.code.head_norm.weight": "depth_decoder.head_norm",
+    "a.gen.code.mask_embd": "depth_decoder.mask_embedding",
+    "a.gen.code.out_embd.weight": "depth_decoder.feedback",
+    "a.gen.wav.quant.first.codebook.weight": "codec_decoder.codebook",
+}
+_LFM3_GEN_BLK_RE = re.compile(r"^a\.gen\.(code|wav\.tfm)\.blk\.(\d+)\.(.+)$")
+
+
+def _lfm3_speech_target(name: str, arr):
+    """``(parameter name, array)`` of an ``lfm3a_gen`` tensor, or None
+    for any other tensor."""
+    hit = _LFM3_GEN_TOP_MAP.get(name)
+    if hit is not None:
+        return hit, arr
+    hit = _LFM3_GEN_TABLES.get(name)
+    if hit is not None:
+        # A new array, so a quantized table is dequantized: no module
+        # stands behind it.
+        return hit, mx.reshape(arr, arr.shape)
+    m = _LFM3_GEN_BLK_RE.match(name)
+    if m is None:
+        return None
+    module = "depth_decoder" if m.group(1) == "code" else "codec_decoder"
+    sub, _, leaf = m.group(3).rpartition(".")
+    pre = f"{module}.layers.{m.group(2)}"
+    if sub == "conv_dw":
+        # The depthwise taps, [channels, width], as the text model's.
+        return f"{pre}.conv.kernel", arr
+    tgt = _LFM3_GEN_BLK_SUBMAP.get(sub)
+    return None if tgt is None else (f"{pre}.{tgt}.{leaf}", arr)
+
+
 _NEMOTRON_OMNI_BLK_SUBMAP = {
     "attn_qkv": "attn.qkv_proj",
     "attn_q": "attn.q_proj",
@@ -1596,6 +1664,7 @@ def _remap_float_arrays(
         return out, skipped
 
     if model_type in LFM3_VLM_TYPES:
+        with_speech = bool((mm_meta or {}).get("clip.has_gen_audio_encoder"))
         for name, arr in arrays.items():
             if name.endswith(".scales") or name.endswith(".biases"):
                 continue
@@ -1615,8 +1684,9 @@ def _remap_float_arrays(
             tgt = _LFM3_VL_BLK_SUBMAP.get(sub)
             if m is None or tgt is None:
                 audio = _lfm3_audio_target(name, arr) if with_audio else None
+                if audio is None and with_speech:
+                    audio = _lfm3_speech_target(name, arr)
                 if audio is None:
-                    # The speech generator.
                     skipped.append(name)
                 else:
                     out[audio[0]] = audio[1]
@@ -2688,6 +2758,9 @@ def _synthesize_lfm3_vlm_config(
         if token_id is None:
             raise ValueError(f"the text GGUF has no {AUDIO_TOKEN} token")
         config["audio_token_id"] = token_id
+    if mm_meta.get("clip.has_gen_audio_encoder"):
+        config["speech_config"] = _synthesize_lfm3_speech_config(
+            text_config, mm_meta, shapes)
     return config
 
 
@@ -2716,7 +2789,111 @@ def _synthesize_lfm3_audio_only_config(text_config: dict, mm_meta: dict,
         "image_token_index": image_id,
         "video_token_id": _gguf_token_id(llm_meta, VIDEO_TOKEN),
         "audio_token_id": audio_id,
+        **({"speech_config": _synthesize_lfm3_speech_config(
+            text_config, mm_meta, shapes)}
+           if mm_meta.get("clip.has_gen_audio_encoder") else {}),
     }
+
+
+def _synthesize_lfm3_speech_config(text_config: dict, mm_meta: dict,
+                                   shapes: dict) -> dict:
+    """The LFM3 speech generator read from ``clip.gen.audio.*``. The
+    codebook count and size, the codec's layer kinds and its head counts
+    have no metadata key, so they follow the tensors. The codec's other
+    sizes are the reference codec's (llama.cpp clip.cpp, lfm3a_gen)."""
+    from gmlx.models.lfm3.model import CONV, SLIDING
+
+    proj = _mm(mm_meta, "clip.gen.audio.projector_type")
+    if proj != "lfm3a_gen":
+        raise UnsupportedVLMError(
+            f"speech generator {proj!r} is not supported (only 'lfm3a_gen')")
+    key = "clip.gen.audio."
+    for name in ("a.gen.code.embd.weight", "a.gen.code.out_embd.weight",
+                 "a.gen.wav.quant.first.codebook.weight",
+                 "a.gen.wav.tfm.out_proj.bias"):
+        if name not in shapes:
+            raise ValueError(f"lfm3a_gen: missing tensor {name}")
+    # [hidden, codes, codebooks] in GGUF order.
+    hidden, codes, books = (int(d) for d in shapes["a.gen.code.embd.weight"])
+    config: dict = {
+        "model_type": "lfm3_speech",
+        "hidden_size": _mm_int(mm_meta, key + "embedding_length"),
+        "intermediate_size": _mm_int(mm_meta, key + "feed_forward_length"),
+        "num_hidden_layers": _mm_int(mm_meta, key + "block_count"),
+        "num_attention_heads": _mm_int(mm_meta, key + "attention.head_count"),
+        "num_key_value_heads": _mm_int(
+            mm_meta, key + "attention.head_count_kv"),
+        "projection_dim": _mm_int(mm_meta, key + "projection_dim"),
+        "num_codebooks": books,
+        "codebook_size": codes,
+    }
+    if config["hidden_size"] != hidden:
+        raise ValueError(
+            f"lfm3a_gen: the code embeddings are {hidden} wide but the "
+            f"depth decoder is {config['hidden_size']}")
+    if config["projection_dim"] != int(text_config["hidden_size"]):
+        raise ValueError(
+            f"mmproj speech projection width {config['projection_dim']} "
+            f"does not match the lfm3 hidden size {text_config['hidden_size']}")
+    eps = _mm(mm_meta, key + "attention.layer_norm_epsilon")
+    if eps is not None:
+        config["norm_eps"] = float(eps)
+    for field, name, cast in (
+            ("temperature", "temp", float), ("top_k", "top_k", int),
+            ("repetition_penalty", "penalty_repeat", float),
+            ("repetition_window", "penalty_last_n", int)):
+        value = _mm(mm_meta, key + "sampling." + name)
+        if value is not None:
+            config[field] = cast(value)
+    # The codec decoder.
+    levels, fsq_codes = sorted(
+        int(d) for d in shapes["a.gen.wav.quant.first.codebook.weight"])
+    if fsq_codes != codes - 1:
+        raise ValueError(
+            f"lfm3a_gen: the codec has {fsq_codes} codes but the depth "
+            f"decoder has {codes - 1} and the end code")
+    layer_types = []
+    index = 0
+    while f"a.gen.wav.tfm.blk.{index}.ln1.weight" in shapes:
+        pre = f"a.gen.wav.tfm.blk.{index}."
+        is_conv = pre + "conv_dw.weight" in shapes
+        is_attn = pre + "attn_q.weight" in shapes
+        if is_conv == is_attn:
+            raise ValueError(
+                f"lfm3a_gen codec layer {index} is neither a conv nor an "
+                "attention block")
+        layer_types.append(CONV if is_conv else SLIDING)
+        index += 1
+    if not layer_types:
+        raise ValueError("lfm3a_gen: the codec decoder has no layers")
+    config.update({
+        "codec_layer_types": layer_types,
+        "fsq_dim": levels,
+        "codec_hidden_size": int(
+            shapes["a.gen.wav.tfm.blk.0.ln1.weight"][0]),
+        "n_fft": int(shapes["a.gen.wav.tfm.out_proj.bias"][0]) - 2,
+    })
+    attn = next((i for i, kind in enumerate(layer_types)
+                 if kind == SLIDING), None)
+    if attn is not None:
+        pre = f"a.gen.wav.tfm.blk.{attn}."
+        head_dim = int(shapes[pre + "attn_q_norm.weight"][0])
+        config["codec_num_attention_heads"] = (
+            config["codec_hidden_size"] // head_dim)
+        config["codec_num_key_value_heads"] = min(
+            int(d) for d in shapes[pre + "attn_k.weight"]) // head_dim
+    conv = next((i for i, kind in enumerate(layer_types) if kind == CONV),
+                None)
+    if conv is not None:
+        config["codec_conv_L_cache"] = min(
+            int(d) for d in shapes[f"a.gen.wav.tfm.blk.{conv}.conv_dw.weight"])
+    ffn = shapes.get("a.gen.wav.tfm.blk.0.ffn_down.weight")
+    if ffn:
+        config["codec_intermediate_size"] = max(int(d) for d in ffn)
+    quant = shapes.get("a.gen.wav.quant.first.out_proj.bias")
+    if quant:
+        config["quantizer_dim"] = int(quant[0])
+    return config
 
 
 def _synthesize_lfm3_audio_config(text_config: dict, mm_meta: dict,

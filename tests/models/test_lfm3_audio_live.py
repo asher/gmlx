@@ -88,7 +88,7 @@ def _features(model, pre) -> np.ndarray:
         pre["feature_attention_mask"]).astype(mx.float32))
 
 
-def test_the_load_fills_the_encoder_and_leaves_the_speech_generator(
+def test_the_load_fills_the_encoder_and_the_speech_generator(
         gguf_dir, gguf_index, capsys):
     from gmlx.load.headerscan import scan_gguf
     from gmlx.load.vlm import load_vlm_model
@@ -103,8 +103,10 @@ def test_the_load_fills_the_encoder_and_leaves_the_speech_generator(
     model, config, _processor = load_vlm_model(*found, verbose=True)
     log = capsys.readouterr().out
     assert "redundant" not in log, log
-    generator = sum(t.name.startswith("a.gen.") for t in scan.tensors)
-    assert f" {generator} skipped" in log, log
+    assert " 0 skipped" in log, log
+    if scan.kv.get("clip.has_gen_audio_encoder"):
+        assert len(model.depth_decoder.layers) == \
+            scan.kv["clip.gen.audio.block_count"]
     assert len(model.audio_encoder.layers) == \
         scan.kv["clip.audio.block_count"]
     assert config["audio_config"]["sliding_window"] == \

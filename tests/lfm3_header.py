@@ -154,7 +154,7 @@ def load_as_f16_projector(text_path, projector_path):
 
     model, config, processor = load_vlm_model(text_path, projector_path)
     for name in ("vision_tower", "multi_modal_projector", "audio_encoder",
-                 "audio_projector"):
+                 "audio_projector", "depth_decoder", "codec_decoder"):
         module = getattr(model, name, None)
         if module is not None:
             module.update(tree_unflatten([

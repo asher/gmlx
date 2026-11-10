@@ -35,6 +35,7 @@ from gmlx._vendor.mlx_vlm.models.base import (
 from .audio import AudioConfig, AudioEncoder, AudioProjector
 from .model import Model as TextModel
 from .model import ModelArgs
+from .speech import CodecDecoder, DepthDecoder, SpeechConfig
 from .vision import (CLIP_PATCHES, MultiModalProjector, VisionConfig,
                      VisionModel)
 
@@ -45,8 +46,9 @@ MODEL_TYPES = ("lfm3_omni", "lfm3_vl", "lfm3_audio")
 __all__ = ["AudioConfig", "LanguageModel", "Model", "ModelConfig",
            "TextConfig", "VisionConfig"]
 
-# "1" runs the vision tower and the speech encoder in a float32 stream on
-# their 16-bit weights, to tell a 16-bit rounding effect from a defect.
+# "1" runs the vision tower, the speech encoder and the speech decoders
+# in a float32 stream on their 16-bit weights, to tell a 16-bit rounding
+# effect from a defect.
 TOWER_FP32_ENV = "GMLX_LFM3_TOWER_FP32"
 
 
@@ -58,6 +60,8 @@ class ModelConfig(BaseModelConfig):
         default_factory=VisionConfig)
     # The speech encoder of a model that hears, else None.
     audio_config: Optional[AudioConfig] = None
+    # The speech generator of a model that speaks, else None.
+    speech_config: Optional[SpeechConfig] = None
     model_type: str = "lfm3_omni"
     image_token_id: Optional[int] = 125030
     video_token_id: Optional[int] = 125029
@@ -76,6 +80,10 @@ class ModelConfig(BaseModelConfig):
             self.audio_config = None
         elif isinstance(self.audio_config, dict):
             self.audio_config = AudioConfig.from_dict(self.audio_config)
+        if not self.speech_config:
+            self.speech_config = None
+        elif isinstance(self.speech_config, dict):
+            self.speech_config = SpeechConfig.from_dict(self.speech_config)
 
 
 class LanguageModel(TextModel):
@@ -139,6 +147,12 @@ class Model(nn.Module):
             self.audio_projector = AudioProjector(config.audio_config)
             if fp32:
                 self.audio_encoder.stream_dtype = mx.float32
+        if config.speech_config is not None:
+            self.depth_decoder = DepthDecoder(config.speech_config)
+            self.codec_decoder = CodecDecoder(config.speech_config)
+            if fp32:
+                self.depth_decoder.stream_dtype = mx.float32
+                self.codec_decoder.stream_dtype = mx.float32
         # The serve engine runs the language model alone and reads the
         # media ids off its config (gmlx.cache.apc_media).
         for name in ("image_token_id", "video_token_id"):

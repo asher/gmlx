@@ -1013,12 +1013,16 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # The speech encoder's short convolutions use the text model's class,
     # and its downsampler's convolutions are F32 on the wire and run in
     # float32.
+    # The speech generator's code table holds the FSQ levels, F32 on the
+    # wire, and the depth decoder's head norm scales in float32.
     "lfm3_omni": (".conv.kernel", ".spatial_conv.weight",
                   ".downsample.conv_", ".downsample.lin_mid.",
-                  ".downsample.lin_end."),
+                  ".downsample.lin_end.", "codec_decoder.codebook",
+                  "depth_decoder.head_norm"),
     "lfm3_vl": (".conv.kernel", ".spatial_conv.weight"),
     "lfm3_audio": (".conv.kernel", ".downsample.conv_",
-                   ".downsample.lin_mid.", ".downsample.lin_end."),
+                   ".downsample.lin_mid.", ".downsample.lin_end.",
+                   "codec_decoder.codebook", "depth_decoder.head_norm"),
     # ricursive: the value-residual logit is F32 on the wire, one per layer.
     # Kept in step with the model class's cast_predicate.
     "ricursive": (".vres_lambda",),

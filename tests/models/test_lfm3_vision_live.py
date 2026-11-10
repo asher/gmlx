@@ -86,8 +86,8 @@ def _features(model, pixel_values, grid) -> np.ndarray:
 
 
 def test_the_load_fills_every_parameter(pair, capsys):
-    """The speech generator's tensors are the only ones the load
-    leaves."""
+    """The load leaves no projector tensor, the speech generator's
+    included."""
     from gmlx.load.headerscan import scan_gguf
     from gmlx.load.vlm import load_vlm_model
 
@@ -97,8 +97,7 @@ def test_the_load_fills_every_parameter(pair, capsys):
     scan = scan_gguf(pair[1], include_tensors=True)
     assert config["model_type"] == (
         "lfm3_omni" if scan.kv.get("clip.has_audio_encoder") else "lfm3_vl")
-    generator = sum(t.name.startswith("a.gen.") for t in scan.tensors)
-    assert f" {generator} skipped" in log, log
+    assert " 0 skipped" in log, log
     assert len(model.vision_tower.layers) == \
         scan.kv["clip.vision.block_count"]
     # The head masks the speech markers and the media placeholders, as on
