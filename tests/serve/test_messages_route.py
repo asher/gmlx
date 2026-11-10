@@ -72,14 +72,43 @@ _CHAT_TEMPLATES = {
 }
 
 
+# A stand-in written for these tests. It is not the LFM3 chat template,
+# which is not committed. It has the one behaviour the render lists depend
+# on: an image item renders where its message holds it, in a user turn and
+# in a tool turn alike. tests/models/test_lfm3_vision_live.py holds the
+# shipped template to the same placement.
+_INLINE = {"lfm3-stand-in": """{%- for message in messages -%}
+<|im_start|>{{ message['role'] }}
+{% if message['content'] is string -%}
+{{ message['content'] }}
+{%- else -%}
+{%- for item in message['content'] or [] -%}
+{%- if item['type'] == 'image' -%}
+<|vision_start|><|image|><|vision_end|>
+{%- elif item['type'] == 'text' -%}
+{{ item['text'] }}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- for call in message['tool_calls'] or [] -%}
+CALL {{ call['function']['name'] }} {{ call['function']['arguments'] | tojson }}
+{%- endfor -%}
+<|im_end|>
+{% endfor -%}
+{%- if add_generation_prompt -%}
+<|im_start|>assistant
+{% endif -%}
+"""}
+
+
 class _Processor:
     """Renders the template as the tokenizer gmlx builds for the type."""
 
     def __init__(self, model_type, fixture):
         base = model_type.removesuffix("_vl")
         self.chat_template = (
-            (_FIXTURES / fixture).read_text() if fixture
-            else bundled_chat_template(base))
+            _INLINE.get(fixture) or (_FIXTURES / fixture).read_text()
+            if fixture else bundled_chat_template(base))
         finish_gguf_tokenizer(self, base)
 
     def apply_chat_template(self, messages, tokenize=False,
@@ -281,11 +310,14 @@ _VISION = {
     "minicpm-v-4.7": ("minicpmv4_7", "minicpmv47_template.jinja", _QWEN),
     "minimax-m3.1": ("minimax_m3_vision", "minimax_m31_template.jinja",
                      "]<]image[>["),
+    "lfm3-omni": ("lfm3_omni", "lfm3-stand-in", "<|image|>"),
+    "lfm3-vl": ("lfm3_vl", "lfm3-stand-in", "<|image|>"),
 }
 # The templates that show an image in a tool turn.
-_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "minicpm-v-4.6",
-                 "minicpm-v-4.7", "minimax-m3.1", "muse", "muse-spark",
-                 "nemotron-bolt", "qwen3.5", "qwen3.6", "qwen3.8")
+_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "lfm3-omni",
+                 "lfm3-vl", "minicpm-v-4.6", "minicpm-v-4.7", "minimax-m3.1",
+                 "muse", "muse-spark", "nemotron-bolt", "qwen3.5", "qwen3.6",
+                 "qwen3.8")
 
 
 def test_the_tool_image_types_are_the_checked_ones():

@@ -130,6 +130,8 @@ MODEL_CONFIG = {
     "deepseek_v41_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "muse_spark": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "nemotron_h_omni": MessageFormat.LIST_WITH_IMAGE_FIRST,
+    "lfm3_omni": MessageFormat.LIST_WITH_IMAGE_FIRST,
+    "lfm3_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "nemotron_h_transcribe": MessageFormat.AUDIO_LOCATORS_AFTER_TEXT,
     "minimax_m3_vision": MessageFormat.LIST_WITH_IMAGE_FIRST,
 }
@@ -336,6 +338,8 @@ class MessageFormatter:
             "minimax_m3_vl",
             "llava_onevision",
             "glm5_next",
+            "lfm3_omni",
+            "lfm3_vl",
         ] and kwargs.get("video"):
             return self._format_video_message(
                 prompt,

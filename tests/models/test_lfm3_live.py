@@ -99,3 +99,39 @@ def test_nvfp4_file_loads_with_no_warning(gguf_index, capfd, caplog):
     assert bool(mx.isfinite(logits.astype(mx.float32)).all())
     word = tok.decode([int(logits[0, -1].argmax())])
     assert "Paris" in word, word
+
+
+def test_every_shipped_template_takes_tool_arguments_as_a_mapping(gguf_index):
+    """An OpenAI client replays a tool call's arguments as a JSON string.
+    Each shipped template raises on that, which is why the serve render
+    decodes the string for this model type."""
+    from gmlx import load_model
+    from gmlx.serve.patches import render
+
+    assert "lfm3" in render._DICT_TOOL_ARGUMENTS
+    tools = [{"type": "function", "function": {
+        "name": "weather", "description": "Read the weather.",
+        "parameters": {"type": "object", "properties": {
+            "city": {"type": "string"}}}}}]
+
+    def turns(arguments):
+        return [
+            {"role": "user", "content": "Weather?"},
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "weather", "arguments": arguments}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "Sunny"}]
+
+    for path in _lfm3_files(gguf_index):
+        _model, _config, tok = load_model(path, verbose=False)
+
+        def render_turns(arguments, tok=tok):
+            return tok.apply_chat_template(
+                turns(arguments), tools=tools, add_generation_prompt=True,
+                tokenize=False)
+
+        assert "Lisbon" in render_turns({"city": "Lisbon"}), path
+        with pytest.raises(Exception, match="mapping"):
+            render_turns('{"city": "Lisbon"}')
+        del _model
+        mx.clear_cache()

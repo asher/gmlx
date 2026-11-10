@@ -2,7 +2,8 @@
 # Copyright (c) 2026 Asher Feldman
 """A tiny LFM3 GGUF for header tests: the family's metadata keys and the
 three tensors the config synthesis reads shapes from. It holds no model
-weights and no template text."""
+weights and no template text. Also the lookup of a real LFM3 model and its
+projector, for the integration tier."""
 
 from __future__ import annotations
 
@@ -67,3 +68,21 @@ def write_lfm3_header(path, *, context: int = 128000, templates=(),
     w.write_tensors_to_file()
     w.close()
     return str(path)
+
+
+def find_vision_pair(gguf_dir, gguf_index) -> tuple[str, str] | None:
+    """The (text GGUF, projector) of a real LFM3 model with vision under
+    the integration folder, matched by the base name both headers carry.
+    The projector can sit in any subfolder."""
+    from gmlx.load.headerscan import scan_gguf
+
+    texts: dict = {}
+    for path in gguf_index.get(ARCH, ()):
+        kv = scan_gguf(path, include_tensors=False).kv
+        texts.setdefault(kv.get("general.basename"), path)
+    for path in sorted(gguf_dir.rglob("*mmproj*.gguf")):
+        kv = scan_gguf(str(path), include_tensors=False).kv
+        if (kv.get("clip.vision.projector_type") == "lfm3vl"
+                and kv.get("general.basename") in texts):
+            return texts[kv["general.basename"]], str(path)
+    return None

@@ -1008,6 +1008,10 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # lfm3: the depthwise taps are F32 on the wire and the convolution sums
     # in float32. Kept in step with the model class's cast_predicate.
     "lfm3": (".conv.kernel",),
+    # The VLM types carry the same text tower. The vision tower's depthwise
+    # taps are F32 on the wire too, and its convolution sums in float32.
+    "lfm3_omni": (".conv.kernel", ".spatial_conv.weight"),
+    "lfm3_vl": (".conv.kernel", ".spatial_conv.weight"),
     # ricursive: the value-residual logit is F32 on the wire, one per layer.
     # Kept in step with the model class's cast_predicate.
     "ricursive": (".vres_lambda",),

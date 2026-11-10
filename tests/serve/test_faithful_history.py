@@ -190,7 +190,8 @@ def test_retire_capture_wraps_faithful_render():
 
 
 @pytest.mark.parametrize("model_type", ["muse_spark", "k2_horizon", "beam",
-                                        "flint", "ricursive"])
+                                        "flint", "ricursive", "lfm3",
+                                        "lfm3_omni", "lfm3_vl"])
 def test_string_tool_arguments_decode_for_dict_templates(model_type):
     # These templates raise on the OpenAI JSON-string form.
     install_faithful_history()
