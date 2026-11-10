@@ -274,7 +274,8 @@ def test_the_container_files_mlx_audio_hands_ffmpeg_go_to_ffmpeg(tmp_path,
                                                                 monkeypatch, name):
     seen = []
 
-    def decode(source, field="audio", sample_rate=None, nchannels=None):
+    def decode(source, field="audio", sample_rate=None, nchannels=None,
+               max_seconds=None):
         seen.append((source, sample_rate, nchannels))
         return np.zeros(4, dtype=np.int16), sample_rate or 8000, nchannels or 1
     monkeypatch.setattr(media_programs, "decode", decode)
@@ -289,7 +290,8 @@ def test_the_container_files_mlx_audio_hands_ffmpeg_go_to_ffmpeg(tmp_path,
 def test_the_container_bytes_mlx_audio_hands_ffmpeg_go_to_ffmpeg(monkeypatch, head):
     seen = []
 
-    def decode(source, field="audio", sample_rate=None, nchannels=None):
+    def decode(source, field="audio", sample_rate=None, nchannels=None,
+               max_seconds=None):
         seen.append(source)
         return np.zeros(4, dtype=np.int16), 8000, 1
     monkeypatch.setattr(media_programs, "decode", decode)
@@ -303,7 +305,7 @@ def test_ffmpeg_decodes_to_the_target_rate_and_channels(monkeypatch):
     the samples at the target."""
     seen = []
 
-    def run(argv, data, limit):
+    def run(argv, data, limit, keep=False):
         seen.append(argv)
         return 0, bytearray(b"\0\0" * 8), b""
     monkeypatch.setattr(media_programs, "_run_bounded", run)
@@ -385,7 +387,7 @@ def test_an_endless_ffmpeg_decode_is_stopped_at_the_limit(endless_ffmpeg):
 def test_ffmpeg_gets_a_time_limit_past_the_sample_limit(tmp_path, monkeypatch):
     seen = []
 
-    def run(argv, data, limit):
+    def run(argv, data, limit, keep=False):
         seen.append((argv, limit))
         return 0, bytearray(b"\0\0"), b""
     monkeypatch.setattr(media_programs, "_run_bounded", run)
@@ -585,13 +587,19 @@ def _video(path, frames: int, size=(64, 48)) -> str:
     return str(path)
 
 
+@pytest.fixture
+def opencv_reader(monkeypatch):
+    """read_video takes OpenCV, as on a server without ffmpeg."""
+    monkeypatch.setattr(media_programs, "find", lambda name: None)
+
+
 def _stock_load_video():
     utils = importlib.import_module("gmlx._vendor.mlx_vlm.utils")
     stock = utils.load_video
     return utils, getattr(stock, "__wrapped__", stock)
 
 
-def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path):
+def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path, opencv_reader):
     """The frames and the VideoMetadata of mlx-vlm's load_video, for loose
     sampling keywords, a VideoSampling and a processor's frame sampler."""
     path = _video(tmp_path / "v.avi", 40)
@@ -612,7 +620,7 @@ def test_the_video_reader_gives_what_mlx_vlm_gives(tmp_path):
         assert meta == want_meta and np.array_equal(got, want), (args, kwargs)
 
 
-def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path):
+def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path, opencv_reader):
     path = _video(tmp_path / "v.avi", 8)
     _, stock = _stock_load_video()
     with pytest.raises(TypeError, match="unexpected keyword"):
@@ -622,7 +630,7 @@ def test_the_video_reader_refuses_a_sampling_keyword_mlx_vlm_refuses(tmp_path):
 
 
 def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, opencv_reader):
     """A frame sampler picks the count, and the count is charged before
     the first frame decodes."""
     cv2 = pytest.importorskip("cv2")
@@ -647,8 +655,8 @@ def test_a_sampled_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
     assert read == []
 
 
-def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path,
-                                                                       monkeypatch):
+def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(
+        tmp_path, monkeypatch, opencv_reader):
     cv2 = pytest.importorskip("cv2")
     path = _video(tmp_path / "v.avi", 40)
     monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 7 * 64 * 48)
@@ -669,6 +677,95 @@ def test_a_video_past_the_pixel_limit_is_refused_before_a_frame_decodes(tmp_path
     with pytest.raises(MediaRefused, match="video of 8 frames of 64x48 pixels brings"):
         md.read_video(path)
     assert read == []
+
+
+_FIXTURES = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+
+
+def _torchcodec_clips():
+    with open(os.path.join(_FIXTURES, "video_decode", "torchcodec.json")) as f:
+        record = json.load(f)
+    for name, want in record.items():
+        folder = "video_decode" if os.path.exists(
+            os.path.join(_FIXTURES, "video_decode", name)) else \
+            os.path.join("embeddinggemma2_reference", "media")
+        yield pytest.param(os.path.join(_FIXTURES, folder, name), want, id=name)
+
+
+@pytest.fixture
+def ffmpeg_reader():
+    if not (media_programs.find("ffmpeg") and media_programs.find("ffprobe")):
+        pytest.skip("no ffmpeg and ffprobe on PATH")
+
+
+@pytest.mark.parametrize("path, want", _torchcodec_clips())
+def test_ffmpeg_reads_what_torchcodec_gives_transformers(path, want, ffmpeg_reader):
+    """The frame count, rate and duration of torchcodec's exact mode, the
+    shown size, and the same frames, recorded by
+    scripts/embedder_oracle/video_decode_reference.py: a VP9 WebM with no
+    frame count in its header, a clip whose frame rate changes, a clip
+    turned a quarter, and an HD clip tagged BT.709."""
+    import hashlib
+
+    frames, meta = md.read_video(path, frame_sampler=lambda m, **k: want["indices"])
+    assert meta.total_num_frames == want["frames"]
+    assert meta.fps == pytest.approx(want["fps"], rel=1e-12)
+    assert meta.duration == pytest.approx(want["duration"], rel=1e-12)
+    assert (meta.width, meta.height) == (want["width"], want["height"])
+    assert list(meta.frames_indices) == want["indices"]
+    assert frames.shape == (len(want["indices"]), 3, want["height"], want["width"])
+    assert hashlib.sha256(frames.tobytes()).hexdigest() == want["sha256"]
+
+
+def test_a_turned_clip_gives_frames_mlx_takes(ffmpeg_reader):
+    import mlx.core as mx
+
+    path = os.path.join(_FIXTURES, "video_decode", "rot90.mp4")
+    frames, _ = md.read_video(path, frame_sampler=lambda m, **k: [0, 8])
+    assert all(s > 0 for s in frames.strides), frames.strides
+    assert np.array_equal(np.array(mx.array(frames)), frames)
+
+
+def test_ffmpeg_gives_a_frame_picked_twice_twice(ffmpeg_reader):
+    path = os.path.join(_FIXTURES, "video_decode", "rot90.mp4")
+    frames, meta = md.read_video(path, frame_sampler=lambda m, **k: [3, 3, 5])
+    assert list(meta.frames_indices) == [3, 3, 5]
+    assert np.array_equal(frames[0], frames[1]) and not np.array_equal(frames[1], frames[2])
+
+
+def test_ffmpeg_reads_more_frames_than_one_select_sum_takes(ffmpeg_reader):
+    # ffmpeg's expression parser refuses a sum of over 100 terms; mlx-vlm's
+    # default sampling takes up to 768 frames.
+    path = os.path.join(_FIXTURES, "embeddinggemma2_reference", "media", "scenes_40s.mp4")
+    every, _ = md.read_video(path, frame_sampler=lambda m, **k: list(range(200)))
+    assert every.shape[0] == 200
+    some, _ = md.read_video(path, frame_sampler=lambda m, **k: [7, 150, 199])
+    assert np.array_equal(some, every[[7, 150, 199]])
+
+
+def test_ffmpeg_charges_the_frames_before_it_decodes_one(monkeypatch, ffmpeg_reader):
+    path = os.path.join(_FIXTURES, "video_decode", "vfr.mp4")
+    monkeypatch.setattr(mg, "MEDIA_MAX_TOTAL_PIXELS", 9 * 160 * 120)
+    ran = []
+    reading = media_programs._run_reading
+
+    def run_reading(argv, *args, **kwargs):
+        ran.append(os.path.basename(argv[0]))
+        return reading(argv, *args, **kwargs)
+    monkeypatch.setattr(media_programs, "_run_reading", run_reading)
+    with pytest.raises(MediaRefused, match="video of 10 frames of 160x120 pixels brings"):
+        md.read_video(path, frame_sampler=lambda m, **k: list(range(10)))
+    assert "ffprobe" in ran and "ffmpeg" not in ran
+
+
+def test_without_a_decoder_a_chat_video_is_a_400(installed, monkeypatch, opencv_reader):
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    video = importlib.import_module("gmlx._vendor.mlx_vlm.generate.video")
+    with open(os.path.join(_FIXTURES, "video_decode", "vfr.mp4"), "rb") as f:
+        mp4 = _uri(f.read(), "video/mp4")
+    with pytest.raises(HTTPException) as err:
+        video.resolve_video_inputs(object(), [mp4])
+    assert err.value.status_code == 400 and "ffmpeg or OpenCV" in err.value.detail
 
 
 def test_mlx_vlm_samples_the_frames_of_an_inline_video(installed, tmp_path):
@@ -748,14 +845,111 @@ def test_the_media_pass_wraps_a_binding_another_installer_wrapped_first(
         media_sinks.uninstall()
 
 
-def test_video_without_opencv_names_the_video_extra(monkeypatch):
-    """OpenCV comes with the video extra; a video read without it says
-    which extra to install, before it opens the file."""
-    import sys
-
+def test_video_without_a_decoder_names_both_installs(monkeypatch, opencv_reader):
+    """OpenCV comes with the video extra. A server with neither ffmpeg nor
+    OpenCV refuses a video with both installs, before it opens the file."""
     from gmlx.commands import extras
 
     monkeypatch.setitem(sys.modules, "cv2", None)
     monkeypatch.setattr(extras, "install_route", lambda: extras.ROUTE_PIP)
-    with pytest.raises(ImportError, match=r"needs OpenCV: .*gmlx\[video\]"):
+    with pytest.raises(MediaRefused, match=r"needs ffmpeg or OpenCV: .*brew install ffmpeg"
+                                           r".*gmlx\[video\]"):
         md.read_video("/nonexistent.mp4")
+
+
+# The stop limit: an embeddings audio clip decodes only to its cut.
+
+def test_flac_silence_stops_at_the_cut_without_a_refusal(installed, monkeypatch):
+    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
+    # 6.5 million samples past the limit, cut at 30 s of 8 kHz.
+    data = flac_silence(100)
+    audio = md.load_audio(io.BytesIO(data), 8000, max_seconds=30)
+    assert len(audio) == 30 * 8000
+    # A 16 kHz clip that needs no resample is still a copy of the cut.
+    data = flac_silence(20, rate=16000)
+    audio = md.load_audio(io.BytesIO(data), 16000, max_seconds=2)
+    assert len(audio) == 32000
+
+
+def test_a_cut_past_the_sample_limit_keeps_the_limit(installed, monkeypatch):
+    monkeypatch.setattr(mg, "AUDIO_MAX_SAMPLES", 1 << 20)
+    with pytest.raises(MediaRefused, match="the limit for one audio clip"):
+        md.load_audio(io.BytesIO(flac_silence(100)), 8000, max_seconds=10_000)
+
+
+def test_ffmpeg_stops_at_the_cut(endless_ffmpeg):
+    samples, rate, channels = media_programs.decode(b"OggS" + b"\0" * 64,
+                                                    max_seconds=1.5)
+    assert (rate, channels) == (48000, 2)
+    assert len(samples) == 72000 * 2
+    assert _gone(int((endless_ffmpeg / "ffmpeg.pid").read_text()))
+
+
+def test_ffmpeg_gets_the_cut_as_its_time_limit(monkeypatch):
+    seen = []
+
+    def run(argv, data, limit, keep=False):
+        seen.append((argv, limit))
+        return 0, bytearray(b"\0\0" * 10), b""
+    monkeypatch.setattr(media_programs, "_run_bounded", run)
+    monkeypatch.setattr(media_programs, "program", lambda name: name)
+    probe = b'{"streams": [{"sample_rate": "16000", "channels": 1, "duration": "9000"}]}'
+    monkeypatch.setattr(media_programs, "_run", lambda argv, data: type(
+        "P", (), {"returncode": 0, "stderr": b"", "stdout": probe})())
+    # A header that names a long clip is no refusal under a cut.
+    media_programs.decode(b"x", max_seconds=30.25)
+    argv, limit = seen[0]
+    assert argv[argv.index("-t") + 1] == "30.25"
+    assert limit == 2 * (16000 * 30 + 4000)
+
+
+def test_ffmpeg_mode_mixes_stereo_down_as_ffmpeg_does():
+    left = np.arange(-4000, 4000, 8, dtype=np.int64)
+    clip = wav(np.stack([left, left // 2], axis=1).reshape(-1), 8000, channels=2)
+    want = (left + left // 2) / 32768.0
+    mean = md.load_audio(io.BytesIO(clip), 8000)
+    np.testing.assert_allclose(mean, want * 0.5, atol=1e-6)
+    # FFmpeg's default stereo-to-mono matrix, as torchcodec decodes for
+    # transformers' load_audio.
+    ffmpeg = md.load_audio(io.BytesIO(clip), 8000, ffmpeg=True)
+    np.testing.assert_allclose(ffmpeg, want * 0.5 ** 0.5, atol=1e-6)
+
+
+@pytest.mark.parametrize("data", [b"RIFF\x24\x7d\x00\x00WAVEfmt ", b"fLaC" + b"\0" * 200,
+                                  b"ID3" + b"\0" * 200])
+@pytest.mark.parametrize("ffmpeg", [False, True])
+def test_audio_miniaudio_cannot_decode_is_refused(data, ffmpeg):
+    # A WAV cut short, a FLAC or an MP3 with nothing after its header: a
+    # refusal, the 400 of chat and embeddings, not miniaudio's own error.
+    with md.decode_pass(), pytest.raises(MediaRefused, match="cannot be decoded as audio"):
+        md.load_audio(io.BytesIO(data), 16000, "input_audio", ffmpeg=ffmpeg)
+
+
+@pytest.mark.parametrize("rate", [8000, 11025, 22050, 44100, 48000])
+def test_ffmpeg_resample_matches_torchcodec(rate):
+    # Recorded by scripts/embedder_oracle/ffmpeg_resample_reference.py.
+    # 8 and 11.025 kHz upsample, where FFmpeg widens the band to the input's
+    # Nyquist; the clip edges check its mirrored ends.
+    path = os.path.join(os.path.dirname(__file__), "..", "fixtures", "ffmpeg_resample",
+                        "reference.npz")
+    with np.load(path) as z:
+        x, ref = z[f"in.{rate}"].astype(np.float32) / 32768, z[f"out.{rate}"]
+    y = md.ffmpeg_resample(x, rate, 16000)
+    # torchcodec's length moves by a sample with how the decoder splits the
+    # clip into packets.
+    assert abs(len(y) - len(ref)) <= 1
+    n = min(len(y), len(ref))
+    y, ref = y[:n], ref[:n].astype(np.float64)
+    snr = 10 * np.log10(np.sum(ref ** 2) / np.sum((y - ref) ** 2))
+    assert snr > 90, snr
+
+
+def test_ffmpeg_resample_keeps_the_passband_and_cuts_above_nyquist():
+    # A 1 kHz tone passes; a 9 kHz tone, above the new Nyquist, does not
+    # fold back into the band.
+    rate, t = 44100, np.arange(44100) / 44100
+    for f, lo, hi in ((1000, 0.99, 1.01), (9000, 0.0, 0.01)):
+        y = md.ffmpeg_resample(np.sin(2 * np.pi * f * t), rate, 16000)
+        assert len(y) == 16000
+        gain = np.sqrt(2) * np.sqrt(np.mean(y[1000:-1000] ** 2))
+        assert lo <= gain <= hi, (f, gain)

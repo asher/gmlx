@@ -80,22 +80,31 @@ def test_the_mismatch_message_never_names_a_local_folder():
     assert "'embeddinggemma'" in str(exc.value)
 
 
-# _normalize_input
-def test_normalize_input_string_and_list():
-    assert emb._normalize_input("hello") == ["hello"]
-    assert emb._normalize_input(["a", "b"]) == ["a", "b"]
+# embeddings_request.items
+def _texts(value):
+    from gmlx.serve.embeddings_request import items
+
+    found, chat = items({"input": value})
+    assert not chat
+    return ["".join(item.parts) for item in found]
 
 
-def test_normalize_input_rejects_bad_shapes():
+def test_input_string_and_list():
+    assert _texts("hello") == ["hello"]
+    assert _texts(["a", "b"]) == ["a", "b"]
+
+
+def test_input_rejects_bad_shapes():
     for bad, match in [
-        (None, "'input' is required"),
+        (None, "exactly one of the fields 'input' and 'messages'"),
         ("   ", "must not be empty"),
         ([], "empty list"),
-        ([1, 2], "list of strings"),
-        (42, "must be a string or a list"),
+        ([1, 2], "token ids"),
+        ([[1, 2]], "token ids"),
+        (42, "must be a string, a content part or a list"),
     ]:
         with pytest.raises(emb.EmbeddingsRequestError, match=match):
-            emb._normalize_input(bad)
+            _texts(bad)
 
 
 # encode_embedding
@@ -120,7 +129,7 @@ def _stub_embed(monkeypatch, matrix, n_tokens=7):
                         classmethod(lambda cls, p: ("MODEL", "TOK")))
     cap = {}
 
-    def fake_embed(model_obj, tokenizer, texts):
+    def fake_embed(model_obj, tokenizer, texts, add_special_tokens=True):
         cap.update(model=model_obj, tok=tokenizer, texts=list(texts))
         return np.asarray(matrix, dtype=np.float32), n_tokens
 
@@ -223,7 +232,8 @@ def test_check_names_why_a_model_cannot_load(unloadable, monkeypatch):
     reason = emb.check_embeddings_model(unloadable)
     assert reason.startswith("model_type 'qwen3_vl' is not a supported "
                              "embeddings model. Supported: EmbeddingGemma, "
-                             "BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+                             "EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT "
+                             "and Qwen3-Embedding.")
     assert "qwen3-embed-0.6b" in reason and unloadable not in reason
     assert emb._UNLOADABLE == {unloadable: reason}
     # A GGUF, or a repo id not cached yet, is left to the load.
@@ -679,7 +689,8 @@ class _FakeBatchTok:
         self.model_max_length = model_max_length
         self.calls = []
 
-    def __call__(self, texts, *, padding, truncation, max_length, return_tensors):
+    def __call__(self, texts, *, padding, truncation, max_length, return_tensors,
+                 add_special_tokens=True):
         self.calls.append(dict(n=len(texts), padding=padding,
                                truncation=truncation, max_length=max_length,
                                return_tensors=return_tensors))
@@ -741,7 +752,8 @@ def test_run_embeddings_gguf_backend(monkeypatch):
     monkeypatch.setattr(emb._GGUFEmbeddingsHolder, "causal", False)
     cap = {}
 
-    def fake_embed(model_obj, tok, texts, pooling="last", causal=True):
+    def fake_embed(model_obj, tok, texts, pooling="last", causal=True,
+                   add_special_tokens=True):
         cap.update(model=model_obj, tok=tok, texts=list(texts), pooling=pooling,
                    causal=causal)
         return np.asarray([[0.5, -0.5]], dtype=np.float32), 4
@@ -835,8 +847,9 @@ def no_gguf_load(monkeypatch):
 
 _SUPPORTED_GGUFS = (
     "Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
-    "qwen3-embed-4b and qwen3-embed-8b aliases, and EmbeddingGemma, as the "
-    "embeddinggemma-gguf alias.")
+    "qwen3-embed-4b and qwen3-embed-8b aliases, EmbeddingGemma, as the "
+    "embeddinggemma-gguf alias, and EmbeddingGemma 2, as the "
+    "embeddinggemma-2-gguf alias.")
 _CAUSAL = ("and its file name names no embedding model, so it is a causal "
            "LM, not an embeddings model. " + _SUPPORTED_GGUFS)
 
@@ -876,6 +889,11 @@ _CAUSAL = ("and its file name names no embedding model, so it is a causal "
     ("gemma-embedding", 0, "gemma-embedding.gguf",
      "this gemma-embedding GGUF sets gemma-embedding.pooling_type to 0, and "
      "gmlx runs a gemma-embedding encoder only with mean pooling (1). "
+     + _SUPPORTED_GGUFS),
+    ("gemma-embedding2", 1, "embeddinggemma-2-Q8_0.gguf", None),
+    ("gemma-embedding2", 2, "embeddinggemma-2-Q8_0.gguf",
+     "this gemma-embedding2 GGUF sets gemma-embedding2.pooling_type to 2, "
+     "and gmlx runs a gemma-embedding2 encoder only with mean pooling (1). "
      + _SUPPORTED_GGUFS),
     ("gemma-embedding", 4, "gemma-embedding.gguf",
      "this gemma-embedding GGUF sets gemma-embedding.pooling_type to 4 "

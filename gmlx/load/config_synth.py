@@ -62,6 +62,9 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # gmlx's own encoder (gmlx.models.embedders) by build_model's
     # gemma_embedding branch.
     "gemma-embedding": "gemma_embedding",
+    # EmbeddingGemma 2: a Gemma 4-style bidirectional encoder with per-layer
+    # inputs; gmlx's own encoder (gmlx.models.embedders.gemma_embedding2).
+    "gemma-embedding2": "gemma_embedding2",
     "qwen35": "qwen3_5",
     "qwen35moe": "qwen3_5_moe",
     # Qwen3.8-Flash-Next: the qwen35 hybrid + hyper-connections + QSA sparse
@@ -1009,6 +1012,110 @@ def _synth_gemma_embedding(meta, shapes, config: dict) -> None:
     causal = _read_bool(meta, f"{arch}.attention.causal")
     if causal is not None:
         config["attention_causal"] = causal
+
+
+# EmbeddingGemma 2 (gemma-embedding2)
+
+def _synth_gemma_embedding2(meta, shapes, config: dict) -> None:
+    """Synthesize an EmbeddingGemma 2 config, nested like the transformers
+    ``EmbeddingGemma2Config``: ``{model_type, text_config}``.
+
+    Two GGUF fields differ from the transformers config:
+      - ``attention.sliding_window`` is the full window (llama.cpp's
+        converter writes ``2 * sliding_window``); transformers' value is the
+        keys on each side, so it is halved here.
+      - ``context_length`` is the rope's reach (262144); the model card's
+        context is 8192, which the encoder caps (``ModelArgs.max_tokens``).
+
+    Per-layer head_dim and KV heads come from ``key_length`` /
+    ``key_length_swa`` and the per-layer ``head_count_kv`` array.
+    """
+    arch = "gemma-embedding2"
+    pattern = _require(
+        _read_bool_array(meta, f"{arch}.attention.sliding_window_pattern"),
+        arch=arch, gguf_field=f"{arch}.attention.sliding_window_pattern")
+    n_layers = config["num_hidden_layers"]
+    if len(pattern) != n_layers:
+        raise ValueError(
+            f"{arch}: sliding_window_pattern has {len(pattern)} entries for "
+            f"{n_layers} layers")
+    full_hd = _require(_read_int(meta, f"{arch}.attention.key_length"),
+                       arch=arch, gguf_field=f"{arch}.attention.key_length")
+    swa_hd = _read_int(meta, f"{arch}.attention.key_length_swa") or full_hd
+    for k_key, v_key in (("key_length", "value_length"),
+                         ("key_length_swa", "value_length_swa")):
+        k = _read_int(meta, f"{arch}.attention.{k_key}")
+        v = _read_int(meta, f"{arch}.attention.{v_key}")
+        if k is not None and v is not None and k != v:
+            raise ValueError(f"{arch}: {k_key} {k} != {v_key} {v}")
+    for rope_key, hd in (("dimension_count", full_hd),
+                         ("dimension_count_swa", swa_hd)):
+        dims = _read_int(meta, f"{arch}.rope.{rope_key}")
+        if dims is not None and dims != hd:
+            raise ValueError(
+                f"{arch}: rope.{rope_key} {dims} != head_dim {hd}; only "
+                "full-width rope is supported")
+    if _read_int(meta, f"{arch}.attention.shared_kv_layers"):
+        raise ValueError(f"{arch}: shared KV layers are not supported")
+    kv = _read_int_array(meta, f"{arch}.attention.head_count_kv")
+    if kv is None:
+        kv = [config["num_key_value_heads"]] * n_layers
+    if len(kv) != n_layers:
+        raise ValueError(
+            f"{arch}: head_count_kv has {len(kv)} entries for {n_layers} layers")
+    layer_types = ["sliding_attention" if s else "full_attention"
+                   for s in pattern]
+    sliding_kv = next((kv[i] for i, s in enumerate(pattern) if s), kv[0])
+    per_layer: dict[str, dict] = {}
+    for i, s in enumerate(pattern):
+        hd = swa_hd if s else full_hd
+        if hd != swa_hd or kv[i] != sliding_kv:
+            per_layer[f"{i:02d}"] = {"head_dim": hd, "num_key_value_heads": kv[i]}
+    window = _require(_read_int(meta, f"{arch}.attention.sliding_window"),
+                      arch=arch, gguf_field=f"{arch}.attention.sliding_window")
+    full_freq = _read_float(meta, f"{arch}.rope.freq_base") or 1_000_000.0
+    swa_freq = _read_float(meta, f"{arch}.rope.freq_base_swa") or 10_000.0
+    out_dim = _read_int(meta, f"{arch}.embedding_length_out")
+    if out_dim is None:
+        out_shape = shapes.get("output.weight")
+        if not out_shape or len(out_shape) != 2:
+            raise ValueError(f"{arch}: no embedding_length_out and no output.weight")
+        out_dim = int(out_shape[1])
+    causal = _read_bool(meta, f"{arch}.attention.causal")
+    if causal:
+        raise ValueError(f"{arch}: attention.causal is true; the encoder is bidirectional")
+    text_config: dict[str, Any] = {
+        "model_type": "embedding_gemma2_text",
+        "vocab_size": config["vocab_size"],
+        "hidden_size": config["hidden_size"],
+        "intermediate_size": config["intermediate_size"],
+        "num_hidden_layers": n_layers,
+        "num_attention_heads": config["num_attention_heads"],
+        "num_key_value_heads": sliding_kv,
+        "head_dim": swa_hd,
+        "rms_norm_eps": config.get("rms_norm_eps", 1e-6),
+        "max_position_embeddings": config.get("max_position_embeddings", 8192),
+        "sliding_window": window // 2,
+        "layer_types": layer_types,
+        "per_layer_config": per_layer,
+        "rope_parameters": {
+            "full_attention": {"rope_type": "default", "rope_theta": full_freq},
+            "sliding_attention": {"rope_type": "default", "rope_theta": swa_freq},
+        },
+        "hidden_size_per_layer_input": _require(
+            _read_int(meta, f"{arch}.embedding_length_per_layer_input"),
+            arch=arch, gguf_field=f"{arch}.embedding_length_per_layer_input"),
+        "embedding_dim": out_dim,
+    }
+    pad = _read_int(meta, "tokenizer.ggml.padding_token_id")
+    if pad is not None:
+        text_config["pad_token_id"] = pad
+    pooling = _read_int(meta, f"{arch}.pooling_type")
+    config.clear()
+    config["model_type"] = "gemma_embedding2"
+    config["text_config"] = text_config
+    if pooling is not None:
+        config["pooling_type"] = pooling
 
 
 # gemma3n (gemma-3n E2B / E4B text tower: MatFormer + AltUp + LAuReL)
@@ -4424,6 +4531,7 @@ _SYNTH = {
     "qwen3next": _synth_qwen3next,
     "gemma3": _synth_gemma3,
     "gemma-embedding": _synth_gemma_embedding,
+    "gemma-embedding2": _synth_gemma_embedding2,
     "gemma3n": _synth_gemma3n,
     "diffusion-gemma": _synth_diffusion_gemma,
 }

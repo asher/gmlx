@@ -106,6 +106,8 @@ _OWNED = {
                    ("model.layers.1.ffn.shared_experts.down_proj", "blk.1.ffn_down_shexp.weight", IN)],
     "diffusion-gemma": [("model.decoder.layers.0.self_attn.q_proj", "blk.0.attn_q.weight", IN),
                         ("model.decoder.layers.1.mlp.down_proj", "blk.1.ffn_down.weight", IN)],
+    "gemma-embedding2": [("language_model.layers.0.self_attn.q_proj", "blk.0.attn_q.weight", IN),
+                         ("language_model.layers.1.ple_block.per_layer_projection", "blk.1.proj.weight", IN)],
     "graniteswitch": [("model.layers.0.self_attn.qkv_proj", "blk.0.attn_qkv.weight", IN),
                       ("model.layers.1.mlp.up_proj", "blk.1.ffn_up.weight", IN)],
     "glm5-next": [("model.layers.0.self_attn.q_proj", "blk.0.attn_q.weight", IN),

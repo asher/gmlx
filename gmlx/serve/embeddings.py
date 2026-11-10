@@ -23,8 +23,8 @@ Three backends, chosen by what ``embeddings:`` points at:
   itself, so each text is just forwarded.
 
 * safetensors encoder (an alias, an mlx-community repo id or a local dir):
-  EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding
-  checkpoints, loaded by :func:`gmlx.models.embedders.load`. It returns
+  EmbeddingGemma, EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT and
+  Qwen3-Embedding checkpoints, loaded by :func:`gmlx.models.embedders.load`. It returns
   pooled, L2-normalized vectors in ``outputs.text_embeds``, pooled as the
   checkpoint's sentence-transformers config sets (see
   :mod:`gmlx.models.embedders.checkpoint`).
@@ -44,17 +44,14 @@ import base64
 import concurrent.futures
 import os
 import sys
+from dataclasses import dataclass
 
 import numpy as np
 
 from . import subservice
+from .embeddings_errors import EmbeddingsModelError, EmbeddingsRequestError
 from .hf_cache import offline_resolve
-from .subservice import (
-    GGUFModelHolder,
-    SingleWorker,
-    SubserviceRequestError,
-    preset_for,
-)
+from .subservice import GGUFModelHolder, SingleWorker, preset_for, service_display
 
 # Embedding model presets surfaced by the ``gmlx init`` wizard, in display order.
 # Two tiers:
@@ -79,10 +76,22 @@ def _qwen_emb_ref(size: str, quant: str) -> str:
             f"Qwen3-Embedding-{size}-{quant}.gguf")
 
 
+_EG2_REPO = "hf:unsloth/embeddinggemma-2-GGUF"
+
 EMBEDDING_PRESETS = [
+    {"alias": "embeddinggemma-2-gguf", "label": "EmbeddingGemma 2 (GGUF)",
+     "tier": "gguf", "dim": 768, "ctx": 8192,
+     "blurb": "text, images, audio and video in one space (Google)",
+     "default_quant": "Q8_0",
+     "quants": {"Q8_0": f"{_EG2_REPO}/embeddinggemma-2-Q8_0.gguf"},
+     # The projector by chip (see preset_mmproj_ref); both are 16-bit.
+     "mmproj": {"bf16": f"{_EG2_REPO}/mmproj-BF16.gguf",
+                "f16": f"{_EG2_REPO}/mmproj-F16.gguf"},
+     # The text file and this Mac's projector.
+     "sizes": {"Q8_0": 1.29}},
     {"alias": "qwen3-embed-0.6b", "label": "Qwen3-Embedding 0.6B",
      "tier": "gguf", "dim": 1024, "ctx": 32768,
-     "blurb": "small, fast, multilingual, strong retrieval per byte; the default",
+     "blurb": "small, fast, multilingual, strong retrieval per byte",
      "default_quant": "Q8_0",
      "quants": {"Q8_0": _qwen_emb_ref("0.6B", "Q8_0"),
                 "f16": _qwen_emb_ref("0.6B", "f16")},
@@ -112,6 +121,13 @@ EMBEDDING_PRESETS = [
      "quants": {"Q8_0": ("hf:ggml-org/embeddinggemma-300M-GGUF/"
                          "embeddinggemma-300M-Q8_0.gguf")},
      "sizes": {"Q8_0": 0.33}},
+    {"alias": "embeddinggemma-2", "label": "EmbeddingGemma 2",
+     "tier": "mlx", "dim": 768, "ctx": 8192,
+     "blurb": "text, images, audio and video in one space (Google)",
+     "default_quant": "8bit",
+     "quants": {"8bit": "mlx-community/embeddinggemma-2-8bit",
+                "bf16": "mlx-community/embeddinggemma-2-bf16"},
+     "sizes": {"8bit": 1.23, "bf16": 1.49}},
     {"alias": "embeddinggemma", "label": "EmbeddingGemma 300M",
      "tier": "mlx", "dim": 768, "ctx": 2048,
      "blurb": "tiny, strong multilingual retrieval (Google)",
@@ -150,7 +166,10 @@ EMBEDDING_PRESETS = [
      "sizes": {"4bit": 0.32, "6bit": 0.46, "8bit": 0.60, "fp16": 1.14}},
 ]
 
+# The model of ``embeddings: true``, ``default`` and a bare ``--embeddings``.
 DEFAULT_EMBEDDINGS_ALIAS = "qwen3-embed-0.6b"
+# The model that ``gmlx init``, its wizard and ``--with-embeddings`` set up.
+INIT_EMBEDDINGS_ALIAS = "embeddinggemma-2-gguf"
 
 # alias -> default-rung concrete value (gguf ``hf:`` ref or mlx-community repo id).
 EMBEDDINGS_ALIASES = {
@@ -164,6 +183,46 @@ EMBEDDINGS_ALIASES["qwen3-embed"] = EMBEDDINGS_ALIASES["qwen3-embed-0.6b"]
 def embedding_preset(alias):
     """The preset dict for a base alias (e.g. ``qwen3-embed-4b``), or ``None``."""
     return preset_for(alias, EMBEDDING_PRESETS)
+
+
+def preset_mmproj_ref(preset: dict) -> str | None:
+    """The ``hf:`` ref of a preset's projector for this Mac: BF16 where the
+    chip runs bfloat16 natively (M3 and later), F16 on M1 and M2. The chip
+    decides, never ``GMLX_ACTIVATION_DTYPE``."""
+    mmproj = preset.get("mmproj")
+    if not mmproj:
+        return None
+    from gmlx.load.dtypes import has_native_bfloat16
+
+    return mmproj["bf16" if has_native_bfloat16() else "f16"]
+
+
+def pull_hint(value, projector: bool = True) -> str | None:
+    """The ``gmlx pull`` command for a GGUF preset alias or one of its refs
+    that has a projector, or None. Without ``projector``, the text file
+    alone."""
+    v = str(value).strip()
+    for p in EMBEDDING_PRESETS:
+        if "mmproj" not in p:
+            continue
+        rungs = [q for q, ref in p["quants"].items() if ref == v]
+        if v.lower() == p["alias"]:
+            rungs = [p["default_quant"]]
+        if rungs:
+            args = preset_pull_args(p, rungs[0])
+            return "gmlx pull " + " ".join(args if projector else args[:1])
+    return None
+
+
+def preset_pull_args(preset: dict, quant: str | None = None) -> list[str]:
+    """The ``gmlx pull`` arguments that fetch a GGUF preset's rung and its
+    projector for this Mac: the ref, then the projector's file name in the
+    same repo."""
+    ref = preset["quants"][quant or preset["default_quant"]]
+    mm = preset_mmproj_ref(preset)
+    if mm is None:
+        return [ref]
+    return [ref, mm.rsplit("/", 1)[1]]
 
 
 # Request `model` values that mean "whatever this server has configured".
@@ -194,22 +253,6 @@ _GGUF_MAX_TOKENS = 32768
 # single-worker thread. subservice.SingleWorker says why (per-thread MLX
 # streams; an uncaught cross-thread abort otherwise).
 _EMBED_WORKER = SingleWorker("embeddings-worker")
-
-
-class EmbeddingsRequestError(SubserviceRequestError):
-    """A client-side problem with an embeddings request (HTTP 4xx)."""
-
-
-class EmbeddingsModelError(EmbeddingsRequestError):
-    """The configured model cannot load (HTTP 501). When no retry can fix
-    that, the reason is cached and every request returns it."""
-
-    err_type = "model_unsupported"
-
-    def __init__(self, reason: str):
-        super().__init__(
-            501, f"the configured `server.embeddings` model cannot load: "
-                 f"{reason}")
 
 
 # Model path -> the reason it cannot load. A file that could not be read is
@@ -263,8 +306,9 @@ def _local_checkpoint(model_path: str) -> str | None:
 
 
 _GGUF_SUPPORTED = ("Supported GGUFs: Qwen3-Embedding, as the qwen3-embed-0.6b, "
-                   "qwen3-embed-4b and qwen3-embed-8b aliases, and "
-                   "EmbeddingGemma, as the embeddinggemma-gguf alias.")
+                   "qwen3-embed-4b and qwen3-embed-8b aliases, EmbeddingGemma, "
+                   "as the embeddinggemma-gguf alias, and EmbeddingGemma 2, "
+                   "as the embeddinggemma-2-gguf alias.")
 
 
 # How a decoder GGUF pools, by llama.cpp's <arch>.pooling_type: 1 the mean,
@@ -481,10 +525,11 @@ def prewarm(model_path: str) -> concurrent.futures.Future:
 
 
 def release() -> concurrent.futures.Future:
-    """Drop the cached embeddings models of both backends (see
-    :func:`subservice.release`)."""
+    """Drop the cached embeddings models of both backends and the media
+    towers (see :func:`subservice.release`)."""
+    _FAMILIES.clear()
     return subservice.release(_EMBED_WORKER, _EmbeddingsModelHolder,
-                              _GGUFEmbeddingsHolder)
+                              _GGUFEmbeddingsHolder, _TowersHolder)
 
 
 def _is_gguf_ref(value) -> bool:
@@ -526,8 +571,17 @@ def resolve_embeddings_model(value, model_dirs=()) -> str:
     # dir. A gguf ref (whether passed directly or reached via a gguf-tier alias)
     # resolves to its local file; a repo id / dir is the safetensors backend.
     if _is_gguf_ref(v):
-        from gmlx.config import resolve_path
-        return resolve_path(v, list(model_dirs))  # hf: -> cache; path -> abs
+        from gmlx.config import MissingModelFile, resolve_path
+        try:
+            return resolve_path(v, list(model_dirs))  # hf: -> cache; path -> abs
+        except MissingModelFile:
+            hint = pull_hint(v)
+            if hint is None:
+                raise
+            raise MissingModelFile(
+                f"hf model {v!r} is not in the local Hugging Face cache or under "
+                f"model_dirs; `{hint}` fetches it and its projector for this "
+                "Mac, or remove the entry.") from None
     expanded = os.path.expanduser(v)
     if os.path.isdir(expanded):
         return os.path.abspath(expanded)
@@ -543,32 +597,8 @@ def effective_model(requested: str, configured: str) -> str:
         kind="embeddings", hint="text-embedding-3-small")
 
 
-def _normalize_input(value) -> list:
-    """Coerce the request ``input`` field to a non-empty list of strings.
-
-    OpenAI also allows arrays of token ids; we don't decode those (RAG clients,
-    including Open WebUI, send text) and reject them with a clear message.
-    """
-    if value is None:
-        raise EmbeddingsRequestError(400, "field 'input' is required")
-    if isinstance(value, str):
-        if not value.strip():
-            raise EmbeddingsRequestError(400, "field 'input' must not be empty")
-        return [value]
-    if isinstance(value, list):
-        if not value:
-            raise EmbeddingsRequestError(
-                400, "field 'input' must not be an empty list")
-        if all(isinstance(x, str) for x in value):
-            return value
-        raise EmbeddingsRequestError(
-            400, "field 'input' must be a string or a list of strings "
-                 "(arrays of token ids are not supported)")
-    raise EmbeddingsRequestError(
-        400, "field 'input' must be a string or a list of strings")
-
-
-def _embed_texts(model_obj, tokenizer, texts: list):
+def _embed_texts(model_obj, tokenizer, texts: list,
+                 add_special_tokens: bool = True):
     """Run a safetensors encoder over ``texts`` and return ``(matrix,
     n_tokens)``: a float32 ``[len(texts), dim]`` numpy array of pooled,
     L2-normalized vectors (the checkpoint's own pooling), plus the total
@@ -579,6 +609,7 @@ def _embed_texts(model_obj, tokenizer, texts: list):
     if not isinstance(cap, int) or cap <= 0 or cap > _ENCODER_MAX_TOKENS:
         cap = _ENCODER_MAX_TOKENS           # sentinel / unknown -> the ceiling
     inputs = tokenizer(texts, padding=True, truncation=True, max_length=cap,
+                       add_special_tokens=add_special_tokens,
                        return_tensors="np")
     mask = np.asarray(inputs["attention_mask"])
     # An all-real batch (one text, or equal lengths) needs no attention mask.
@@ -605,9 +636,11 @@ def _eos_id(tokenizer):
     return None
 
 
-def _encode_for_embed(tokenizer, text: str) -> list:
+def _encode_for_embed(tokenizer, text: str, add_special_tokens: bool = True) -> list:
     """Token ids for one input. Tolerates backends whose ``encode`` rejects the
     ``add_special_tokens`` kwarg (the GGUF-synthesized fast tokenizer accepts it)."""
+    if not add_special_tokens:
+        return list(tokenizer.encode(text, add_special_tokens=False))
     try:
         ids = tokenizer.encode(text)
     except TypeError:
@@ -631,7 +664,7 @@ class _BidirectionalCache:
 
 
 def _embed_texts_gguf(model_obj, tokenizer, texts: list, pooling: str = "last",
-                      causal: bool = True):
+                      causal: bool = True, add_special_tokens: bool = True):
     """Embed ``texts`` with the GGUF decoder-LM backend and return
     ``(matrix, n_tokens)``: a float32 ``[len(texts), dim]`` of pooled,
     L2-normalized hidden states, plus the total token count.
@@ -653,7 +686,7 @@ def _embed_texts_gguf(model_obj, tokenizer, texts: list, pooling: str = "last",
     vecs: list = []
     n_tokens = 0
     for text in texts:
-        ids = _encode_for_embed(tokenizer, text)
+        ids = _encode_for_embed(tokenizer, text, add_special_tokens)
         if len(ids) > _GGUF_MAX_TOKENS:
             ids = ids[:_GGUF_MAX_TOKENS]
         if (pooling == "last" and eos is not None
@@ -687,7 +720,8 @@ def _is_gguf_encoder(model_obj) -> bool:
     return type(model_obj).__module__.startswith("gmlx.models.embedders")
 
 
-def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list):
+def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list,
+                              add_special_tokens: bool = True):
     """Embed ``texts`` with a GGUF encoder backend (EmbeddingGemma: a gemma3
     backbone run as a bidirectional sentence encoder, K-quant leaves loaded into
     the gmlx encoder) and return ``(matrix, n_tokens)``.
@@ -711,7 +745,7 @@ def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list):
     vecs: list = []
     n_tokens = 0
     for text in texts:
-        ids = _encode_for_embed(tokenizer, text)
+        ids = _encode_for_embed(tokenizer, text, add_special_tokens)
         if len(ids) > cap:
             keep_eos = eos is not None and ids[-1] == eos
             ids = ids[:cap - 1] + [eos] if keep_eos else ids[:cap]
@@ -725,6 +759,473 @@ def _embed_texts_gguf_encoder(model_obj, tokenizer, texts: list):
     return np.stack(vecs, axis=0), n_tokens
 
 
+# Families with prompt tables and Matryoshka widths
+
+# The sentence-transformers prompt tables of the GGUF families, from each
+# model's config_sentence_transformers.json: google/embeddinggemma-2 (main,
+# 2026-10-28), google/embeddinggemma-300m (as mlx-community copies it) and
+# Qwen/Qwen3-Embedding-0.6B (the 4B and 8B repos ship the same table). A
+# safetensors checkpoint's own file takes their place.
+_GEMMA2_PROMPTS = {
+    "query": "task: search result | query: ",
+    "document": "title: none | text: ",
+    "BitextMining": "task: search result | query: ",
+    "Classification": "task: classification | query: ",
+    "Clustering": "task: clustering | query: ",
+    "CodeRetrieval": "task: code retrieval | query: ",
+    "Document": "title: none | text: ",
+    "FactChecking": "task: fact checking | query: ",
+    "InstructionRetrieval": "task: code retrieval | query: ",
+    "MultilabelClassification": "task: classification | query: ",
+    "PairClassification": "task: sentence similarity | query: ",
+    "QuestionAnswering": "task: question answering | query: ",
+    "Reranking": "task: search result | query: ",
+    "Retrieval": "task: search result | query: ",
+    "Retrieval-document": "title: none | text: ",
+    "Retrieval-query": "task: search result | query: ",
+    "STS": "task: sentence similarity | query: ",
+    "SearchQuery": "task: search result | query: ",
+    "SentenceSimilarity": "task: sentence similarity | query: ",
+    "Summarization": "task: sentence similarity | query: ",
+}
+_GEMMA_PROMPTS = {
+    "query": "task: search result | query: ",
+    "document": "title: none | text: ",
+    "BitextMining": "task: search result | query: ",
+    "Clustering": "task: clustering | query: ",
+    "Classification": "task: classification | query: ",
+    "InstructionRetrieval": "task: code retrieval | query: ",
+    "MultilabelClassification": "task: classification | query: ",
+    "PairClassification": "task: sentence similarity | query: ",
+    "Reranking": "task: search result | query: ",
+    "Retrieval": "task: search result | query: ",
+    "Retrieval-query": "task: search result | query: ",
+    "Retrieval-document": "title: none | text: ",
+    "STS": "task: sentence similarity | query: ",
+    "Summarization": "task: summarization | query: ",
+}
+_QWEN3_PROMPTS = {
+    "query": ("Instruct: Given a web search query, retrieve relevant passages "
+              "that answer the query\nQuery:"),
+    "document": "",
+}
+
+# The most tokens of one EmbeddingGemma 2 input, media included.
+_GEMMA2_MAX_TOKENS = 8192
+
+# The widths EmbeddingGemma's Matryoshka training keeps.
+_GEMMA_DIMS = (768, 512, 256, 128)
+# The narrowest width Qwen3-Embedding takes.
+_QWEN3_MIN_DIMS = 32
+
+
+@dataclass(frozen=True)
+class _Family:
+    """What the configured model takes beyond plain text: ``key`` is
+    ``gemma2``, ``gemma``, ``qwen3`` or empty for any other model."""
+
+    label: str
+    key: str = ""
+    prompts: dict | None = None
+    width: int | None = None
+
+
+# Model path -> its family.
+_FAMILIES: dict[str, _Family] = {}
+
+
+def _gguf_family(path: str) -> _Family:
+    from gmlx.load.gguf_meta import read_int
+
+    kv = _gguf_header(path)
+    arch = str(kv.get("general.architecture") or "")
+    if arch == "gemma-embedding2":
+        return _Family("EmbeddingGemma 2", "gemma2", _GEMMA2_PROMPTS, 768)
+    if arch == "gemma-embedding":
+        return _Family("EmbeddingGemma", "gemma", _GEMMA_PROMPTS, 768)
+    if arch == "qwen3":
+        return _Family("Qwen3-Embedding", "qwen3", _QWEN3_PROMPTS,
+                       read_int(kv, "qwen3.embedding_length"))
+    return _Family(service_display(path))
+
+
+def _checkpoint_family(path: str, folder: str) -> _Family:
+    from gmlx.models.embedders import checkpoint
+
+    config = checkpoint._read_json(folder, "config.json")
+    model_type = config.get("model_type") if isinstance(config, dict) else None
+    own = checkpoint.prompts(folder)
+    if model_type == "embedding_gemma2":
+        return _Family("EmbeddingGemma 2", "gemma2", own or _GEMMA2_PROMPTS, 768)
+    if model_type == "gemma3_text":
+        return _Family("EmbeddingGemma", "gemma", own or _GEMMA_PROMPTS, 768)
+    if model_type == "qwen3":
+        width = config.get("hidden_size") if isinstance(config, dict) else None
+        return _Family("Qwen3-Embedding", "qwen3", own or _QWEN3_PROMPTS,
+                       width if isinstance(width, int) else None)
+    return _Family(checkpoint.FAMILIES.get(str(model_type), service_display(path)),
+                   prompts=own)
+
+
+def _family(target: str) -> _Family:
+    """The configured model's family, from its GGUF header or config.json.
+    A Hub checkpoint not on disk yet loads first."""
+    if target in _FAMILIES:
+        return _FAMILIES[target]
+    if _is_gguf_ref(target):
+        try:
+            family = _gguf_family(target)
+        except OSError:
+            # The load reports a missing or unreadable file.
+            return _Family(service_display(target))
+    else:
+        folder = _local_checkpoint(target)
+        if folder is None:
+            subservice.run_on_worker(
+                _EMBED_WORKER, lambda: _load_embeddings_model(target),
+                error_cls=EmbeddingsRequestError, what="embedding model load")
+            folder = _local_checkpoint(target)
+        if folder is None:
+            return _Family(service_display(target))
+        from gmlx.models.embedders.checkpoint import UnsupportedEncoderError
+
+        try:
+            family = _checkpoint_family(target, folder)
+        except UnsupportedEncoderError:
+            # The load reports a config that cannot be read.
+            return _Family(service_display(target))
+    _FAMILIES[target] = family
+    return family
+
+
+def _prompt(family: _Family, name: str | None) -> str:
+    if name is None:
+        return ""
+    if not family.prompts:
+        raise EmbeddingsRequestError(
+            400, f"prompt_name: {family.label} has no prompt table")
+    if name not in family.prompts:
+        raise EmbeddingsRequestError(
+            400, f"prompt_name {name!r} is not one of "
+                 f"{', '.join(sorted(family.prompts))}")
+    return family.prompts[name]
+
+
+def _check_dimensions(family: _Family, dims: int | None) -> int | None:
+    """The width to cut each vector to, or None. Models without a
+    Matryoshka head ignore ``dimensions``."""
+    if dims is None:
+        return None
+    if family.key in ("gemma", "gemma2"):
+        if dims not in _GEMMA_DIMS:
+            raise EmbeddingsRequestError(
+                400, f"dimensions must be one of "
+                     f"{', '.join(map(str, _GEMMA_DIMS))} for {family.label}")
+        return dims
+    if family.key == "qwen3":
+        top = family.width or dims
+        if not _QWEN3_MIN_DIMS <= dims <= top:
+            raise EmbeddingsRequestError(
+                400, f"dimensions must be from {_QWEN3_MIN_DIMS} to {top} for "
+                     f"{family.label}")
+        return dims
+    return None
+
+
+def _cut(matrix: np.ndarray, dims: int | None) -> np.ndarray:
+    """Each vector cut to ``dims`` and normalized again (Matryoshka)."""
+    if dims is None or dims >= matrix.shape[1]:
+        return matrix
+    cut = matrix[:, :dims]
+    return cut / np.maximum(np.linalg.norm(cut, axis=1, keepdims=True), 1e-12)
+
+
+# EmbeddingGemma 2 media
+
+@dataclass(frozen=True)
+class MediaSetting:
+    """Where the EmbeddingGemma 2 service finds its media towers: an mmproj
+    ``path`` (GGUF), the checkpoint's own (``path`` None for a safetensors
+    model), or ``reason`` it runs text-only."""
+
+    path: str | None = None
+    reason: str | None = None
+
+
+def media_refusal(reason: str) -> str:
+    return f"media is not supported: the embeddings model runs text-only ({reason})"
+
+
+class ProjectorFileMissing(FileNotFoundError):
+    """The embeddings model's projector file is gone from disk."""
+
+
+class _TowersHolder:
+    """The towers of the loaded EmbeddingGemma 2, loaded on its first media
+    request. ``model_path`` keys them by model and projector; ``reason``
+    says why they cannot load."""
+
+    model = None
+    model_path = None
+    reason: str | None = None
+
+    @classmethod
+    def attach(cls, model_obj, target: str, setting: MediaSetting) -> None:
+        key = f"{target}\0{setting.path}"
+        if cls.model_path != key:
+            # The key is kept once the towers load or the projector is
+            # found not to fit. Any other failure loads again next time.
+            cls.model, cls.reason, cls.model_path = None, None, None
+            try:
+                cls.model = _load_towers(model_obj, target, setting)
+            except FileNotFoundError as exc:
+                if setting.path is not None and not os.path.exists(setting.path):
+                    raise ProjectorFileMissing(str(exc)) from exc
+                raise
+            except ValueError as exc:
+                name = os.path.basename(setting.path or target)
+                cls.reason = f"{name} is not a projector for this model: {exc}"
+                print(f"[server] embeddings: {media_refusal(cls.reason)}",
+                      file=sys.stderr)
+            cls.model_path = key
+        if cls.reason is not None:
+            raise EmbeddingsRequestError(400, media_refusal(cls.reason))
+        model_obj.towers = cls.model
+
+
+def _load_towers(model_obj, target: str, setting: MediaSetting):
+    if setting.path is not None:
+        from gmlx.load.dtypes import activation_dtype
+        from gmlx.load.embedder_mmproj import load_towers
+
+        return load_towers(setting.path,
+                           text_hidden=model_obj.args.text.hidden_size,
+                           act_dtype=activation_dtype("gemma_embedding2"),
+                           log=lambda *a: None)
+    from gmlx.models.embedders import checkpoint
+
+    folder = _local_checkpoint(target)
+    assert folder is not None
+    return checkpoint.load_towers(folder)
+
+
+def resolve_media(model_path: str, value=None, model_dirs=()) -> MediaSetting:
+    """The :class:`MediaSetting` of the configured embeddings model, from
+    ``server.embeddings_mmproj`` (``value``): False turns media off, a
+    path or ``hf:`` ref names a GGUF projector, and None takes the preset's
+    projector for this Mac or one paired beside the model. Only
+    EmbeddingGemma 2 takes media; any other model gets an empty setting.
+    Raises :class:`gmlx.config.ConfigError` for a projector set on a model
+    that takes none."""
+    from gmlx.config import ConfigError
+
+    if value is False:
+        return MediaSetting(reason="server.embeddings_mmproj is false")
+    if not _is_gguf_ref(model_path):
+        if value is not None:
+            raise ConfigError(
+                "it names a GGUF projector, and the embeddings model is a "
+                "safetensors checkpoint, which carries its own towers. Set it "
+                "to false for text only, or remove it.")
+        folder = _local_checkpoint(model_path)
+        if folder is None:
+            return MediaSetting()
+        from gmlx.models.embedders import checkpoint
+
+        try:
+            config = checkpoint._read_json(folder, "config.json")
+            if not (isinstance(config, dict)
+                    and config.get("model_type") == "embedding_gemma2"):
+                return MediaSetting()
+            return MediaSetting(reason=checkpoint.media_mismatch(folder, config))
+        except checkpoint.UnsupportedEncoderError as exc:
+            return MediaSetting(reason=exc.reason)
+    if not os.path.isfile(model_path):
+        return MediaSetting()
+    if _gguf_family(model_path).key != "gemma2":
+        if value is not None:
+            raise ConfigError(
+                f"it is set, and the embeddings model "
+                f"({service_display(model_path)}) takes text only")
+        return MediaSetting()
+    if value is not None:
+        from gmlx.config import resolve_path
+
+        return _checked_mmproj(resolve_path(str(value), list(model_dirs)),
+                               model_path)
+    found, hint = _paired_mmproj(model_path, model_dirs)
+    if found is None:
+        return MediaSetting(reason=f"no mmproj found; {hint}")
+    return _checked_mmproj(found, model_path)
+
+
+def _checked_mmproj(path: str, model_path: str) -> MediaSetting:
+    from gmlx.load.embedder_mmproj import mmproj_mismatch
+
+    name = os.path.basename(path)
+    if not os.path.isfile(path):
+        return MediaSetting(reason=f"{name} does not exist")
+    try:
+        kv = _gguf_header(path)
+    except Exception as exc:              # noqa: BLE001 (any unreadable file)
+        return MediaSetting(reason=f"{name} cannot be read ({type(exc).__name__})")
+    from gmlx.load.gguf_meta import read_int
+
+    width = read_int(_gguf_header(model_path), "gemma-embedding2.embedding_length")
+    reason = mmproj_mismatch(kv, int(width or 0))
+    if reason is not None:
+        return MediaSetting(reason=f"{name} is not a projector for this model: "
+                                   f"{reason}")
+    return MediaSetting(path=path)
+
+
+def _paired_mmproj(model_path: str, model_dirs=()) -> tuple[str | None, str]:
+    """The projector for an EmbeddingGemma 2 GGUF without a configured one:
+    the preset's projector for this Mac when the model is a preset's file,
+    else one beside the model (gmlx.load.discovery). Gives the hint for a
+    log line when there is none."""
+    preset = _preset_of(model_path, model_dirs)
+    if preset is not None:
+        ref = preset_mmproj_ref(preset)
+        assert ref is not None
+        from gmlx.config import ConfigError, resolve_path
+
+        try:
+            return resolve_path(ref, list(model_dirs)), ""
+        except ConfigError:
+            return None, f"run gmlx pull {ref}"
+    from gmlx.load.discovery import embedder_mmproj_beside
+
+    found = embedder_mmproj_beside(model_path)
+    if found is not None:
+        return found, ""
+    return None, "set server.embeddings_mmproj or --embeddings-mmproj"
+
+
+def _preset_of(model_path: str, model_dirs=()) -> dict | None:
+    """The preset whose GGUF ``model_path`` is: the local file of one of
+    its ``quants`` refs."""
+    from gmlx.config import ConfigError, resolve_path
+
+    real = os.path.realpath(model_path)
+    for p in EMBEDDING_PRESETS:
+        if "mmproj" not in p:
+            continue
+        for ref in p["quants"].values():
+            try:
+                if os.path.realpath(resolve_path(ref, list(model_dirs))) == real:
+                    return p
+            except ConfigError:
+                continue
+    return None
+
+
+# Requests
+
+def _cut_text(ids: list, cap: int, protected: list) -> list:
+    """``ids`` cut to ``cap`` tokens by dropping unprotected tokens from the
+    end: text goes, BOS, EOS and media blocks stay."""
+    over = len(ids) - cap
+    keep = [True] * len(ids)
+    for i in range(len(ids) - 1, -1, -1):
+        if over <= 0:
+            break
+        if not protected[i]:
+            keep[i] = False
+            over -= 1
+    return [t for t, k in zip(ids, keep) if k]
+
+
+def _protected(ids: list, markers) -> list:
+    """Which of an item's ids are BOS, EOS or inside a media block."""
+    out, inside = [], False
+    opens = {markers.boi, markers.boa}
+    closes = {markers.eoi, markers.eoa}
+    for i, t in enumerate(ids):
+        if t in opens:
+            inside = True
+        out.append(inside or t in (markers.bos, markers.eos))
+        if t in closes:
+            inside = False
+    return out
+
+
+def _embed_gemma2(model_obj, tokenizer, items: list, *, prompt: str,
+                  add_special_tokens: bool, options, attach):
+    """Embed EmbeddingGemma 2 items (lists of text and decoded media) and
+    return ``(matrix, n_tokens)``. ``attach`` loads the towers into the
+    model on the first item with media."""
+    import mlx.core as mx
+
+    from gmlx.models.embedders import gemma_embedding2_processor as proc
+
+    cap = model_obj.args.max_position_embeddings
+    markers = proc.Markers.from_args(
+        model_obj.args, int(tokenizer.bos_token_id), int(_eos_id(tokenizer)))
+    vecs, n_tokens = [], 0
+    for i, parts in enumerate(items):
+        try:
+            plan = proc.plan_item(tokenizer, parts, markers, options,
+                                  prompt=prompt,
+                                  add_special_tokens=add_special_tokens)
+        except ValueError as exc:
+            raise EmbeddingsRequestError(400, f"input {i}: {exc}") from None
+        if len(plan.ids) > cap:
+            protected = _protected(plan.ids, markers)
+            if sum(protected) > cap:
+                raise EmbeddingsRequestError(
+                    400, f"input {i} has {sum(protected)} media tokens, over the "
+                         f"{cap} tokens one input holds")
+            plan.ids = _cut_text(plan.ids, cap, protected)
+        if not plan.ids:
+            raise EmbeddingsRequestError(400, "input encodes to zero tokens")
+        n_tokens += len(plan.ids)
+        if plan.media:
+            attach()
+            out = proc.encode_item(model_obj, plan)
+        else:
+            out = model_obj(mx.array([plan.ids]))
+        vec = out.text_embeds[0].astype(mx.float32)
+        mx.eval(vec)
+        vecs.append(np.asarray(vec))
+    return np.stack(vecs, axis=0), n_tokens
+
+
+def _decode_media(request, family: _Family, setting: MediaSetting, options,
+                  is_gguf: bool):
+    """The request's items with their media decoded, on the request thread;
+    each item's media tokens are checked against the context first."""
+    from . import media_decode
+    from .embeddings_media import decode, media_tokens
+
+    if family.key != "gemma2":
+        raise EmbeddingsRequestError(
+            400, f"media is not supported: {family.label} takes text only")
+    reason = setting.reason
+    if reason is None and setting.path is None and is_gguf:
+        reason = "no mmproj found; set server.embeddings_mmproj or --embeddings-mmproj"
+    if reason is not None:
+        raise EmbeddingsRequestError(400, media_refusal(reason))
+    cap = _GEMMA2_MAX_TOKENS
+    out = []
+    with media_decode.decode_pass():
+        for i, item in enumerate(request.items):
+            parts = [p if isinstance(p, str) else decode(p, options, cap)
+                     for p in item.parts]
+            try:
+                n = media_tokens(parts, options)
+            except ValueError as exc:
+                raise EmbeddingsRequestError(400, f"input {i}: {exc}") from None
+            n += 2 if request.add_special_tokens else 0
+            if n > cap:
+                raise EmbeddingsRequestError(
+                    400, f"input {i} has {n} media tokens, over the {cap} tokens "
+                         "one input holds. Send fewer or shorter media, or a "
+                         "lower max_soft_tokens in mm_processor_kwargs.")
+            out.append(parts)
+    return out
+
+
 def encode_embedding(vec, encoding_format: str):
     """Encode one vector per OpenAI ``encoding_format``: a list of floats, or a
     base64 string of the little-endian float32 bytes."""
@@ -734,42 +1235,80 @@ def encode_embedding(vec, encoding_format: str):
     return [float(x) for x in vec]
 
 
-def run_embeddings(inputs, *, configured_model: str, model: str = "",
-                   encoding_format: str = "") -> dict:
-    """Validate fields, embed ``inputs``, and return the OpenAI response dict
-    (``object``/``data``/``model``/``usage``). Raises
+def run_embeddings(inputs=None, *, configured_model: str, model: str = "",
+                   encoding_format: str = "", body: dict | None = None,
+                   media: MediaSetting | None = None) -> dict:
+    """Validate fields, embed the inputs, and return the OpenAI response
+    dict (``object``/``data``/``model``/``usage``). Raises
     :class:`EmbeddingsRequestError` for 4xx problems.
 
-    ``inputs`` is the raw request ``input`` value (string or list of strings).
-    """
-    texts = _normalize_input(inputs)
-    target = effective_model(model, configured_model)
-    fmt = (encoding_format or "float").strip().lower()
-    if fmt not in ENCODING_FORMATS:
-        raise EmbeddingsRequestError(
-            400, f"unsupported encoding_format {fmt!r} "
-                 f"(supported: {', '.join(ENCODING_FORMATS)})")
+    ``body`` is the request's JSON body (:mod:`.embeddings_request`); without
+    it, ``inputs`` is the ``input`` value and ``encoding_format`` the format.
+    ``media`` says where EmbeddingGemma 2 finds its towers
+    (:func:`resolve_media`)."""
+    from . import embeddings_request
 
+    if body is None:
+        if inputs is None:
+            raise EmbeddingsRequestError(400, "field 'input' is required")
+        body = {"input": inputs, "encoding_format": encoding_format or None}
+    model = str(body.get("model") or model or "")
+    request = embeddings_request.parse(body)
+    target = effective_model(model, configured_model)
+    family = _family(target)
+    if request.chat and family.key != "gemma2":
+        raise EmbeddingsRequestError(
+            400, f"chat messages are not supported: {family.label} takes plain "
+                 "inputs")
+    prompt = _prompt(family, request.prompt_name)
+    dims = _check_dimensions(family, request.dimensions)
+    setting = media or MediaSetting()
+    if family.key == "gemma2":
+        from gmlx.models.embedders import gemma_embedding2_processor as proc
+
+        try:
+            options = proc.parse_options(request.mm_processor_kwargs)
+        except ValueError as exc:
+            raise EmbeddingsRequestError(400, str(exc)) from None
+        items = (_decode_media(request, family, setting, options,
+                               _is_gguf_ref(target))
+                 if request.has_media else [item.parts for item in request.items])
+    elif request.has_media:
+        raise EmbeddingsRequestError(
+            400, f"media is not supported: {family.label} takes text only")
+    else:
+        texts = [prompt + "".join(item.parts) for item in request.items]
     is_gguf = _is_gguf_ref(target)
+    special = request.add_special_tokens
 
     def _job():
         # Load (if needed) and embed on the same dedicated thread (see
-        # subservice.SingleWorker). _embed_texts* return host (numpy) values,
+        # subservice.SingleWorker). The drivers return host (numpy) values,
         # so nothing GPU-bound crosses back to the caller.
+        holder = _GGUFEmbeddingsHolder if is_gguf else _EmbeddingsModelHolder
+        model_obj, tokenizer = holder.get(target)
+        if family.key == "gemma2":
+            def attach():
+                _TowersHolder.attach(model_obj, target, setting)
+            return _embed_gemma2(model_obj, tokenizer, items, prompt=prompt,
+                                 add_special_tokens=special, options=options,
+                                 attach=attach)
         if is_gguf:
-            model_obj, tokenizer = _GGUFEmbeddingsHolder.get(target)
             if _is_gguf_encoder(model_obj):
-                return _embed_texts_gguf_encoder(model_obj, tokenizer, texts)
+                return _embed_texts_gguf_encoder(model_obj, tokenizer, texts,
+                                                 add_special_tokens=special)
             return _embed_texts_gguf(model_obj, tokenizer, texts,
                                      pooling=_GGUFEmbeddingsHolder.pooling,
-                                     causal=_GGUFEmbeddingsHolder.causal)
-        model_obj, tokenizer = _EmbeddingsModelHolder.get(target)
-        return _embed_texts(model_obj, tokenizer, texts)
+                                     causal=_GGUFEmbeddingsHolder.causal,
+                                     add_special_tokens=special)
+        return _embed_texts(model_obj, tokenizer, texts,
+                            add_special_tokens=special)
 
     matrix, n_tokens = subservice.run_on_worker(
         _EMBED_WORKER, _job, error_cls=EmbeddingsRequestError,
         what="embedding")
-
+    matrix = _cut(matrix, dims)
+    fmt = request.encoding_format
     data = [{"object": "embedding", "index": i,
              "embedding": encode_embedding(matrix[i], fmt)}
             for i in range(matrix.shape[0])]

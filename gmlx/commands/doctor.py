@@ -294,15 +294,19 @@ def check_services(cfg):
     if cfg is None:
         return None
     from gmlx.serve.patches.routes import _service_file_on_disk
+    mmproj = getattr(cfg, "embeddings_mmproj", None)
     svcs = [("embeddings", cfg.embeddings), ("rerank", cfg.rerank),
-            ("stt", cfg.stt), ("tts", cfg.tts)]
+            ("stt", cfg.stt), ("tts", cfg.tts),
+            ("embeddings_mmproj", mmproj if cfg.embeddings and isinstance(
+                mmproj, str) else None)]
     svcs = [(n, v) for n, v in svcs if v]
     if not svcs:
         return None
     misses = []
     for name, value in svcs:
         v = str(value)
-        gguf_like = v.endswith(".gguf") or v.startswith("hf:")
+        gguf_like = (v.endswith(".gguf") or v.startswith("hf:")
+                     or name == "embeddings_mmproj")
         # Path-looking values only: a bare HF repo id (org/name) also
         # contains a separator but is a repo reference, not a local dir.
         local_dir = (v.startswith(("/", "~", "./", "../"))

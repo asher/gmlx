@@ -420,9 +420,10 @@ def test_embeddings_route_embeds(monkeypatch):
 
     captured = {}
 
-    def fake_run(inputs, *, configured_model, model, encoding_format):
-        captured.update(inputs=inputs, configured=configured_model,
-                        model=model, fmt=encoding_format)
+    def fake_run(*, configured_model, body, media):
+        captured.update(inputs=body["input"], configured=configured_model,
+                        model=body["model"], fmt=body["encoding_format"],
+                        media=media)
         return {"object": "list",
                 "data": [{"object": "embedding", "index": 0,
                           "embedding": [0.1, 0.2]}],
@@ -440,7 +441,8 @@ def test_embeddings_route_embeds(monkeypatch):
     assert body["data"][0]["embedding"] == [0.1, 0.2]
     assert body["model"] == EMB_REPO
     assert captured == {"inputs": ["hi", "yo"], "configured": EMB_REPO,
-                        "model": "text-embedding-3-small", "fmt": "float"}
+                        "model": "text-embedding-3-small", "fmt": "float",
+                        "media": None}
 
 
 def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
@@ -448,7 +450,7 @@ def test_embeddings_route_maps_request_error_to_4xx(monkeypatch):
 
     import gmlx.serve.embeddings as emb
 
-    def boom(inputs, **kw):
+    def boom(**kw):
         raise emb.EmbeddingsRequestError(400, "field 'input' is required")
 
     monkeypatch.setattr(emb, "run_embeddings", boom)
@@ -485,7 +487,8 @@ def test_embeddings_route_unloadable_model_is_typed_501(monkeypatch, tmp_path,
         assert err["message"] == (
             "the configured `server.embeddings` model cannot load: model_type "
             "'lfm2' is not a supported embeddings model. Supported: "
-            "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+            "EmbeddingGemma, EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT "
+            "and Qwen3-Embedding.")
         lines = [ln for ln in capsys.readouterr().out.splitlines()
                  if ln.startswith("[req] ")]
         assert len(lines) == 1
@@ -520,7 +523,7 @@ def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
 
     import gmlx.serve.embeddings as emb
 
-    def boom(inputs, **kw):
+    def boom(**kw):
         raise FileNotFoundError("[Errno 2] No such file: '/lib/e.gguf'")
 
     monkeypatch.setattr(emb, "run_embeddings", boom)
@@ -532,6 +535,24 @@ def test_embeddings_route_missing_file_is_typed_404(monkeypatch):
     assert err["type"] == "model_file_missing"
     assert "server.embeddings" in err["message"]
     assert "sync-models" in err["message"]
+
+
+def test_embeddings_route_missing_projector_names_its_key(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import gmlx.serve.embeddings as emb
+
+    def boom(**kw):
+        raise emb.ProjectorFileMissing("[Errno 2] No such file: '/lib/mmproj-BF16.gguf'")
+
+    monkeypatch.setattr(emb, "run_embeddings", boom)
+    sp.install_embeddings_route(EMB_REPO)
+    client = TestClient(_APP.app)
+    r = client.post("/v1/embeddings", json={"input": "hi"})
+    assert r.status_code == 404
+    err = r.json()["error"]
+    assert err["type"] == "model_file_missing"
+    assert "server.embeddings_mmproj" in err["message"]
 
 
 def test_models_endpoint_delists_missing_gguf_service(monkeypatch, tmp_path):

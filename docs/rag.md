@@ -14,18 +14,23 @@ Add an embedder and a reranker to the `server` block of the
 
 ```yaml
 server:
-  embeddings: qwen3-embed-0.6b
+  embeddings: embeddinggemma-2-gguf
   rerank: qwen3-rerank-0.6b
 ```
 
 The server never downloads these GGUF models, so download them, then
-restart the server:
+restart the server. On M1 and M2 Macs, pull `mmproj-F16.gguf` in place of
+`mmproj-BF16.gguf`:
 
 ```sh
-gmlx pull hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf
+gmlx pull hf:unsloth/embeddinggemma-2-GGUF/embeddinggemma-2-Q8_0.gguf mmproj-BF16.gguf
 gmlx pull hf:mradermacher/Qwen3-Reranker-0.6B-GGUF/Qwen3-Reranker-0.6B.Q8_0.gguf
 gmlx restart
 ```
+
+EmbeddingGemma 2 also embeds images, audio and video, so one index can
+hold photos and recordings beside your documents. See
+[Images, audio and video](services.md#images-audio-and-video).
 
 A server that was running without the files turns the services on at a
 [reload](config.md#changing-the-file) as well.
@@ -56,12 +61,13 @@ docs = [
 ]
 question = "How do I cancel my plan?"
 
-def embed(texts):
-    reply = client.embeddings.create(model="text-embedding-3-small", input=texts)
+def embed(texts, prompt):
+    reply = client.embeddings.create(model="text-embedding-3-small", input=texts,
+                                     extra_body={"prompt_name": prompt})
     return [item.embedding for item in reply.data]
 
-doc_vectors = embed(docs)
-query_vector = embed([question])[0]
+doc_vectors = embed(docs, "document")
+query_vector = embed([question], "query")[0]
 
 # The vectors have length 1, so the dot product is the cosine similarity.
 scores = [sum(q * d for q, d in zip(query_vector, v)) for v in doc_vectors]
@@ -80,8 +86,10 @@ answer = client.chat.completions.create(
 print(answer.choices[0].message.content)
 ```
 
-A real index keeps the document vectors in a vector database instead of a
-list, and embeds each document once. On a server with an
+`prompt_name` gives questions and documents the model's
+[search prompts](services.md#search-prompts-and-shorter-vectors). A real
+index keeps the document vectors in a vector database instead of a list,
+and embeds each document once. On a server with an
 [API key](config.md#serverapi_key), pass the key to the OpenAI client and
 as an `Authorization: Bearer` header to httpx.
 

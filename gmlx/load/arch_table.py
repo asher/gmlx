@@ -52,7 +52,10 @@ _MLX_VLM_BACKED = {"diffusion-gemma"}
 
 # Archs whose model class gmlx ships itself (bidirectional encoder embedders,
 # not autoregressive LMs): gguf_arch -> the gmlx module defining ``class Model``.
-_GMLX_BACKED = {"gemma-embedding": "gmlx.models.embedders.gemma_embedding"}
+_GMLX_BACKED = {
+    "gemma-embedding": "gmlx.models.embedders.gemma_embedding",
+    "gemma-embedding2": "gmlx.models.embedders.gemma_embedding2",
+}
 
 
 # gguf_arch -> (family, notes). family/notes are this module's contribution;
@@ -106,6 +109,7 @@ _FAMILY_NOTES = {
     "falcon-h1":      ("falcon",   "TII Falcon-H1 (0.5B-34B); parallel attention + Mamba2 in every layer (one input_layernorm feeds both, outputs summed), dense gated MLP under feed_forward.*, explicit head_dim from key_length. NEOX rope (no qk-permute). The muP multiplier zoo is folded into the wire weights at convert => synth pins every multiplier neutral; ffn_norm/ssm_a/ssm_d stored with no .weight suffix"),
     "qwen3next":      ("qwen",     "Qwen3-Next-80B-A3B; gated-DeltaNet linear attention (3 of every 4 layers) + gated full attention (gate fused in attn_q), every-layer 512-expert MoE + shared expert. NEOX rope (no qk-permute, not qwen35's packing). Both GDN wire layouts load: legacy fused ssm_in -> in_proj_qkvz; the newer split attn_qkv/attn_gate via a load-time module split (loader swaps in_proj_qkvz for in_proj_qkv/in_proj_z, skipping the runtime de-interleave). V heads HF-grouped (kv_head_layout grouped, not qwen3.5's tiled order); +1 norm bake is what mlx-lm expects (passthrough)"),
     "gemma-embedding": ("gemma",   "EmbeddingGemma 300M; a gemma3 text backbone run as a bidirectional sentence encoder (mean pool + a 2-layer dense head), built into gmlx's own encoder (gmlx.models.embedders.gemma_embedding, on mlx-lm gemma3_text blocks). Reuses the GEMMA3 remap/synth; norm +1 bake undone; dense_2/dense_3 -> the Model's dense.0/dense.1; tied embeddings"),
+    "gemma-embedding2": ("gemma",  "EmbeddingGemma 2 (270M text, plus vision and audio towers in an mmproj); a Gemma 4-style bidirectional encoder, 24 layers at d=512 with 4 query heads. Sliding layers at head_dim 256 with 2 KV heads and a symmetric window of 512 on each side (the GGUF stores the full 1024), full layers every sixth at head_dim 512 with 1 KV head; default rope at theta 1e4 / 1e6 on the full head width, attention scale 1, q/k norms and a scale-free v norm. Projection-only per-layer inputs: one 512-wide slice per layer of a projection of the input embeddings, gated in after the MLP. Mean pool, then output.weight projects 512 -> 768, L2 norm, Matryoshka to 512/256/128. The mmproj carries the Gemma 4 vision (gemma4v) and audio (gemma4a) towers; media soft tokens replace the placeholder embeddings unscaled. Complete fail-closed remap (GEMMA_EMBEDDING2); gmlx's own encoder (gmlx.models.embedders.gemma_embedding2); never float16"),
     "diffusion-gemma": ("gemma",   "DiffusionGemma 26B-A4B; a non-autoregressive encoder-decoder block-diffusion model on the gemma-4 MoE backbone (each decoder layer runs a dense MLP + routed experts in parallel; encoder and decoder share weights bar a per-layer scalar). The decoder denoises a fixed-length canvas over reverse-diffusion steps with an entropy-bound sampler. Model class + denoising engine live in mlx-vlm (model_type diffusion_gemma); the backbone homes under model.decoder.* with the expert gate_up kept fused, plus the self-conditioning gated MLP. Single text-only GGUF (vision tower dropped at convert). Also answers structured decisions on POST /v1/systemone through gmlx/systemone/"),
 }
 

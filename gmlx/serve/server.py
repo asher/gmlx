@@ -255,7 +255,8 @@ def _cmd_init(argv: list, prog: str = "gmlx init") -> int:
                     metavar="MODEL", help="Configure text-to-speech (server.tts).")
     ap.add_argument("--with-embeddings", nargs="?", const=_SVC_DEFAULT, default=None,
                     metavar="MODEL",
-                    help="Configure text embeddings (server.embeddings).")
+                    help="Configure embeddings (server.embeddings). Bare "
+                         "flag picks embeddinggemma-2-gguf.")
     ap.add_argument("--with-rerank", nargs="?", const=_SVC_DEFAULT, default=None,
                     metavar="MODEL",
                     help="Configure reranking (server.rerank); a Qwen3-Reranker "
@@ -367,6 +368,12 @@ def _init_interactive(a, ap) -> int:
                            no_reload=a.no_reload)
         if rc != 0:
             return rc
+        try:
+            written = load_config(outcome.out)
+            _print_service_pulls(written.embeddings, written.model_dirs,
+                                 written.embeddings_mmproj)
+        except ConfigError:
+            pass
         models = outcome.models
         if not models and _offer_pull(io, outcome.out):
             from gmlx.commands import manage
@@ -409,7 +416,7 @@ def _resolve_services(a):
 
     return (pick(a.with_stt, _stt.DEFAULT_STT_ALIAS),
             pick(a.with_tts, _tts.DEFAULT_TTS_ALIAS),
-            pick(a.with_embeddings, _emb.DEFAULT_EMBEDDINGS_ALIAS),
+            pick(a.with_embeddings, _emb.INIT_EMBEDDINGS_ALIAS),
             pick(a.with_rerank, _rr.DEFAULT_RERANK_ALIAS))
 
 
@@ -496,6 +503,7 @@ def _init_scaffold(a, ap) -> int:
                        skipped=scan_stats.get("skipped", 0))
     if rc != 0:
         return rc
+    _print_service_pulls(emb_v, dirs)
     _print_next_steps(out, models)
     if a.install:
         _install_for_services(stt_v, tts_v)
@@ -541,6 +549,24 @@ def _finish_write(out: Path, text: str, models, *, no_reload: bool,
               "full table.")
     _reload_running(out, skip=no_reload)
     return 0
+
+
+def _print_service_pulls(embeddings, dirs, mmproj=None) -> None:
+    """The pull for an embeddings preset that is not on disk yet, with its
+    projector for this Mac unless ``mmproj`` is False (text only)."""
+    if not embeddings:
+        return
+    from gmlx.config import MissingModelFile
+
+    from . import embeddings as _emb
+    try:
+        _emb.resolve_embeddings_model(embeddings, dirs)
+    except MissingModelFile:
+        hint = _emb.pull_hint(embeddings, projector=mmproj is not False)
+        if hint:
+            print(f"\nembeddings: {hint}")
+    except ConfigError:
+        pass
 
 
 def _print_next_steps(out: Path, models) -> None:
@@ -2088,13 +2114,17 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                          "a config `server.tts:`.")
     ap.add_argument("--embeddings", nargs="?", const="default", default=None,
                     metavar="MODEL",
-                    help="Serve POST /v1/embeddings from a GGUF decoder-LM "
-                         "embedder (alias qwen3-embed-0.6b/-4b/-8b, *.gguf, or "
-                         "hf:<org>/<repo>/<file>.gguf; no extra) or a "
-                         "safetensors encoder (alias embeddinggemma/arctic-l/"
-                         "nomic-embed/bge-m3, HF repo, or local dir; no extra "
-                         "needed). Bare flag picks qwen3-embed-0.6b; "
-                         "overrides config server.embeddings:.")
+                    help="Serve POST /v1/embeddings from a GGUF embedder "
+                         "(alias embeddinggemma-2-gguf or qwen3-embed-0.6b/-4b/"
+                         "-8b, *.gguf, or hf:<org>/<repo>/<file>.gguf) or a "
+                         "safetensors encoder (alias embeddinggemma-2/"
+                         "embeddinggemma/arctic-l/nomic-embed/bge-m3, HF repo, "
+                         "or local dir); no extra needed. Bare flag picks "
+                         "qwen3-embed-0.6b; overrides config server.embeddings:.")
+    ap.add_argument("--embeddings-mmproj", default=None, metavar="MMPROJ",
+                    help="The media projector of an EmbeddingGemma 2 GGUF "
+                         "(*.gguf or hf: ref), or false for text only. "
+                         "Overrides config server.embeddings_mmproj:.")
     ap.add_argument("--rerank", nargs="?", const="default", default=None,
                     metavar="MODEL",
                     help="Serve POST /v1/rerank (Cohere/Jina shape) from a "
@@ -2248,6 +2278,8 @@ def _bg_serve_args(a, cfg_path) -> list:
     if getattr(a, "embeddings", None):
         out += (["--embeddings"] if a.embeddings == "default"
                 else ["--embeddings", a.embeddings])
+    if getattr(a, "embeddings_mmproj", None):
+        out += ["--embeddings-mmproj", a.embeddings_mmproj]
     if getattr(a, "rerank", None):
         out += ["--rerank", a.rerank]
     # Tri-state feeder flags: None means loader default; an explicit
@@ -2794,6 +2826,20 @@ def _overlay_cli_flags(cfg, a) -> None:
             v = getattr(a, key, None)
             if v:
                 setattr(cfg, key, alias if v == "default" else v)
+    if getattr(a, "embeddings", None) or getattr(a, "embeddings_mmproj", None):
+        cfg.embeddings_mmproj = _embeddings_mmproj_value(a, cfg)
+
+
+def _embeddings_mmproj_value(a, cfg):
+    """``server.embeddings_mmproj`` with ``--embeddings-mmproj`` over it. An
+    ``--embeddings`` flag that names another model drops the config's
+    projector."""
+    flag = getattr(a, "embeddings_mmproj", None)
+    if flag:
+        return False if flag.strip().lower() == "false" else flag
+    if getattr(a, "embeddings", None):
+        return None
+    return getattr(cfg, "embeddings_mmproj", None)
 
 
 def cors_origin_lines(origins) -> list[str]:
@@ -2841,7 +2887,7 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
                "decode_prefill_ratio", "prefill_tick_ms",
                "cache_limit_gb", "family_defaults",
                "stochastic_mtp", "gpu_keepwarm", "stt", "tts", "embeddings",
-               "rerank", "systemone",
+               "embeddings_mmproj", "rerank", "systemone",
                "defaults", "cache", "assistants", "assistant_allow_remote",
                "image", "video")}
     # Profile/model names double as dict keys; drop the redundant fields so the
@@ -3102,12 +3148,23 @@ def _resolve_service_models(cfg, a) -> None:
     # Relative GGUF paths search server.model_dirs, as a models: entry does.
     model_dirs = getattr(cfg, "model_dirs", None) or []
     emb_value = getattr(a, "embeddings", None) or getattr(cfg, "embeddings", None)
+    mmproj_value = _embeddings_mmproj_value(a, cfg)
     cfg.embeddings = None
+    cfg.embeddings_media = None
     if emb_value:
         from . import embeddings as emb_mod
         cfg.embeddings = _resolve_service(
             "server.embeddings", emb_mod.resolve_embeddings_model,
             emb_value, model_dirs)
+        if cfg.embeddings:
+            try:
+                cfg.embeddings_media = emb_mod.resolve_media(
+                    cfg.embeddings, mmproj_value, model_dirs)
+            except ConfigError as e:
+                raise ConfigError(f"server.embeddings_mmproj: {e}") from None
+            reason = cfg.embeddings_media.reason
+            if reason and mmproj_value is not False:
+                print(f"[server] embeddings: text only ({reason})", file=sys.stderr)
 
     rerank_value = getattr(a, "rerank", None) or getattr(cfg, "rerank", None)
     cfg.rerank = None

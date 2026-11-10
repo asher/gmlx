@@ -6,10 +6,39 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- EmbeddingGemma 2 embeds text, images, audio and video at
+  `/v1/embeddings`, from the unsloth GGUF with its media projector or from
+  the mlx-community builds. See [Embeddings](docs/services.md#embeddings).
+- `/v1/embeddings` takes content parts, vLLM's chat forms,
+  `mm_processor_kwargs` and `add_special_tokens`. See
+  [Chat messages and vLLM requests](docs/services.md#chat-messages-and-vllm-requests).
+- `server.embeddings_mmproj` and `--embeddings-mmproj` name the
+  EmbeddingGemma 2 projector, or `false` runs it text only.
+
 ### Changed
 
 - `fasth3` runs `--int8 linears`, which it refused. See
   [Faster clips with int8](docs/video.md#faster-clips-with-int8).
+- `gmlx init` and `--with-embeddings` set up EmbeddingGemma 2.
+  `embeddings: true` still picks `qwen3-embed-0.6b`.
+- `prompt_name` and `dimensions` work on EmbeddingGemma and
+  Qwen3-Embedding. See
+  [Search prompts and shorter vectors](docs/services.md#search-prompts-and-shorter-vectors).
+- Gemma 4 image and video input takes less memory.
+- With ffmpeg installed, the server reads video input with it, so chat and
+  embeddings models get the frames their reference code gets. OpenCV reads
+  video only when ffmpeg is missing.
+
+### Fixed
+
+- Gemma 4 audio input now matches the reference model. The audio encoder
+  saw one frame too many, and with a GGUF projector it also scaled its
+  attention queries wrongly.
+- A video request to a server with neither ffmpeg nor OpenCV gets a 400
+  that names both installs, not a 500.
+- A damaged WAV, FLAC or MP3 file in a request gets a 400, not a 500.
 
 ## [0.5.5] - 2026-11-08
 

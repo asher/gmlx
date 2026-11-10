@@ -37,7 +37,8 @@ brew install ffmpeg
 
 uv puts the `gmlx` command on your PATH and downloads a Python when your
 system has none. Voice, speech-to-text on the server, speech output in a
-format other than WAV or PCM, and video generation need ffmpeg.
+format other than WAV or PCM, and video generation need ffmpeg. Video input
+needs ffmpeg or the `video` extra.
 
 ## pip
 
@@ -67,7 +68,7 @@ runs the menu bar app and has the prompts of `gmlx chat`, `gmlx init` and
 | `tts` | Text-to-speech on the server, with mlx-audio, for Kokoro, Qwen3-TTS and other speech models |
 | `talk` | The voice client [`gmlx talk`](talk.md), with `stt` and `tts` |
 | `assistant` | MCP tools for the built-in [assistant](assistant.md) |
-| `video` | OpenCV, which video input to vision models and DeepSeek-VL image input need. SAM 3 and a few others use it. `gmlx video` does not |
+| `video` | OpenCV, which reads video input when ffmpeg is missing, and which DeepSeek-VL image input needs. SAM 3 and a few others use it. `gmlx video` does not |
 | `all` | Every extra above except `video` |
 
 To add or remove extras with uv, install again and list every extra you

@@ -401,7 +401,7 @@ def _preset_row(n: int, p: dict) -> str:
     """One numbered guidance row for an embedding preset (dim / ctx / size / blurb).
     Size is the default rung's on-disk GB - the quant follow-up refines it."""
     size = p["sizes"][p["default_quant"]]
-    return (f"    {n}) {p['alias']:<16} {p['dim']:>4}-dim  "
+    return (f"    {n}) {p['alias']:<21} {p['dim']:>4}-dim  "
             f"{_ctx_label(p['ctx']):>4} ctx  {size:>4.1f} GB   {p['blurb']}")
 
 
@@ -473,24 +473,33 @@ def _pick_quant(io: WizardIO, preset: dict, *, prefer=None) -> str:
 
 def _configure_embeddings(io: WizardIO, *, found, seeded: bool = False,
                           seed_model=None):
-    """Configure text embeddings: adopt an embedder GGUF already on disk, else pick
-    a tiered preset + quant (or a custom repo/path). Returns ``(value, quant_rung)`` -
-    ``value`` is the config string (hf: ref / repo id / path) or ``None`` if
-    skipped; ``quant_rung`` is the chosen rung (so the reranker can match it) or
-    ``None`` for a custom / adopted pick."""
-    io.note("\ntext embeddings (POST /v1/embeddings)")
+    """Configure embeddings: adopt an embedder GGUF already on disk, else pick
+    a tiered preset + quant (or a custom repo/path). Returns ``(value, quant_rung,
+    mmproj)`` - ``value`` is the config string (hf: ref / repo id / path) or
+    ``None`` if skipped; ``quant_rung`` is the chosen rung (so the reranker can
+    match it) or ``None`` for a custom / adopted pick; ``mmproj`` is the
+    ``server.embeddings_mmproj`` value, None to leave it out."""
+    io.note("\nembeddings (POST /v1/embeddings)")
     io.note("  a local RAG embedder - vector search / retrieval for Open WebUI "
             "and other clients.")
     adopt = _offer_found(io, found, "embedder")
     if adopt is not None:
-        return adopt, None
-    if not io.yesno("Configure text embeddings?", default=seeded):
-        return None, None
+        found_arch = next((c.arch for c in found if c.path == adopt), None)
+        mmproj = (discovery.embedder_mmproj_beside(adopt)
+                  if found_arch == "gemma-embedding2" else None)
+        return adopt, None, mmproj
+    if not io.yesno("Configure embeddings?", default=seeded):
+        return None, None, None
     pick = _pick_embedding(io, default=seed_model or "1")
     if isinstance(pick, str):                   # custom HF repo id / local path
-        return pick, None
+        return pick, None, None
     rung = _pick_quant(io, pick)
-    return pick["quants"][rung], rung
+    mmproj = None
+    if pick.get("mmproj") and not io.yesno(
+            "  embed images, audio and video too? (adds a 1 GB projector)",
+            default=True):
+        mmproj = False
+    return pick["quants"][rung], rung, mmproj
 
 
 def _configure_rerank(io: WizardIO, *, found, embed_quant, seeded: bool = False,
@@ -653,7 +662,7 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
     found_emb, found_rerank = (
         discovery.find_retrieval_models(dirs, recursive=recursive)
         if dirs else ([], []))
-    emb_value, emb_quant = _configure_embeddings(
+    emb_value, emb_quant, emb_mmproj = _configure_embeddings(
         io, found=found_emb, seeded="embeddings" in svc,
         seed_model=svc.get("embeddings"))
     rerank_value = _configure_rerank(
@@ -709,7 +718,8 @@ def run_wizard(*, default_out, io: WizardIO | None = None,
         models, model_dirs=dirs, hf_cache=hf_cache, disk_cache=disk_cache,
         disk_cache_gb=disk_cache_gb,
         stt=svc_values["stt"], tts=svc_values["tts"],
-        embeddings=emb_value, rerank=rerank_value, default_model=default_model,
+        embeddings=emb_value, embeddings_mmproj=emb_mmproj,
+        rerank=rerank_value, default_model=default_model,
         aliases=aliases, ttl_s=ttl_s, token_queue_timeout_s=timeout_s,
         talk=talk_value, port=seeds.port)
     io.note("\n----- config preview -----")

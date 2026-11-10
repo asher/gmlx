@@ -541,8 +541,9 @@ def test_unsupported_model_type_names_the_supported_ones(tmp_path, model_type):
     msg = ei.value.reason
     assert repr(model_type) in msg and str(p) not in msg
     assert msg.startswith(f"model_type {model_type!r} is not a supported "
-                          "embeddings model. Supported: EmbeddingGemma, BERT, "
-                          "XLM-RoBERTa, ModernBERT and Qwen3-Embedding.")
+                          "embeddings model. Supported: EmbeddingGemma, "
+                          "EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT and "
+                          "Qwen3-Embedding.")
     # A Qwen model type points at the Qwen3-Embedding paths.
     assert ("qwen3-embed-0.6b" in msg) == model_type.startswith("qwen")
     assert set(checkpoint.FAMILIES) == set(checkpoint.MODEL_TYPES)
@@ -570,8 +571,8 @@ def test_gemma3_causal_lm_is_not_an_encoder(tmp_path, cpu):
             "this gemma3_text checkpoint sets no use_bidirectional_attention "
             "and lists no sentence-transformers Dense module, so it is a "
             "Gemma 3 causal LM, not EmbeddingGemma. Supported: "
-            "EmbeddingGemma, BERT, XLM-RoBERTa, ModernBERT and "
-            "Qwen3-Embedding. For EmbeddingGemma, set server.embeddings to "
+            "EmbeddingGemma, EmbeddingGemma 2, BERT, XLM-RoBERTa, ModernBERT "
+            "and Qwen3-Embedding. For EmbeddingGemma, set server.embeddings to "
             "the embeddinggemma alias, the embeddinggemma-gguf GGUF alias, or "
             "an EmbeddingGemma safetensors checkpoint such as "
             "mlx-community/embeddinggemma-300m-8bit.")
@@ -593,8 +594,8 @@ def test_qwen3_causal_lm_is_not_an_encoder(tmp_path, cpu):
     assert ei.value.reason == (
         "this qwen3 checkpoint lists no sentence-transformers Pooling module "
         "and names no Qwen3-Embedding model, so it is a Qwen3 causal LM, not "
-        "Qwen3-Embedding. Supported: EmbeddingGemma, BERT, XLM-RoBERTa, "
-        "ModernBERT and Qwen3-Embedding. For Qwen3-Embedding, set "
+        "Qwen3-Embedding. Supported: EmbeddingGemma, EmbeddingGemma 2, BERT, "
+        "XLM-RoBERTa, ModernBERT and Qwen3-Embedding. For Qwen3-Embedding, set "
         "server.embeddings to the qwen3-embed-0.6b, qwen3-embed-4b or "
         "qwen3-embed-8b GGUF alias, or to a Qwen3-Embedding safetensors "
         "checkpoint such as mlx-community/Qwen3-Embedding-0.6B-8bit.")
@@ -1023,6 +1024,23 @@ _GUARD = textwrap.dedent("""
     out = model(mx.array([[1, 2, 3]]))
     widths["gemma-embedding"] = int(out.text_embeds.shape[-1])
 
+    arch = "gemma-embedding2"
+    meta = {"general.architecture": arch, f"{arch}.context_length": 64,
+            f"{arch}.embedding_length": 64, f"{arch}.feed_forward_length": 96,
+            f"{arch}.block_count": 2, f"{arch}.attention.head_count": 2,
+            f"{arch}.attention.head_count_kv": [1, 1],
+            f"{arch}.attention.key_length": 32,
+            f"{arch}.attention.key_length_swa": 16,
+            f"{arch}.attention.layer_norm_rms_epsilon": 1e-6,
+            f"{arch}.attention.sliding_window": 8,
+            f"{arch}.attention.sliding_window_pattern": [True, False],
+            f"{arch}.embedding_length_per_layer_input": 16,
+            f"{arch}.embedding_length_out": 48,
+            "tokenizer.ggml.tokens": ["a"] * 64}
+    model, _ = loader.build_model(synthesize_config(meta, tensor_shapes={}))
+    out = model(mx.array([[1, 2, 3]]))
+    widths["gemma-embedding2"] = int(out.text_embeds.shape[-1])
+
     print(json.dumps({"attempts": attempts, "widths": widths,
                       "loaded": sorted(m for m in sys.modules
                                        if m.split(".")[0] in stock)}))
@@ -1042,7 +1060,8 @@ def test_no_gmlx_entry_point_imports_a_stock_package(tmp_path):
     assert got["attempts"] == [] and got["loaded"] == []
     assert got["widths"] == {"bert": 64, "xlm-roberta": 64, "modernbert": 64,
                              "gemma3_text": 64, "qwen3": 64,
-                             "gemma-embedding": 64}
+                             "gemma-embedding": 64,
+                             "gemma-embedding2": 48}
 
 
 def test_pyproject_does_not_list_mlx_embeddings():

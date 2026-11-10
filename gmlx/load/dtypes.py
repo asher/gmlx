@@ -62,7 +62,9 @@ _SHORT_NAME = {mx.bfloat16: "bf16", mx.float16: "fp16", mx.float32: "fp32"}
 # gemma_embedding is the EmbeddingGemma GGUF. The safetensors build has the
 # model type gemma3_text, which every Gemma 3 chat GGUF also gets, so the
 # encoder loader applies the rule to it (models/embedders/checkpoint.py).
-NO_FLOAT16_MODEL_TYPES = frozenset({"gemma_embedding"})
+# gemma_embedding2 is the EmbeddingGemma 2 GGUF, whose card rules out float16
+# too.
+NO_FLOAT16_MODEL_TYPES = frozenset({"gemma_embedding", "gemma_embedding2"})
 
 # Norm weights. GGUF files store them F32. "auto" keeps them float32 for
 # the model types below and casts them to the activation dtype for the rest;

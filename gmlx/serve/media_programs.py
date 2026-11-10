@@ -83,12 +83,11 @@ def _run(argv: list[str], data: bytes | None) -> subprocess.CompletedProcess[byt
 _STDERR_KEEP = 64 << 10
 
 
-def _run_bounded(argv: list[str], data: bytes | None,
-                 limit: int) -> tuple[int, bytearray, bytes] | None:
-    """Run ``argv`` with ``data`` on its input, and give its exit code, its
-    output and the start of its error output. When the output passes
-    ``limit`` bytes, the program is stopped and the result is None, so a
-    small input that decodes to a large output never fills the memory."""
+def _run_reading(argv: list[str], data: bytes | None, read) -> tuple[int, bool, bytes]:
+    """Run ``argv`` with ``data`` on its input while ``read(fd)`` reads its
+    output. ``read`` returns True to stop the program, when the output
+    passes what the caller takes. Gives the exit code, whether it was
+    stopped, and the start of the error output."""
     proc = subprocess.Popen(
         argv, stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -112,14 +111,9 @@ def _run_bounded(argv: list[str], data: bytes | None,
         helpers.append(threading.Thread(target=feed, daemon=True))
     for t in helpers:
         t.start()
-    out = bytearray()
     over = False
     try:
-        while chunk := os.read(proc.stdout.fileno(), 1 << 20):
-            out += chunk
-            if len(out) > limit:
-                over = True
-                break
+        over = read(proc.stdout.fileno())
     except BaseException:
         proc.kill()
         raise
@@ -131,9 +125,54 @@ def _run_bounded(argv: list[str], data: bytes | None,
             t.join()
         proc.stdout.close()
         proc.stderr.close()
+    return proc.returncode, over, bytes(errors)
+
+
+def _run_bounded(argv: list[str], data: bytes | None, limit: int,
+                 keep: bool = False) -> tuple[int, bytearray, bytes] | None:
+    """Run ``argv`` with ``data`` on its input, and give its exit code, its
+    output and the start of its error output. When the output passes
+    ``limit`` bytes, the program is stopped and the result is None, so a
+    small input that decodes to a large output never fills the memory.
+    With ``keep``, the result is then the first ``limit`` bytes, as from a
+    program that stopped there."""
+    out = bytearray()
+
+    def read(fd: int) -> bool:
+        while chunk := os.read(fd, 1 << 20):
+            out.extend(chunk)
+            if len(out) > limit:
+                return True
+        return False
+
+    code, over, errors = _run_reading(argv, data, read)
     if over:
+        if keep:
+            return 0, out[:limit], errors
         return None
-    return proc.returncode, out, bytes(errors)
+    return code, out, errors
+
+
+def _run_into(argv: list[str], buffer) -> tuple[int, int, bytes] | None:
+    """Run ``argv`` with no input and read its output into ``buffer``, such
+    as a numpy array's memory, with no copy. Gives the exit code, the bytes
+    written and the start of the error output. When the output passes the
+    buffer, the program is stopped and the result is None."""
+    view = memoryview(buffer).cast("B")
+    filled = 0
+
+    def read(fd: int) -> bool:
+        nonlocal filled
+        while filled < len(view):
+            # macOS refuses a read of 2 GiB or more.
+            n = os.readv(fd, [view[filled:filled + (1 << 30)]])
+            if n == 0:
+                return False
+            filled += n
+        return bool(os.read(fd, 1))
+
+    code, over, errors = _run_reading(argv, None, read)
+    return None if over else (code, filled, errors)
 
 
 def _limit_seconds(rate: int, channels: int) -> str:
@@ -146,7 +185,7 @@ def _limit_seconds(rate: int, channels: int) -> str:
 
 
 def decode(source, field: str = "audio", sample_rate: int | None = None,
-           nchannels: int | None = None) -> tuple:
+           nchannels: int | None = None, max_seconds: float | None = None) -> tuple:
     """Decode audio bytes or an audio file to 16-bit samples at
     ``sample_rate`` with ``nchannels`` channels, each the one that ffprobe
     reads when not given, and give the samples, the rate and the channel
@@ -155,7 +194,8 @@ def decode(source, field: str = "audio", sample_rate: int | None = None,
     :data:`~.patches.media_gate.AUDIO_MAX_SAMPLES` samples at the output
     rate and channel count, or at a sample rate over
     :data:`~.patches.media_gate.AUDIO_MAX_RATE`, is refused, and the decode
-    stops at that count."""
+    stops at that count. With ``max_seconds``, the decode stops after that
+    many seconds instead, and no clip is refused for its length."""
     import numpy as np
 
     from .patches import media_gate as mg
@@ -185,18 +225,28 @@ def decode(source, field: str = "audio", sample_rate: int | None = None,
         seconds = float(streams[0].get("duration", "nan"))
     except (TypeError, ValueError):
         seconds = math.nan
-    if seconds * rate * channels > mg.AUDIO_MAX_SAMPLES:
-        raise mg.audio_too_long(field, rate, channels)
-    out = _run_bounded([ffmpeg, "-v", "error", "-i", name, "-t", _limit_seconds(rate, channels),
+    frames = None
+    if max_seconds is not None and math.ceil(max_seconds * rate) * channels \
+            <= mg.AUDIO_MAX_SAMPLES:
+        frames = math.ceil(max_seconds * rate)
+        limit_t, limit = str(max_seconds), 2 * frames * channels
+    else:
+        if seconds * rate * channels > mg.AUDIO_MAX_SAMPLES:
+            raise mg.audio_too_long(field, rate, channels)
+        limit_t, limit = _limit_seconds(rate, channels), 2 * mg.AUDIO_MAX_SAMPLES
+    out = _run_bounded([ffmpeg, "-v", "error", "-i", name, "-t", limit_t,
                         "-f", "s16le", "-acodec", "pcm_s16le", "-ar", str(rate),
                         "-ac", str(channels), "pipe:1"],
-                       data, 2 * mg.AUDIO_MAX_SAMPLES)
+                       data, limit, keep=frames is not None)
     if out is None:
         raise mg.audio_too_long(field, rate, channels)
     code, pcm, errors = out
     if code != 0:
         raise RuntimeError(f"ffmpeg decoding failed: {errors.decode(errors='replace')}")
-    return np.frombuffer(pcm, dtype=np.int16), rate, channels
+    samples = np.frombuffer(pcm, dtype=np.int16)
+    if frames is not None:
+        samples = samples[:frames * channels]
+    return samples, rate, channels
 
 
 def decode_mono(path: str, rate: int, field: str = "audio"):
