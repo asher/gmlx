@@ -35,8 +35,9 @@ TRANSLATE_FROM = "Please translate the following spoken {source} into {target} t
 TRANSLATE_ANY = "Please translate the following speech into {target} text."
 TARGET = "English"
 
-# ISO 639-1 codes of the languages the card lists, to the names its
-# prompts take.
+# ISO 639-1 codes of the languages the family's cards list, to the names
+# their prompts take. A model takes the ones its GGUF lists
+# (``general.languages``).
 LANGUAGES = {
     "ar": "Arabic", "da": "Danish", "de": "German", "el": "Greek",
     "en": "English", "es": "Spanish", "fi": "Finnish", "fr": "French",
@@ -45,7 +46,8 @@ LANGUAGES = {
     "pt": "Portuguese", "ru": "Russian", "sv": "Swedish", "th": "Thai",
     "tr": "Turkish", "vi": "Vietnamese", "zh": "Chinese",
 }
-_NAMES = {name.lower(): name for name in LANGUAGES.values()}
+_CODES = {name.lower(): code for code, name in LANGUAGES.items()}
+_LISTED_MEMO: dict = {}
 
 # Tokens the chat template and the system prompt add around the clip.
 TEMPLATE_TOKENS = 48
@@ -58,24 +60,50 @@ LEAST_TOKENS_PER_SECOND = 4
 SILENCE_PEAK = 1e-3
 
 
-def language_name(value: str) -> str | None:
+def listed_languages(path) -> tuple | None:
+    """The codes of :data:`LANGUAGES` that the GGUF at ``path`` lists, or
+    None for a file that lists none."""
+    import os
+
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError):
+        return None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if key not in _LISTED_MEMO:
+        from gmlx.load.headerscan import scan_gguf
+
+        try:
+            listed = scan_gguf(str(path), include_tensors=False).kv.get(
+                "general.languages")
+        except Exception:  # noqa: BLE001  not a GGUF
+            listed = None
+        codes = tuple(sorted(
+            {str(c).lower() for c in listed or ()} & set(LANGUAGES)))
+        _LISTED_MEMO[key] = codes or None
+    return _LISTED_MEMO[key]
+
+
+def language_name(value: str, listed=None) -> str | None:
     """The English name of a request's ``language``: an ISO 639-1 code or
-    a name. None for an empty value. Raises STTRequestError."""
+    a name. ``listed`` holds the codes the model takes, or None for all
+    of :data:`LANGUAGES`. None for an empty value. Raises
+    STTRequestError."""
     v = (value or "").strip().lower()
     if not v:
         return None
-    code = v.split("-")[0].split("_")[0]
-    if code in LANGUAGES:
+    takes = sorted(LANGUAGES if listed is None else listed)
+    code = _CODES.get(v, v.split("-")[0].split("_")[0])
+    if code in takes:
         return LANGUAGES[code]
-    if v in _NAMES:
-        return _NAMES[v]
     raise STTRequestError(
-        400, f"language {value!r} is not one this model's card lists. Send "
-             f"one of: {', '.join(sorted(LANGUAGES))}, or leave it out")
+        400, f"language {value!r} is not one this model lists. Send one "
+             f"of: {', '.join(takes)}, or leave it out")
 
 
-def _fields(form, task: str) -> dict:
-    """The request's form fields, checked. Raises STTRequestError."""
+def _fields(form, task: str, listed=None) -> dict:
+    """The request's form fields, checked. ``listed`` holds the language
+    codes the model takes. Raises STTRequestError."""
     fmt = str(form.get("response_format") or "json").strip().lower()
     if fmt not in FORMATS:
         raise STTRequestError(
@@ -101,7 +129,8 @@ def _fields(form, task: str) -> dict:
     if not 0.0 <= temperature <= 2.0:
         raise STTRequestError(400, "temperature must be between 0 and 2")
     return {"format": fmt, "temperature": temperature,
-            "language": language_name(str(form.get("language") or ""))}
+            "language": language_name(str(form.get("language") or ""),
+                                      listed)}
 
 
 def instruction(task: str, language: str | None) -> str:
@@ -202,7 +231,18 @@ async def answer(http_request, form, model_id: str, audio_bytes: bytes,
 
     if not audio_bytes:
         raise STTRequestError(400, "multipart field 'file' is required")
-    fields = _fields(form, task)
+    fields = _fields(form, task, _served_languages(model_id))
     audio = await asyncio.to_thread(decode, audio_bytes, filename)
     result = await run(http_request, model_id, audio, task, fields)
     return format_result(result, fields)
+
+
+def _served_languages(model_id: str) -> tuple | None:
+    from . import bridge_vlm as serving
+
+    try:
+        _, spec = serving.resolve_request_model(
+            model_id, profile_field=serving.get_request_profile())
+    except Exception:  # noqa: BLE001  the chat route answers the error
+        return None
+    return listed_languages(getattr(spec, "path", None))

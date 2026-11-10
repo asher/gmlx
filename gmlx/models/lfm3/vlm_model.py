@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
 """LFM3-VL and LFM3-Omni with image and video input (mmproj projector
-``lfm3vl``).
+``lfm3vl``), and LFM3-Audio, which has the speech encoder alone
+(``lfm3a``).
 
 The text half is the class the text-only path uses
 (:mod:`gmlx.models.lfm3.model`), in the ``language_model`` shape mlx-vlm's
@@ -39,7 +40,7 @@ from .vision import (CLIP_PATCHES, MultiModalProjector, VisionConfig,
 
 TextConfig = ModelArgs
 
-MODEL_TYPES = ("lfm3_omni", "lfm3_vl")
+MODEL_TYPES = ("lfm3_omni", "lfm3_vl", "lfm3_audio")
 
 __all__ = ["AudioConfig", "LanguageModel", "Model", "ModelConfig",
            "TextConfig", "VisionConfig"]
@@ -52,12 +53,14 @@ TOWER_FP32_ENV = "GMLX_LFM3_TOWER_FP32"
 @dataclass
 class ModelConfig(BaseModelConfig):
     text_config: TextConfig = None  # pyright: ignore[reportAssignmentType]
-    vision_config: VisionConfig = field(default_factory=VisionConfig)
+    # None on a model with the speech encoder alone (``lfm3_audio``).
+    vision_config: Optional[VisionConfig] = field(
+        default_factory=VisionConfig)
     # The speech encoder of a model that hears, else None.
     audio_config: Optional[AudioConfig] = None
     model_type: str = "lfm3_omni"
-    image_token_id: int = 125030
-    video_token_id: int = 125029
+    image_token_id: Optional[int] = 125030
+    video_token_id: Optional[int] = 125029
     audio_token_id: Optional[int] = None
     image_token_index: Optional[int] = None
     vocab_size: int = 128000
@@ -66,6 +69,8 @@ class ModelConfig(BaseModelConfig):
     def __post_init__(self):
         if self.image_token_index is None:
             self.image_token_index = self.image_token_id
+        if self.model_type == "lfm3_audio":
+            self.vision_config = None
         # An absent encoder arrives as an empty dict from the loader.
         if not self.audio_config:
             self.audio_config = None
@@ -96,10 +101,12 @@ class LanguageModel(TextModel):
         return LanguageModelOutput(logits=self.head(h))
 
 
-def scatter_features(token_id: int, features: mx.array,
+def scatter_features(token_id: Optional[int], features: mx.array,
                      inputs_embeds: mx.array, input_ids: mx.array,
                      what: str) -> mx.array:
     """Put ``features`` on the rows of ``token_id``, in order."""
+    if token_id is None:
+        raise ValueError(f"this LFM3 model has no {what} token")
     positions = input_ids == token_id
     slots = int(mx.sum(positions).item())
     if slots != features.shape[0]:
@@ -120,14 +127,17 @@ class Model(nn.Module):
         super().__init__()
         self.config = config
         self.model_type = config.model_type
-        self.vision_tower = VisionModel(config.vision_config)
-        self.multi_modal_projector = MultiModalProjector(config.vision_config)
+        fp32 = os.environ.get(TOWER_FP32_ENV) == "1"
+        if config.vision_config is not None:
+            self.vision_tower = VisionModel(config.vision_config)
+            self.multi_modal_projector = MultiModalProjector(
+                config.vision_config)
+            if fp32:
+                self.vision_tower.stream_dtype = mx.float32
         if config.audio_config is not None:
             self.audio_encoder = AudioEncoder(config.audio_config)
             self.audio_projector = AudioProjector(config.audio_config)
-        if os.environ.get(TOWER_FP32_ENV) == "1":
-            self.vision_tower.stream_dtype = mx.float32
-            if config.audio_config is not None:
+            if fp32:
                 self.audio_encoder.stream_dtype = mx.float32
         # The serve engine runs the language model alone and reads the
         # media ids off its config (gmlx.cache.apc_media).
@@ -143,6 +153,8 @@ class Model(nn.Module):
         their projected features, concatenated in the same order. Each
         image runs on its own, and a clip a few slices at a time. Each
         pass is evaluated before the next starts."""
+        if getattr(self, "vision_tower", None) is None:
+            raise ValueError("this LFM3 model has no vision tower")
         feats = []
         start = 0
         rows = [tuple(int(v) for v in row) for row in
@@ -205,6 +217,8 @@ class Model(nn.Module):
                 "audio")
         if pixel_values is None and videos is None:
             return InputEmbeddingsFeatures(inputs_embeds=embeds)
+        if getattr(self, "vision_tower", None) is None:
+            raise ValueError("this LFM3 model has no vision tower")
         if pixel_values is not None:
             features = kwargs.get("cached_image_features")
             if features is None:

@@ -791,3 +791,165 @@ def test_the_serve_prefix_cache_counts_the_audio_token_as_media():
     ids = ar.BatchGenerator._apc_media_token_ids(
         SimpleNamespace(model=model.language_model))
     assert isinstance(ids, CausalMedia) and ids == {29, 30, 33}
+
+
+# -- LFM3-Audio: the speech encoder alone --------------------------------------
+
+_AUDIO_ONLY_META = {k: v for k, v in _META.items()
+                    if not k.startswith("clip.vision.")}
+
+
+def _audio_only_shapes():
+    return {k: v for k, v in _mmproj_shapes().items()
+            if k.startswith(("a.", "mm.a."))}
+
+
+def _audio_only_synth(llm=None, meta=None):
+    from gmlx.load import vlm
+
+    return vlm._synthesize_lfm3_vlm_config(
+        {"hidden_size": 24}, meta or _AUDIO_ONLY_META, llm or _LLM_META,
+        _audio_only_shapes(), "lfm3_audio")
+
+
+def test_a_projector_with_the_speech_encoder_alone_is_lfm3_audio():
+    from gmlx.load import vlm
+
+    assert vlm.resolve_vlm_model_type("lfm3", _AUDIO_ONLY_META) == "lfm3_audio"
+    assert vlm.resolve_vlm_model_type("lfm3", _META) == "lfm3_omni"
+    with pytest.raises(vlm.UnsupportedVLMError, match="'lfm3a' on LLM arch"):
+        vlm.resolve_vlm_model_type("gemma4", _AUDIO_ONLY_META)
+
+
+def test_the_audio_only_config_has_no_vision_side():
+    cfg = _audio_only_synth()
+    assert cfg["model_type"] == "lfm3_audio" and cfg["vision_config"] is None
+    assert cfg["audio_config"] == _synth()["audio_config"]
+    assert (cfg["audio_token_id"], cfg["image_token_id"],
+            cfg["video_token_id"]) == (33, 30, 29)
+    # A tokenizer without the image and video tokens leaves their ids out.
+    bare = _audio_only_synth(llm={"tokenizer.ggml.tokens":
+                                  ["<unk>"] * 33 + ["<|audio|>"]})
+    assert (bare["audio_token_id"], bare["image_token_id"],
+            bare["video_token_id"]) == (33, None, None)
+    with pytest.raises(ValueError, match="no audio encoder"):
+        _audio_only_synth(meta={**_AUDIO_ONLY_META,
+                                "clip.has_audio_encoder": False})
+
+
+def test_the_audio_only_remap_needs_no_vision_tensor():
+    from gmlx.load import vlm
+
+    arrays = {k: mx.zeros(tuple(reversed(s)), dtype=mx.float32)
+              for k, s in _audio_only_shapes().items()}
+    out, skipped, kq = vlm.remap_vision_arrays(arrays, "lfm3_audio",
+                                               with_audio=True)
+    assert skipped == ["a.gen.code.mask_embd"] and not kq
+    config = AudioConfig.from_dict(_audio_only_synth()["audio_config"])
+    want = {f"audio_encoder.{k}": v.shape
+            for k, v in tree_flatten(AudioEncoder(config).parameters())}
+    want.update({f"audio_projector.{k}": v.shape for k, v in
+                 tree_flatten(AudioProjector(config).parameters())})
+    assert {k: v.shape for k, v in out.items()} == want
+
+
+def test_the_audio_only_type_has_its_load_rows():
+    from gmlx._vendor.mlx_vlm import prompt_utils
+    from gmlx.load.loader import fp32_keep_for
+    from gmlx.models import owned
+
+    keep = set(fp32_keep_for("lfm3_audio"))
+    assert keep == set(fp32_keep_for("lfm3_omni")) - {".spatial_conv.weight"}
+    assert owned.OWNED_VLM_MODELS["lfm3_audio"] == \
+        owned.OWNED_VLM_MODELS["lfm3_omni"]
+    assert prompt_utils.MODEL_CONFIG["lfm3_audio"] == \
+        prompt_utils.MODEL_CONFIG["lfm3_omni"]
+
+
+def _audio_only_processor():
+    from gmlx.load import vlm
+
+    return vlm._synthesize_lfm3_processor(_tok(), _AUDIO_ONLY_META,
+                                          "lfm3_audio")
+
+
+def test_the_audio_only_processor_writes_bare_audio_tokens():
+    proc = _audio_only_processor()
+    assert proc.image_processor is None and proc.video_processor is None
+    out = proc(audio=[_clip(8333), _clip(1680)],
+               text=["<|audio|> hi <|audio|>"])
+    assert np.array(out["input_ids"])[0].tolist() == (
+        [33] * 7 + [1] + [33] * 2)
+    assert np.array(out["feature_attention_mask"]).sum(-1).tolist() == [51, 9]
+    assert "input_features" in proc.model_input_names
+
+
+def test_the_audio_only_processor_refuses_images_and_videos():
+    from PIL import Image
+
+    proc = _audio_only_processor()
+    with pytest.raises(ValueError, match="no vision tower"):
+        proc(images=[Image.new("RGB", (64, 64))], text=["<|image|>"])
+    with pytest.raises(ValueError, match="no vision tower"):
+        proc(videos=[_frames()], video_metadata=[_video_meta()],
+             text=["<|video|>"])
+
+
+def test_the_input_pipeline_runs_the_audio_only_processor():
+    from gmlx._vendor.mlx_vlm.utils import prepare_inputs
+
+    out = prepare_inputs(_audio_only_processor(), prompts="<|audio|> hi",
+                         audio=[_clip(8333)])
+    assert (np.array(out["input_ids"]) == 33).sum() == 7
+    assert tuple(out["input_features"].shape) == (1, 128, 51)
+
+
+def _audio_only_container():
+    from gmlx.models.lfm3.model import CONV as T_CONV
+    from gmlx.models.lfm3.model import FULL as T_FULL
+    from gmlx.models.lfm3.model import SLIDING, ModelArgs
+    from gmlx.models.lfm3.vlm_model import Model, ModelConfig
+
+    text = ModelArgs(
+        model_type="lfm3", hidden_size=24, num_hidden_layers=3,
+        intermediate_size=32, num_attention_heads=4, num_key_value_heads=2,
+        head_dim=6, vocab_size=40, layer_types=[T_CONV, T_FULL, SLIDING],
+        sliding_window=8)
+    config = ModelConfig(
+        text_config=text, vision_config=None, model_type="lfm3_audio",
+        audio_config=dict(CONFIG),  # pyright: ignore[reportArgumentType]
+        image_token_id=30, video_token_id=29, audio_token_id=33,
+        vocab_size=40)
+    model = Model(config)
+    mx.random.seed(0)
+    model.update(tree_unflatten([
+        (k, mx.random.normal(v.shape) * 0.1)
+        for k, v in tree_flatten(model.parameters())]))
+    return model
+
+
+def test_the_audio_only_container_has_no_vision_tower():
+    model = _audio_only_container()
+    names = [k for k, _ in tree_flatten(model.parameters())]
+    assert not any(k.startswith(("vision_tower", "multi_modal_projector"))
+                   for k in names)
+    assert model.config.vision_config is None
+    features, mask = _spectrograms()
+    ids = mx.array([[1, 33, 33, 33, 2, 33, 3]])
+    logits = model(ids, input_features=mx.array(features),
+                   feature_attention_mask=mask).logits
+    assert logits.shape == (1, 7, 40)
+    assert model.config.text_config.media_token_ids == [33]
+    with pytest.raises(ValueError, match="no vision tower"):
+        model.get_input_embeddings(
+            mx.array([[1, 30, 2]]), mx.zeros((4, 48)),
+            image_grid_thw=[(1, 2, 2)])
+    with pytest.raises(ValueError, match="no vision tower"):
+        model.vision_features(mx.zeros((4, 48)), [(1, 2, 2)])
+
+
+def test_the_default_config_keeps_its_vision_tower():
+    from gmlx.models.lfm3.vlm_model import ModelConfig
+
+    assert ModelConfig().vision_config is not None
+    assert ModelConfig(model_type="lfm3_audio").vision_config is None

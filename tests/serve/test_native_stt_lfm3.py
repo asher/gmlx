@@ -46,7 +46,9 @@ def files(tmp_path, monkeypatch):
     audio projector (`gemma`) and a Nemotron pairing (`nemotron`)."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setattr(disc, "_HEADER_DISK", None)
-    lfm = write_lfm3_header(tmp_path / "lfm3.gguf", templates=("tts",))
+    lfm = write_lfm3_header(tmp_path / "lfm3.gguf", templates=("tts",),
+                            languages=("en", "de", "ja", "pt", "zh", "fr",
+                                       "es", "tlh"))
     hears = write_projector_header(tmp_path / "mmproj-omni.gguf", vision=True,
                                    audio=True, speech=True)
     sees = write_projector_header(tmp_path / "mmproj-vl.gguf", vision=True)
@@ -202,6 +204,27 @@ def test_a_language_is_a_code_a_locale_or_a_name():
     with pytest.raises(STTRequestError, match="leave it out") as e:
         lfm3.language_name("xx")
     assert e.value.status_code == 400
+
+
+def test_a_model_takes_the_languages_its_gguf_lists(files, tmp_path):
+    listed = lfm3.listed_languages(files["omni"][0])
+    assert listed == ("de", "en", "es", "fr", "ja", "pt", "zh")
+    assert lfm3.language_name("de", listed) == "German"
+    assert lfm3.language_name("Japanese", listed) == "Japanese"
+    for value in ("ru", "Russian"):
+        with pytest.raises(STTRequestError) as e:
+            lfm3.language_name(value, listed)
+        assert "Send one of: de, en, es, fr, ja, pt, zh, or" in str(e.value)
+    assert _fields(language="ru")["language"] == "Russian"
+    with pytest.raises(STTRequestError, match="not one this model lists"):
+        lfm3._fields(_form(language="ru"), "transcribe", listed)
+
+
+def test_a_file_that_lists_no_language_limits_nothing(files, tmp_path):
+    assert lfm3.listed_languages(files["gemma"][0]) is None
+    assert lfm3.listed_languages(tmp_path / "absent.gguf") is None
+    assert lfm3.listed_languages(None) is None
+    assert lfm3.language_name("ru", None) == "Russian"
 
 
 def test_every_listed_language_has_one_name():
@@ -380,6 +403,13 @@ def test_the_transcription_route_reaches_the_lfm3_adapter(client, model):
     assert chat.calls[0].messages[0].content == "Perform ASR."
 
 
+def test_the_route_names_a_listed_language_in_the_prompt(client):
+    post, chat = client
+    r = post("/v1/audio/transcriptions", language="pt-BR")
+    assert r.status_code == 200
+    assert chat.calls[0].messages[0].content == "Perform ASR in Portuguese."
+
+
 def test_the_translation_route_reaches_the_lfm3_adapter(client):
     post, chat = client
     r = post("/v1/audio/translations", model="whisper-1",
@@ -395,6 +425,9 @@ def test_the_routes_refuse_what_the_model_cannot_give(client):
     assert r.status_code == 400 and "no word times" in r.text
     r = post("/v1/audio/transcriptions", language="xx")
     assert r.status_code == 400 and "leave it out" in r.text
+    # The model's GGUF does not list Russian.
+    r = post("/v1/audio/transcriptions", language="ru")
+    assert r.status_code == 400 and "not one this model lists" in r.text
     r = post("/v1/audio/transcriptions", model="gemma")
     assert r.status_code == 400 and "takes no audio input" in r.text
     assert not chat.calls

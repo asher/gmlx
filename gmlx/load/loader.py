@@ -1017,6 +1017,8 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
                   ".downsample.conv_", ".downsample.lin_mid.",
                   ".downsample.lin_end."),
     "lfm3_vl": (".conv.kernel", ".spatial_conv.weight"),
+    "lfm3_audio": (".conv.kernel", ".downsample.conv_",
+                   ".downsample.lin_mid.", ".downsample.lin_end."),
     # ricursive: the value-residual logit is F32 on the wire, one per layer.
     # Kept in step with the model class's cast_predicate.
     "ricursive": (".vres_lambda",),

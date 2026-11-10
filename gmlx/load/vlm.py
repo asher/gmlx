@@ -105,6 +105,14 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
                 "supported (only LFM3 text GGUFs, arch 'lfm3')")
         return ("lfm3_omni" if mm_meta.get("clip.has_audio_encoder")
                 else "lfm3_vl")
+    if proj is None and _mm(mm_meta, "clip.audio.projector_type") == "lfm3a":
+        # Liquid AI LFM3-Audio: the speech encoder and the speech
+        # generator of LFM3-Omni, with no vision tower.
+        if llm_arch != "lfm3":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'lfm3a' on LLM arch {llm_arch!r} is not "
+                "supported (only LFM3 text GGUFs, arch 'lfm3')")
+        return "lfm3_audio"
     if proj == "minimax_m3":
         # MiniMax-M3.1-Flash: a 2-D rope CLIP ViT, a per-patch GELU MLP and
         # a 2x2 merge MLP onto the minimax-m3 text tower
@@ -928,7 +936,9 @@ _GLM5NEXTV_TOP_MAP = {
 # LFM3-VL / LFM3-Omni (lfm3_vl / lfm3_omni): the transformers names of
 # Lfm3VlVisionModel and Lfm3VlMultiModalProjector, as llama.cpp's converter
 # maps them (gguf-py tensor_mapping, "lfm3vl").
-LFM3_VLM_TYPES = ("lfm3_omni", "lfm3_vl")
+LFM3_VLM_TYPES = ("lfm3_omni", "lfm3_vl", "lfm3_audio")
+# LFM3-Audio has the speech encoder alone.
+LFM3_AUDIO_ONLY = "lfm3_audio"
 _LFM3_VL_BLK_SUBMAP = {
     "ln1": "operator_norm",
     "ln2": "ffn_norm",
@@ -1612,6 +1622,8 @@ def _remap_float_arrays(
                     out[audio[0]] = audio[1]
                 continue
             out[f"vision_tower.layers.{m.group(1)}.{tgt}.{leaf}"] = arr
+        if model_type == LFM3_AUDIO_ONLY:
+            return out, skipped
         missing = [p for p in _LFM3_VL_PATCH if p not in arrays]
         if missing:
             raise ValueError(
@@ -2601,6 +2613,9 @@ def _synthesize_lfm3_vlm_config(
     from gmlx.models.lfm3.vision import CONV, FULL
 
     shapes = mm_shapes or {}
+    if model_type == LFM3_AUDIO_ONLY:
+        return _synthesize_lfm3_audio_only_config(
+            text_config, mm_meta, llm_meta, shapes)
     hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
     n_layers = _mm_int(mm_meta, "clip.vision.block_count")
     merge = _mm_int(mm_meta, "clip.vision.spatial_merge_size")
@@ -2674,6 +2689,34 @@ def _synthesize_lfm3_vlm_config(
             raise ValueError(f"the text GGUF has no {AUDIO_TOKEN} token")
         config["audio_token_id"] = token_id
     return config
+
+
+def _synthesize_lfm3_audio_only_config(text_config: dict, mm_meta: dict,
+                                       llm_meta: dict, shapes: dict) -> dict:
+    """LFM3-Audio config: the lfm3 text synth plus the speech encoder.
+    The image and video ids are the tokenizer's, when it has them, so
+    the head and the prefix cache know them. No prompt holds them."""
+    from gmlx.models.lfm3.processing import (AUDIO_TOKEN, IMAGE_TOKEN,
+                                             VIDEO_TOKEN)
+
+    if not mm_meta.get("clip.has_audio_encoder"):
+        raise ValueError("lfm3a: the mmproj has no audio encoder")
+    audio_id = _gguf_token_id(llm_meta, AUDIO_TOKEN)
+    if audio_id is None:
+        raise ValueError(f"the text GGUF has no {AUDIO_TOKEN} token")
+    image_id = _gguf_token_id(llm_meta, IMAGE_TOKEN)
+    return {
+        "model_type": LFM3_AUDIO_ONLY,
+        "text_config": text_config,
+        "vision_config": None,
+        "audio_config": _synthesize_lfm3_audio_config(
+            text_config, mm_meta, shapes),
+        "vocab_size": int(text_config.get("vocab_size", 128000)),
+        "image_token_id": image_id,
+        "image_token_index": image_id,
+        "video_token_id": _gguf_token_id(llm_meta, VIDEO_TOKEN),
+        "audio_token_id": audio_id,
+    }
 
 
 def _synthesize_lfm3_audio_config(text_config: dict, mm_meta: dict,
@@ -4603,6 +4646,13 @@ def _synthesize_lfm3_processor(tokenizer, mm_meta: dict, model_type: str):
         Lfm3ImageProcessor, Lfm3VideoProcessor, build_processor,
     )
 
+    if model_type == LFM3_AUDIO_ONLY:
+        from gmlx.models.lfm3.audio import AudioFeatureExtractor
+
+        return _attach_streaming_helpers(
+            build_processor(tokenizer, feature_extractor=AudioFeatureExtractor(
+                _mm_int(mm_meta, "clip.audio.num_mel_bins"))),
+            tokenizer)
     patch = _mm_int(mm_meta, "clip.vision.patch_size")
     merge = _mm_int(mm_meta, "clip.vision.spatial_merge_size")
     min_pixels = _mm_int(mm_meta, "clip.vision.image_min_pixels")

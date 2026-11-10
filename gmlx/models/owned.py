@@ -72,6 +72,7 @@ OWNED_VLM_MODELS = {
     "glm5_next": "gmlx.models.glm5_next.vlm_model",
     "lfm3_omni": "gmlx.models.lfm3.vlm_model",
     "lfm3_vl": "gmlx.models.lfm3.vlm_model",
+    "lfm3_audio": "gmlx.models.lfm3.vlm_model",
     "minicpmv4_6": "gmlx.models.minicpmv.vlm_model",
     "minicpmv4_7": "gmlx.models.minicpmv.vlm_model",
     "muse_glimmer": "gmlx.models.muse_glimmer.vlm_model",

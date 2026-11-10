@@ -293,9 +293,12 @@ def strip_template_spans(prompt: str) -> str:
     return prompt
 
 
-def audio_expansion(tokens: int) -> str:
-    """A clip's soft tokens between the vision markers, as a model with a
-    vision tower wraps them."""
+def audio_expansion(tokens: int, markers: bool = True) -> str:
+    """A clip's soft tokens. A model with a vision tower wraps them in
+    the vision markers. A model with the speech encoder alone writes them
+    bare."""
+    if not markers:
+        return AUDIO_TOKEN * tokens
     return VISION_START + AUDIO_TOKEN * tokens + VISION_END
 
 
@@ -332,11 +335,15 @@ def video_expansion(soft_tokens: int, timestamps: Sequence[float],
     return VISION_START + groups + VISION_END
 
 
-def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
-                    video_processor: Lfm3VideoProcessor,
+def build_processor(tokenizer,
+                    image_processor: Optional[Lfm3ImageProcessor] = None,
+                    video_processor: Optional[Lfm3VideoProcessor] = None,
                     feature_extractor=None):
     """``feature_extractor`` is the speech front end of a model with an
-    audio encoder (gmlx.models.lfm3.audio), or None."""
+    audio encoder (gmlx.models.lfm3.audio), or None. A model with the
+    speech encoder alone has no image and no video processor, and writes
+    a clip's tokens without markers."""
+    has_vision = image_processor is not None
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
@@ -344,8 +351,10 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
     from gmlx.upstream.single_bos_fix import KWARGS_REACH_TOKENIZER
 
     class Lfm3Processor(ProcessorMixin):
-        attributes = ["image_processor", "tokenizer"]
-        image_processor_class = "AutoImageProcessor"
+        attributes = (["image_processor", "tokenizer"] if has_vision
+                      else ["tokenizer"])
+        # transformers reads the parts from the ``_class`` names.
+        image_processor_class = "AutoImageProcessor" if has_vision else None
         tokenizer_class = "AutoTokenizer"
 
         image_token = IMAGE_TOKEN
@@ -381,6 +390,8 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
                 images = [images]
             if videos is not None and not isinstance(videos, (list, tuple)):
                 videos = [videos]
+            if (images or videos) and not has_vision:
+                raise ValueError("this LFM3 model has no vision tower")
             for name, token, media in (("images", IMAGE_TOKEN, images),
                                        ("videos", VIDEO_TOKEN, videos),
                                        ("audio clips", AUDIO_TOKEN, audio)):
@@ -428,7 +439,7 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
                     video_text.append(self._video_text(
                         grid, meta,
                         None if track is None else fe.tokens(track.size)))
-            audio_text = [audio_expansion(fe.tokens(clip.size))
+            audio_text = [audio_expansion(fe.tokens(clip.size), has_vision)
                           for clip in clips]
             text = self._expand(text, image_text, video_text, audio_text)
 
@@ -505,16 +516,20 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
 
         @property
         def model_input_names(self):
-            return list(dict.fromkeys(
-                list(self.tokenizer.model_input_names)
-                + list(self.image_processor.model_input_names)
-                + list(self.video_processor.model_input_names)))
+            names = list(self.tokenizer.model_input_names)
+            for part in (self.image_processor, self.video_processor,
+                         self.feature_extractor):
+                names += list(getattr(part, "model_input_names", ()))
+            return list(dict.fromkeys(names))
 
     # __call__ hands **kwargs to self.tokenizer (single_bos_fix).
     setattr(Lfm3Processor, KWARGS_REACH_TOKENIZER, True)
+    parts = {"image_processor": image_processor} if has_vision else {}
     processor = Lfm3Processor(
-        image_processor=image_processor, tokenizer=tokenizer,
-        chat_template=getattr(tokenizer, "chat_template", None))
+        tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None), **parts)
+    if not has_vision:
+        processor.image_processor = None
     processor.video_processor = video_processor
     processor.feature_extractor = feature_extractor
     return processor

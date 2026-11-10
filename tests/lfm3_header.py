@@ -23,9 +23,10 @@ SHIPPED_SLIDING = [i >= 4 and i % 4 == 0 for i in range(24)]
 def write_lfm3_header(path, *, context: int = 128000, templates=(),
                       causal: bool | None = None,
                       decision: str | None = None,
-                      shipped: bool = False) -> str:
+                      shipped: bool = False, languages=()) -> str:
     """Write the GGUF and return its path. ``templates`` are the names in
-    ``tokenizer.chat_templates``. ``causal`` and ``decision`` are the two
+    ``tokenizer.chat_templates``, and ``languages`` the codes in
+    ``general.languages``. ``causal`` and ``decision`` are the two
     keys a d1 decision model carries. ``shipped`` writes the geometry of
     the shipped 2B models (24 layers, 16 query and 4 KV heads, head dim
     128, window 256) in place of the tiny one."""
@@ -53,6 +54,8 @@ def write_lfm3_header(path, *, context: int = 128000, templates=(),
     w.add_array("tokenizer.ggml.tokens", ["t"] * 32)
     if templates:
         w.add_array("tokenizer.chat_templates", list(templates))
+    if languages:
+        w.add_array("general.languages", list(languages))
     if causal is not None:
         w.add_bool(f"{ARCH}.attention.causal", causal)
     if decision is not None:
