@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from queue import Empty as QueueEmpty
 from queue import Queue
 from threading import Event, Lock, Thread
-from typing import TYPE_CHECKING, Callable, Generator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Generator, List, Optional, Tuple
 
 import mlx.core as mx
 from fastapi import HTTPException
@@ -870,6 +870,10 @@ class StreamingToken:
     cached_tokens: int = 0
     token_count: int = 1
     emitted_at: Optional[float] = None
+    # gmlx: a spoken reply's slot. ``speech_kind`` is marker, text, frame
+    # or end, and ``audio`` holds the float32 samples the slot adds.
+    speech_kind: Optional[str] = None
+    audio: Optional[Any] = None
 
 
 class _DiffusionBlockEmitter:
@@ -1654,6 +1658,27 @@ class ResponseGenerator:
             lora=lora,
         )
 
+    def _speech_settings(self, settings, spec, prompt_ids, args):
+        """gmlx: ``settings`` with the record of a spoken reply. Raises
+        ValueError for a model that does not speak and for an engine that
+        speculates, which holds no speaking row."""
+        import dataclasses
+
+        from gmlx.serve import speech_rows
+
+        if self.draft_model is not None:
+            raise ValueError(
+                "speech output does not run on a model served with a drafter"
+            )
+        record = speech_rows.open_row(
+            self.model,
+            prompt_ids[-1],
+            spec,
+            getattr(args, "seed", None),
+            end_of_turn=self.stop_tokens,
+        )
+        return dataclasses.replace(settings, speech=record)
+
     def _make_logits_processors(
         self, args: GenerationArguments, input_ids: Optional[mx.array] = None
     ) -> List[Callable[[mx.array, mx.array], mx.array]]:
@@ -2060,9 +2085,21 @@ class ResponseGenerator:
                     try:
                         thinking_budget_criteria = request.thinking_budget_criteria
                         prompt_ids = input_ids.squeeze(0).tolist()
+                        # gmlx: a spoken reply's record rides the row's
+                        # settings. Its mode marker is forced as the first
+                        # token and belongs to the prompt, so the budget
+                        # gets one more.
+                        max_tokens = args.max_tokens
+                        speech_spec = getattr(args, "_kq_speech", None)
+                        if speech_spec is not None:
+                            settings = self._speech_settings(
+                                settings, speech_spec, prompt_ids, args
+                            )
+                            if max_tokens is not None:
+                                max_tokens = max_tokens + 1
                         (uid,) = batch_gen.insert(
                             [prompt_ids],
-                            max_tokens=args.max_tokens,
+                            max_tokens=max_tokens,
                             prompt_kwargs=[gen_kwargs],
                             logits_processors=[
                                 self._make_logits_processors(args, input_ids)
@@ -2295,9 +2332,19 @@ class ResponseGenerator:
 
             tok = r.token
             token_count = 0 if tok is None else 1
+            # gmlx: a spoken reply's marker, frames and steering tokens
+            # write no text. A finish still flushes the text held back.
+            speech = getattr(r, "speech", None)
             if tok is None:
                 text = info["streamer"].finalize()
                 tok = 0
+            elif speech is not None and speech.quiet:
+                tok = tok.item() if hasattr(tok, "item") else tok
+                text = (
+                    ""
+                    if r.finish_reason is None
+                    else self._stream_text(info, tok, "stop")
+                )
             elif hasattr(tok, "item"):
                 tok = tok.item()
                 text = self._stream_text(info, tok, r.finish_reason)
@@ -2340,6 +2387,8 @@ class ResponseGenerator:
                     cached_tokens=info.get("cached_tokens", 0),
                     token_count=token_count,
                     emitted_at=emitted_at,
+                    speech_kind=None if speech is None else speech.kind,
+                    audio=None if speech is None else speech.audio,
                 )
             )
 
