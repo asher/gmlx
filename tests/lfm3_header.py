@@ -3,7 +3,8 @@
 """A tiny LFM3 GGUF for header tests: the family's metadata keys and the
 three tensors the config synthesis reads shapes from. It holds no model
 weights and no template text. Also the lookup of a real LFM3 model and its
-projector, for the integration tier."""
+projector, for the integration tier, and the float16 weights an M1 or M2
+loads."""
 
 from __future__ import annotations
 
@@ -86,3 +87,26 @@ def find_vision_pair(gguf_dir, gguf_index) -> tuple[str, str] | None:
                 and kv.get("general.basename") in texts):
             return texts[kv["general.basename"]], str(path)
     return None
+
+
+def load_as_f16_projector(text_path, projector_path):
+    """Load the pair as an M1 or M2 does with the F16 projector: call
+    under ``GMLX_ACTIVATION_DTYPE=float16``. The activation cast never
+    visits BF16 tensors, so a BF16 projector's matrices are cast here.
+    Without that the mix of float16 and bfloat16 runs a float32 stream,
+    which cannot overflow."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten, tree_unflatten
+
+    from gmlx.load.vlm import load_vlm_model
+
+    model, config, processor = load_vlm_model(text_path, projector_path)
+    for name in ("vision_tower", "multi_modal_projector", "audio_encoder",
+                 "audio_projector"):
+        module = getattr(model, name, None)
+        if module is not None:
+            module.update(tree_unflatten([
+                (k, v.astype(mx.float32).astype(mx.float16))
+                for k, v in tree_flatten(module.parameters())
+                if v.dtype == mx.bfloat16]))
+    return model, config, processor

@@ -33,6 +33,7 @@ from transformers.image_processing_utils import ImageProcessingMixin
 
 IMAGE_TOKEN = "<|image|>"
 VIDEO_TOKEN = "<|video|>"
+AUDIO_TOKEN = "<|audio|>"
 VISION_START = "<|vision_start|>"
 VISION_END = "<|vision_end|>"
 
@@ -287,9 +288,15 @@ class Lfm3VideoProcessor(_Geometry):
 def strip_template_spans(prompt: str) -> str:
     """Drop the vision markers the chat template writes around a single
     placeholder. The expansion adds exactly one pair."""
-    for token in (IMAGE_TOKEN, VIDEO_TOKEN):
+    for token in (IMAGE_TOKEN, VIDEO_TOKEN, AUDIO_TOKEN):
         prompt = prompt.replace(VISION_START + token + VISION_END, token)
     return prompt
+
+
+def audio_expansion(tokens: int) -> str:
+    """A clip's soft tokens between the vision markers, as a model with a
+    vision tower wraps them."""
+    return VISION_START + AUDIO_TOKEN * tokens + VISION_END
 
 
 def image_expansion(soft_tokens: int) -> str:
@@ -306,7 +313,10 @@ def video_expansion(soft_tokens: int, timestamps: Sequence[float]) -> str:
 
 
 def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
-                    video_processor: Lfm3VideoProcessor):
+                    video_processor: Lfm3VideoProcessor,
+                    feature_extractor=None):
+    """``feature_extractor`` is the speech front end of a model with an
+    audio encoder (gmlx.models.lfm3.audio), or None."""
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
@@ -320,6 +330,8 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
 
         image_token = IMAGE_TOKEN
         video_token = VIDEO_TOKEN
+        audio_token = AUDIO_TOKEN
+        supports_multiple_audio = True
 
         def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
                 self, images=None, text=None, videos=None, audio=None,
@@ -328,8 +340,10 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
             # signature names, so the video ones are named. The frame
             # times come from the metadata, and fps is not read.
             del fps
-            if audio is not None:
-                raise ValueError("LFM3 audio input is not supported yet")
+            if audio is not None and not isinstance(audio, (list, tuple)):
+                audio = [audio]
+            if audio and self.feature_extractor is None:
+                raise ValueError("this LFM3 model has no audio encoder")
             metadata = video_metadata
             if text is None:
                 raise ValueError("LFM3 needs a text prompt")
@@ -341,7 +355,8 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
             if videos is not None and not isinstance(videos, (list, tuple)):
                 videos = [videos]
             for name, token, media in (("images", IMAGE_TOKEN, images),
-                                       ("videos", VIDEO_TOKEN, videos)):
+                                       ("videos", VIDEO_TOKEN, videos),
+                                       ("audio clips", AUDIO_TOKEN, audio)):
                 found = sum(t.count(token) for t in text)
                 given = len(media) if media else 0
                 if found != given:
@@ -368,7 +383,19 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
                 data.update(pre)
                 for grid, meta in zip(pre["video_grid_thw"], metadata):
                     video_text.append(self._video_text(grid, meta))
-            text = self._expand(text, image_text, video_text)
+            audio_text: list = []
+            if audio:
+                clips = [np.asarray(clip, dtype=np.float32) for clip in audio]
+                for clip in clips:
+                    if clip.ndim != 1 or clip.size == 0:
+                        raise ValueError(
+                            "LFM3 audio input takes mono clips with at "
+                            f"least one sample, got shape {clip.shape}")
+                fe = self.feature_extractor
+                data.update(fe(clips))
+                audio_text = [audio_expansion(fe.tokens(clip.size))
+                              for clip in clips]
+            text = self._expand(text, image_text, video_text, audio_text)
 
             kwargs.pop("return_tensors", None)
             return BatchFeature(
@@ -389,15 +416,16 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
                 self.video_processor.soft_tokens(grid), stamps)
 
         @staticmethod
-        def _expand(texts, image_text, video_text):
+        def _expand(texts, image_text, video_text, audio_text=()):
             """Replace each placeholder with its expansion, in order
             across the batch."""
             import re
 
-            pattern = re.compile(
-                "|".join(map(re.escape, (IMAGE_TOKEN, VIDEO_TOKEN))))
+            pattern = re.compile("|".join(map(
+                re.escape, (IMAGE_TOKEN, VIDEO_TOKEN, AUDIO_TOKEN))))
             queues = {IMAGE_TOKEN: iter(image_text),
-                      VIDEO_TOKEN: iter(video_text)}
+                      VIDEO_TOKEN: iter(video_text),
+                      AUDIO_TOKEN: iter(audio_text)}
             return [pattern.sub(lambda m: next(queues[m.group(0)]), t)
                     for t in texts]
 
@@ -420,4 +448,5 @@ def build_processor(tokenizer, image_processor: Lfm3ImageProcessor,
         image_processor=image_processor, tokenizer=tokenizer,
         chat_template=getattr(tokenizer, "chat_template", None))
     processor.video_processor = video_processor
+    processor.feature_extractor = feature_extractor
     return processor

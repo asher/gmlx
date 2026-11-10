@@ -1010,7 +1010,12 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "lfm3": (".conv.kernel",),
     # The VLM types carry the same text tower. The vision tower's depthwise
     # taps are F32 on the wire too, and its convolution sums in float32.
-    "lfm3_omni": (".conv.kernel", ".spatial_conv.weight"),
+    # The speech encoder's short convolutions use the text model's class,
+    # and its downsampler's convolutions are F32 on the wire and run in
+    # float32.
+    "lfm3_omni": (".conv.kernel", ".spatial_conv.weight",
+                  ".downsample.conv_", ".downsample.lin_mid.",
+                  ".downsample.lin_end."),
     "lfm3_vl": (".conv.kernel", ".spatial_conv.weight"),
     # ricursive: the value-residual logit is F32 on the wire, one per layer.
     # Kept in step with the model class's cast_predicate.

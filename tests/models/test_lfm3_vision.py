@@ -396,7 +396,8 @@ def test_images_and_videos_expand_in_prompt_order():
     (dict(text=["<|image|> hi"]), "Found 1 <|image|> tokens"),
     (dict(text=["<|video|>"], videos=[np.zeros((4, 3, 64, 64), np.uint8)]),
      "frame timestamps"),
-    (dict(text=["hi"], audio=["clip.wav"]), "audio input is not supported"),
+    (dict(text=["hi"], audio=[np.zeros(400, np.float32)]),
+     "no audio encoder"),
 ])
 def test_the_processor_refuses_what_it_cannot_place(kwargs, message):
     with pytest.raises(ValueError, match=message.replace("|", r"\|")):

@@ -79,8 +79,8 @@ def _features(model, pixel_values, grid) -> np.ndarray:
 
 
 def test_the_load_fills_every_parameter(pair, capsys):
-    """The projector's audio and speech tensors are the only ones the
-    vision load leaves."""
+    """The speech generator's tensors are the only ones the load
+    leaves."""
     from gmlx.load.headerscan import scan_gguf
     from gmlx.load.vlm import load_vlm_model
 
@@ -90,9 +90,8 @@ def test_the_load_fills_every_parameter(pair, capsys):
     scan = scan_gguf(pair[1], include_tensors=True)
     assert config["model_type"] == (
         "lfm3_omni" if scan.kv.get("clip.has_audio_encoder") else "lfm3_vl")
-    vision = sum(t.name.startswith(("v.", "mm.")) and
-                 not t.name.startswith("mm.a.") for t in scan.tensors)
-    assert f" {len(scan.tensors) - vision} skipped" in log, log
+    generator = sum(t.name.startswith("a.gen.") for t in scan.tensors)
+    assert f" {generator} skipped" in log, log
     assert len(model.vision_tower.layers) == \
         scan.kv["clip.vision.block_count"]
     # The head masks the speech markers and the media placeholders, as on
@@ -235,14 +234,15 @@ def test_a_float16_stream_does_not_overflow(pair, ref, monkeypatch):
     """M1 and M2 run float16, whose range ends at 65,504. The tower's
     activations stay inside it on real inputs, and the features hold the
     16-bit floor."""
-    from gmlx.load.vlm import load_vlm_model
+    from tests.lfm3_header import load_as_f16_projector
 
     monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float16")
-    model, _config, _processor = load_vlm_model(pair[0], pair[1])
-    assert model.vision_tower.patchifier.weight.dtype == mx.float16
+    model, _config, _processor = load_as_f16_projector(*pair)
     for what in ("image", "clip"):
-        got = _features(model, ref[f"{what}_pixel_values"],
-                        ref[f"{what}_grid"])
+        features = model.vision_features(
+            mx.array(ref[f"{what}_pixel_values"]), ref[f"{what}_grid"])
+        assert features.dtype == mx.float16, what
+        got = np.asarray(features.astype(mx.float32))
         assert np.isfinite(got).all(), what
         rel, cosine = _distance(got, ref[f"{what}_features"])
         assert rel <= STREAM_REL_RMS and cosine >= STREAM_MEAN_COSINE, \

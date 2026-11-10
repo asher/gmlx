@@ -30,6 +30,7 @@ from gmlx._vendor.mlx_vlm.models.base import (
     LanguageModelOutput,
 )
 
+from .audio import AudioConfig, AudioEncoder, AudioProjector
 from .model import Model as TextModel
 from .model import ModelArgs
 from .vision import (CLIP_PATCHES, MultiModalProjector, VisionConfig,
@@ -39,17 +40,20 @@ TextConfig = ModelArgs
 
 MODEL_TYPES = ("lfm3_omni", "lfm3_vl")
 
-__all__ = ["LanguageModel", "Model", "ModelConfig", "TextConfig",
-           "VisionConfig"]
+__all__ = ["AudioConfig", "LanguageModel", "Model", "ModelConfig",
+           "TextConfig", "VisionConfig"]
 
 
 @dataclass
 class ModelConfig(BaseModelConfig):
     text_config: TextConfig = None  # pyright: ignore[reportAssignmentType]
     vision_config: VisionConfig = field(default_factory=VisionConfig)
+    # The speech encoder of a model that hears, else None.
+    audio_config: Optional[AudioConfig] = None
     model_type: str = "lfm3_omni"
     image_token_id: int = 125030
     video_token_id: int = 125029
+    audio_token_id: Optional[int] = None
     image_token_index: Optional[int] = None
     vocab_size: int = 128000
     eos_token_id: Optional[List[int]] = None
@@ -57,6 +61,11 @@ class ModelConfig(BaseModelConfig):
     def __post_init__(self):
         if self.image_token_index is None:
             self.image_token_index = self.image_token_id
+        # An absent encoder arrives as an empty dict from the loader.
+        if not self.audio_config:
+            self.audio_config = None
+        elif isinstance(self.audio_config, dict):
+            self.audio_config = AudioConfig.from_dict(self.audio_config)
 
 
 class LanguageModel(TextModel):
@@ -108,10 +117,16 @@ class Model(nn.Module):
         self.model_type = config.model_type
         self.vision_tower = VisionModel(config.vision_config)
         self.multi_modal_projector = MultiModalProjector(config.vision_config)
+        if config.audio_config is not None:
+            self.audio_encoder = AudioEncoder(config.audio_config)
+            self.audio_projector = AudioProjector(config.audio_config)
         # The serve engine runs the language model alone and reads the
         # media ids off its config (gmlx.cache.apc_media).
         for name in ("image_token_id", "video_token_id"):
             setattr(config.text_config, name, getattr(config, name))
+        config.text_config.media_token_ids = (
+            [] if config.audio_token_id is None
+            else [int(config.audio_token_id)])
         self.language_model = LanguageModel(config.text_config)
 
     def vision_features(self, pixel_values: mx.array, grid_thw) -> mx.array:
@@ -142,6 +157,24 @@ class Model(nn.Module):
                 "were given")
         return feats[0] if len(feats) == 1 else mx.concatenate(feats, axis=0)
 
+    def audio_features(self, input_features: mx.array,
+                       feature_attention_mask) -> mx.array:
+        """The spectrograms of every clip, ``[clips, mel bins, frames]``
+        right-padded, to their projected features, concatenated in clip
+        order. Each clip runs alone on its own frames, and is evaluated
+        before the next starts."""
+        if getattr(self, "audio_encoder", None) is None:
+            raise ValueError("this LFM3 model has no audio encoder")
+        lengths = [int(n) for n in
+                   mx.array(feature_attention_mask).sum(axis=-1).tolist()]
+        feats = []
+        for i, frames in enumerate(lengths):
+            hidden = self.audio_encoder(input_features[i, :, :frames])
+            feats.append(self.audio_projector(hidden))
+            if len(lengths) > 1:
+                mx.eval(feats[-1])
+        return feats[0] if len(feats) == 1 else mx.concatenate(feats, axis=0)
+
     def get_input_embeddings(
         self,
         input_ids: Optional[mx.array] = None,
@@ -150,6 +183,17 @@ class Model(nn.Module):
     ):
         embeds = self.language_model.model.embed_tokens(input_ids)
         videos = kwargs.get("pixel_values_videos")
+        audio = kwargs.get("input_features")
+        if audio is not None:
+            mask = kwargs.get("feature_attention_mask")
+            if mask is None:
+                raise ValueError(
+                    "LFM3 audio needs feature_attention_mask alongside "
+                    "input_features")
+            embeds = scatter_features(
+                self.config.audio_token_id,
+                self.audio_features(audio, mask), embeds, input_ids,
+                "audio")
         if pixel_values is None and videos is None:
             return InputEmbeddingsFeatures(inputs_embeds=embeds)
         if pixel_values is not None:

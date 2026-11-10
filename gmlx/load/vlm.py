@@ -954,6 +954,64 @@ _LFM3_VL_TOP_MAP = {
     "mm.2.bias": "multi_modal_projector.linear_2.bias",
 }
 _LFM3_VL_PATCH = ("v.patch_embd.weight", "v.patch_embd.weight.1")
+# The speech encoder and its projector (projector ``lfm3a``): the
+# downsampler's five convolutions, the LFM2 stack and the GELU MLP
+# (gmlx.models.lfm3.audio). The speech generator's tensors (``a.gen.*``)
+# are not loaded here.
+_LFM3_A_BLK_SUBMAP = {
+    "ln1": "operator_norm",
+    "ln2": "ffn_norm",
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_out": "self_attn.out_proj",
+    "attn_q_norm": "self_attn.q_layernorm",
+    "attn_k_norm": "self_attn.k_layernorm",
+    "conv_pw1": "conv.in_proj",
+    "conv_pw2": "conv.out_proj",
+    "ffn_gate": "feed_forward.gate_proj",
+    "ffn_up": "feed_forward.up_proj",
+    "ffn_down": "feed_forward.down_proj",
+}
+_LFM3_A_TOP_MAP = {
+    "a.post_ln.weight": "audio_encoder.embedding_norm.weight",
+    "a.pre_encode.out.weight": "audio_encoder.downsample.lin_out.weight",
+    "a.pre_encode.out.bias": "audio_encoder.downsample.lin_out.bias",
+    "mm.a.mlp.0.weight": "audio_projector.layer_norm.weight",
+    "mm.a.mlp.0.bias": "audio_projector.layer_norm.bias",
+    "mm.a.mlp.1.weight": "audio_projector.linear_1.weight",
+    "mm.a.mlp.1.bias": "audio_projector.linear_1.bias",
+    "mm.a.mlp.3.weight": "audio_projector.linear_2.weight",
+    "mm.a.mlp.3.bias": "audio_projector.linear_2.bias",
+}
+_LFM3_A_CONVS = {"0": "conv_in", "2": "conv_mid", "3": "lin_mid",
+                 "5": "conv_end", "6": "lin_end"}
+_LFM3_A_CONV_RE = re.compile(r"^a\.conv1d\.(\d+)\.(weight|bias)$")
+
+
+def _lfm3_audio_target(name: str, arr):
+    """``(parameter name, array)`` of an ``lfm3a`` encoder or projector
+    tensor, or None for any other tensor."""
+    hit = _LFM3_A_TOP_MAP.get(name)
+    if hit is not None:
+        return hit, arr
+    m = _LFM3_A_CONV_RE.match(name)
+    if m is not None and m.group(1) in _LFM3_A_CONVS:
+        base = f"audio_encoder.downsample.{_LFM3_A_CONVS[m.group(1)]}"
+        if m.group(2) == "bias":
+            return f"{base}.bias", arr.reshape(-1)
+        # [out, in / groups, kH, kW] -> the MLX layout [out, kH, kW, in].
+        return f"{base}.weight", mx.transpose(arr, (0, 2, 3, 1))
+    m = _AUDIO_BLK_RE.match(name)
+    if m is None:
+        return None
+    sub, _, leaf = m.group(2).rpartition(".")
+    pre = f"audio_encoder.layers.{m.group(1)}"
+    if sub == "conv_dw":
+        # The depthwise taps, [channels, width], as the text model's.
+        return f"{pre}.conv.kernel", arr
+    tgt = _LFM3_A_BLK_SUBMAP.get(sub)
+    return None if tgt is None else (f"{pre}.{tgt}.{leaf}", arr)
 
 _NEMOTRON_OMNI_BLK_SUBMAP = {
     "attn_qkv": "attn.qkv_proj",
@@ -1546,8 +1604,12 @@ def _remap_float_arrays(
                 continue
             tgt = _LFM3_VL_BLK_SUBMAP.get(sub)
             if m is None or tgt is None:
-                # The audio encoder and the speech generator.
-                skipped.append(name)
+                audio = _lfm3_audio_target(name, arr) if with_audio else None
+                if audio is None:
+                    # The speech generator.
+                    skipped.append(name)
+                else:
+                    out[audio[0]] = audio[1]
                 continue
             out[f"vision_tower.layers.{m.group(1)}.{tgt}.{leaf}"] = arr
         missing = [p for p in _LFM3_VL_PATCH if p not in arrays]
@@ -2602,7 +2664,81 @@ def _synthesize_lfm3_vlm_config(
             raise ValueError(f"the text GGUF has no {token} token")
         config[key] = token_id
     config["image_token_index"] = config["image_token_id"]
+    if mm_meta.get("clip.has_audio_encoder"):
+        from gmlx.models.lfm3.processing import AUDIO_TOKEN
+
+        config["audio_config"] = _synthesize_lfm3_audio_config(
+            text_config, mm_meta, shapes)
+        token_id = _gguf_token_id(llm_meta, AUDIO_TOKEN)
+        if token_id is None:
+            raise ValueError(f"the text GGUF has no {AUDIO_TOKEN} token")
+        config["audio_token_id"] = token_id
     return config
+
+
+def _synthesize_lfm3_audio_config(text_config: dict, mm_meta: dict,
+                                  shapes: dict) -> dict:
+    """The LFM3 speech encoder read from ``clip.audio.*``. The layer
+    kinds, the tap count and the downsampler's channels have no metadata
+    key, so they follow the tensors. The refusals are llama.cpp's
+    (clip.cpp, lfm3a)."""
+    from gmlx.models.lfm3.audio import CONV, FULL
+
+    proj = _mm(mm_meta, "clip.audio.projector_type")
+    if proj != "lfm3a":
+        raise UnsupportedVLMError(
+            f"audio projector {proj!r} beside an lfm3vl tower is not "
+            "supported (only 'lfm3a')")
+    window = _mm_int(mm_meta, "clip.audio.window_size")
+    if window <= 0:
+        raise ValueError(f"lfm3a: invalid audio attention window {window}")
+    n_layers = _mm_int(mm_meta, "clip.audio.block_count")
+    if "a.post_ln.weight" not in shapes:
+        raise ValueError("lfm3a: missing tensor a.post_ln.weight")
+    layer_types = []
+    for i in range(n_layers):
+        pre = f"a.blk.{i}."
+        is_conv = all(pre + f"conv_{part}.weight" in shapes
+                      for part in ("pw1", "dw", "pw2"))
+        is_attn = all(pre + f"attn_{part}.weight" in shapes
+                      for part in ("q", "k", "v", "out", "q_norm", "k_norm"))
+        if is_conv == is_attn:
+            raise ValueError(
+                f"lfm3a layer {i} is neither a complete conv nor a "
+                "complete attention block")
+        layer_types.append(CONV if is_conv else FULL)
+    audio_config: dict = {
+        "model_type": "lfm3_audio_encoder",
+        "hidden_size": _mm_int(mm_meta, "clip.audio.embedding_length"),
+        "intermediate_size": _mm_int(
+            mm_meta, "clip.audio.feed_forward_length"),
+        "num_hidden_layers": n_layers,
+        "num_attention_heads": _mm_int(
+            mm_meta, "clip.audio.attention.head_count"),
+        "num_key_value_heads": _mm_int(
+            mm_meta, "clip.audio.attention.head_count_kv"),
+        "num_mel_bins": _mm_int(mm_meta, "clip.audio.num_mel_bins"),
+        "sliding_window": window,
+        "layer_types": layer_types,
+        "projection_dim": _mm_int(mm_meta, "clip.audio.projection_dim"),
+    }
+    eps = _mm(mm_meta, "clip.audio.attention.layer_norm_epsilon")
+    if eps is not None:
+        audio_config["norm_eps"] = float(eps)
+    first_conv = next((i for i, kind in enumerate(layer_types)
+                       if kind == CONV), None)
+    if first_conv is not None:
+        # [channels, width] in either order.
+        taps = shapes[f"a.blk.{first_conv}.conv_dw.weight"]
+        audio_config["conv_L_cache"] = min(int(d) for d in taps)
+    channels = shapes.get("a.conv1d.0.bias")
+    if channels:
+        audio_config["conv_channels"] = max(int(d) for d in channels)
+    if audio_config["projection_dim"] != int(text_config["hidden_size"]):
+        raise ValueError(
+            f"mmproj audio projection width {audio_config['projection_dim']} "
+            f"does not match the lfm3 hidden size {text_config['hidden_size']}")
+    return audio_config
 
 
 # MiniMax-M3.1-Flash: the chat template writes ]<]image[>[ per image; mtmd
@@ -4486,8 +4622,15 @@ def _synthesize_lfm3_processor(tokenizer, mm_meta: dict, model_type: str):
         max_frames=MAX_FRAMES[model_type],
         patch_size=patch, merge_size=merge, temporal_patch_size=2,
         image_mean=mean, image_std=std)
+    feature_extractor = None
+    if mm_meta.get("clip.has_audio_encoder"):
+        from gmlx.models.lfm3.audio import AudioFeatureExtractor
+
+        feature_extractor = AudioFeatureExtractor(
+            _mm_int(mm_meta, "clip.audio.num_mel_bins"))
     return _attach_streaming_helpers(
-        build_processor(tokenizer, image_processor, video_processor),
+        build_processor(tokenizer, image_processor, video_processor,
+                        feature_extractor),
         tokenizer)
 
 
