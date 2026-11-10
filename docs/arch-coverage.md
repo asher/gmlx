@@ -1,6 +1,6 @@
 # Supported architectures
 
-gmlx maps 50 GGUF architectures to model types, and 50 of them load end-to-end
+gmlx maps 51 GGUF architectures to model types, and 51 of them load end-to-end
 with no `hf_source`. `scripts/check-coverage.py` generates this page from the
 architecture table and the mlx-lm that gmlx carries, so do not edit it by hand.
 
@@ -53,6 +53,7 @@ family, backend, status and caveat:
 | `hyv4` | hunyuan | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16. |
 | `k2-horizon` | k2-horizon | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `kimi-k3` | kimi | mlx-lm | loadable | The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message. |
+| `lfm3` | lfm | mlx-lm | loadable | The GGUF has no MTP head. The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again. |
 | `llama` | llama | mlx-lm | loadable |  |
 | `minimax-m2` | minimax | mlx-lm | loadable |  |
 | `minimax-m3` | minimax_m3 | mlx-lm | loadable | Without indexer tensors or an indexer sidecar file, a GGUF runs dense. Its output is exact to 2048 tokens and degrades beyond that. |
