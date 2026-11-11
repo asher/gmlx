@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import types
 import time
 
 import numpy as np
@@ -1058,3 +1059,221 @@ def test_keys_poll_collapses_an_escape_sequence(monkeypatch):
         assert keys.poll() == "\x1b"
     finally:
         _os.close(w_fd)
+
+
+# One model for the whole turn
+class SpeakingBrain(FakeBrain):
+    """A brain whose model hears the clip and speaks the reply."""
+
+    def __init__(self, gate=None):
+        super().__init__()
+        self.speech = None
+        self.clips = []
+        self.gate = gate
+
+    def turn(self, text):
+        self.turns.append(text)
+        yield from self._reply()
+
+    def turn_audio(self, clip, transcript):
+        self.clips.append((clip[:4], transcript))
+        yield from self._reply()
+
+    def _reply(self):
+        yield ("say", "Hello there. ")
+        yield ("audio", np.zeros(1920, np.int16), 24000)
+        if self.gate is not None:
+            self.gate.wait(30.0)
+        yield ("say", "Bye bye friend.")
+        yield ("audio", np.zeros(960, np.int16), 24000)
+        yield ("done", {})
+
+
+def _one_model_loop(mode="vad", brain=None, label="omni"):
+    loop = _make_loop(mode, one_model=True)
+    loop.model_label = label
+    loop.brain = brain or SpeakingBrain()
+    loop._sync_speech()
+    loop._heard = []
+
+    def transcribe(base_url, wav_bytes, api_key=None, language=None,
+                   model="whisper-1"):
+        loop._heard.append((model, language))
+        return "hello world"
+
+    loop._transcribe = transcribe
+    return loop
+
+
+def _speak_into(loop):
+    for _ in range(5):
+        loop.on_frame(_loud())
+    for _ in range(8):
+        loop.on_frame(_quiet())
+
+
+def _at_rest(loop):
+    return (loop.m.state == LISTENING and not loop.m.turn_active
+            and not loop.m.speaking and loop.events.empty())
+
+
+def test_one_model_turn_sends_the_clip_and_plays_the_models_speech(capsys):
+    loop = _one_model_loop(label="omni@fast")
+    loop.start_threads()
+    try:
+        loop.backend.start_input(loop.on_frame)
+        _speak_into(loop)
+        _pump_until(loop, lambda: bool(loop.brain.clips) and _at_rest(loop))
+    finally:
+        loop.shutdown()
+    # The transcription goes to the chat model, by its id.
+    assert loop._heard == [("omni", None)]
+    # The model hears the clip itself, and the transcript rides along.
+    assert loop.brain.clips == [(b"RIFF", "hello world")]
+    assert loop.brain.turns == []
+    # No speech service call: the reply's own audio is what plays.
+    assert loop._said == []
+    assert loop.backend.played == [(1920, 24000), (960, 24000)]
+    out = capsys.readouterr().out
+    assert "you: hello world" in out
+    assert "  Hello there. Bye bye friend." in out
+    assert loop.brain.speech == {"modalities": ["text", "audio"],
+                                 "audio": {"format": "pcm16",
+                                           "voice": "af_heart"}}
+
+
+def test_one_model_turn_with_no_words_gets_no_reply():
+    loop = _one_model_loop()
+    loop._transcribe = lambda *a, **k: "  "
+    loop.start_threads()
+    try:
+        loop.backend.start_input(loop.on_frame)
+        _speak_into(loop)
+        _pump_until(loop, lambda: loop.note == "(heard nothing)")
+        _pump_until(loop, lambda: _at_rest(loop))
+    finally:
+        loop.shutdown()
+    assert loop.brain.clips == [] and loop.brain.turns == []
+    assert loop.backend.played == []
+
+
+def test_one_model_typed_turn_is_text_in_and_speech_out():
+    loop = _one_model_loop()
+    loop.start_threads()
+    try:
+        loop._apply(loop.m.text_turn("what time is it"), "what time is it")
+        _pump_until(loop, lambda: bool(loop.backend.played) and _at_rest(loop))
+    finally:
+        loop.shutdown()
+    assert loop.brain.turns == ["what time is it"]
+    assert loop.brain.clips == [] and loop._heard == []
+    assert loop.backend.played == [(1920, 24000), (960, 24000)]
+
+
+def test_one_model_stop_drops_the_rest_of_the_reply(capsys):
+    gate = threading.Event()
+    loop = _one_model_loop(brain=SpeakingBrain(gate))
+    loop.start_threads()
+    try:
+        loop.backend.start_input(loop.on_frame)
+        _speak_into(loop)
+        _pump_until(loop, lambda: (loop.m.state == SPEAKING
+                                   and bool(loop.backend.played)))
+        turn = loop._turn_thread
+        loop._apply(loop.m.on_cancel())
+        gate.set()
+        turn.join(30.0)
+        _pump_until(loop, lambda: _at_rest(loop))
+    finally:
+        gate.set()
+        loop.shutdown()
+    # The audio the dead turn made after the stop never plays.
+    assert loop.backend.played == [(1920, 24000)]
+    assert "Bye bye friend." not in capsys.readouterr().out
+
+
+def test_one_model_voice_and_speed_commands(capsys):
+    loop = _one_model_loop()
+    loop._slash("/voice male")
+    assert loop.brain.speech["audio"]["voice"] == "male"
+    loop._slash("/speed 1.5")
+    assert loop.speed == 1.0
+    assert "speaks at one speed" in capsys.readouterr().out
+
+
+def test_a_text_brain_is_left_alone_outside_one_model_mode():
+    loop = _make_loop("vad")
+    assert not hasattr(loop.brain, "speech")
+    loop._slash("/voice bm_lewis")
+    assert not hasattr(loop.brain, "speech")
+
+
+def test_a_model_that_speaks_needs_no_tts_service(capsys):
+    from gmlx.talk.main import _capability_guidance
+
+    assert _capability_guidance({"stt": True, "tts": False}, needs_stt=True,
+                                explicit_url=False, out=sys.stdout,
+                                needs_tts=False)
+    assert not _capability_guidance({"stt": False, "tts": False},
+                                    needs_stt=True, explicit_url=False,
+                                    out=sys.stdout, needs_tts=False)
+    out = capsys.readouterr().out
+    assert "no stt service enabled" in out and "stt + tts" not in out
+
+
+def _run_cmd_talk(monkeypatch, tmp_path, caps, argv=()):
+    """``cmd_talk`` up to the loop: ``(exit code, build_talk_loop kwargs)``."""
+    import gmlx.commands.launch as launch_mod
+    import gmlx.talk.client as tc
+    import gmlx.talk.main as tm
+
+    cfg = tmp_path / "gmlx.yaml"
+    cfg.write_text("models: {}\n")
+    built = {}
+
+    def build(s, **kw):
+        built.update(kw, mode=s["mode"])
+        return types.SimpleNamespace(run=lambda: 0), lambda: None
+
+    monkeypatch.setattr(launch_mod, "_ensure_server", lambda ns: None)
+    monkeypatch.setattr(tc, "probe_capabilities", lambda *a, **k: caps)
+    monkeypatch.setattr(tm, "build_talk_loop", build)
+    return tm.cmd_talk(["--config", str(cfg), *argv]), built
+
+
+_OMNI = {"omni": ["text", "vision", "audio", "speech"]}
+
+
+def test_talk_starts_on_one_model_with_no_tts_service(monkeypatch, tmp_path):
+    caps = {"stt": True, "tts": False, "chat_ids": ["omni"],
+            "default": "omni", "modalities": _OMNI}
+    rc, built = _run_cmd_talk(monkeypatch, tmp_path, caps)
+    assert rc == 0
+    assert built["model"] == "omni" and built["one_model"] is True
+
+
+def test_one_model_talk_still_needs_the_transcription_route(
+        monkeypatch, tmp_path, capsys):
+    caps = {"stt": False, "tts": False, "chat_ids": ["omni"],
+            "default": "omni", "modalities": _OMNI}
+    rc, built = _run_cmd_talk(monkeypatch, tmp_path, caps)
+    assert rc == 1 and built == {}
+    assert "no stt service enabled" in capsys.readouterr().err
+    # Typed turns need no transcription.
+    rc, built = _run_cmd_talk(monkeypatch, tmp_path, caps, ["--mode", "text"])
+    assert rc == 0 and built["one_model"] is True
+
+
+def test_a_text_model_keeps_the_service_pipeline(monkeypatch, tmp_path,
+                                                 capsys):
+    caps = {"stt": True, "tts": False, "chat_ids": ["omni", "plain"],
+            "default": "plain", "modalities": {**_OMNI, "plain": ["text"]}}
+    rc, built = _run_cmd_talk(monkeypatch, tmp_path, caps)
+    assert rc == 1 and built == {}
+    assert "no tts service enabled" in capsys.readouterr().err
+    caps["tts"] = True
+    rc, built = _run_cmd_talk(monkeypatch, tmp_path, caps)
+    assert rc == 0 and built["one_model"] is False
+    # Naming the model that speaks picks one-model mode on the same server.
+    rc, built = _run_cmd_talk(monkeypatch, tmp_path, caps, ["omni"])
+    assert rc == 0 and built["one_model"] is True

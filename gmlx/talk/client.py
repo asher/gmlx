@@ -11,10 +11,16 @@ answer deltas, ``("status", label)`` progress (thinking, tools), ``("done",
 stats)`` end-of-turn. v1 ships :class:`ServerChatBrain` (rolling-history
 ``/v1/chat/completions``); the assistant brain (tool calls, MCP, memory)
 is a drop-in behind the same protocol.
+
+A chat model that hears audio and speaks runs the whole turn itself
+(:func:`one_model`). The brain then sends the user's clip with
+``turn_audio`` and asks for audio output, and the reply's speech comes
+back as ``("audio", samples, rate)`` events beside its text.
 """
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
@@ -157,9 +163,82 @@ def probe_capabilities(base_url: str, api_key: str | None = None,
             "chat_ids": chat_ids,
             "default": default,
             "gmlx": any(e.get("owned_by") == "gmlx" for e in entries),
+            # What each chat model reads and writes, on a server that says.
+            "modalities": {
+                e["id"]: [str(m) for m in e["modalities"]]
+                for e in entries
+                if e.get("id") in chat_ids
+                and isinstance(e.get("modalities"), list)},
         }
 
     return _decode_body("capability probe", _caps)
+
+
+def one_model(caps: dict, model: str | None) -> bool:
+    """Whether ``model`` runs a voice turn by itself: it hears the user's
+    audio and speaks its reply. ``model`` may carry an ``@profile``."""
+    if not model:
+        return False
+    listed = (caps.get("modalities") or {}).get(model.split("@", 1)[0]) or ()
+    return {"audio", "speech"} <= set(listed)
+
+
+# A chat reply's streamed speech: 16-bit mono at this rate.
+SPEECH_RATE = 24000
+
+
+def speech_request(voice: str | None = None,
+                   language: str | None = None) -> dict:
+    """The chat request fields that ask for a spoken reply."""
+    audio = {"format": "pcm16"}
+    if voice:
+        audio["voice"] = voice
+    if language:
+        audio["language"] = language
+    return {"modalities": ["text", "audio"], "audio": audio}
+
+
+def clip_message(wav_bytes: bytes) -> dict:
+    """A user message that is one audio clip."""
+    return {"role": "user", "content": [{
+        "type": "input_audio",
+        "input_audio": {"data": base64.b64encode(wav_bytes).decode(),
+                        "format": "wav"}}]}
+
+
+class SpokenDeltas:
+    """Reads the speech out of one streamed chat reply.
+
+    A reply the model speaks carries its text only as the audio's
+    transcript. A reply the server reads aloud carries it as content
+    first, and the transcript repeats it. Either way the text comes out
+    once."""
+
+    def __init__(self):
+        self.has_content = False
+
+    def events(self, delta: dict) -> list:
+        """``("say", text)`` and ``("audio", samples, rate)`` events of
+        one delta. The caller reads the delta's content itself."""
+        if delta.get("content"):
+            self.has_content = True
+        audio = delta.get("audio")
+        if not isinstance(audio, dict):
+            return []
+        out: list = []
+        text = audio.get("transcript")
+        if text and not self.has_content:
+            out.append(("say", text))
+        data = audio.get("data")
+        if data:
+            try:
+                raw = base64.b64decode(data)
+            except ValueError:
+                raw = b""
+            samples = np.frombuffer(raw[:len(raw) // 2 * 2], dtype="<i2")
+            if samples.size:
+                out.append(("audio", samples, SPEECH_RATE))
+        return out
 
 
 def keep_model(base_url: str, model: str, *, api_key: str | None = None,
@@ -182,15 +261,18 @@ def keep_model(base_url: str, model: str, *, api_key: str | None = None,
 def transcribe_wav(base_url: str, wav_bytes: bytes, *,
                    api_key: str | None = None,
                    language: str | None = None,
+                   model: str = "whisper-1",
                    timeout: float = 120.0) -> str:
-    """POST one utterance to ``/v1/audio/transcriptions`` -> its text."""
+    """POST one utterance to ``/v1/audio/transcriptions`` -> its text.
+    ``model`` is the server's configured transcriber by default, or the
+    id of a served model that hears audio."""
     boundary = uuid.uuid4().hex
     parts = [
         (b"--%s\r\nContent-Disposition: form-data; name=\"file\"; "
          b"filename=\"utterance.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
          % boundary.encode()) + wav_bytes + b"\r\n",
         (b"--%s\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n"
-         b"whisper-1\r\n" % boundary.encode()),
+         % boundary.encode()) + model.encode() + b"\r\n",
     ]
     if language:
         parts.append(
@@ -410,11 +492,22 @@ class SentenceChunker:
 
 BrainEvent = tuple  # ("say", text) | ("status", label) | ("done", stats: dict)
                     # | ("count", n) - cumulative output tokens this round
+                    # | ("audio", int16 samples, rate) - the reply's speech
 
 
 class Brain(Protocol):
     def turn(self, user_text: str) -> Iterator[BrainEvent]: ...
     def reset(self) -> None: ...
+
+
+class SpeakingBrain(Brain, Protocol):
+    """A brain whose model hears and speaks. ``speech`` holds the request
+    fields that ask for a spoken reply, or None for text."""
+
+    speech: dict | None
+
+    def turn_audio(self, clip: bytes,
+                   transcript: str) -> Iterator[BrainEvent]: ...
 
 
 class ServerChatBrain:
@@ -432,12 +525,14 @@ class ServerChatBrain:
 
     def __init__(self, *, base_url: str, model: str,
                  api_key: str | None = None,
-                 system: str | None = None, max_tokens: int | None = None):
+                 system: str | None = None, max_tokens: int | None = None,
+                 speech: dict | None = None):
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
         self.system = system
         self.max_tokens = max_tokens
+        self.speech = speech
         self.messages: list[dict] = []
         self.reset()
 
@@ -446,16 +541,29 @@ class ServerChatBrain:
                          if self.system else [])
 
     def turn(self, user_text: str) -> Iterator[BrainEvent]:
+        yield from self._turn({"role": "user", "content": user_text},
+                              user_text)
+
+    def turn_audio(self, clip: bytes,
+                   transcript: str) -> Iterator[BrainEvent]:
+        """A turn the user spoke: the model hears ``clip`` (WAV bytes).
+        Once the turn ends, the history keeps it as ``transcript``, so a
+        later request does not carry the audio again."""
+        yield from self._turn(clip_message(clip), transcript)
+
+    def _turn(self, message: dict, kept: str) -> Iterator[BrainEvent]:
         from gmlx.tui.reasoning import ReasoningFilter
 
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append(message)
         rf = ReasoningFilter()
+        spoken = SpokenDeltas()
         answer: list[str] = []
         stats: dict = {}
         deltas = stream_chat(self.base_url, model=self.model,
                              messages=self.messages,
                              max_tokens=self.max_tokens,
-                             api_key=self.api_key)
+                             api_key=self.api_key,
+                             **({"extra": self.speech} if self.speech else {}))
         completed = False
         try:
             for delta in deltas:
@@ -468,6 +576,10 @@ class ServerChatBrain:
                 if delta.get("reasoning"):
                     yield ("think", delta["reasoning"])
                     continue
+                for event in spoken.events(delta):
+                    if event[0] == "say":
+                        answer.append(event[1])
+                    yield event
                 text = delta.get("content")
                 if not text:
                     continue
@@ -489,6 +601,7 @@ class ServerChatBrain:
             # turn's context matches what the user heard. No yields here - a
             # closing generator may not yield.
             deltas.close()
+            message["content"] = kept
             self.messages.append({"role": "assistant",
                                   "content": "".join(answer)})
         if completed:

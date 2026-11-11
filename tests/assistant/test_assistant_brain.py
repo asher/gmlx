@@ -279,3 +279,103 @@ def test_execute_survives_pathological_json_nesting():
     deep = "[" * 20000 + "]" * 20000
     out = b._execute({"name": "get_time", "args": [deep]})
     assert out.startswith("error: invalid arguments JSON")
+
+
+# -- spoken turns -------------------------------------------------------------
+def _speech_script(*rounds):
+    """As ``_stream_script``, for a brain that asks for audio output."""
+    remaining = list(rounds)
+    calls: list = []
+
+    def fake(base_url, *, model, messages, max_tokens, api_key=None,
+             tools=None, timeout=600.0, extra=None):
+        calls.append({"messages": [dict(m) for m in messages],
+                      "tools": tools, "extra": extra})
+        return iter(list(remaining.pop(0)))
+
+    fake.calls = calls
+    return fake
+
+
+_SPEECH = {"modalities": ["text", "audio"], "audio": {"format": "pcm16"}}
+
+
+def _samples(*values) -> str:
+    import base64
+
+    import numpy as np
+
+    return base64.b64encode(np.array(values, "<i2").tobytes()).decode()
+
+
+def test_a_spoken_turn_keeps_its_clip_through_the_tool_round():
+    """The model hears the clip in every request of the turn. After the
+    turn the history holds the transcript, with no audio."""
+    stream = _speech_script(
+        _tool_round(),
+        # The server read the plain-text answer aloud: content, then audio.
+        [{"content": "It is 5pm."},
+         {"audio": {"transcript": "It is 5pm.", "data": _samples(4, 5)}},
+         {"_finish": "stop"}, {"_usage": {"total_tokens": 7}}])
+    b = _brain(stream, speech=_SPEECH)
+    events = list(b.turn_audio(b"CLIP", "what time is it?"))
+
+    assert [e[1] for e in events if e[0] == "say"] == ["It is 5pm."]
+    assert [e[1].tolist() for e in events if e[0] == "audio"] == [[4, 5]]
+    assert ("status", "using get_time") in events
+    for call in stream.calls:
+        assert call["extra"] == _SPEECH
+        (part,) = call["messages"][0]["content"]
+        assert part["type"] == "input_audio"
+    assert b.messages[0] == {"role": "user", "content": "what time is it?"}
+    assert b.messages[-1] == {"role": "assistant", "content": "It is 5pm."}
+    assert all(isinstance(m["content"], (str, type(None)))
+               for m in b.messages)
+
+
+def test_a_reply_the_model_speaks_is_its_transcript():
+    stream = _speech_script(
+        [{"audio": {"transcript": "Half past "}},
+         {"audio": {"data": _samples(1)}},
+         {"audio": {"transcript": "five."}},
+         {"_finish": "stop"}])
+    b = _brain(stream, speech=_SPEECH, tools=ToolRegistry())
+    events = list(b.turn_audio(b"CLIP", "when?"))
+    assert "".join(e[1] for e in events if e[0] == "say") == "Half past five."
+    assert b.messages == [{"role": "user", "content": "when?"},
+                          {"role": "assistant", "content": "Half past five."}]
+
+
+def test_memory_reads_a_spoken_turn_as_its_transcript():
+    seen = {}
+
+    class Memory:
+        def recall(self, text):
+            seen["recall"] = text
+            return []
+
+        def remember(self, user_text, answer):
+            seen["remember"] = (user_text, answer)
+
+    stream = _speech_script(
+        [{"audio": {"transcript": "Noted."}}, {"_finish": "stop"}])
+    b = _brain(stream, speech=_SPEECH, memory=Memory(), tools=ToolRegistry())
+    list(b.turn_audio(b"CLIP", "my dog is Rex"))
+    assert seen == {"recall": "my dog is Rex",
+                    "remember": ("my dog is Rex", "Noted.")}
+
+
+def test_a_spoken_turn_that_fails_leaves_no_user_message():
+    def boom(base_url, **kw):
+        raise RuntimeError("down")
+
+    b = _brain(boom, speech=_SPEECH)
+    with pytest.raises(RuntimeError):
+        list(b.turn_audio(b"CLIP", "hello"))
+    assert b.messages == []
+
+
+def test_a_text_brain_passes_no_audio_fields():
+    stream = _stream_script(_PROSE)       # its signature takes no ``extra``
+    b = _brain(stream)
+    assert [e for e in b.turn("what time is it?") if e[0] == "say"]

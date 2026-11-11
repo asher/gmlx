@@ -22,6 +22,12 @@ sentences decoded so far, synthesize while earlier audio plays) -> playback.
 All coordination flows through one events queue; the state machine
 (:class:`TalkStateMachine`) is pure and tested against synthetic event
 sequences.
+
+One-model mode: a chat model that hears audio and speaks runs the whole
+turn. The utterance goes to ``/v1/audio/transcriptions`` under that
+model's id, and an empty transcript ends the turn as always. The reply
+request then carries the clip itself and asks for audio output, and the
+reply's speech plays as it streams. The TTS worker has no part in it.
 """
 
 from __future__ import annotations
@@ -366,6 +372,7 @@ class StatusLine:
 
 
 _TURN_END = object()          # tts/playback queue sentinel: reply complete
+_ONE_SPEED = "this model speaks at one speed, so the speed setting is not used"
 _NO_ITEM = object()           # tts worker: no queue item carried over
 _MERGE_CHARS = 400            # cap on one merged synthesis utterance
 
@@ -380,7 +387,7 @@ class TalkLoop:
                  model_label: str, once: bool = False, status: StatusLine,
                  transcribe=None, synthesize=None,
                  wake_threshold: float = 0.3, make_wake=None,
-                 on_display=None):
+                 on_display=None, one_model: bool = False):
         from . import client as talk_client
         self.on_display = on_display  # headless sink; None -> terminal TUI
         self.m = machine
@@ -402,6 +409,9 @@ class TalkLoop:
         self.status = status
         self._transcribe = transcribe or talk_client.transcribe_wav
         self._synthesize = synthesize or talk_client.synthesize
+        # The chat model hears the clip and speaks the reply itself.
+        self.one_model = one_model
+        self._sync_speech()
 
         self.events: queue.Queue = queue.Queue()
         self.frames: queue.Queue = queue.Queue(maxsize=64)
@@ -416,6 +426,12 @@ class TalkLoop:
         self._input_started = False
         self._turn_thread = None
         self._threads: list = []
+
+    def _sync_speech(self) -> None:
+        """Give the brain the audio-output fields of the next request."""
+        if self.one_model:
+            from .client import speech_request
+            self.brain.speech = speech_request(self.voice, self.language)
 
     # -- capture side ----------------------------------------------------------
     def on_frame(self, frame) -> None:
@@ -477,14 +493,18 @@ class TalkLoop:
     def _run_turn(self, source, cancel) -> None:
         from .audio import RATE
         from .client import SentenceChunker, TalkClientError, encode_wav
+        clip = None
         if isinstance(source, str):
             text = source
         else:
             ms = 1000.0 * len(source) / RATE
+            clip = encode_wav(source, RATE)
             try:
                 text = self._transcribe(
-                    self.base_url, encode_wav(source, RATE),
-                    api_key=self.api_key, language=self.language)
+                    self.base_url, clip,
+                    api_key=self.api_key, language=self.language,
+                    **({"model": self.model_label.split("@", 1)[0]}
+                       if self.one_model else {}))
             except TalkClientError as e:
                 if not cancel.is_set():
                     self.events.put(("error", str(e)))
@@ -502,7 +522,10 @@ class TalkLoop:
             if not text.strip():
                 return
         chunker = SentenceChunker()
-        turn = self.brain.turn(text)
+        one = self.one_model
+        # The model hears a spoken turn's clip; a typed turn is its text.
+        turn = (self.brain.turn_audio(clip, text) if one and clip is not None
+                else self.brain.turn(text))
         try:
             for ev in turn:
                 if cancel.is_set():
@@ -512,7 +535,14 @@ class TalkLoop:
                     turn.close()
                     break
                 kind = ev[0]
-                if kind == "say":
+                if kind == "say" and one:
+                    # The model's own speech follows as audio events.
+                    for chunk in chunker.feed(ev[1]):
+                        self.events.put(("line", chunk))
+                elif kind == "audio":
+                    self.events.put(("say", None))
+                    self.play_q.put((cancel, "", ev[1], ev[2]))
+                elif kind == "say":
                     for chunk in chunker.feed(ev[1]):
                         self.events.put(("say", chunk))
                         self.tts_q.put((cancel, chunk))
@@ -533,10 +563,15 @@ class TalkLoop:
             # turn_active/speaking mid-flight.
             return
         tail = chunker.flush()
-        if tail:
-            self.events.put(("say", tail))
-            self.tts_q.put((cancel, tail))
-        self.tts_q.put(_TURN_END)
+        if one:
+            if tail:
+                self.events.put(("line", tail))
+            self.play_q.put(_TURN_END)
+        else:
+            if tail:
+                self.events.put(("say", tail))
+                self.tts_q.put((cancel, tail))
+            self.tts_q.put(_TURN_END)
         self.events.put(("turn_done", None))
 
     def _tts_worker(self) -> None:
@@ -593,7 +628,8 @@ class TalkLoop:
                 if self.stop_speaking.is_set() or (
                         cancel is not None and cancel.is_set()):
                     continue
-                self.events.put(("chunk_start", text))
+                if text:                  # the model's own speech passes ""
+                    self.events.put(("chunk_start", text))
             try:
                 self.backend.play(pcm, rate, stop=(self.stop_speaking
                                                    if text is not None
@@ -689,7 +725,7 @@ class TalkLoop:
             self._apply(m.on_stt(""))     # rest + idle chime, no turn
         elif kind == "say":
             self._apply(m.on_say())
-        elif kind == "chunk_start":
+        elif kind in ("chunk_start", "line"):
             self._print(f"  {payload}")
         elif kind == "status":
             self.note = payload
@@ -842,12 +878,15 @@ class TalkLoop:
         if cmd == "/voice":
             if arg:
                 self.voice = arg
+                self._sync_speech()
                 self._print(f"[talk] voice -> {arg}")
             else:
                 voices = list_voices(self.base_url, self.api_key)
                 self._print("[talk] voices: " + (", ".join(voices)
                             if voices else "(server has no voice listing; "
                             "pass a name)"))
+        elif cmd == "/speed" and self.one_model:
+            self._print(f"[talk] {_ONE_SPEED}")
         elif cmd == "/speed":
             try:
                 self.speed = _speed(arg)
@@ -1095,11 +1134,12 @@ def _pick_model(requested: str | None, caps: dict) -> str | None:
 
 
 def _capability_guidance(caps: dict, *, needs_stt: bool, explicit_url: bool,
-                         out=None) -> bool:
+                         out=None, needs_tts: bool = True) -> bool:
     """Check stt/tts service markers; print fix-it guidance and return False
-    when the server can't do voice."""
+    when the server can't do voice. A model that speaks its own replies
+    needs no tts service."""
     out = out if out is not None else sys.stderr
-    missing = [name for name, need in (("stt", needs_stt), ("tts", True))
+    missing = [name for name, need in (("stt", needs_stt), ("tts", needs_tts))
                if need and not caps.get(name)]
     if not missing:
         return True
@@ -1130,14 +1170,17 @@ class TalkSetupError(Exception):
 
 def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
                     model: str, once: bool = False, on_display=None,
-                    warn=None):
+                    warn=None, one_model: bool = False):
     """Construct the full voice pipeline - audio backend, wake/VAD, brain
     (incl. assistant tools + memory), :class:`TalkLoop` - from merged settings
     ``s``. Shared by the CLI verb and the menu bar's in-process session.
     Returns ``(loop, cleanup)``; call ``cleanup()`` after the loop exits.
     Fatal problems raise :class:`TalkSetupError`; non-fatal degradations
-    (missing wake engine, energy-gate VAD, MCP servers down) go to ``warn``."""
+    (missing wake engine, energy-gate VAD, MCP servers down) go to ``warn``.
+    ``one_model``: the chat model hears the user and speaks the reply."""
     warn = warn or (lambda m: print(f"[talk] {m}", file=sys.stderr))
+    if one_model and s["speed"] not in (None, 1.0):
+        warn(_ONE_SPEED)
     from .audio import (
         Endpointer,
         SoundDeviceBackend,
@@ -1211,7 +1254,8 @@ def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
         brain=brain, base_url=base_url, api_key=api_key, voice=s["voice"],
         speed=s["speed"], language=s["language"], chime=s["chime"],
         model_label=model, once=once, status=StatusLine(),
-        wake_threshold=s["wake_threshold"], on_display=on_display)
+        wake_threshold=s["wake_threshold"], on_display=on_display,
+        one_model=one_model)
 
     # Hold the model resident (and warm it) for the session's lifetime: a
     # live mic with no model loaded is not a real mode of operation. Off the
@@ -1264,7 +1308,8 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
         return rc
     base_url, api_key = ns.base_url, ns.api_key
 
-    from .client import TalkClientError, list_voices, probe_capabilities
+    from .client import (TalkClientError, list_voices, one_model,
+                         probe_capabilities)
     try:
         caps = probe_capabilities(base_url, api_key)
     except TalkClientError as e:
@@ -1280,11 +1325,15 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
               else "(the server has no /v1/audio/voices route)")
         return 0
 
+    # A model that hears and speaks runs the turn itself, so it needs no
+    # tts service. Its transcription route is still the server's.
+    model = _pick_model(s["model"], caps)
+    alone = one_model(caps, model)
     if not _capability_guidance(caps, needs_stt=s["mode"] != "text",
-                                explicit_url=args.base_url is not None):
+                                explicit_url=args.base_url is not None,
+                                needs_tts=not alone):
         return 1
 
-    model = _pick_model(s["model"], caps)
     if not model:
         ids = ", ".join(caps.get("chat_ids") or []) or "(none)"
         print(f"error: no model selected and the server has no default. "
@@ -1293,7 +1342,8 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
 
     try:
         loop, cleanup = build_talk_loop(s, base_url=base_url, api_key=api_key,
-                                        model=model, once=args.once)
+                                        model=model, once=args.once,
+                                        one_model=alone)
     except TalkSetupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
