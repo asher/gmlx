@@ -256,5 +256,22 @@ def grow(cache, keys, values, prev, need, make, grid=True, routed=True) -> None:
 
         cache.keys = extend(cache.keys, keys)
         cache.values = extend(cache.values, values)
+        _eval_regrown(cache)
     if routed:
         mark_fresh(cache, prev)
+
+
+def _eval_regrown(cache) -> None:
+    """Evaluate one cache's regrown buffers, so its old and new buffers
+    stand together and not every layer's, which the step's one graph would
+    hold. It runs inside a forward, so an allocator refusal is left for
+    the step's own eval to raise."""
+    from gmlx.eval_guard import guard
+
+    try:
+        guard.eval(cache.keys, cache.values, site="kv-regrow", owner="owned")
+    except RuntimeError as e:
+        from gmlx.serve.tick_guard import is_allocator_refusal
+
+        if not is_allocator_refusal(e):
+            raise

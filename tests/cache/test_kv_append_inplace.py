@@ -21,6 +21,7 @@ import pytest
 
 from gmlx._vendor.mlx_vlm import apc, apc_adapters
 from gmlx._vendor.mlx_vlm.generate import ar
+from gmlx import eval_guard
 from gmlx.cache import kv_append
 from gmlx.cache.apc_manager import GmlxAPCManager
 from gmlx.cache.apc_pooling import install_batched_cachelist_admission
@@ -731,6 +732,89 @@ def test_first_append_after_a_lone_row_is_joined_regrows_nothing(
             np.testing.assert_array_equal(gv[:, :, :-1], wv)
             np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
             np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
+
+
+# Memory: a regrow is made one layer at a time.
+
+@metal
+def test_a_grid_crossing_regrows_one_layer_at_a_time(decode_caps):
+    # Four rows fill their buffers to a grid point near 8000 tokens, so
+    # the next token regrows every layer. Each layer's new buffers are
+    # made as its append is built: one layer's old and new buffers stand
+    # together. Left to the step's eval, every layer's do.
+    width = kv_append.grid_capacity(8000, owned.BatchKVCache.step)
+    live, rows = [], []
+    for layer in range(JOIN_LAYERS):
+        c, want = _batch([width - 10 * i for i in range(4)], 10 * layer)
+        live.append(c)
+        rows.append(want)
+    assert all(c._idx == c.keys.shape[2] == width for c in live)
+    old = live[0].keys.nbytes + live[0].values.nbytes
+    assert JOIN_LAYERS * old > 60 << 20
+
+    k, v = _rows(1, 999, b=4)
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    for c in live:
+        c.update_and_fetch(k, v)
+    mx.eval(_layer_arrays(live))  # the step's eval
+    mx.synchronize()
+    peak = mx.get_peak_memory() - base
+    new = live[0].keys.nbytes + live[0].values.nbytes
+    assert new > old
+    # What every layer grew by, and one layer's two buffers.
+    assert peak <= JOIN_LAYERS * (new - old) + 2 * new
+
+    tk, tv = np.asarray(k), np.asarray(v)
+    for c, want in zip(live, rows):
+        for i, (wk, wv) in enumerate(want):
+            gk, gv = _batch_row(c, i)
+            np.testing.assert_array_equal(gk[:, :, :-1], wk)
+            np.testing.assert_array_equal(gv[:, :, :-1], wv)
+            np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
+            np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
+
+
+class _EvalThrows:
+    """The eval guard's mx, with an eval that throws."""
+
+    def __init__(self, text):
+        self.text, self.calls = text, 0
+
+    def __getattr__(self, name):
+        return getattr(mx, name)
+
+    def eval(self, *arrays):
+        self.calls += 1
+        raise RuntimeError(self.text)
+
+
+def test_a_refused_regrow_eval_is_left_to_the_step(monkeypatch):
+    # The regrow's eval runs inside a forward. An allocator refusal there
+    # leaves the layer's buffers unevaluated and the append built, so the
+    # step's own eval is where the refusal is raised. A failed command
+    # buffer is not swallowed.
+    width = kv_append.grid_capacity(200, owned.BatchKVCache.step)
+    k, v = _rows(1, 5, b=2)
+    c, rows = _batch([width, width - 3], 0)
+    refused = _EvalThrows("[metal::malloc] Attempting to allocate 1 bytes")
+    monkeypatch.setattr(eval_guard, "mx", refused)
+    c.update_and_fetch(k, v)
+    assert refused.calls == 1 and c.keys.shape[2] > width
+    for i, (wk, wv) in enumerate(rows):
+        gk, gv = _batch_row(c, i)
+        np.testing.assert_array_equal(gk[:, :, :-1], wk)
+        np.testing.assert_array_equal(gv[:, :, :-1], wv)
+        np.testing.assert_array_equal(gk[:, :, -1:], np.asarray(k[i:i + 1]))
+        np.testing.assert_array_equal(gv[:, :, -1:], np.asarray(v[i:i + 1]))
+
+    c, _ = _batch([width, width - 3], 1)
+    monkeypatch.setattr(eval_guard, "mx", _EvalThrows(
+        "[METAL] Command buffer execution failed: Insufficient Memory "
+        "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)."))
+    with pytest.raises(RuntimeError, match="Command buffer"):
+        c.update_and_fetch(k, v)
 
 
 # Memory: a finish filters one layer at a time.
