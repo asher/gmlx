@@ -349,6 +349,19 @@ def test_ffmpeg_writes_the_other_formats(fmt, magic):
     assert out.startswith(magic)
 
 
+def test_a_flac_clip_states_its_length():
+    """The stream header holds the sample count, which ffmpeg writes only
+    to an output it can seek in. A player reads the duration from it."""
+    if media_programs.find("ffmpeg") is None:
+        pytest.skip("needs ffmpeg")
+    pcm = _pcm()
+    out = nt.encode(pcm, 24000, "flac")
+    # The stream header follows the 4-byte magic and a 4-byte block
+    # header, and its last 36 bits before the checksum are the count.
+    samples = int.from_bytes(out[18:26], "big") & ((1 << 36) - 1)
+    assert samples == len(pcm) // 2
+
+
 # -- the pass -----------------------------------------------------------------
 
 

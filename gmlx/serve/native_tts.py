@@ -19,8 +19,10 @@ import base64
 import importlib
 import io
 import json
+import os
 import re
 import subprocess
+import tempfile
 import wave
 from dataclasses import dataclass
 
@@ -312,15 +314,23 @@ def encode(pcm: bytes, sample_rate: int, fmt: str) -> bytes:
         return buffer.getvalue()
     from . import media_programs
 
-    done = subprocess.run(
-        [media_programs.program("ffmpeg"), "-hide_banner", "-loglevel",
-         "error", "-f", "s16le", "-ar", str(sample_rate), "-ac", "1", "-i",
-         "pipe:0", *_FFMPEG_OUT[fmt], "pipe:1"],
-        input=pcm, capture_output=True, check=False)
-    if done.returncode != 0 or not done.stdout:
+    # A file and not a pipe: ffmpeg goes back to the header of a flac or
+    # mp3 clip to write its length.
+    with tempfile.TemporaryDirectory(prefix="gmlx-speech-") as folder:
+        path = os.path.join(folder, "clip")
+        done = subprocess.run(
+            [media_programs.program("ffmpeg"), "-hide_banner", "-loglevel",
+             "error", "-f", "s16le", "-ar", str(sample_rate), "-ac", "1",
+             "-i", "pipe:0", *_FFMPEG_OUT[fmt], "-y", path],
+            input=pcm, capture_output=True, check=False)
+        data = b""
+        if done.returncode == 0 and os.path.exists(path):
+            with open(path, "rb") as f:
+                data = f.read()
+    if not data:
         tail = done.stderr.decode("utf-8", "replace").strip()[-200:]
         raise RuntimeError(f"ffmpeg could not write {fmt}: {tail}")
-    return done.stdout
+    return data
 
 
 @dataclass(frozen=True)
