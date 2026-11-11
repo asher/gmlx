@@ -214,9 +214,10 @@ def _max_run(ids) -> int:
 _SPAM_WINDOW = 2048
 
 # Arches that decode from another seed.
-#   lfm3 - after the seed's trailing space the model writes a run of spaces,
-#   in llama.cpp too. Without the space it loops on the sentence.
-DECODE_SEED = {"lfm3": _SEED.rstrip()}
+#   lfm3 - after a whole sentence, Omni Q4_0 writes a run of spaces, in
+#   llama.cpp too. A seed that stops mid-sentence keeps every quant in text.
+DECODE_SEED = {"lfm3": ("Chapter One\n\nThe history of science is a long and "
+                        "winding story. It begins")}
 
 
 def _build_prompt(tok, n_tokens):

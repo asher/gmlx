@@ -218,14 +218,19 @@ def test_passes_over_a_long_clip_keep_the_output(monkeypatch, stretch,
                                _reference(cfg, w, mel), rtol=2e-4, atol=2e-5)
 
 
-def test_the_encoder_keeps_a_16_bit_stream():
-    """16-bit weights give 16-bit features: the float32 convolutions,
-    norms and rope do not widen the stream. ``stream_dtype`` overrides."""
+@pytest.mark.parametrize("name", ["bfloat16", "float16"])
+def test_the_encoder_keeps_a_16_bit_stream(name, monkeypatch):
+    """16-bit weights in the activation dtype give 16-bit features: the
+    float32 convolutions, norms and rope do not widen the stream. A chip
+    without bfloat16 gets the F16 projector and runs float16.
+    ``stream_dtype`` overrides."""
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", name)
+    dtype = getattr(mx, name)
     _cfg, encoder, projector, _w = _build()
-    encoder.set_dtype(mx.bfloat16)
-    projector.set_dtype(mx.bfloat16)
+    encoder.set_dtype(dtype)
+    projector.set_dtype(dtype)
     mel = mx.zeros((16, 24))
-    assert projector(encoder(mel)).dtype == mx.bfloat16
+    assert projector(encoder(mel)).dtype == dtype
     encoder.stream_dtype = mx.float32
     assert encoder(mel).dtype == mx.float32
 

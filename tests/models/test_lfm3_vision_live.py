@@ -63,6 +63,26 @@ def pair(gguf_dir, gguf_index):
     return found
 
 
+# The fixtures hold LFM3-Omni-2B's tower output and prompts. LFM3-VL-2B has
+# a tower of its own and another template.
+FIXTURE_MODEL = "LFM3-Omni-2B"
+
+
+@pytest.fixture(scope="module")
+def omni(pair) -> bool:
+    """Whether the pair is the model the fixtures were recorded on."""
+    from gmlx.load.headerscan import scan_gguf
+
+    return scan_gguf(pair[1], include_tensors=False).kv.get(
+        "general.basename") == FIXTURE_MODEL
+
+
+@pytest.fixture
+def omni_only(omni):
+    if not omni:
+        pytest.skip(f"the fixtures hold {FIXTURE_MODEL}'s tower and prompts")
+
+
 @pytest.fixture(scope="module")
 def loaded(pair):
     from gmlx.load.vlm import load_vlm_model
@@ -105,8 +125,12 @@ def test_the_load_fills_every_parameter(pair, capsys):
     from gmlx.models.lfm3.model import MEDIA_PLACEHOLDERS, MODE_MARKERS
 
     vocab = _processor.tokenizer.get_vocab()
+    names = MODE_MARKERS + MEDIA_PLACEHOLDERS
+    # LFM3-VL's vocabulary has no audio tokens.
+    assert {n for n in names if n not in vocab} <= {"<|audio_out|>",
+                                                     "<|audio|>"}
     assert list(model.language_model.suppressed_tokens) == sorted(
-        vocab[name] for name in MODE_MARKERS + MEDIA_PLACEHOLDERS)
+        vocab[name] for name in names if name in vocab)
 
 
 def test_patches_are_the_reference_processors(loaded, ref):
@@ -127,7 +151,8 @@ def test_patches_are_the_reference_processors(loaded, ref):
 
 @_NEEDS_GPU
 @pytest.mark.parametrize("what", ["image", "clip"])
-def test_a_float32_stream_gives_the_reference_features(loaded, ref, what):
+def test_a_float32_stream_gives_the_reference_features(loaded, ref, what,
+                                                       omni_only):
     model = loaded[0]
     tower = model.vision_tower
     tower.stream_dtype = mx.float32
@@ -153,7 +178,7 @@ def _holds_the_16_bit_recording(got, ref, what) -> None:
 @_NEEDS_GPU
 @pytest.mark.parametrize("what", ["image", "clip"])
 def test_the_default_stream_holds_the_reference_16_bit_tower(loaded, ref,
-                                                             what):
+                                                             what, omni_only):
     model = loaded[0]
     got = _features(model, ref[f"{what}_pixel_values"], ref[f"{what}_grid"])
     assert np.isfinite(got).all()
@@ -167,7 +192,8 @@ def test_the_16_bit_and_float32_streams_give_the_same_answer(loaded, ref,
     """The greedy tokens after the recorded prompt, with the tower in
     each stream. The two may part only where the best two logits are a
     near tie."""
-    from tests.lfm3_header import greedy_tokens, same_answer_up_to_a_tie
+    from tests.lfm3_header import (end_tokens, greedy_tokens,
+                                   same_answer_up_to_a_tie, start_agrees)
 
     model = loaded[0]
     key = "pixel_values" if what == "image" else "pixel_values_videos"
@@ -181,9 +207,10 @@ def test_the_16_bit_and_float32_streams_give_the_same_answer(loaded, ref,
         exact = greedy_tokens(model, ids, GREEDY_TOKENS, **inputs)
     finally:
         model.vision_tower.stream_dtype = None
-    assert same_answer_up_to_a_tie(default, exact), (default[0], exact[0])
+    ends = end_tokens(loaded[2])
+    assert same_answer_up_to_a_tie(default, exact, ends), (default[0], exact[0])
     # The towers agree on the start of the answer.
-    assert default[0][:8] == exact[0][:8]
+    assert start_agrees(default, exact, ends)
 
 
 def test_the_debug_switch_runs_the_towers_in_float32(pair, monkeypatch):
@@ -197,7 +224,7 @@ def test_the_debug_switch_runs_the_towers_in_float32(pair, monkeypatch):
         assert model.audio_encoder.stream_dtype == mx.float32
 
 
-def test_prompts_are_the_reference_token_ids(loaded, ref):
+def test_prompts_are_the_reference_token_ids(loaded, ref, omni_only):
     """The chat template and the expansion write the ids the reference
     template and processor write, for an image and for a clip."""
     from PIL import Image
@@ -294,10 +321,10 @@ def test_the_shipped_template_is_what_the_serve_render_lists_say(loaded):
 
 
 @_NEEDS_GPU
-def test_a_float16_stream_does_not_overflow(pair, ref, monkeypatch):
+def test_a_float16_stream_does_not_overflow(pair, ref, omni, monkeypatch):
     """M1 and M2 run float16, whose range ends at 65,504. The tower's
-    activations stay inside it on real inputs, and the features hold the
-    16-bit floor."""
+    activations stay inside it on real inputs, and on the fixture's model
+    the features hold the 16-bit floor."""
     from tests.lfm3_header import load_as_f16_projector
 
     monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float16")
@@ -308,4 +335,5 @@ def test_a_float16_stream_does_not_overflow(pair, ref, monkeypatch):
         assert features.dtype == mx.float16, what
         got = np.asarray(features.astype(mx.float32))
         assert np.isfinite(got).all(), what
-        _holds_the_16_bit_recording(got, ref, what)
+        if omni:
+            _holds_the_16_bit_recording(got, ref, what)

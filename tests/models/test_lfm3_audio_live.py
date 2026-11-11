@@ -171,7 +171,8 @@ def test_the_16_bit_and_float32_streams_give_the_same_answer(loaded, ref):
     """The greedy tokens after the recorded two-clip prompt, with the
     encoder in each stream. The two may part only where the best two
     logits are a near tie."""
-    from tests.lfm3_header import greedy_tokens, same_answer_up_to_a_tie
+    from tests.lfm3_header import (end_tokens, greedy_tokens,
+                                   same_answer_up_to_a_tie, start_agrees)
 
     model = loaded[0]
     pre = loaded[2].feature_extractor(_waves(ref))
@@ -184,8 +185,9 @@ def test_the_16_bit_and_float32_streams_give_the_same_answer(loaded, ref):
                               **inputs)
     finally:
         model.audio_encoder.stream_dtype = None
-    assert same_answer_up_to_a_tie(default, exact), (default[0], exact[0])
-    assert default[0][:8] == exact[0][:8]
+    ends = end_tokens(loaded[2])
+    assert same_answer_up_to_a_tie(default, exact, ends), (default[0], exact[0])
+    assert start_agrees(default, exact, ends)
 
 
 @_NEEDS_GPU

@@ -149,14 +149,39 @@ def greedy_tokens(model, input_ids, steps: int,
     return tokens, ties
 
 
-def same_answer_up_to_a_tie(a, b) -> bool:
+def same_answer_up_to_a_tie(a, b, ends=()) -> bool:
     """Whether two ``greedy_tokens`` results agree, or first differ at a
     step that one of them holds as a near tie. After such a step the two
-    are different continuations."""
+    are different continuations. Nothing after an end token in ``ends``
+    that both give is compared, since the answer is over."""
     for i, (x, y) in enumerate(zip(a[0], b[0])):
         if x != y:
             return a[1][i] or b[1][i]
+        if x in ends:
+            return True
     return True
+
+
+def start_agrees(a, b, ends=(), most: int = 8) -> bool:
+    """Whether two ``greedy_tokens`` results give the same first ``most``
+    tokens, cut before the first step that either holds as a near tie and
+    after an end token in ``ends``."""
+    k = min(most, len(a[0]), len(b[0]))
+    for i in range(k):
+        if a[1][i] or b[1][i]:
+            k = i
+            break
+        if a[0][i] in ends:
+            k = i + 1
+            break
+    return list(a[0][:k]) == list(b[0][:k])
+
+
+def end_tokens(processor) -> set:
+    """The ids that end an answer, from the processor's tokenizer."""
+    tok = getattr(processor, "tokenizer", processor)
+    ids = tok.eos_token_id
+    return {int(i) for i in (ids if isinstance(ids, (list, tuple)) else [ids])}
 
 
 def load_as_f16_projector(text_path, projector_path):

@@ -40,20 +40,22 @@ def _nvfp4_file(gguf_index) -> str:
 
 
 def test_every_masked_name_resolves_on_the_shipped_vocabulary(gguf_index):
-    """All six names are tokens of every LFM3 file, and the loaded model
-    masks exactly those six ids."""
+    """The six names are tokens of every LFM3 file but LFM3-VL's, which has
+    no audio tokens. The loaded model masks exactly the ones it has."""
     from gmlx import load_model
 
     for path in _lfm3_files(gguf_index):
         model, _config, tok = load_model(path, verbose=False)
         raw = getattr(tok, "_tokenizer", tok)
         vocab = raw.get_vocab()
-        missing = [n for n in _NAMES if n not in vocab]
-        assert not missing, (path, missing)
-        ids = sorted(vocab[n] for n in _NAMES)
-        assert len(set(ids)) == len(_NAMES)
+        # LFM3-VL's vocabulary has no audio tokens.
+        missing = {n for n in _NAMES if n not in vocab}
+        assert missing <= {"<|audio_out|>", "<|audio|>"}, (path, missing)
+        names = [n for n in _NAMES if n in vocab]
+        ids = sorted(vocab[n] for n in names)
+        assert len(set(ids)) == len(names)
         assert list(model.suppressed_tokens) == ids, path
-        assert sorted(raw.convert_ids_to_tokens(ids)) == sorted(_NAMES)
+        assert sorted(raw.convert_ids_to_tokens(ids)) == sorted(names)
 
         logits = model(mx.array([tok.encode("Hello")]))[0, -1]
         masked = logits[mx.array(ids)].astype(mx.float32)
