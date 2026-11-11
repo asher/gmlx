@@ -32,8 +32,11 @@ reference's own 16-bit distance: the divergence may be at most
 ``REPLAY_TOP1_SLACK`` under it. A quantized text model has the looser
 pair. Both pairs were set before the first comparison.
 
-The last test speaks a sentence and has the same model transcribe it.
-It is a check that the whole path works, not a quality floor.
+A round-trip test speaks a sentence and has the same model transcribe
+it. It is a check that the whole path works, not a quality floor.
+
+The last test runs the batch engine: a text row has the same logits
+beside a speaking row as beside a text row.
 """
 
 from __future__ import annotations
@@ -429,3 +432,91 @@ def test_serve_takes_the_marker_off_the_speech_prompt(loaded):
         ids = tok.encode(prompt, add_special_tokens=False)
         _, forced = model.speech_start(ids[-1], "audio")
         assert forced == marker
+
+
+# -- a text row beside a speaking row -----------------------------------------
+
+NEIGHBOR_STEPS = 40
+
+
+def _row_logits(loaded, monkeypatch, neighbor_mode, join_at) -> list:
+    """The logits of a greedy text row at each step, in a batch whose
+    second row joins after ``join_at`` tokens: a text row for a mode of
+    None, else a speaking row in that mode. The second row has the same
+    prompt either way and grows by one slot a step, so the batch has the
+    same shape either way."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx.serve import speech_rows
+    from gmlx.serve.row_sampling import RowSettings
+
+    model, processor = loaded[0], loaded[2]
+    lm, tok = model.language_model, processor.tokenizer
+    end = {tok.eos_token_id}
+
+    def ids(ask):
+        return tok.encode(tok.apply_chat_template(
+            [{"role": "user", "content": ask}], add_generation_prompt=True,
+            tokenize=False), add_special_tokens=False)
+
+    def embeds(prompt):
+        return {"inputs_embeds": lm.model.embed_tokens(mx.array([prompt]))}
+
+    text = ids("List five facts about the planet Mars, one sentence each.")
+    other = ids("Tell me in three sentences how a rainbow forms after a "
+                "summer storm, and say which colors a person sees first.")
+    seen, stock = [], ar.raw_logprobs
+
+    def recording(logits):
+        seen.append(np.array(logits[0].astype(mx.float32)))
+        return stock(logits)
+
+    gen = ar.BatchGenerator(lm, processor, stop_tokens=end,
+                            default_row=RowSettings())
+    try:
+        monkeypatch.setattr(ar, "raw_logprobs", recording)
+        (uid,) = gen.insert([text], max_tokens=NEIGHBOR_STEPS,
+                            prompt_kwargs=[embeds(text)],
+                            row_settings=[RowSettings(logprobs=True)])
+        count, done, joined, kinds = 0, False, False, set()
+        while not done:
+            if not joined and count >= join_at:
+                joined = True
+                settings = RowSettings()
+                if neighbor_mode is not None:
+                    settings = RowSettings(speech=speech_rows.open_row(
+                        model, other[-1], {"mode": neighbor_mode}, 3,
+                        end_of_turn=end))
+                gen.insert([other], max_tokens=4 * NEIGHBOR_STEPS,
+                           prompt_kwargs=[embeds(other)],
+                           row_settings=[settings])
+            _prompts, responses = gen.next()
+            for r in responses:
+                if r.uid == uid:
+                    count += 1
+                    done = done or r.finish_reason is not None
+                else:
+                    # The batch keeps its shape only while both rows run.
+                    assert r.finish_reason is None
+                    if r.speech is not None:
+                        kinds.add(r.speech.kind)
+    finally:
+        monkeypatch.setattr(ar, "raw_logprobs", stock)
+        gen.close()
+    assert ("frame" in kinds) == (neighbor_mode is not None)
+    return seen
+
+
+@pytest.mark.parametrize("join_at", [0, 5])
+def test_a_text_rows_logits_do_not_depend_on_a_speaking_neighbor(
+        loaded, monkeypatch, join_at):
+    """A text row beside a speaking row has the logits it has beside a
+    text row, bit for bit. The reply text is not the check: a batch's
+    shape moves a 16-bit logit by one step, and that picks the other
+    token wherever two logits tie."""
+    beside_text = _row_logits(loaded, monkeypatch, None, join_at)
+    assert len(beside_text) >= NEIGHBOR_STEPS
+    for mode in ("interleaved", "audio"):
+        got = _row_logits(loaded, monkeypatch, mode, join_at)
+        assert len(got) == len(beside_text)
+        for step, (a, b) in enumerate(zip(beside_text, got)):
+            assert np.array_equal(a, b), (mode, step)
