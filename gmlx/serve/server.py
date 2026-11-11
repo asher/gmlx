@@ -941,6 +941,25 @@ def _resolved_drafter(mc, model_dirs):
     return dataclasses.replace(mc, draft_gguf=rp)
 
 
+def _projector_gives(path, *, short: bool = False) -> list:
+    """What the projector at ``path`` gives its model, from its header.
+    A file whose header says nothing gives image input. ``short`` names
+    them as a registration note does: images, audio, speech."""
+    from gmlx.load.discovery import projector_caps
+
+    caps = projector_caps(path)
+    names = (("images", "audio", "speech") if short
+             else ("image input", "audio input", "speech output"))
+    words = [w for w, on in zip(names, (caps.vision,
+                                        caps.audio_in or caps.speech_encoder,
+                                        caps.speech_out)) if on]
+    return words or names[:1]
+
+
+def _and(words: list) -> str:
+    return words[0] if len(words) == 1 else f"{', '.join(words[:-1])} and {words[-1]}"
+
+
 def _companion_hints(draft_pairs, mmproj_pairs) -> dict:
     """{(id, "drafter" or "mmproj"): path} for the companions a sync leaves
     out without --add-companions."""
@@ -1713,11 +1732,11 @@ def register_downloads(paths: list, config_path=None, *,
             print(f"registered {os.path.basename(dp)} for faster replies on "
                   f"{mid} in {path}")
         for mid, mp in mmprojs.items():
-            print(f"registered {os.path.basename(mp)} for image input on "
-                  f"{mid} in {path}")
+            print(f"registered {os.path.basename(mp)} for "
+                  f"{_and(_projector_gives(mp))} on {mid} in {path}")
         for m in newly:
-            extras = [w for w, on in (("images", m.mmproj),
-                                      ("faster replies", m.speculative)) if on]
+            extras = [*(_projector_gives(m.mmproj, short=True) if m.mmproj else ()),
+                      *(["faster replies"] if m.speculative else [])]
             note = f"  ({', '.join(extras)})" if extras else ""
             print(f"registered {m.id} in {path}{note}")
         for im in images:
