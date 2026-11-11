@@ -2407,9 +2407,9 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
         if max_len is not None and max_len < len(ids):
             cap = max_len
         elif len(ids) >= 2:
-            # The row is already single-row on the B=1 path; ckpt_store
-            # slices it directly (its own stores copy internally), so no
-            # full-cache clone happens -- the exact tier's whole sin. A
+            # A row still on its single-row caches is sliced directly:
+            # the stores copy per block, with no clone of the row. A row
+            # taken out of batch classes arrives as one copy of its KV. A
             # rotating layer below the window stores its block-grid
             # prefix (grid_truncate); the ring below holds aligned
             # clones for the post-wrap off-grid cases.

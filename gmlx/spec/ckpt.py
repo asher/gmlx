@@ -1467,6 +1467,9 @@ def _install_plain_ckpt_decode() -> None:
                                       "extract unavailable", i)
                         else:
                             _plain_retire(stash, rows)
+                    else:
+                        _log.info("APC retire skipped: row %d needs a row "
+                                  "extract, GMLX_APC_RETIRE_BATCH=0", i)
         except Exception:
             _log.warning("APC plain retire hook failed; continuing", exc_info=True)
         _orig_filter(self, keep)
