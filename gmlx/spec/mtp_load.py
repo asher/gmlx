@@ -63,13 +63,16 @@ from gmlx.models.qwen35.owned import is_owned_language_model
 from gmlx.load.transforms import coalesce_split_experts
 
 
+# The widest batch the native head of a dense Qwen target drafts for; a
+# wider batch decodes plain. At 4 rows plain decode is the faster of the two.
+_NATIVE_HEAD_WIDTH_CAP = 3
+
 # Per-family MTP batch-width caps, keyed on model_type (NEVER isinstance:
 # HyV3MTPDrafter subclasses QwenMTPDrafter, so a class check would hand hy_v3
-# the uncapped dense-qwen default). Cap = speculate only while the live decode
-# batch is this wide; 0 = uncapped. Measured knees, 2026-07 batch campaign:
-# qwen dense nextn wins through c4 (worst corner 0.97); the gemma assistant
-# wins c1/c2 on the dense 31B (1.83/1.80) and knees at B>=3. Limit = hard
-# ceiling a config/env value can never cross, for drafters that raise above it.
+# the dense-qwen default). Cap = speculate only while the live decode batch
+# is this wide; 0 = uncapped. Measured knees: the gemma assistant wins c1/c2
+# on the dense 31B (1.83/1.80) and knees at B>=3. Limit = hard ceiling a
+# config/env value can never cross, for drafters that raise above it.
 #
 # These are the DENSE-target defaults. Routed-expert targets are capped to 1 by
 # `model_is_moe` regardless of family (see `_stamp_mtp_width_cap`): qwen MoE
@@ -79,8 +82,8 @@ from gmlx.load.transforms import coalesce_split_experts
 # reaches the structural check still lands on the measured value rather than
 # the fallback.
 _MTP_WIDTH_CAP_BY_MODEL_TYPE = {
-    "qwen3_5": 0,
-    "qwen3_5_text": 0,
+    "qwen3_5": _NATIVE_HEAD_WIDTH_CAP,
+    "qwen3_5_text": _NATIVE_HEAD_WIDTH_CAP,
     "qwen3_5_moe": 1,
     "qwen3_5_moe_text": 1,
     "gemma4_assistant": 2,

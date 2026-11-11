@@ -2762,15 +2762,17 @@ def _mixed_policy(drafter, lm, cap: int) -> bool:
     ``cap`` rows and decodes the rest plain in the same verify forward
     (a mixed batch), instead of converting to plain decode until it drains.
 
-    GMLX_MTP_MIXED: ``auto`` (default), ``1`` forces it where the mechanism
-    applies, ``0`` restores the plain-decode trip. The mechanism needs a
-    drafter that owns its per-row state (no shared target KV), a target
-    that rolls back each row by its own accept count (_ragged_rollback),
-    and a cap. ``auto`` also leaves routed-expert targets on the trip: a
-    plain row verifies a full block of padding drafts, and on an MoE target
-    those positions widen the expert union the same as speculating on every
+    GMLX_MTP_MIXED: ``0`` (default) is the plain-decode trip, ``1`` turns
+    the mixed batch on where the mechanism applies, ``auto`` does the same
+    except on routed-expert targets. The mechanism needs a drafter that
+    owns its per-row state (no shared target KV), a target that rolls back
+    each row by its own accept count (_ragged_rollback), and a cap. Off is
+    the default because a mixed batch decodes slower than the same rows
+    plain. ``auto`` leaves routed-expert targets on the trip: a plain row
+    verifies a full block of padding drafts, and on an MoE target those
+    positions widen the expert union the same as speculating on every
     row, the cost the MoE cap exists to avoid."""
-    mode = os.environ.get("GMLX_MTP_MIXED", "auto").strip().lower()
+    mode = os.environ.get("GMLX_MTP_MIXED", "0").strip().lower()
     if mode in ("0", "off", "false", "no") or cap < 1:
         return False
     if getattr(drafter, "uses_shared_kv", True):
@@ -2949,11 +2951,12 @@ def _owned_decode_rounds_batch(
     while one is active the gated rounds give up their lookahead step,
     because the next step's processing depends on the token it produces.
 
-    Mixed batches (_mixed_policy): past the width cap the batch keeps
-    speculating on the ``cap`` oldest rows and verifies every other row in
-    the same forward behind padding drafts, which the exact-match walk
-    accepts only where they equal the target's token. The drafter runs on
-    the speculating rows alone. A plain row keeps a parked drafter context
+    Mixed batches (_mixed_policy, off by default): past the width cap the
+    batch keeps speculating on the ``cap`` oldest rows and verifies every
+    other row in the same forward behind padding drafts, which the
+    exact-match walk accepts only where they equal the target's token. The
+    drafter runs on the speculating rows alone. A plain row keeps a parked
+    drafter context
     (row_context_* on the drafter) warm from each round's capture, so it
     takes over the drafter at full context when a speculating row
     finishes; a drafter without parked contexts is cold-started from the

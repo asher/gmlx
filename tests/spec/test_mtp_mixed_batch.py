@@ -1,6 +1,8 @@
-"""Mixed batches at the width cap: a batch wider than the drafter's cap keeps
-speculating on the oldest ``cap`` rows and verifies every other row in the
-same forward behind padding drafts, instead of converting to plain decode.
+"""Mixed batches at the width cap (GMLX_MTP_MIXED=1): a batch wider than the
+drafter's cap keeps speculating on the oldest ``cap`` rows and verifies every
+other row in the same forward behind padding drafts, instead of converting to
+plain decode. The default, plain decode past the cap, is in
+test_mtp_width_policy.py.
 
 Loop-level tests drive _owned_decode_rounds_batch with an echo target (next
 token = input + 1) and a drafter that drafts the echo chain, so a speculating
@@ -32,8 +34,9 @@ VOCAB = 64
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for var in ("GMLX_MTP_WIDTH_CAP", "MLX_VLM_GGUF_SPEC_WIDTH_CAP",
-                "GMLX_MTP_MIXED", "GMLX_MTP_RESUME"):
+                "GMLX_MTP_RESUME"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GMLX_MTP_MIXED", "1")
     spec._width_cap_memo = ("", None)
     _width_cap_logged.clear()
     yield
@@ -204,6 +207,8 @@ def test_policy_needs_cap_owned_state_and_ragged_rollback(monkeypatch):
     assert not _mixed_policy(d, SimpleNamespace(), 1)  # no rollback hook
     monkeypatch.setenv("GMLX_MTP_MIXED", "0")
     assert not _mixed_policy(d, lm, 1)
+    monkeypatch.delenv("GMLX_MTP_MIXED")               # off is the default
+    assert not _mixed_policy(d, lm, 1)
 
 
 def test_policy_refuses_a_target_that_rolls_back_one_row(monkeypatch):
@@ -232,7 +237,11 @@ def test_policy_auto_leaves_moe_targets_on_the_trip(monkeypatch):
     lm = _EchoLM()
     d = _RowDrafter()
     d.mtp_target_moe = True
+    monkeypatch.setenv("GMLX_MTP_MIXED", "auto")
     assert not _mixed_policy(d, lm, 1)
+    d.mtp_target_moe = False
+    assert _mixed_policy(d, lm, 1)
+    d.mtp_target_moe = True
     monkeypatch.setenv("GMLX_MTP_MIXED", "1")
     assert _mixed_policy(d, lm, 1)
 
