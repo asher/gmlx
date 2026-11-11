@@ -494,8 +494,6 @@ def install_batched_cachelist_admission() -> None:
 
     from gmlx._vendor.mlx_vlm.generate import ar as _ar
 
-    from .kv_append import eval_cache
-
     if wrapped_with(_ar._extend_cache, "_kq_batched_cachelist"):
         return
     if os.environ.get("GMLX_BATCHED_CACHELIST_ADMISSION", "1") == "0":
@@ -512,6 +510,10 @@ def install_batched_cachelist_admission() -> None:
             return cache_b
         if not cache_b:
             return cache_a
+        # Imported here: a function this one closes over counts as a
+        # wrapper of the name it replaces (gmlx.upstream.claims).
+        from .kv_append import eval_cache
+
         extended = []
         for ca, cb in zip(cache_a, cache_b):
             ca = _promote(ca)
