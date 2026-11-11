@@ -708,6 +708,12 @@ def test_boot_contexts_hold_on_the_loaded_pair(monkeypatch, omni, cls):
     _cfg, costs, _heads, _fp16 = cap.boot_costs(text)
     reserve = sm.admit_reserve_bytes(ws)
     drained = ws - weights - reserve
+    if drained <= 0:
+        # A 16-bit text file with its projector leaves no room here. The
+        # rule reads the sizes, not the table, so a table that gives a
+        # quantized file no context still fails below.
+        pytest.skip(f"the files take {weights / 1e9:.2f} GB, which leaves "
+                    f"no room on a {cls} GB Mac")
     idle = ws - weights
     monkeypatch.setattr(pd, "headroom_bytes", lambda: idle)
     monkeypatch.setattr(device, "metal_value", lambda name: ws)
