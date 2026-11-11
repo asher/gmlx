@@ -522,6 +522,26 @@ def test_autosize_extends_pool_to_budget_share(monkeypatch):
     assert m._free_tail is m.pool[-1]  # new blocks join the free queue
 
 
+def test_autosize_counts_block_tensors_on_attention_layers(monkeypatch):
+    # Qwen3.5 27B geometry: 16 attention layers among 64. A block holds K
+    # and V of those 16; the 48 recurrent states take no pool tensors.
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    monkeypatch.delenv("APC_MAX_POOL_TENSORS", raising=False)
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    cfg = SimpleNamespace(
+        model_type="qwen3_5", num_hidden_layers=64, num_attention_heads=16,
+        num_key_value_heads=4, head_dim=256, full_attention_interval=4,
+        linear_num_value_heads=32, linear_num_key_heads=16,
+        linear_key_head_dim=128, linear_value_head_dim=128,
+        linear_conv_kernel_dim=4)
+    m = GmlxAPCManager(num_blocks=2048, block_size=64)
+    m.autosize(SimpleNamespace(config=cfg))
+    per_tok = 16 * 2 * 4 * 256 * 2.0
+    share = int(100 * GB * 0.5 // (64 * per_tok))
+    assert 450000 // (2 * 64) < share < 450000 // (2 * 16)
+    assert m.num_blocks == share
+
+
 def test_autosize_env_and_floor_win(monkeypatch):
     _autosize_rig(monkeypatch, budget=100 * GB)
     m = GmlxAPCManager(num_blocks=2048, block_size=16)

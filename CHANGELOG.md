@@ -61,6 +61,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attention gates, which they refused.
 - `gmlx pull --list` no longer marks Nemotron 3.5 Transcribe as a model
   that reads images.
+- On Qwen3.5 and other hybrid models the prompt cache stopped well short of
+  its memory share, so long conversations served side by side pushed each
+  other out of it and reran their prompts.
 
 ## [0.5.5] - 2026-11-08
 

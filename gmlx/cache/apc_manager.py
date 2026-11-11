@@ -306,7 +306,8 @@ class GmlxAPCManager(_apc.APCManager):
             _log.info("APC exact tier budget: %.1f GB (count cap 64)",
                       self._exact_budget_bytes / 1e9)
         if not os.environ.get("APC_NUM_BLOCKS"):
-            self._grow_pool(free * budget_fraction, per_tok, len(costs))
+            self._grow_pool(free * budget_fraction, per_tok,
+                            _block_layers(costs))
         self._working_set_bytes = int(budget)
         if not os.environ.get("APC_MEMORY_MAX_GB"):
             cap = (self.num_blocks * self.block_size * per_tok
@@ -942,6 +943,14 @@ _EXACT_BUDGET_FRACTION = 0.15
 _BLOCK_SIZES = (16, 32, 64, 128, 256)
 
 
+def _block_layers(costs) -> int:
+    """Cost entries a pool block holds arrays for: the growing ones. A
+    fixed buffer (a recurrent state) is kept beside the blocks."""
+    from gmlx.serve.mem_preflight import FixedRows
+
+    return sum(1 for w, _b in costs if not isinstance(w, FixedRows))
+
+
 def _auto_block_size(model_path):
     """Smallest block size whose tensor-capped pool covers the byte
     budget autosize will ask for. Committed blocks cost K+V arrays per
@@ -953,7 +962,7 @@ def _auto_block_size(model_path):
         return None
     try:
         from gmlx.serve.capacity import working_budget_bytes
-        from gmlx.serve.mem_preflight import FixedRows, per_token_bytes
+        from gmlx.serve.mem_preflight import per_token_bytes
         from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
 
         shards = _shards(str(model_path))
@@ -969,8 +978,7 @@ def _auto_block_size(model_path):
         budget_tokens = (max(0.0, budget - weights)
                          * _POOL_BUDGET_FRACTION / per_tok)
         max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
-        growing = sum(1 for w, _b in costs if not isinstance(w, FixedRows))
-        need = 2 * growing * budget_tokens / max(1, max_tensors)
+        need = 2 * _block_layers(costs) * budget_tokens / max(1, max_tensors)
         for bs in _BLOCK_SIZES:
             if bs >= need:
                 return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
