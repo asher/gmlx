@@ -69,6 +69,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   could hold extra memory while it decoded alone, more the longer its context.
 - A request that joined others already decoding long contexts could push
   memory far past what its admission had counted, for the length of one step.
+- A request that finished beside others decoding long contexts could push
+  memory up by several gigabytes for the length of one step.
 
 ## [0.5.5] - 2026-11-08
 

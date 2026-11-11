@@ -620,6 +620,7 @@ class QwenMTPDrafter(nn.Module):
             elif cache.keys is not None:
                 cache.keys = cache.keys[keep]
                 cache.values = cache.values[keep]
+            eval_cache(cache)
         if self._seed_token is not None:
             self._seed_token = self._seed_token[keep]
         if self._seed_hidden is not None:

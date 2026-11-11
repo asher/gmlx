@@ -30,7 +30,9 @@ from gmlx.cache.snapshot import _truncate_kv_snapshot, row_snapshot
 from gmlx.serve import cb_phase
 from gmlx.serve.memtrace import _cache_report
 from gmlx.spec.helpers import _slice_shared_kv_after_reject
+from gmlx.spec.mtp_drafter import QwenMTPDrafter
 from gmlx.spec.speculative import (_cache_restore, _cache_snapshot,
+                                   _filter_batch_rows,
                                    _filter_batch_rows_empty,
                                    _join_injected_caches)
 
@@ -587,20 +589,21 @@ def decode_caps():
     cb_phase.restore(saved)
 
 
-def _rolled_back_batch(seed):
-    """Three rows after a verify block of 4 tokens that kept 3, 2 and 1 of
-    them, with the ragged rollback left pending as the round leaves it.
-    Returns the cache and each row's rows."""
-    c, rows = _batch([8000, 7990, 7980], seed)
-    k, v = _rows(4, seed + 1, b=3)
+def _rolled_back_batch(seed, kept=(3, 2, 1)):
+    """Rows near 8000 tokens after a verify block of 4 tokens that kept
+    ``kept`` of them, with the ragged rollback left pending as the round
+    leaves it. Returns the cache and each row's rows."""
+    n = len(kept)
+    c, rows = _batch([8000 - 10 * i for i in range(n)], seed)
+    k, v = _rows(4, seed + 1, b=n)
     c.update_and_fetch(k, v)
     mx.eval(c.keys, c.values)
     c.trim(1)
-    c.prepare(right_padding=[0, 1, 2])
+    c.prepare(right_padding=[3 - a for a in kept])
     c.finalize()
-    rows = [(np.concatenate([rk, np.asarray(k[i:i + 1, :, :3 - i])], 2),
-             np.concatenate([rv, np.asarray(v[i:i + 1, :, :3 - i])], 2))
-            for i, (rk, rv) in enumerate(rows)]
+    rows = [(np.concatenate([rk, np.asarray(k[i:i + 1, :, :a])], 2),
+             np.concatenate([rv, np.asarray(v[i:i + 1, :, :a])], 2))
+            for i, ((rk, rv), a) in enumerate(zip(rows, kept))]
     return c, rows
 
 
@@ -671,6 +674,78 @@ def test_join_copies_one_layer_at_a_time(route, decode_caps, monkeypatch):
     tk, tv = np.asarray(k), np.asarray(v)
     for c, want in zip(live, rows):
         assert c.keys.shape[0] == 4
+        for i, (wk, wv) in enumerate(want):
+            gk, gv = _batch_row(c, i)
+            np.testing.assert_array_equal(gk[:, :, :-1], wk)
+            np.testing.assert_array_equal(gv[:, :, :-1], wv)
+            np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
+            np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
+
+
+# Memory: a finish filters one layer at a time.
+
+@metal
+@pytest.mark.parametrize("route", ["spec", "head", "vendored"])
+def test_finish_filters_one_layer_at_a_time(route, decode_caps):
+    # One of four rows near 8000 tokens finishes after a ragged round.
+    # Each layer's rolled copy and its three kept rows are made before the
+    # next layer's are built, so the finish peaks at a few layers' copies.
+    # Left to the next round, every layer's copies are live at once.
+    live, rows = [], []
+    for layer in range(JOIN_LAYERS):
+        c, want = _rolled_back_batch(10 * layer, kept=(3, 2, 1, 3))
+        live.append(c)
+        rows.append([want[0], want[2], want[3]])
+    keep = [0, 2, 3]
+    if route == "spec":
+        def finish():
+            _filter_batch_rows(live, mx.array(keep, dtype=mx.int32))
+    elif route == "head":
+        head = SimpleNamespace(_cache=live, _seed_token=None,
+                               _seed_hidden=None)
+
+        def finish():
+            QwenMTPDrafter.filter_batch(head, keep)
+    else:
+        # The plain batch has no ragged round: its rows are evaluated
+        # when one finishes.
+        mx.eval(_layer_arrays(live))
+        batch = ar.GenerationBatch(
+            None, uids=[0, 1, 2, 3], inputs=mx.array([1, 2, 3, 4]),
+            prompt_cache=live, sampler=None, stop_criteria=None,
+            max_tokens=[64] * 4)
+
+        def finish():
+            batch.filter(keep)
+
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    finish()
+    mx.eval(_layer_arrays(live))  # the next round reads every layer
+    mx.synchronize()
+    peak = mx.get_peak_memory() - base
+
+    # One row of one layer, at the batch's capacity.
+    row = (live[0].keys.nbytes + live[0].values.nbytes) // 3
+    assert JOIN_LAYERS * row > 60 << 20
+    assert peak <= 12 * row
+
+    # The first append after the finish still writes into each layer's
+    # buffer.
+    k, v = _rows(1, 999, b=3)
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    for c in live:
+        c.update_and_fetch(k, v)
+    mx.eval(_layer_arrays(live))
+    mx.synchronize()
+    assert mx.get_peak_memory() - base < 3 * row
+
+    tk, tv = np.asarray(k), np.asarray(v)
+    for c, want in zip(live, rows):
+        assert c.keys.shape[0] == 3
         for i, (wk, wv) in enumerate(want):
             gk, gv = _batch_row(c, i)
             np.testing.assert_array_equal(gk[:, :, :-1], wk)

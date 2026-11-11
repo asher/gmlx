@@ -2373,6 +2373,16 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         _log.warning("APC retire failed; continuing", exc_info=True)
 
 
+def _filter_batch_rows(prompt_cache: list, keep: mx.array) -> None:
+    """Keep the rows ``keep`` of each layer cache, one layer at a time: the
+    layer's pending rollback copy and its kept rows are evaluated before
+    the next layer's are built, so a finish holds one layer's old and new
+    arrays together and not every layer's."""
+    for c in prompt_cache:
+        c.filter(keep)
+        _eval_cache(c)
+
+
 def _filter_batch_rows_empty(prompt_cache: list) -> None:
     """Drop every row from each batch cache entry.
 
@@ -4065,8 +4075,7 @@ def _owned_decode_rounds_batch(
                 j for j in range(n_active) if not finished[active_idx[j]]]
             if len(keep_slots) < n_active:
                 keep_mx = mx.array(keep_slots, dtype=mx.int32)
-                for c in prompt_cache:
-                    c.filter(keep_mx)
+                _filter_batch_rows(prompt_cache, keep_mx)
                 if row_deltas is not None:
                     row_deltas = row_deltas[keep_mx]
                 if _gated_pending is not None:

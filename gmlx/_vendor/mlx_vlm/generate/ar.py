@@ -56,7 +56,7 @@ from .common import (
 )
 from .types import GenerateKwargs, ProcessorLike, Unpack
 
-# gmlx: a join evaluates each layer's cache as it is extended.
+# gmlx: a join and a finish evaluate each layer's cache as it changes.
 from gmlx.cache.kv_append import eval_cache as _eval_cache
 # gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
 from gmlx.gen.logprobs import raw_logprobs, top_logprobs
@@ -1652,6 +1652,9 @@ class GenerationBatch:
             keep_arr = mx.array(keep, mx.int32)
             for c in self.prompt_cache:
                 c.filter(keep_arr)
+                # gmlx: one layer's kept rows at a time, not every layer's
+                # at the next step.
+                _eval_cache(c)
             if self._next_tokens is not None:
                 self._next_tokens = self._next_tokens[keep_arr]
             if self._next_lps is not None:
