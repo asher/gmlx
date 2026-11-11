@@ -1161,8 +1161,8 @@ class _MenuBarApp:
         def boot():
             try:
                 import gmlx.talk.main as talk_mod
-                from gmlx.talk.client import (ensure_v1_base, one_model,
-                                              probe_capabilities)
+                from gmlx.talk.client import (ensure_v1_base, model_voices,
+                                              one_model, probe_capabilities)
                 # _current_target returns a bare http://host:port; the talk
                 # client's audio routes exist only under /v1.
                 base = ensure_v1_base(url)
@@ -1187,12 +1187,13 @@ class _MenuBarApp:
                 loop, cleanup = talk_mod.build_talk_loop(
                     s, base_url=base, api_key=key, model=model,
                     on_display=sess.lines.append, warn=warn,
-                    one_model=one_model(caps, model))
+                    one_model=one_model(caps, model),
+                    model_voices=model_voices(caps, model))
                 loop.backend.gain = self._settings.get("volume", 1.0)
                 sess.loop, sess.cleanup = loop, cleanup
                 sess.wake = getattr(loop.wake, "name", None)
                 sess.lines.append(f"[talk] {model} · voice "
-                                  f"{s['voice'] or 'default'}")
+                                  f"{loop.voice or 'default'}")
                 sess.starting = False
                 try:
                     loop.run_headless(sess.control)

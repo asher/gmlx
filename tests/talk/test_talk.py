@@ -1201,6 +1201,38 @@ def test_one_model_voice_and_speed_commands(capsys):
     assert "speaks at one speed" in capsys.readouterr().out
 
 
+def test_one_model_voice_command_takes_only_the_models_voices(capsys):
+    loop = _one_model_loop()
+    loop.model_voices = ("female", "male")
+    loop._slash("/voice Male")
+    assert loop.voice == "male"
+    assert loop.brain.speech["audio"]["voice"] == "male"
+    capsys.readouterr()
+    # A voice of the speech service is not one of the model's.
+    loop._slash("/voice af_heart")
+    assert loop.voice == "male"
+    assert "omni speaks as: female, male" in capsys.readouterr().out
+    loop._slash("/voice")
+    assert "omni speaks as: female, male" in capsys.readouterr().out
+
+
+def test_a_speech_service_voice_gives_way_to_the_models_default():
+    """A config written for the speech service names one of its voices.
+    The model has none by that name, so it speaks in its own default."""
+    from gmlx.talk.main import _own_voice
+
+    said = []
+    voices = ["female", "male"]
+    assert _own_voice("af_heart", "omni", voices, said.append) is None
+    assert said == ["omni has no voice af_heart, so it speaks as female "
+                    "(its voices: female, male)"]
+    assert _own_voice("Male", "omni", voices, said.append) == "male"
+    assert _own_voice(None, "omni", voices, said.append) is None
+    # A server that lists no voices gets the name as it is.
+    assert _own_voice("af_heart", "omni", [], said.append) == "af_heart"
+    assert len(said) == 1
+
+
 def test_a_text_brain_is_left_alone_outside_one_model_mode():
     loop = _make_loop("vad")
     assert not hasattr(loop.brain, "speech")
@@ -1246,10 +1278,12 @@ _OMNI = {"omni": ["text", "vision", "audio", "speech"]}
 
 def test_talk_starts_on_one_model_with_no_tts_service(monkeypatch, tmp_path):
     caps = {"stt": True, "tts": False, "chat_ids": ["omni"],
-            "default": "omni", "modalities": _OMNI}
+            "default": "omni", "modalities": _OMNI,
+            "voices": {"omni": ["female", "male"]}}
     rc, built = _run_cmd_talk(monkeypatch, tmp_path, caps)
     assert rc == 0
     assert built["model"] == "omni" and built["one_model"] is True
+    assert built["model_voices"] == ["female", "male"]
 
 
 def test_one_model_talk_still_needs_the_transcription_route(

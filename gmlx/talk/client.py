@@ -169,6 +169,12 @@ def probe_capabilities(base_url: str, api_key: str | None = None,
                 for e in entries
                 if e.get("id") in chat_ids
                 and isinstance(e.get("modalities"), list)},
+            # The voices of each chat model that speaks, its default first.
+            "voices": {
+                e["id"]: [str(v) for v in e["voices"]]
+                for e in entries
+                if e.get("id") in chat_ids
+                and isinstance(e.get("voices"), list)},
         }
 
     return _decode_body("capability probe", _caps)
@@ -181,6 +187,14 @@ def one_model(caps: dict, model: str | None) -> bool:
         return False
     listed = (caps.get("modalities") or {}).get(model.split("@", 1)[0]) or ()
     return {"audio", "speech"} <= set(listed)
+
+
+def model_voices(caps: dict, model: str | None) -> list:
+    """The voices ``model`` speaks its replies in, its default first. Empty
+    for a model that does not speak, or a server that does not say."""
+    if not model:
+        return []
+    return list((caps.get("voices") or {}).get(model.split("@", 1)[0]) or ())
 
 
 # A chat reply's streamed speech: 16-bit mono at this rate.

@@ -345,7 +345,8 @@ def test_chunker_waits_for_stream_tail():
 # One model for the whole turn
 def _omni_payload(modalities=("text", "vision", "audio", "speech")):
     return {"object": "list", "data": [
-        {"id": "omni", "default": True, "modalities": list(modalities)},
+        {"id": "omni", "default": True, "modalities": list(modalities),
+         "voices": ["female", "male"]},
         {"id": "plain", "modalities": ["text"]},
         {"id": "old"},
         {"id": "whisper-1", "stt": True, "alias_of": "omni",
@@ -360,6 +361,17 @@ def test_probe_keeps_each_chat_models_modalities(monkeypatch):
     # Chat entries only, and only the ones that say.
     assert caps["modalities"] == {
         "omni": ["text", "vision", "audio", "speech"], "plain": ["text"]}
+
+
+def test_probe_keeps_the_voices_of_a_model_that_speaks(monkeypatch):
+    monkeypatch.setattr(tc, "_http_get_json",
+                        lambda url, timeout=5.0, api_key=None: _omni_payload())
+    caps = tc.probe_capabilities("http://h:1/v1")
+    assert caps["voices"] == {"omni": ["female", "male"]}
+    assert tc.model_voices(caps, "omni@fast") == ["female", "male"]
+    assert tc.model_voices(caps, "plain") == []
+    assert tc.model_voices(caps, None) == []
+    assert tc.model_voices({"chat_ids": ["omni"]}, "omni") == []
 
 
 def test_one_model_needs_a_model_that_hears_and_speaks():

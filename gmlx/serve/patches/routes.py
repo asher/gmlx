@@ -91,6 +91,7 @@ def _models_payload() -> dict:
         return kv_by_id.get(base, kv_by_path.get(rm.path))
 
     def _entry(mid, rm, *, alias_of=None, profile=None, spec=None):
+        modalities = _modalities(rm)
         return {
             "id": mid,
             "object": "model",
@@ -104,7 +105,9 @@ def _models_payload() -> dict:
             "vlm": rm.mmproj is not None,
             # What the model takes and gives: text, vision, audio (audio
             # input) and speech (speech output).
-            "modalities": _modalities(rm),
+            "modalities": modalities,
+            # The voices of a model that speaks, its default first.
+            **({"voices": _voices()} if "speech" in modalities else {}),
             "profile": profile if alias_of else rm.profile_name,
             "family": getattr(rm, "family", None),   # sampling family (profiles.py)
             "default": mid == default_id,            # aliases never == default_id
@@ -135,6 +138,12 @@ def _models_payload() -> dict:
                                  pinned=rm.path in pinned,
                                  default=iid == default_image))
     return {"object": "list", "data": data}
+
+
+def _voices() -> list:
+    from ..native_tts import voices
+
+    return list(voices())
 
 
 def _modalities(rm) -> list:

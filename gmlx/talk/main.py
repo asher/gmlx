@@ -387,7 +387,8 @@ class TalkLoop:
                  model_label: str, once: bool = False, status: StatusLine,
                  transcribe=None, synthesize=None,
                  wake_threshold: float = 0.3, make_wake=None,
-                 on_display=None, one_model: bool = False):
+                 on_display=None, one_model: bool = False,
+                 model_voices=()):
         from . import client as talk_client
         self.on_display = on_display  # headless sink; None -> terminal TUI
         self.m = machine
@@ -411,6 +412,8 @@ class TalkLoop:
         self._synthesize = synthesize or talk_client.synthesize
         # The chat model hears the clip and speaks the reply itself.
         self.one_model = one_model
+        # Its own voices, which are not the speech service's.
+        self.model_voices = tuple(model_voices)
         self._sync_speech()
 
         self.events: queue.Queue = queue.Queue()
@@ -875,7 +878,15 @@ class TalkLoop:
                                       else "")
         if cmd in ("/quit", "/exit", "/q"):
             return "quit"
-        if cmd == "/voice":
+        if cmd == "/voice" and self.one_model and self.model_voices:
+            if arg.lower() in self.model_voices:
+                self.voice = arg.lower()
+                self._sync_speech()
+                self._print(f"[talk] voice -> {self.voice}")
+            else:
+                self._print(f"[talk] {self.model_label} speaks as: "
+                            + ", ".join(self.model_voices))
+        elif cmd == "/voice":
             if arg:
                 self.voice = arg
                 self._sync_speech()
@@ -1163,6 +1174,19 @@ def _capability_guidance(caps: dict, *, needs_stt: bool, explicit_url: bool,
     return False
 
 
+def _own_voice(voice: str | None, model: str, voices, warn) -> str | None:
+    """The voice a model that speaks its own replies uses. A configured
+    voice of the speech service is not one of the model's, so the model
+    then speaks in its default voice, and ``warn`` says so."""
+    if not voice or not voices:
+        return voice
+    if voice.lower() in voices:
+        return voice.lower()
+    warn(f"{model} has no voice {voice}, so it speaks as {voices[0]} "
+         f"(its voices: {', '.join(voices)})")
+    return None
+
+
 class TalkSetupError(Exception):
     """A fatal problem building the voice pipeline; str() is the user-facing
     message (the CLI prefixes ``error:``, the menu bar shows it verbatim)."""
@@ -1170,17 +1194,20 @@ class TalkSetupError(Exception):
 
 def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
                     model: str, once: bool = False, on_display=None,
-                    warn=None, one_model: bool = False):
+                    warn=None, one_model: bool = False, model_voices=()):
     """Construct the full voice pipeline - audio backend, wake/VAD, brain
     (incl. assistant tools + memory), :class:`TalkLoop` - from merged settings
     ``s``. Shared by the CLI verb and the menu bar's in-process session.
     Returns ``(loop, cleanup)``; call ``cleanup()`` after the loop exits.
     Fatal problems raise :class:`TalkSetupError`; non-fatal degradations
     (missing wake engine, energy-gate VAD, MCP servers down) go to ``warn``.
-    ``one_model``: the chat model hears the user and speaks the reply."""
+    ``one_model``: the chat model hears the user and speaks the reply, in
+    one of ``model_voices``."""
     warn = warn or (lambda m: print(f"[talk] {m}", file=sys.stderr))
     if one_model and s["speed"] not in (None, 1.0):
         warn(_ONE_SPEED)
+    voice = _own_voice(s["voice"], model, model_voices, warn) if one_model \
+        else s["voice"]
     from .audio import (
         Endpointer,
         SoundDeviceBackend,
@@ -1251,11 +1278,11 @@ def build_talk_loop(s: dict, *, base_url: str, api_key: str | None,
                               min_speech_ms=s["min_speech_ms"],
                               pre_roll_ms=s["pre_roll_ms"],
                               min_level_dbfs=s["min_level_dbfs"]),
-        brain=brain, base_url=base_url, api_key=api_key, voice=s["voice"],
+        brain=brain, base_url=base_url, api_key=api_key, voice=voice,
         speed=s["speed"], language=s["language"], chime=s["chime"],
         model_label=model, once=once, status=StatusLine(),
         wake_threshold=s["wake_threshold"], on_display=on_display,
-        one_model=one_model)
+        one_model=one_model, model_voices=model_voices)
 
     # Hold the model resident (and warm it) for the session's lifetime: a
     # live mic with no model loaded is not a real mode of operation. Off the
@@ -1308,8 +1335,8 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
         return rc
     base_url, api_key = ns.base_url, ns.api_key
 
-    from .client import (TalkClientError, list_voices, one_model,
-                         probe_capabilities)
+    from .client import (TalkClientError, list_voices, model_voices,
+                         one_model, probe_capabilities)
     try:
         caps = probe_capabilities(base_url, api_key)
     except TalkClientError as e:
@@ -1343,7 +1370,8 @@ def cmd_talk(argv: list | None = None, prog: str = "gmlx talk") -> int:
     try:
         loop, cleanup = build_talk_loop(s, base_url=base_url, api_key=api_key,
                                         model=model, once=args.once,
-                                        one_model=alone)
+                                        one_model=alone,
+                                        model_voices=model_voices(caps, model))
     except TalkSetupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

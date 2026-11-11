@@ -517,6 +517,30 @@ def test_models_payload_lists_image_models_with_their_markers(
     assert by_id["qwen"]["adapters"] == [] and "adapters" not in zit
 
 
+def test_models_payload_lists_the_voices_of_a_model_that_speaks(
+        monkeypatch, tmp_path):
+    """A chat entry that lists ``speech`` names the model's voices, its
+    default first. No other entry has the key."""
+    import gmlx.load.discovery as disc
+    from lfm3_header import write_lfm3_header, write_projector_header
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(disc, "_HEADER_DISK", None)
+    lfm = write_lfm3_header(tmp_path / "lfm3.gguf", templates=("tts",))
+    speaks = write_projector_header(tmp_path / "mmproj-omni.gguf",
+                                    vision=True, audio=True, speech=True)
+    sees = write_projector_header(tmp_path / "mmproj-vl.gguf", vision=True)
+    _register({"models": {"omni": {"path": lfm, "mmproj": speaks},
+                          "vl": {"path": lfm, "mmproj": sees}}})
+    try:
+        by_id = {m["id"]: m for m in sp_routes._models_payload()["data"]}
+    finally:
+        serving.clear_resolved_models()
+    assert by_id["omni"]["modalities"] == ["text", "vision", "audio", "speech"]
+    assert by_id["omni"]["voices"] == ["female", "male"]
+    assert "voices" not in by_id["vl"]
+
+
 def test_models_payload_lists_krea_2_by_its_header(monkeypatch, tmp_path):
     import json
     from dataclasses import replace
