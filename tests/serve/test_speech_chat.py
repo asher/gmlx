@@ -273,9 +273,9 @@ def _args(max_tokens=200, **kw):
     return _GEN.GenerationArguments(max_tokens=max_tokens, **kw)
 
 
-def _spoken_pass(reply, generator, text, args=None, used=10):
+def _spoken_pass(reply, generator, text, args=None):
     reply.text = [text]
-    return list(reply.speak(generator, _Processor(), args or _args(), used))
+    return list(reply.speak(generator, _Processor(), args or _args()))
 
 
 def test_a_text_reply_with_no_tool_call_takes_a_pass():
@@ -301,30 +301,22 @@ def test_the_pass_speaks_the_sanitized_text_in_the_asked_voice():
     assert (args.seed, args.temperature) == (4, 0.0)
     assert generator.closed == 1
     assert (reply.frames, reply.markers, reply.pass_tokens) == (3, 1, 5)
-    assert reply.pass_prompt_tokens == 20 and reply.pass_finish is None
+    assert reply.pass_prompt_tokens == 20
     # The transcript is the reply's own text.
     assert reply.transcript() == "**Hello** there."
 
 
-def test_the_pass_counts_against_the_requests_budget():
+def test_the_requests_budget_bounds_the_text_alone():
+    """A text that used all of max_tokens is still spoken whole: the pass
+    takes the text's own allowance."""
     text = "Hello there."
     allowance = native_tts.frame_budget(text)
-    reply, generator = _plan(audio={"voice": "male"}), _Generator()
-    _spoken_pass(reply, generator, text, _args(max_tokens=1000), used=10)
-    assert generator.calls[0][1].max_tokens == allowance
-    # Two slots are left: the audio ends there, and the reply's finish
-    # reason is the budget.
-    reply, generator = _plan(audio={"voice": "male"}), _Generator(frames=50)
-    chunks = _spoken_pass(reply, generator, text, _args(max_tokens=12),
-                          used=10)
-    assert generator.calls[0][1].max_tokens == 2 and len(chunks) == 2
-    assert reply.pass_finish == "length"
-    assert reply.finish_reason("stop") == "length"
-    # No slot is left: no pass runs.
-    reply, generator = _plan(audio={"voice": "male"}), _Generator()
-    assert _spoken_pass(reply, generator, text, _args(max_tokens=10),
-                        used=10) == []
-    assert not generator.calls and reply.pass_finish == "length"
+    for max_tokens in (1000, 12, 1):
+        reply, generator = _plan(audio={"voice": "male"}), _Generator()
+        chunks = _spoken_pass(reply, generator, text,
+                              _args(max_tokens=max_tokens))
+        assert generator.calls[0][1].max_tokens == allowance
+        assert len(chunks) == 4
 
 
 def test_a_pass_that_runs_to_its_own_allowance_is_not_the_requests_limit(
@@ -335,8 +327,7 @@ def test_a_pass_that_runs_to_its_own_allowance_is_not_the_requests_limit(
     generator = _Generator(frames=allowance + 50)
     with caplog.at_level("WARNING"):
         chunks = _spoken_pass(reply, generator, text, _args(max_tokens=5000))
-    assert len(chunks) == allowance and reply.pass_finish is None
-    assert reply.finish_reason("stop") == "stop"
+    assert len(chunks) == allowance
     assert "allowance" in caplog.text
 
 
@@ -376,13 +367,13 @@ def test_a_long_text_is_spoken_piece_by_piece():
     assert counts["completion_tokens"] == 8 + 5 * len(pieces)
 
 
-def test_the_requests_budget_ends_a_long_text_between_pieces():
+def test_a_small_budget_still_speaks_every_piece():
     text = "The ferry leaves the island at six each morning. " * 20
+    pieces = native_tts.split_text(text.strip())
     reply, generator = _plan(audio={"voice": "male"}), _Generator(frames=4)
-    # Ten slots after the text: one piece of five, then five more.
-    _spoken_pass(reply, generator, text, _args(max_tokens=20), used=10)
-    assert [a.max_tokens for _, a in generator.calls] == [10, 5]
-    assert reply.pass_finish == "length"
+    _spoken_pass(reply, generator, text, _args(max_tokens=20))
+    assert [a.max_tokens for _, a in generator.calls] == [
+        native_tts.frame_budget(p) for p in pieces]
 
 
 def test_the_speech_route_gets_the_speech_prompt_and_its_budget():
@@ -413,19 +404,19 @@ def _wav_seconds(data: str) -> float:
 
 def test_a_message_carries_the_audio_and_its_transcript():
     reply, generator = _plan(audio={"voice": "male"}), _Generator(frames=4)
-    audio = reply.message_audio(generator, _Processor(), _args(), 10,
+    audio = reply.message_audio(generator, _Processor(), _args(),
                                 "Hello there.", False)
     assert audio["id"] == reply.id and audio["transcript"] == "Hello there."
     assert _wav_seconds(audio["data"]) == pytest.approx(4 * 0.08 + 0.04)
     assert reply.message_content("Hello there.", audio) is None
     # With tools the text is the content too.
     reply = _plan(tools=[{}])
-    audio = reply.message_audio(generator, _Processor(), _args(), 10,
+    audio = reply.message_audio(generator, _Processor(), _args(),
                                 "Hello there.", False)
     assert reply.message_content("Hello there.", audio) == "Hello there."
     # A tool call has no audio, and a reply with no audio keeps its text.
     reply = _plan(tools=[{}])
-    assert reply.message_audio(generator, _Processor(), _args(), 10,
+    assert reply.message_audio(generator, _Processor(), _args(),
                                None, True) is None
     reply = _plan(audio={"voice": "male"})
     assert reply.message_content("Hello.", None) == "Hello."
@@ -444,7 +435,7 @@ def test_the_usage_counts_a_marker_as_a_prompt_token():
     # A text reply of 8 tokens, then a pass: 20 prompt tokens, the
     # marker, 3 frames and the end frame.
     reply, generator = _plan(audio={"voice": "male"}), _Generator()
-    _spoken_pass(reply, generator, "Hello.", used=8)
+    _spoken_pass(reply, generator, "Hello.")
     assert reply.usage(30, 8) == {
         "prompt_tokens": 51, "completion_tokens": 12, "total_tokens": 63,
         "audio_tokens": 3, "tts_tokens": 21}

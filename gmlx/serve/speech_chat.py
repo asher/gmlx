@@ -222,7 +222,6 @@ class Reply:
         self.passes = 0
         self.pass_prompt_tokens = 0
         self.pass_tokens = 0
-        self.pass_finish: Optional[str] = None
 
     # -- before the generation ------------------------------------------
 
@@ -328,35 +327,26 @@ class Reply:
         return (self.kind == TEXT_FIRST and not tool_calls
                 and bool(self.transcript()))
 
-    def speak(self, generator, processor, args, used: int) -> Iterator[bytes]:
+    def speak(self, generator, processor, args) -> Iterator[bytes]:
         """Run the speech pass over the reply's text and yield its audio
-        as 16-bit pcm chunks. ``used`` is the reply's tokens so far, which
-        the pass counts against the request's budget. A text too long for
-        one pass is spoken piece by piece. Blocks, so the route runs it on
-        a thread."""
+        as 16-bit pcm chunks. The request's ``max_tokens`` bounds the text
+        alone: the pass takes the text's own allowance, under the context.
+        A text too long for one pass is spoken piece by piece. Blocks, so
+        the route runs it on a thread."""
         from .tts import sanitize_speech_text
 
         spoken = sanitize_speech_text(self.transcript())
         for index, piece in enumerate(native_tts.split_text(spoken)):
-            # A pass's marker is a prompt token, so it takes no budget.
-            taken = used + self.pass_tokens - self.passes
-            left = (None if args.max_tokens is None
-                    else int(args.max_tokens) - taken)
-            if left is not None and left <= 0:
-                self.pass_finish = "length"
-                return
             yield from self._speak_piece(generator, processor, args, piece,
-                                         index, left)
-            if self.pass_finish is not None:
-                return
+                                         index)
 
     def _speak_piece(self, generator, processor, args, piece: str,
-                     index: int, left: Optional[int]) -> Iterator[bytes]:
+                     index: int) -> Iterator[bytes]:
         from gmlx._vendor.mlx_vlm.server.generation import GenerationArguments
 
         prompt = speech_prompt(processor, piece, self.voice, self.language,
                                self.marker)
-        budget = self._budget(generator, processor, prompt, piece, left)
+        budget = self._budget(generator, processor, prompt, piece, None)
         # The pass is its own request: only the seed, the tenant and the
         # adapters of the reply carry over.
         pass_args = GenerationArguments(
@@ -379,13 +369,9 @@ class Reply:
                     yield chunk
                 if token.finish_reason:
                     if token.finish_reason == "length":
-                        if left is not None and budget == left:
-                            self.pass_finish = "length"
-                        else:
-                            _log.warning(
-                                "speech pass stopped at its %d-frame "
-                                "allowance for %d characters", budget,
-                                len(piece))
+                        _log.warning(
+                            "speech pass stopped at its %d-frame allowance "
+                            "for %d characters", budget, len(piece))
                     break
         finally:
             tokens.close()
@@ -401,15 +387,10 @@ class Reply:
 
     # -- after the reply --------------------------------------------------
 
-    def finish_reason(self, reason: Optional[str]) -> Optional[str]:
-        """The reply's finish reason, ``length`` when the pass ran out of
-        the request's budget."""
-        return self.pass_finish or reason
-
     def transcript(self) -> str:
         return "".join(self.text).strip()
 
-    def message_audio(self, generator, processor, args, used: int,
+    def message_audio(self, generator, processor, args,
                       content: Optional[str],
                       tool_calls: bool) -> Optional[dict]:
         """The ``audio`` object of a message that is not streamed, whose
@@ -418,7 +399,7 @@ class Reply:
         the route runs it on a thread."""
         self.text = [content or ""]
         if self.wants_pass(tool_calls):
-            for _ in self.speak(generator, processor, args, used):
+            for _ in self.speak(generator, processor, args):
                 pass
         if not self.pcm:
             return None

@@ -2021,14 +2021,12 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                     runtime.response_generator,
                                     processor,
                                     gen_args,
-                                    output_tokens,
                                 )
                             first_chunk = True
                             while speech_pass is not None:
                                 pcm = await asyncio.to_thread(next, speech_pass, None)
                                 if pcm is None:
                                     speech_pass = None
-                                    finish_reason = speech.finish_reason(finish_reason)
                                     break
                                 chunk_data = _chat_audio_chunk(
                                     request_id,
@@ -2404,12 +2402,10 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                         runtime.response_generator,
                         processor,
                         gen_args,
-                        output_tokens,
                         content,
                         bool(parsed_tool_calls),
                     )
                     content = speech.message_content(content, message_audio)
-                    finish_reason = speech.finish_reason(finish_reason)
                     _speech_chat.apply_usage(
                         usage_stats, speech.usage(prompt_tokens, completion_tokens)
                     )
