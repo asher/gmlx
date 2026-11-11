@@ -33,6 +33,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `fasth3` runs `--int8 linears`, which it refused. See
   [Faster clips with int8](docs/video.md#faster-clips-with-int8).
+- `gmlx serve` video jobs and ComfyUI video steps evaluate a step as
+  `gmlx video generate` does, so a small clip's steps take less time.
 - `gmlx init` and `--with-embeddings` set up EmbeddingGemma 2.
   `embeddings: true` still picks `qwen3-embed-0.6b`.
 - `prompt_name` and `dimensions` work on EmbeddingGemma and
@@ -51,6 +53,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A video request to a server with neither ffmpeg nor OpenCV gets a 400
   that names both installs, not a 500.
 - A damaged WAV, FLAC or MP3 file in a request gets a 400, not a 500.
+- `gmlx video generate` and `gmlx serve` apply a LoRA's pairs on FastH3's
+  attention gates, which they refused.
 - `gmlx pull --list` no longer marks Nemotron 3.5 Transcribe as a model
   that reads images.
 

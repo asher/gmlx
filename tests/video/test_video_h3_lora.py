@@ -125,6 +125,36 @@ def test_the_key_map_names_each_linear_of_the_gguf():
                 and "adaln" not in p]) == 208
 
 
+_GATE = "attn.to_gate_compress"
+
+
+@pytest.mark.parametrize("form", ["header", "model"])
+def test_fasth3s_key_map_adds_the_gate_of_each_block(form):
+    """FastH3's config, as the header gives it or as the built model holds
+    it, adds the VSA gate of each block to the key map in each spelling
+    ComfyUI reads, and h3's config does not."""
+    import dataclasses
+
+    from gmlx.image.lora.reader import _dit_target, _underscore_index
+
+    config = hf.FAMILY.synth_config(fixture_view(H3_HEADER))
+    if form == "model":
+        config = dataclasses.asdict(hm.H3Config.from_dict(config))
+    h3 = lora_map(config)
+    fast = lora_map({**config, "vsa_sparsity": hf.VSA_SPARSITY})
+    depth = int(config.get("depth", config.get("num_layers")))
+    gates = {f"blocks.{i}.{_GATE}" for i in range(depth)}
+    assert not gates & set(h3.targets)
+    assert set(fast.targets) == set(h3.targets) | gates
+    under = _underscore_index(fast.targets)
+    assert len(under) == len(fast.targets)
+    for g in gates:
+        for stem in (g, f"diffusion_model.{g}",
+                     "lora_unet_" + g.replace(".", "_")):
+            assert stem in fast.comfy_stems
+            assert _dit_target(stem, fast.targets, under)[0] == g
+
+
 def test_a_comfyui_lora_runs_live_as_the_merged_weights(tmp_path):
     params = _params()
     one, two = _adapter(1), _adapter(2)
@@ -173,6 +203,10 @@ _PDD = {"diffusion_model.final_layer.video_out.lora_A.weight":
         np.zeros((4, 64), np.float32),
         "diffusion_model.final_layer.video_out.lora_B.weight":
         np.zeros((192, 4), np.float32)}
+_GATE_PAIR = {"diffusion_model.blocks.1.attn.to_gate_compress.lora_A.weight":
+              np.zeros((4, TINY["hidden_size"]), np.float32),
+              "diffusion_model.blocks.1.attn.to_gate_compress.lora_B.weight":
+              np.zeros((INNER, 4), np.float32)}
 _PDD_AUDIO = {"lora_unet_final_layer_audio_out.lora_down.weight":
               np.zeros((4, 64), np.float32),
               "lora_unet_final_layer_audio_out.lora_up.weight":
@@ -184,7 +218,8 @@ _PDD_AUDIO = {"lora_unet_final_layer_audio_out.lora_down.weight":
     (_CONFIG, "config", "blocks.0.attn.comfy_attention.config"),
     (_PDD, "PDD", "final_layer.video_out"),
     (_PDD_AUDIO, "PDD", "final_layer_audio_out"),
-], ids=["diffsynth", "config", "pdd", "pdd-audio-underscore"])
+    (_GATE_PAIR, "FastH3 gate", "blocks.1.attn.to_gate_compress"),
+], ids=["diffsynth", "config", "pdd", "pdd-audio-underscore", "gate"])
 def test_a_lora_gmlx_does_not_run_is_refused_by_name(tmp_path, extra, kind,
                                                      names):
     keys = dict(extra) if kind == "DiffSynth" else \
@@ -202,6 +237,31 @@ def test_a_lora_gmlx_does_not_run_is_refused_by_name(tmp_path, extra, kind,
         assert e.value.kind == kind
         assert names in str(e.value)
         assert not pipe.adapter_files and len(pipe.patch_tables) == 1
+
+
+@pytest.mark.parametrize("stem, down, up", [
+    ("diffusion_model.blocks.1.attn.to_gate_compress", ".lora_A.weight",
+     ".lora_B.weight"),
+    ("blocks.1.attn.to_gate_compress", ".lora_A.weight", ".lora_B.weight"),
+    ("lora_unet_blocks_1_attn_to_gate_compress", ".lora_down.weight",
+     ".lora_up.weight"),
+], ids=["diffusion-model", "bare", "lora-unet"])
+def test_a_lora_on_gates_alone_is_refused_by_name_on_h3(tmp_path, stem,
+                                                        down, up):
+    """A file whose only pairs are on FastH3's gates names the gate on a
+    model without it, rather than another model, in each spelling ComfyUI
+    reads. The message names the pair's down key, not its alpha."""
+    path = write_keys(tmp_path / "gate.safetensors", {
+        stem + ".alpha": np.asarray(4.0, np.float32),
+        stem + down: np.zeros((4, TINY["hidden_size"]), np.float32),
+        stem + up: np.zeros((INNER, 4), np.float32)})
+    pipe = _pipe(_params())
+    with pytest.raises(UnsupportedAdapterError, match=re.escape(
+            f"its pair {stem}{down} targets FastH3's attention gate, which "
+            "the model's file does not have")) as e:
+        pipeline.adapter_table(pipe, [(path, 1.0)])
+    assert e.value.kind == "FastH3 gate"
+    assert not pipe.adapter_files and len(pipe.patch_tables) == 1
 
 
 def test_another_models_lora_in_a_stack_loads_nothing(tmp_path):
