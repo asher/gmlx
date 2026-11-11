@@ -60,6 +60,7 @@ from .types import GenerateKwargs, ProcessorLike, Unpack
 from gmlx.cache.kv_append import eval_cache as _eval_cache
 # gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
 from gmlx.gen.logprobs import raw_logprobs, top_logprobs
+from gmlx.serve.tick_guard import is_allocator_refusal as _is_allocator_refusal
 from gmlx.serve.tick_guard import mark_broken as _mark_broken
 from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
@@ -1650,11 +1651,17 @@ class GenerationBatch:
             self.thinking_budget_criteria = []
         else:
             keep_arr = mx.array(keep, mx.int32)
+            failed = None
             for c in self.prompt_cache:
                 c.filter(keep_arr)
                 # gmlx: one layer's kept rows at a time, not every layer's
-                # at the next step.
-                _eval_cache(c)
+                # at the next step. A failed eval is the last: the rest of
+                # the filter runs unevaluated, so the batch stays whole.
+                if failed is None:
+                    try:
+                        _eval_cache(c)
+                    except BaseException as e:
+                        failed = e
             if self._next_tokens is not None:
                 self._next_tokens = self._next_tokens[keep_arr]
             if self._next_lps is not None:
@@ -1669,6 +1676,12 @@ class GenerationBatch:
                 self._kq_owed = tuple(
                     a[keep_arr] if a is not None else None for a in owed
                 )
+            if failed is not None:
+                # gmlx: raised from a filtered batch. next() evaluates the
+                # layers left.
+                self._kq_filter_lazy = True
+                failed._kq_filtered = True
+                raise failed
 
     def next(self) -> List[Response]:
         """Generate the next batch of tokens."""
@@ -1680,6 +1693,11 @@ class GenerationBatch:
             keep = [i for i, uid in enumerate(self.uids) if uid not in drop]
             if len(keep) < len(self.uids):
                 self.filter(keep)
+        # gmlx: the layers a failed filter left unevaluated, one at a time.
+        if getattr(self, "_kq_filter_lazy", False):
+            for c in self.prompt_cache:
+                _eval_cache(c)
+            self._kq_filter_lazy = False
         if not self.uids:
             return []
 
@@ -3411,7 +3429,16 @@ class BatchGenerator:
             if uid in self._generation_batch.uids:
                 idx = self._generation_batch.uids.index(uid)
                 keep = [i for i in range(len(self._generation_batch.uids)) if i != idx]
-                self._generation_batch.filter(keep)
+                try:
+                    self._generation_batch.filter(keep)
+                except RuntimeError as e:
+                    # gmlx: an allocator refusal after the row left. The
+                    # next step evaluates what it could not.
+                    if not (
+                        getattr(e, "_kq_filtered", False)
+                        and _is_allocator_refusal(e)
+                    ):
+                        raise
                 return True
 
             return False

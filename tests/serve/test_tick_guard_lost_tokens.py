@@ -291,6 +291,77 @@ def test_d_filter(engine, monkeypatch, shot):
     check(engine, shot, plan=plan, b_max=3)
 
 
+def _throw_in_filter_eval(monkeypatch, shot, layer, again=None):
+    """Throw at the eval of one layer's kept rows inside a filter, and
+    ``again`` at the eval the next step makes for the layers left."""
+    orig = ar._eval_cache
+    seen = []
+
+    def eval_cache(c):
+        caller = sys._getframe(1).f_code.co_name
+        if caller == "filter" and shot.armed:
+            seen.append(c)
+            if len(seen) == layer + 1:
+                shot.fire()
+        elif caller == "next" and again is not None and shot.fired:
+            again.fire()
+        return orig(c)
+
+    monkeypatch.setattr(ar, "_eval_cache", eval_cache)
+
+
+def _arm_at_b_finish(shot):
+    def plan(t, gen, out):
+        if len(out.get(1, [])) == 2:
+            shot.armed = True
+    return plan
+
+
+@pytest.mark.parametrize("layer", [0, 1])
+def test_d_filter_cache_eval(engine, monkeypatch, shot, layer):
+    """D: the eval of one layer's kept rows throws inside the filter of a
+    finishing row. The filter still takes the row out of every layer and
+    of the pending tokens, so the retried tick decodes the row that is
+    left."""
+    _throw_in_filter_eval(monkeypatch, shot, layer)
+    check(engine, shot, plan=_arm_at_b_finish(shot), b_max=3)
+
+
+def test_d_filter_cache_eval_refused_again(engine, monkeypatch):
+    """D: the allocator refuses the same eval on the retried tick, before
+    its step. Nothing was computed, so the guard goes on to its next
+    strike."""
+    shot, again = Shot(MEM), Shot(MEM)
+    again.armed = True
+    _throw_in_filter_eval(monkeypatch, shot, 0, again)
+    check(engine, shot, plan=_arm_at_b_finish(shot), b_max=3)
+    assert again.fired == 1
+
+
+def test_remove_cache_eval_refused(engine, monkeypatch):
+    """A cancelled row is taken out beside one that decodes, and the
+    allocator refuses the eval of the rows left. The row is out, and the
+    other stream is whole."""
+    def cancel(shot):
+        def plan(t, gen, out):
+            if 1 in gen._generation_batch.uids and len(out.get(1, [])) == 2:
+                if shot is not None:
+                    shot.armed = True
+                assert gen.remove(1)
+                tg.forget(gen, 1)
+                assert 1 not in gen._generation_batch.uids
+        return plan
+
+    shot = Shot(MEM)
+    _throw_in_filter_eval(monkeypatch, shot, 0)
+    ref, ref_fin, _ = run(engine, plan=cancel(None), b_max=6)
+    got, fin, gaps = run(engine, plan=cancel(shot), b_max=6)
+    assert shot.fired == 1
+    assert _tokens(got) == _tokens(ref) and len(got[1]) == 2
+    assert fin == ref_fin and set(fin) == {0}
+    assert gaps[0] == {0}
+
+
 def test_d_forced_eval(engine, monkeypatch, shot):
     """D: the eval of a forced id throws."""
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_force_next_tokens"))

@@ -729,7 +729,7 @@ def test_finish_filters_one_layer_at_a_time(route, decode_caps):
     # One row of one layer, at the batch's capacity.
     row = (live[0].keys.nbytes + live[0].values.nbytes) // 3
     assert JOIN_LAYERS * row > 60 << 20
-    assert peak <= 12 * row
+    assert peak <= (5 if route == "vendored" else 12) * row
 
     # The first append after the finish still writes into each layer's
     # buffer.
