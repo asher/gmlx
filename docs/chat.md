@@ -71,6 +71,7 @@ process.
 | `/! <command>` | Runs a shell command and attaches its output to the next message |
 | `/drop` | Discards what is attached |
 | `/image <file>`, `/audio <file>` | Attaches a file to the next message on a multimodal model |
+| `/speak [on\|off\|save DIR]` | Has a model with speech output, such as [LFM3-Omni-2B](lfm3.md#spoken-replies-in-chat), speak its replies |
 | `/copy` | Copies the last answer, without its reasoning |
 | `/memory` | Shows or edits the [assistant's memory](assistant.md#memory), with `--assistant` |
 

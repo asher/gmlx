@@ -85,6 +85,8 @@ These pages are the starting points:
 - [Vision and audio](vlm.md): Multimodal models and their `mmproj` files.
 - [Granite Switch](granite-switch.md): IBM's chat model with built-in
   safety and decision adapters, and audio through its speech companion.
+- [LFM3](lfm3.md): Liquid AI's small models that hear, see and speak, for
+  a voice conversation on one model.
 - [Nemotron 3.5 Transcribe](nemotron-transcribe.md): NVIDIA's speech model
   for transcripts, translations, speakers and word times.
 - [Models larger than memory](streaming.md): Mixture-of-experts models that

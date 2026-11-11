@@ -12,6 +12,15 @@ tests/fixtures/kimi_k3_template.jinja comes from llama.cpp PR #26185.
 The block output that gmlx capture records in gmlx/tune/capture.py
 follows the l_out tensor that tools/cvector-generator reads, and the
 stream mean of a hyper-connection residual follows hc_stream_mean.
+The LFM3 text model in gmlx/models/lfm3/model.py is ported from
+src/models/lfm3.cpp and src/models/lfm-base.cpp at commit e8df20d23, and
+the LFM3 speech decoders and reply loop in gmlx/models/lfm3/speech.py and
+gmlx/models/lfm3/speak.py from tools/mtmd/models/lfm3a-gen.cpp and
+tools/mtmd/mtmd-helper-gen.cpp. Liquid AI contributed these files to
+llama.cpp. The LFM3 encoders in gmlx/models/lfm3/audio.py and
+gmlx/models/lfm3/vision.py are checked against tools/mtmd/models/lfm3a.cpp
+and tools/mtmd/models/lfm3vl.cpp, and their tensor remap in
+gmlx/load/vlm.py follows gguf-py's tensor mapping.
 llama.cpp is distributed under the MIT License:
 
 MIT License

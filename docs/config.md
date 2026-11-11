@@ -669,7 +669,7 @@ accepts.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | <a id="serverstt"></a>`stt` | A served model that [hears audio](services.md#a-served-model-that-hears-audio), if any | Speech-to-text model: an alias such as `whisper-turbo`, a Hugging Face repo id, a folder, or the id of a served model that hears audio. `false` turns it off. |
-| <a id="servertts"></a>`tts` | none | Text-to-speech model: an alias such as `kokoro`, a Hugging Face repo id or a folder |
+| <a id="servertts"></a>`tts` | A served model that [speaks](services.md#a-served-model-that-speaks), if any | Text-to-speech model: an alias such as `kokoro`, a Hugging Face repo id, a folder, or the id of a served model that speaks. `false` turns it off. |
 | <a id="serverembeddings"></a>`embeddings` | none | Embeddings model: a GGUF path, an `hf:` reference, an alias, or the repo id or folder of an MLX encoder checkpoint |
 | <a id="serverembeddings_mmproj"></a>`embeddings_mmproj` | The preset's, or one beside the model | Media projector of an EmbeddingGemma 2 GGUF: a path or an `hf:` reference. `false` runs text only. |
 | <a id="serverrerank"></a>`rerank` | none | Reranker: a Qwen3-Reranker GGUF path, an `hf:` reference or an alias |

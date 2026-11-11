@@ -83,6 +83,10 @@ pairs with the model when the two files share a folder.
 [Nemotron 3.5 Transcribe](nemotron-transcribe.md) shows how to transcribe,
 translate and label speakers with it.
 
+LFM3-Omni-2B and LFM3-Audio-2B also answer in speech, through a speech
+decoder in the same projector file. [LFM3](lfm3.md) shows how to talk to
+them, save speech and transcribe with them.
+
 ## Supported families
 
 The companion's metadata names its projector. When several families
@@ -105,6 +109,7 @@ projector and architecture that it found. gmlx supports these families:
 | MiniCPM-V 4.6 and 4.7 | `minicpmv4_6` or `minicpmv4_7` with `qwen35` or `qwen35moe` | MiniCPM-V-4.6, MiniCPM-V-4.7-35B-A3B, MiniCPM-V-4.7-1B | Video input is refused. |
 | Nemotron 3.5 Bolt and Super VL | `nemotron_omni` with `nemotron_h_moe` | NVIDIA-Nemotron-3.5-Bolt-74B-A9B, NVIDIA-Nemotron-3.5-Super-VL-120B-A12B | Each image becomes 256 to 3328 tokens. Video input is refused. |
 | MiniMax-M3.1-Flash | `minimax_m3` with `minimax-m3` | MiniMax-M3.1-Flash | Each image becomes 8 to 576 tokens. Video input is refused. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
+| LFM3 | `lfm3vl` or `lfm3a` with `lfm3` | LFM3-Omni-2B, LFM3-VL-2B, LFM3-Audio-2B | Each image becomes at most 4,096 tokens. Omni and Audio read audio and [answer in speech](lfm3.md). |
 | Nemotron 3.5 Transcribe | `pee` with `nemotron_h_moe` | NVIDIA-Nemotron-3.5-Transcribe-30B-A4B | It reads audio only, up to six clips and an hour in all. |
 | Muse Spark | `muse-glimmer` and `muse-spark-audio` with `muse-spark` | Muse-Spark-Open-816B-A42B | It reads images and audio. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |

@@ -68,7 +68,7 @@ gets a 400 of type `unknown_profile`. A chat route that names one of the
 | `POST /v1/keep` | Load and warm `{"model": "<id>"}`, a chat or an image model, and keep it past its idle timeout. `"warm": false` skips the load. `"keep": false` releases it. |
 | `POST /v1/reload` | Re-read the config file and keep models whose load settings did not change |
 | `POST /v1/audio/transcriptions`, `/v1/audio/translations` | Speech to text, with `stt` set up as in [Speech, embeddings and rerank](services.md), or a served model that hears audio |
-| `POST /v1/audio/speech` | Text to speech, with `tts` set up. `GET /v1/audio/voices` lists the voices. |
+| `POST /v1/audio/speech` | Text to speech, with `tts` set up, or a served model that speaks. `GET /v1/audio/voices` lists the voices. |
 | `POST /v1/embeddings` | Text embeddings, with `embeddings` set up |
 | `POST /v1/rerank` | Document reranking, with `rerank` set up |
 | `POST /v1/images/generations`, `/v1/images/edits`, `/v1/images/variations` | Image generation, with [image models](config.md#image-models) set up, as the [Image API](image-api.md) shows |
@@ -84,6 +84,10 @@ the Hugging Face cache. Each entry carries the markers `resident`, `pinned`,
 `speculative`, `vlm`, `profile` and `default`. A chat entry also lists its
 `adapters`, each with the `index`, file `name`, default `strength` and the
 `sha256` of the loaded file, as [Adapters](#adapters) describes.
+
+A chat entry's `modalities` names what the model reads and writes: `text`,
+`vision`, `audio` for audio input, and `speech` for speech output. An
+entry with `speech` also lists the model's `voices`, the default first.
 
 Each [image model](config.md#image-models) is listed too, with the fields
 that [Routes](image-api.md#routes) describes.
@@ -537,6 +541,12 @@ message put it.
 
 Other models with an audio tower take audio on `/v1/chat/completions`
 only. `/v1/responses` answers a request with audio for them with a 400.
+
+A model with speech output, such as [LFM3-Omni-2B](lfm3.md), returns
+audio on `/v1/chat/completions` when the request sets
+`"modalities": ["text", "audio"]`, as
+[Speech on the server](lfm3.md#speech-on-the-server) shows. On any other
+model, such a request gets a 400.
 
 ### Word timestamps in chat
 
