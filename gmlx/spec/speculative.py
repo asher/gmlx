@@ -32,6 +32,7 @@ from collections.abc import Callable, Iterator
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
 from gmlx import mlx_guards
+from gmlx.cache.kv_append import eval_cache as _eval_cache
 from gmlx.cache.kv_append import release as _release_kv
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
@@ -2662,6 +2663,25 @@ def _lift_live_cache(cache):
     return lifted
 
 
+def _join_injected_caches(prompt_cache: list, inj_cache: list) -> None:
+    """Extend each live layer cache with the injected rows' cache for that
+    layer, one layer at a time: the layer's pending rollback copy and then
+    its joined copy are evaluated before the next layer's are built, so a
+    join holds one layer's old and new arrays together and not every
+    layer's."""
+    for i, cache in enumerate(prompt_cache):
+        lifted = _lift_live_cache(cache)
+        if lifted is not cache:
+            prompt_cache[i] = cache = lifted
+        _eval_cache(cache)
+        extend_fn = getattr(cache, "extend", None)
+        if callable(extend_fn):
+            other = _lift_injected_cache(cache, inj_cache[i])
+            extend_fn(other)
+            _eval_cache(cache)
+            del other
+
+
 _width_cap_memo: tuple[str, int | None] = ("", None)
 
 # A gated batch back under the cap only re-arms when every surviving row
@@ -3473,15 +3493,7 @@ def _owned_decode_rounds_batch(
                 row_deltas = _join_deltas(
                     row_deltas, len(active_idx),
                     _row_deltas(inj.get("rope_deltas"), B_new), B_new)
-                for i, cache in enumerate(prompt_cache):
-                    lifted = _lift_live_cache(cache)
-                    if lifted is not cache:
-                        prompt_cache[i] = cache = lifted
-                    extend_fn = getattr(cache, "extend", None)
-                    if callable(extend_fn):
-                        other = _lift_injected_cache(
-                            cache, inj["prompt_cache"][i])
-                        extend_fn(other)
+                _join_injected_caches(prompt_cache, inj["prompt_cache"])
 
                 # hidden is None while un-armed (arm-from-capture entry):
                 # the drafter holds no state to inject into, and the capture

@@ -58,6 +58,29 @@ def release(cache) -> None:
     cache.__dict__.pop("_kv_own", None)
 
 
+def eval_cache(cache) -> None:
+    """Evaluate every array ``cache`` holds, in one eval, so the copies a
+    join or a rollback left lazy are made for this cache alone and not
+    with every other layer's at the next step. Walks the members of a
+    cache list. Rebinds nothing and keeps no handle, so the next append
+    still donates its buffer or writes in place."""
+    arrays = []
+    stack = [cache]
+    while stack:
+        c = stack.pop()
+        members = getattr(c, "caches", None)
+        if isinstance(members, (tuple, list)):
+            stack.extend(members)
+            continue
+        for v in (getattr(c, "__dict__", None) or {}).values():
+            if isinstance(v, mx.array):
+                arrays.append(v)
+            elif isinstance(v, (tuple, list)):
+                arrays.extend(a for a in v if isinstance(a, mx.array))
+    if arrays:
+        mx.eval(arrays)
+
+
 def depends_keys(cache, deps) -> None:
     """``cache.keys = mx.depends(cache.keys, deps)``, keeping the append in
     place: the result shares the buffer of the keys it wraps."""

@@ -67,6 +67,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to finish could end its turn uncached, so its next turn reran it.
 - On a hybrid model with no drafter, a chat request that others had joined
   could hold extra memory while it decoded alone, more the longer its context.
+- A request that joined others already decoding long contexts could push
+  memory far past what its admission had counted, for the length of one step.
 
 ## [0.5.5] - 2026-11-08
 

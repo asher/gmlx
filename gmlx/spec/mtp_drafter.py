@@ -48,6 +48,7 @@ import mlx.nn as nn
 import gmlx.gen.prefill_decay as prefill_decay
 from .drafter_protocol import native_block_size
 from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_append import eval_cache
 from gmlx.cache.kv_cache import BatchKVCache, KVCache
 from gmlx.envflags import env_bool, env_int
 from gmlx.models.qwen35.language import Qwen3_5DecoderLayer
@@ -656,6 +657,7 @@ class QwenMTPDrafter(nn.Module):
         self._cache = old_cache
         for old, temp in zip(old_cache, temp_cache):
             old.extend(temp)
+            eval_cache(old)
         if old_seed_token is not None and new_seed_token is not None:
             self._seed_token = mx.concatenate([old_seed_token, new_seed_token])
         else:

@@ -56,6 +56,8 @@ from .common import (
 )
 from .types import GenerateKwargs, ProcessorLike, Unpack
 
+# gmlx: a join evaluates each layer's cache as it is extended.
+from gmlx.cache.kv_append import eval_cache as _eval_cache
 # gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
 from gmlx.gen.logprobs import raw_logprobs, top_logprobs
 from gmlx.serve.tick_guard import mark_broken as _mark_broken
@@ -936,6 +938,9 @@ def _extend_cache(cache_a, cache_b):
             if not callable(getattr(entry, "extend", None)):
                 raise ValueError(f"{type(entry)} does not yet support batching")
         ca.extend(cb)
+        # gmlx: one layer's joined copy at a time, not every layer's at the
+        # next step.
+        _eval_cache(ca)
         extended.append(ca)
     return extended
 
