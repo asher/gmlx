@@ -684,6 +684,146 @@ def test_vlm_chat_streams_the_text_tower(monkeypatch, tmp_path):
 
 # -------------- Tier 1 - loop driver (VLM x MTP: text-only turns) --------------
 
+class _FakeSpeech:
+    """Stands in for the model's speech generator: records each spoken
+    turn and yields two text slots, two frames and the summary."""
+
+    def __init__(self):
+        self.turns = []
+
+    def __call__(self, model, processor, prompt, *, image=None, audio=None,
+                 mode=None, **kw):
+        import numpy as np
+
+        self.turns.append({"prompt": prompt, "image": image, "audio": audio,
+                           "mode": mode, "kw": kw})
+
+        def event(text="", clip=None, **summary):
+            base = dict(token=1, text=text, audio=clip, finish_reason=None,
+                        prompt_tokens=0, text_tokens=0, frames=0,
+                        prompt_seconds=0.0, generation_seconds=0.0)
+            return SimpleNamespace(**{**base, **summary})
+
+        yield event("A")
+        yield event(" cat.")
+        yield event(clip=np.full(1920, 0.1, np.float32))
+        yield event(clip=np.full(1920, 0.2, np.float32))
+        yield event(token=None, finish_reason="stop", prompt_tokens=20,
+                    text_tokens=2, frames=2, prompt_seconds=0.1,
+                    generation_seconds=0.2)
+
+
+class _FakePlayer:
+    def __init__(self):
+        self.fed, self.begun, self.stopped = [], 0, 0
+
+    def begin(self):
+        self.begun += 1
+
+    def feed(self, audio, rate):
+        self.fed.append((len(audio), rate))
+
+    def stop(self):
+        self.stopped += 1
+
+
+def _run_speaking_chat(monkeypatch, tmp_path, lines, *, speaks=True, extra=()):
+    """A chat on a model with speech output: ``(rc, text turns, spoken
+    turns, player, messages)``."""
+    from gmlx.models.lfm3 import speak
+    from gmlx.tui import chat_speech
+
+    speech, player = _FakeSpeech(), _FakePlayer()
+    monkeypatch.setattr(chat, "_speak_refusal", lambda args, vlm_mtp: (
+        None if speaks else "this model has no speech output"))
+    monkeypatch.setattr(speak, "stream_speech", speech)
+    monkeypatch.setattr(chat_speech, "open_player", lambda: player)
+    monkeypatch.setattr(_FakeVlm, "speech_capabilities",
+                        lambda self: {"sample_rate": 24000}, raising=False)
+    rc, _s, vstream, msgs = _run_vlm_chat(monkeypatch, tmp_path, lines, extra)
+    return rc, vstream, speech, player, msgs
+
+
+def test_speak_on_has_the_model_speak_the_reply(monkeypatch, tmp_path, capsys):
+    from gmlx.models.lfm3 import speak
+
+    rc, vstream, speech, player, msgs = _run_speaking_chat(
+        monkeypatch, tmp_path, ["/speak on", "what is this?", "/exit"])
+    assert rc == 0
+    assert len(vstream.turns) == 0 and len(speech.turns) == 1
+    turn = speech.turns[0]
+    assert turn["mode"] == speak.INTERLEAVED
+    # The model's instruction to speak leads a conversation with no
+    # system message, and the turn itself follows.
+    assert turn["prompt"][0] == {"role": "system",
+                                 "content": speak.INTERLEAVED_SYSTEM}
+    assert turn["prompt"][-1]["content"] == "what is this?"
+    assert player.begun == 1 and player.fed == [(1920, 24000)] * 2
+    out = capsys.readouterr().out
+    assert "A cat." in out and "this model speaks" in out
+    # The reply joins the conversation as its text.
+    assert [m["content"] for m in msgs if m["role"] == "assistant"] == ["A cat."]
+
+
+def test_a_spoken_reply_is_text_in_the_next_turns_prompt(monkeypatch, tmp_path):
+    _rc, vstream, speech, _p, _m = _run_speaking_chat(
+        monkeypatch, tmp_path,
+        ["/speak on", "one", "/speak off", "two", "/exit"])
+    assert len(speech.turns) == 1 and len(vstream.turns) == 1
+    prompt = vstream.turns[0]["prompt"]
+    # No instruction to speak on a text turn, and the spoken reply is there.
+    assert [m["role"] for m in prompt] == ["user", "assistant", "user"]
+    assert prompt[1]["content"] == "A cat."
+
+
+def test_the_users_system_prompt_stands_alone_on_a_spoken_turn(
+        monkeypatch, tmp_path):
+    _rc, _v, speech, _p, _m = _run_speaking_chat(
+        monkeypatch, tmp_path, ["/speak on", "hi", "/exit"],
+        extra=["--system-prompt", "Be brief."])
+    prompt = speech.turns[0]["prompt"]
+    assert [m["role"] for m in prompt] == ["system", "user"]
+    assert prompt[0]["content"] == "Be brief."
+
+
+def test_speak_save_writes_each_reply_to_a_file(monkeypatch, tmp_path, capsys):
+    import wave
+
+    out_dir = tmp_path / "clips"
+    rc, _v, speech, player, _m = _run_speaking_chat(
+        monkeypatch, tmp_path,
+        [f"/speak save {out_dir}", "one", "two", "/exit"])
+    assert rc == 0 and len(speech.turns) == 2
+    assert player.fed == []
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "reply-001.wav", "reply-002.wav"]
+    with wave.open(str(out_dir / "reply-001.wav")) as w:
+        assert (w.getframerate(), w.getnframes()) == (24000, 3840)
+    assert f"speech: 0.2 s saved to {out_dir}/reply-001.wav" in (
+        capsys.readouterr().out)
+
+
+def test_a_spoken_turn_carries_its_staged_image(monkeypatch, tmp_path):
+    image = tmp_path / "cat.png"
+    image.write_bytes(b"PNG")
+    _rc, _v, speech, _p, msgs = _run_speaking_chat(
+        monkeypatch, tmp_path,
+        ["/speak on", f"/image {image}", "what is this?", "/exit"])
+    assert speech.turns[0]["image"] == [str(image)]
+    assert [m["n_images"] for m in msgs if m["role"] == "user"] == [1]
+
+
+def test_speak_is_refused_on_a_model_without_speech(monkeypatch, tmp_path,
+                                                    capsys):
+    rc, vstream, speech, player, _m = _run_speaking_chat(
+        monkeypatch, tmp_path, ["/speak on", "hi", "/exit"], speaks=False)
+    assert rc == 0
+    assert len(speech.turns) == 0 and len(vstream.turns) == 1
+    out = capsys.readouterr().out
+    assert "/speak: this model has no speech output" in out
+    assert "this model speaks" not in out
+
+
 class _FakeSpecStream:
     """Stand-in for generation.stream_generate_speculative: records each text-only MTP
     turn's prompt + KV-cache identity, then streams the canned reply word by word."""

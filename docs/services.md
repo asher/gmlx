@@ -103,6 +103,10 @@ Unlike the other service models, this one is a chat model. It loads,
 counts against `server.budget_gb` and unloads as chat models do, and a
 transcription waits in the same queue as chat requests.
 
+An [LFM3](lfm3.md) model with audio input answers both routes the same
+way. It gives the `json` and `text` formats, with no word times and no
+speakers.
+
 ## Text-to-speech
 
 Text-to-speech reads text aloud with
@@ -154,6 +158,27 @@ hf download unsloth/Llama-3.2-1B --include "*.json"
 `gmlx launch open-webui` sets Open WebUI's voice to `af_heart`. With another
 speech model, export `AUDIO_TTS_VOICE` with one of its voices before the
 launch.
+
+### A served model that speaks
+
+A chat model with speech output, such as [LFM3-Omni-2B](lfm3.md), answers
+`/v1/audio/speech` itself, without mlx-audio and the `tts` extra. Name it
+by its id or alias:
+
+```yaml
+server:
+  tts: lfm3-omni-2b
+```
+
+With `server.tts` unset, the server picks such a model by itself: the
+default model when it speaks, else the one configured model that does.
+`tts: false` turns text-to-speech off. A request that names the served
+model in `model` goes to that model, even beside another speech service.
+
+The model's voices are `female` and `male`, and `speed` must be 1.0 or
+left out. [Speech on the server](lfm3.md#speech-on-the-server) lists the
+other fields. Like a served model that hears audio, this one loads and
+queues as a chat model.
 
 ## Embeddings
 

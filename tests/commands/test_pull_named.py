@@ -608,6 +608,35 @@ def test_the_picker_shows_no_toggle_for_a_speech_encoder_and_still_pulls_it(
     assert any(f == DENSE.mmproj for _, f, _ in downloads)
 
 
+def test_a_voice_projector_shows_what_it_adds_and_what_leaving_it_out_costs(
+        cat, monkeypatch, capsys):
+    """A projector that is the model's audio input and speech output: the
+    picker's toggle names it and is on, and a pull without it says what
+    the model loses."""
+    cfg, lib, downloads = cat
+    voice = dataclasses.replace(
+        DENSE, mmproj="mmproj-Dense-BF16.gguf", mmproj_f16="mmproj-Dense-F16.gguf",
+        modalities=("vision", "audio", "speech"))
+    catalog.MODELS["dense"] = voice
+    monkeypatch.setattr("gmlx.load.dtypes.has_native_bfloat16", lambda: False)
+    _tty(monkeypatch)
+    seen = _fake_pick(monkeypatch, lambda groups: _default_plan_of(groups[0].rows[0]))
+    assert manage.cmd_pull(["--config", str(cfg)]) == 0
+    toggle = seen["groups"][0].rows[0].toggles[0]
+    assert (toggle.id, toggle.label, toggle.on) == ("vision", "images and voice", True)
+    assert toggle.note == "image input, audio input and speech output"
+    # This chip has no native bfloat16, so the pull takes the F16 file.
+    assert [f for _, f, _ in downloads if "mmproj" in f] == ["mmproj-Dense-F16.gguf"]
+    out = capsys.readouterr().out
+    assert "image input, audio input and speech output  0.9 GB" in out
+    downloads.clear()
+    monkeypatch.setattr(manage, "_want_interactive", lambda: False)
+    assert manage.cmd_pull(["dense", "--config", str(cfg), "--no-vision"]) == 0
+    assert not [f for _, f, _ in downloads if "mmproj" in f]
+    assert ("Without its projector, dense has no image input, no audio input "
+            "and no speech output.") in capsys.readouterr().out
+
+
 def _pick_image(groups, name, quant):
     from gmlx.tui.pick import Plan
     row = next(r for r in groups[-1].rows if r.id == name)

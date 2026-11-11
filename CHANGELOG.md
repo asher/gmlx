@@ -16,6 +16,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [Chat messages and vLLM requests](docs/services.md#chat-messages-and-vllm-requests).
 - `server.embeddings_mmproj` and `--embeddings-mmproj` name the
   EmbeddingGemma 2 projector, or `false` runs it text only.
+- Liquid AI's LFM3 models run, with image, video and audio input:
+  `gmlx pull` has `lfm3-omni-2b`, `lfm3-audio-2b`, `lfm3-vl-2b` and
+  `lfm3-1.7b`. See [LFM3](docs/lfm3.md).
+- LFM3-Omni-2B and LFM3-Audio-2B answer in speech: on `/v1/audio/speech`,
+  as audio output on `/v1/chat/completions`, with `gmlx run --speech-out`
+  and with `/speak` in chat. See
+  [Speech on the server](docs/lfm3.md#speech-on-the-server).
+- `gmlx talk` runs a whole turn on one model that hears and speaks, with no
+  `stt` or `tts` service. See
+  [One model for the whole turn](docs/talk.md#one-model-for-the-whole-turn).
+- `/v1/models` lists each chat model's `modalities`, and the `voices` of a
+  model that speaks.
 
 ### Changed
 
@@ -43,6 +55,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A damaged WAV, FLAC or MP3 file in a request gets a 400, not a 500.
 - `gmlx video generate` and `gmlx serve` apply a LoRA's pairs on FastH3's
   attention gates, which they refused.
+- `gmlx pull --list` no longer marks Nemotron 3.5 Transcribe as a model
+  that reads images.
 
 ## [0.5.5] - 2026-11-08
 

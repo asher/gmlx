@@ -304,6 +304,11 @@ def _load_tts_model(model_path: str) -> None:
 def prewarm(model_path: str) -> concurrent.futures.Future:
     """Background-load the configured TTS model at server startup
     (best-effort; see :func:`subservice.prewarm`)."""
+    if str(model_path or "").startswith("model:"):
+        done: concurrent.futures.Future = concurrent.futures.Future()
+        done.set_result(None)      # a served model loads as chat models do
+        return done
+
     def _load():
         import_mlx_audio()                # install guidance if the extra is gone
         _load_tts_model(model_path)

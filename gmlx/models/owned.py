@@ -56,6 +56,9 @@ OWNED_LM_MODELS = {
     # llama.cpp LLM_ARCH_GRANITE_SWITCH; the upstream class is built for the
     # HF checkpoint (separate projections, a learned switch layer).
     "granite_switch": "gmlx.models.granite_switch.model",
+    # llama.cpp LLM_ARCH_LFM3; the mlx-lm lfm2 class has no sliding-window
+    # layers, output gate, sandwich norms or partial rotation.
+    "lfm3": "gmlx.models.lfm3.model",
     # mlx-lm nemotron_h, with per-layer MoE sizes (Nemotron-3.5-Bolt) and
     # llama.cpp's fp32 routing.
     "nemotron_h": "gmlx.models.nemotron_h.model",
@@ -67,6 +70,9 @@ OWNED_VLM_MODELS = {
     "deepseek_v4_vl": "gmlx.models.deepseek_v4.vlm_model",
     "deepseek_v41_vl": "gmlx.models.deepseek_v41.vlm_model",
     "glm5_next": "gmlx.models.glm5_next.vlm_model",
+    "lfm3_omni": "gmlx.models.lfm3.vlm_model",
+    "lfm3_vl": "gmlx.models.lfm3.vlm_model",
+    "lfm3_audio": "gmlx.models.lfm3.vlm_model",
     "minicpmv4_6": "gmlx.models.minicpmv.vlm_model",
     "minicpmv4_7": "gmlx.models.minicpmv.vlm_model",
     "muse_glimmer": "gmlx.models.muse_glimmer.vlm_model",

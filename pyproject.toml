@@ -242,6 +242,7 @@ include = [
     "gmlx/cache/snapshot.py",
     "gmlx/commands/capture.py",
     "gmlx/commands/cli.py",
+    "gmlx/commands/speech_run.py",
     "gmlx/distill/eval.py",
     "gmlx/distill/student.py",
     "gmlx/gen/benchmarks.py",
@@ -276,6 +277,8 @@ include = [
     "gmlx/serve/patches/spec_processors.py",
     "gmlx/serve/patches/tokenize.py",
     "gmlx/serve/residency_footprint.py",
+    "gmlx/serve/speech_chat.py",
+    "gmlx/serve/speech_rows.py",
     "gmlx/spec/admission.py",
     "gmlx/spec/ckpt.py",
     "gmlx/spec/dflash_drafter.py",
@@ -292,6 +295,7 @@ include = [
     "gmlx/tune/lora.py",
     "gmlx/upstream/cascade_sdpa.py",
     "gmlx/upstream/gdn_patches.py",
+    "scripts/bench_voice_latency.py",
     "scripts/structured_read_bench.py",
 ]
 # The ComfyUI node pack runs in ComfyUI's Python, against torch and ComfyUI.

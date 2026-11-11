@@ -2064,6 +2064,18 @@ class VideoMetadata:
         return len(self.frames_indices) / max(self.total_num_frames, 1e-6) * self.fps
 
 
+def _video_log_name(video) -> str:
+    # gmlx: a data URL holds the whole clip, so the log gets its media
+    # type and its length.
+    if isinstance(video, bytes):
+        return f"<{len(video)} bytes>"
+    name = str(video)
+    if name.startswith("data:"):
+        head = name.partition(",")[0]
+        return f"{head[:64]},<{len(name) - len(head) - 1} characters>"
+    return name
+
+
 def load_video(
     video_path: str,
     sampling: Optional[VideoSampling] = None,
@@ -2461,7 +2473,7 @@ def prepare_inputs(
                 logger.info(
                     "video %s: sampled %d of %d frames at %.2f fps "
                     "(source %.2f fps, %.1fs)",
-                    v,
+                    _video_log_name(v),
                     len(metadata.frames_indices),
                     metadata.total_num_frames,
                     metadata.sampled_fps,

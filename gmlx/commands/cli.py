@@ -1079,6 +1079,9 @@ def _build_parser(prog: str = "gmlx run") -> argparse.ArgumentParser:
         help="Pass the prompt verbatim, even if a chat template "
         "exists (for base / non-instruct models).",
     )
+    from gmlx.commands import speech_run
+
+    speech_run.add_args(ap)
     add_load_args(ap)
     add_placement_args(ap)
     ap.add_argument(
@@ -1392,10 +1395,11 @@ def _run_bench_depths(args) -> int:
         convs = _load_chat_dataset(ds_id, ds_split)
         print(f"[bench] {len(convs)} conversations loaded")
 
-    from .tool_preflight import check_or_exit
+    from .tool_preflight import args_kv_fp16, check_or_exit
 
     check_or_exit(args.gguf, ctx_tokens=max(depths) + decode_tokens,
-                  streaming=getattr(args, "stream_experts", False))
+                  streaming=getattr(args, "stream_experts", False),
+                  kv_fp16=args_kv_fp16(args))
     drafter = None
     _check_cli_adapter(args)
     if speculative:
@@ -1680,14 +1684,15 @@ def _run_generate(args) -> int:
     )
     from gmlx.gen.generation import generate
     from gmlx.load.loader import load_model
-    from .tool_preflight import check_or_exit
+    from .tool_preflight import args_kv_fp16, check_or_exit
 
     # Parse before the model load so a JSON typo fails fast.
     template_kwargs = fold_thinking_flag(
         args, parse_template_config(args.chat_template_config))
     logit_bias = parse_logit_bias(args.logit_bias)
     check_or_exit(args.gguf,
-                  streaming=getattr(args, "stream_experts", False))
+                  streaming=getattr(args, "stream_experts", False),
+                  kv_fp16=args_kv_fp16(args))
     companion = _audio_companion(args)
 
     from gmlx.gen.thinking_budget import install_finish_thinking_key
@@ -2792,12 +2797,15 @@ def _audio_prompt_ids(args, tok, companion: str, template_kwargs) -> list[int]:
 
 
 def _run_mode(args) -> str:
-    """The path ``gmlx run`` dispatches to: ``vlm_mtp`` (a --mmproj load
+    """The path ``gmlx run`` dispatches to: ``speech`` (--speech-out),
+    ``vlm_mtp`` (a --mmproj load
     with no image, and no audio unless a speech encoder hears it, when a
     drafter is available), ``vlm``,
     ``bench_depths``, ``bench`` or ``generate``. ``gmlx chat`` without
     --mmproj is ``generate``."""
     if getattr(args, "mmproj", None):
+        if getattr(args, "speech_out", None):
+            return "speech"
         images, audios = _media_inputs(args)
         # A speech encoder's clips become prompt rows the drafted path
         # prefills too (speech_prompt).
@@ -3021,6 +3029,12 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 2
     args._transcribes = transcribes(args, parser, argv)
+    from gmlx.commands import speech_run
+
+    why = speech_run.refusal(args)
+    if why:
+        print(f"error: {why}.", file=sys.stderr)
+        return 2
     if not args.report_only:
         preload_wire_check(args, depth=run_room_depth(args),
                            depth_without_mtp=run_room_depth(args, mtp=False))
@@ -3164,6 +3178,10 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
                     print(f"[mtp] companion MTP drafter detected: "
                           f"{os.path.basename(companion)}")
             return _run_vlm_mtp(args)
+        if mode == "speech":
+            from gmlx.commands import speech_run
+
+            return speech_run.run(args)
         if mode == "vlm":
             return _run_vlm(args)
         if mode == "bench_depths":

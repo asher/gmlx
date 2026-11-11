@@ -1005,6 +1005,24 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # in the output dtype. Kept in step with the model class's
     # cast_predicate.
     "flint": (".mlp.gate.weight", ".e_score_correction_bias"),
+    # lfm3: the depthwise taps are F32 on the wire and the convolution sums
+    # in float32. Kept in step with the model class's cast_predicate.
+    "lfm3": (".conv.kernel",),
+    # The VLM types carry the same text tower. The vision tower's depthwise
+    # taps are F32 on the wire too, and its convolution sums in float32.
+    # The speech encoder's short convolutions use the text model's class,
+    # and its downsampler's convolutions are F32 on the wire and run in
+    # float32.
+    # The speech generator's code table holds the FSQ levels, F32 on the
+    # wire, and the depth decoder's head norm scales in float32.
+    "lfm3_omni": (".conv.kernel", ".spatial_conv.weight",
+                  ".downsample.conv_", ".downsample.lin_mid.",
+                  ".downsample.lin_end.", "codec_decoder.codebook",
+                  "depth_decoder.head_norm"),
+    "lfm3_vl": (".conv.kernel", ".spatial_conv.weight"),
+    "lfm3_audio": (".conv.kernel", ".downsample.conv_",
+                   ".downsample.lin_mid.", ".downsample.lin_end.",
+                   "codec_decoder.codebook", "depth_decoder.head_norm"),
     # ricursive: the value-residual logit is F32 on the wire, one per layer.
     # Kept in step with the model class's cast_predicate.
     "ricursive": (".vres_lambda",),
@@ -1787,6 +1805,17 @@ def load_model(
     #       llama.cpp baked into rope_freqs.weight (see _patch_rope_factors).
     if rope_factors is not None and config.get("model_type") == "llama":
         _patch_rope_factors(model, rope_factors)
+    # lfm3: the factors hold the full-attention layers' partial rotation.
+    # llama.cpp requires the tensor.
+    if config.get("model_type") == "lfm3":
+        if rope_factors is None:
+            raise ValueError(
+                "lfm3: the GGUF has no rope_freqs tensor, which holds the "
+                "full-attention layers' rotation")
+        rotated = model.set_full_rope_factors(rope_factors)
+        loadlog.verbose_print(
+            f"[patch] lfm3 full-attention rope rotates {rotated} of "
+            f"{config.get('head_dim')} dims")
 
     # 4a'''. rope scaling: the resolved table replaces the class's rope on
     #        the architectures the swap covers (gmlx.load.rope_swap).
@@ -2056,6 +2085,13 @@ def load_model(
     eos_ids = getattr(raw_tokenizer, "_gguf_eos_token_ids", None)
     tokenizer = TokenizerWrapper(raw_tokenizer, eos_token_ids=eos_ids)
     _detect_xtml_thinking(tokenizer, raw_tokenizer, _log)
+    if config.get("model_type") == "lfm3":
+        # The head masks the speech markers and the media placeholders,
+        # so no text path can sample them.
+        from gmlx.models.lfm3.model import suppressed_token_ids
+
+        model.set_suppressed_tokens(
+            suppressed_token_ids(raw_tokenizer.get_vocab()))
 
     materialize_module_arrays(model)
     wait_for_populate(pf.shards, log=_log)

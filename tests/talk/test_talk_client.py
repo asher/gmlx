@@ -340,3 +340,171 @@ def test_chunker_waits_for_stream_tail():
     ch = SentenceChunker(min_chars=5, fast_first_chars=500)
     assert ch.feed("It costs 3.") == []           # could be "3.14" mid-token
     assert ch.feed("14 total. Done") == ["It costs 3.14 total."]
+
+
+# One model for the whole turn
+def _omni_payload(modalities=("text", "vision", "audio", "speech")):
+    return {"object": "list", "data": [
+        {"id": "omni", "default": True, "modalities": list(modalities),
+         "voices": ["female", "male"]},
+        {"id": "plain", "modalities": ["text"]},
+        {"id": "old"},
+        {"id": "whisper-1", "stt": True, "alias_of": "omni",
+         "modalities": ["audio"]},
+    ]}
+
+
+def test_probe_keeps_each_chat_models_modalities(monkeypatch):
+    monkeypatch.setattr(tc, "_http_get_json",
+                        lambda url, timeout=5.0, api_key=None: _omni_payload())
+    caps = tc.probe_capabilities("http://h:1/v1")
+    # Chat entries only, and only the ones that say.
+    assert caps["modalities"] == {
+        "omni": ["text", "vision", "audio", "speech"], "plain": ["text"]}
+
+
+def test_probe_keeps_the_voices_of_a_model_that_speaks(monkeypatch):
+    monkeypatch.setattr(tc, "_http_get_json",
+                        lambda url, timeout=5.0, api_key=None: _omni_payload())
+    caps = tc.probe_capabilities("http://h:1/v1")
+    assert caps["voices"] == {"omni": ["female", "male"]}
+    assert tc.model_voices(caps, "omni@fast") == ["female", "male"]
+    assert tc.model_voices(caps, "plain") == []
+    assert tc.model_voices(caps, None) == []
+    assert tc.model_voices({"chat_ids": ["omni"]}, "omni") == []
+
+
+def test_one_model_needs_a_model_that_hears_and_speaks():
+    caps = {"modalities": {"omni": ["text", "audio", "speech"],
+                           "hears": ["text", "audio"],
+                           "speaks": ["text", "speech"]}}
+    assert tc.one_model(caps, "omni")
+    assert tc.one_model(caps, "omni@fast")
+    assert not tc.one_model(caps, "hears")
+    assert not tc.one_model(caps, "speaks")
+    assert not tc.one_model(caps, "unlisted")
+    assert not tc.one_model(caps, None)
+    # A server that lists no modalities keeps today's pipeline.
+    assert not tc.one_model({"chat_ids": ["omni"]}, "omni")
+
+
+def test_transcribe_wav_names_its_model(monkeypatch):
+    bodies = []
+    monkeypatch.setattr(tc, "_http_post", lambda url, data, headers, timeout: (
+        bodies.append(data), json.dumps({"text": "hi"}).encode())[1])
+    tc.transcribe_wav("http://h:1/v1", b"W")
+    tc.transcribe_wav("http://h:1/v1", b"W", model="omni")
+    assert b'name="model"\r\n\r\nwhisper-1\r\n' in bodies[0]
+    assert b'name="model"\r\n\r\nomni\r\n' in bodies[1]
+
+
+def test_a_speech_request_asks_for_a_pcm16_stream():
+    assert tc.speech_request() == {
+        "modalities": ["text", "audio"], "audio": {"format": "pcm16"}}
+    assert tc.speech_request("male", "de")["audio"] == {
+        "format": "pcm16", "voice": "male", "language": "de"}
+
+
+def _pcm(*values) -> str:
+    import base64
+
+    return base64.b64encode(np.array(values, "<i2").tobytes()).decode()
+
+
+def test_a_spoken_reply_is_its_transcript_and_its_samples():
+    spoken = tc.SpokenDeltas()
+    events = spoken.events({"audio": {"id": "a", "transcript": "Hi "}})
+    events += spoken.events({"audio": {"id": "a", "data": _pcm(1, -2, 3)}})
+    events += spoken.events({"audio": {"id": "a", "transcript": "there."}})
+    assert [e[:2] for e in events if e[0] == "say"] == [
+        ("say", "Hi "), ("say", "there.")]
+    (audio,) = [e for e in events if e[0] == "audio"]
+    assert audio[1].tolist() == [1, -2, 3] and audio[2] == tc.SPEECH_RATE
+    assert audio[1].dtype == np.dtype("<i2")
+
+
+def test_a_reply_read_aloud_gives_its_text_once():
+    """The server sends the text as content and repeats it as the audio's
+    transcript."""
+    spoken = tc.SpokenDeltas()
+    assert spoken.events({"content": "Hi there."}) == []
+    events = spoken.events({"audio": {"transcript": "Hi there.",
+                                      "data": _pcm(5, 6)}})
+    assert [e[0] for e in events] == ["audio"]
+
+
+def test_damaged_audio_data_is_dropped():
+    import base64
+
+    spoken = tc.SpokenDeltas()
+    assert spoken.events({"audio": {"data": "!!not base64!!"}}) == []
+    assert spoken.events({"audio": "nope"}) == []
+    # A trailing odd byte is cut, not an error.
+    odd = base64.b64encode(np.array([7], "<i2").tobytes() + b"\x01").decode()
+    ((_k, samples, _r),) = spoken.events({"audio": {"data": odd}})
+    assert samples.tolist() == [7]
+
+
+def _wire_payloads(monkeypatch, *replies):
+    """Each chat request gets the next reply; returns the payloads sent."""
+    replies, sent = list(replies), []
+
+    def fake(url, payload, api_key, timeout):
+        sent.append(json.loads(json.dumps(payload)))
+        return _FakeResp(_sse(*replies.pop(0)))
+
+    monkeypatch.setattr(tc, "_open_stream", fake)
+    return sent
+
+
+def test_a_spoken_turn_sends_the_clip_and_keeps_the_transcript(monkeypatch):
+    sent = _wire_payloads(
+        monkeypatch,
+        [_chunk({"audio": {"id": "a", "transcript": "Half past "}}),
+         _chunk({"audio": {"id": "a", "data": _pcm(1, 2)}}),
+         _chunk({"audio": {"id": "a", "transcript": "five."}}, finish="stop",
+                usage={"total_tokens": 9})],
+        [_chunk({"audio": {"id": "b", "transcript": "Yes."}}, finish="stop")])
+    brain = ServerChatBrain(base_url="http://h:1/v1", model="omni",
+                            speech=tc.speech_request("female"))
+    events = list(brain.turn_audio(b"CLIP", "when does it close?"))
+    assert "".join(e[1] for e in events if e[0] == "say") == "Half past five."
+    assert [e[1].tolist() for e in events if e[0] == "audio"] == [[1, 2]]
+    assert events[-1] == ("done", {"total_tokens": 9})
+    # The request carried the clip and asked for audio.
+    first = sent[0]
+    assert first["modalities"] == ["text", "audio"]
+    assert first["audio"] == {"format": "pcm16", "voice": "female"}
+    (part,) = first["messages"][-1]["content"]
+    assert part["type"] == "input_audio"
+    assert part["input_audio"]["format"] == "wav"
+    # The history holds the turn as text on both sides.
+    assert brain.messages == [
+        {"role": "user", "content": "when does it close?"},
+        {"role": "assistant", "content": "Half past five."}]
+    # So the next request sends no audio from the turn before.
+    list(brain.turn("thanks"))
+    assert all(isinstance(m["content"], str) for m in sent[1]["messages"])
+    assert sent[1]["modalities"] == ["text", "audio"]
+
+
+def test_a_cancelled_spoken_turn_still_keeps_the_transcript(monkeypatch):
+    _wire_payloads(
+        monkeypatch,
+        [_chunk({"audio": {"transcript": "One. "}}),
+         _chunk({"audio": {"transcript": "Two."}}, finish="stop")])
+    brain = ServerChatBrain(base_url="http://h:1/v1", model="omni",
+                            speech=tc.speech_request())
+    turn = brain.turn_audio(b"CLIP", "count")
+    next(turn)
+    turn.close()
+    assert brain.messages == [{"role": "user", "content": "count"},
+                              {"role": "assistant", "content": "One. "}]
+
+
+def test_a_text_brain_sends_no_audio_fields(monkeypatch):
+    sent = _wire_payloads(monkeypatch,
+                          [_chunk({"content": "Hi."}, finish="stop")])
+    brain = ServerChatBrain(base_url="http://h:1/v1", model="m")
+    list(brain.turn("hello"))
+    assert "modalities" not in sent[0] and "audio" not in sent[0]

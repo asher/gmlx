@@ -411,6 +411,14 @@ KDA_CFG = dict(model_type="kimi_k3", num_hidden_layers=4,
                layer_types=["linear_attention", "linear_attention",
                             "linear_attention", "full_attention"])
 KDA_STATE = 3 * 3 * 512 * 2 + 4 * 128 * 128 * 4
+LFM3_TYPES = ["conv", "conv"] + [
+    t for i in range(2, 24)
+    for t in [("conv" if i % 2 else
+               "sliding_attention" if i % 4 == 0 else "full_attention")]]
+LFM3_CFG = dict(model_type="lfm3", num_hidden_layers=24, hidden_size=2048,
+                num_attention_heads=16, num_key_value_heads=4, head_dim=128,
+                sliding_window=256, conv_L_cache=7, layer_types=LFM3_TYPES)
+LFM3_STATE = 6 * 2048 * 2            # LFM3-Omni-2B
 
 
 def test_fixed_rows_charge_once():
@@ -427,6 +435,7 @@ def test_recurrent_state_bytes_per_family():
     assert mp.recurrent_state_bytes(SimpleNamespace(**FALCON_CFG)) == FALCON_STATE
     assert mp.recurrent_state_bytes(SimpleNamespace(**NEMO_CFG)) == NEMO_STATE
     assert mp.recurrent_state_bytes(SimpleNamespace(**KDA_CFG)) == KDA_STATE
+    assert mp.recurrent_state_bytes(SimpleNamespace(**LFM3_CFG)) == LFM3_STATE
     assert mp.recurrent_state_bytes(DENSE.config) is None
 
 
@@ -462,6 +471,27 @@ def test_falcon_layers_grow_and_hold_state():
 def test_kda_layer_types_with_mla_latent():
     costs = mp.kv_layer_costs(_model(**KDA_CFG))
     assert costs == [(mp.FixedRows(1), KDA_STATE)] * 3 + [(None, 576 * 2.0)]
+
+
+def test_lfm3_conv_layers_hold_a_tail_and_sliding_layers_cap():
+    assert LFM3_TYPES.count("conv") == 13
+    costs = mp.kv_layer_costs(_model(**LFM3_CFG))
+    full = [c for c in costs if c[0] is None]
+    state = [c for c in costs if isinstance(c[0], mp.FixedRows)]
+    sliding = [c for c in costs
+               if c[0] == 256 and not isinstance(c[0], mp.FixedRows)]
+    per = 2 * 4 * 128 * 2.0
+    assert full == [(None, per)] * 6
+    assert sliding == [(256, per)] * 5
+    assert state == [(mp.FixedRows(1), LFM3_STATE)] * 13
+    # Past the window a token costs 12 KiB. Priced as growing KV, the
+    # conv layers made it 38 KiB.
+    fixed = 5 * 256 * per + 13 * LFM3_STATE
+    assert mp.prompt_kv_bytes(costs, 32768) == 12288 * 32768 + fixed
+    without = dict(LFM3_CFG)
+    del without["conv_L_cache"]
+    dense = mp.kv_layer_costs(_model(**without))
+    assert mp.prompt_kv_bytes(dense, 32768) == 38912 * 32768 + 5 * 256 * per
 
 
 def test_unsized_recurrent_family_prices_growth():

@@ -336,14 +336,24 @@ def mid_close(row) -> bool:
     return bool(closing is not None and closing())
 
 
-def _pick_victim(gen, st: _TickState, spare=None):
+def speaks(gen, uid) -> bool:
+    """Whether ``uid`` is a speaking row. It never requeues: the orange
+    retire passes over it, and every other requeue fails it."""
+    from . import speech_rows
+
+    return speech_rows.speaks(gen, uid)
+
+
+def _pick_victim(gen, st: _TickState, spare=None, spare_uid=None):
     """Largest live decode row by resident tokens (prompt + emitted);
     deterministic, avoiding an immediate repeat victim on ties. A row
-    ``spare(row)`` holds is passed over."""
+    ``spare(row)`` or ``spare_uid(uid)`` holds is passed over."""
     rows = []
     for uid, ntok in _live_decode_rows(gen):
         row = st.ledger.get(uid)
         if spare is not None and row is not None and spare(row):
+            continue
+        if spare_uid is not None and spare_uid(uid):
             continue
         plen = len(row.prompt_ids) if row else 0
         rows.append((plen + ntok, uid))
@@ -361,6 +371,10 @@ def _fail_row_permanently(gen, st: _TickState, uid, err: str, *,
     row = st.ledger.pop(uid, None)
     if remove:
         gen.remove(uid)
+    # A spoken reply's record closes on every path that ends its row.
+    from . import speech_rows
+
+    speech_rows.close_row(gen, uid)
     info = {
         "prompt_len": len(row.prompt_ids) if row else None,
         "delivered": len(row.committed) if row else None,
@@ -407,6 +421,10 @@ def _requeue(gen, st: _TickState, uids) -> list:
                 st.ledger.pop(uid, None)
                 continue
         try:
+            if speaks(gen, uid):
+                # A frame's token does not carry its codes, and a prompt
+                # without embeddings would replay with no error.
+                raise ValueError("a spoken reply cannot replay its frames")
             kwargs = _replay_kwargs(gen, uid, row)
         except Exception as e:
             # A wrong replay is worse than a failed row: the client gets an

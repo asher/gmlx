@@ -1766,8 +1766,9 @@ def _confirm_lines(plan, state: str, stream_verdict: str | None, box, *,
                               pc.plan_speculates(plan))
         lines.append(f"Fits in memory. {ctx}".rstrip())
     if plan.mmproj and m.mmproj:
-        label = "audio input" if m.hears else "image input"
-        lines.append(f"{label}  {pc.human_gb(m.mmproj_bytes)}")
+        lines.append(f"{pc.projector_label(m)}  {pc.human_gb(m.mmproj_bytes)}")
+    elif pc.projector_dropped_text(m):
+        lines.append(pc.projector_dropped_text(m))
     if plan.drafter and m.drafter is not None:
         lines.append(f"faster replies  {pc.human_gb(m.drafter.bytes)}")
     if m.asr is not None:
@@ -2045,11 +2046,13 @@ def _pick_row(m, dp, box, dest: Destination, free: int):
     toggles = []
     if m.mmproj and not m.hears:
         done = _complete_on_disk(pc.PullPlan(m, dp.rung, True, False, False), dest)
+        short, full = pc.projector_short_label(m), pc.projector_label(m)
         toggles.append(pick.Toggle(
-            id="vision", label="image input", size_label=pc.human_gb(m.mmproj_bytes),
-            on=bool(base and base.mmproj),
+            id="vision", label=short, note=full if full != short else "",
+            size_label=pc.human_gb(m.mmproj_bytes),
+            on=bool(base and base.mmproj), on_when_streaming=pc.keeps_projector(m),
             streaming_note="Images work only with gmlx serve when the model runs from the SSD.",
-            on_disk=done[f"hf:{m.repo}/{m.mmproj}"]))
+            on_disk=done[f"hf:{m.repo}/{pc.mmproj_file(m)}"]))
     if m.drafter is not None:
         d = m.drafter
         done = _complete_on_disk(pc.PullPlan(m, dp.rung, False, True, False), dest)
@@ -2295,8 +2298,10 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "model name, the DiT quant such as Q4_K_M or Q8_0 "
                          "(default: the one for this Mac's memory).")
     ap.add_argument("--vision", action=argparse.BooleanOptionalAction, default=None,
-                    help="Download the model's vision tower for image input, or "
-                         "--no-vision to leave it out (default: on where it fits).")
+                    help="Download the model's projector file for image input, or "
+                         "--no-vision to leave it out (default: on where it fits). "
+                         "On a model that hears or speaks, the same file carries "
+                         "audio input and speech output, and the default is on.")
     ap.add_argument("--drafter", action=argparse.BooleanOptionalAction, default=None,
                     help="Download the model's companion file for faster replies, "
                          "or --no-drafter to leave it out (default: on where it "

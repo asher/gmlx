@@ -587,7 +587,8 @@ def test_boot_costs_and_seeded_rates(rig):
     path = rig(weights_gb=10.0, ws_gb=20.0)
     from types import SimpleNamespace
 
-    cfg, costs, heads = cap.boot_costs(path)
+    cfg, costs, heads, kv_fp16 = cap.boot_costs(path)
+    assert kv_fp16
     assert heads == 8 and cfg["num_hidden_layers"] == 10
     assert sum(bpt for _, bpt in costs) == BPT
     assert cap.boot_kv_rates(None) == {}

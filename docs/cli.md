@@ -414,6 +414,20 @@ are refused:
 | `--no-asr` | Off | Pair no speech companion. |
 | `--resize-shape N_OR_WxH` | Model default | Resize images before encoding. |
 
+These flags save speech, on a model with speech output:
+
+```sh
+gmlx run omni.gguf --mmproj mmproj.gguf --speech-out reply.wav --prompt "Why is the sky blue?"
+gmlx run omni.gguf --mmproj mmproj.gguf --tts --speech-out hello.wav --prompt "Good morning."
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--speech-out FILE.wav` | None | Save the reply as speech in this WAV file. The reply's text still prints. |
+| `--tts` | Off | With `--speech-out`: read the prompt's text aloud and give no answer. |
+| `--voice NAME` | `female` | With `--tts`: the voice, `female` or `male`. |
+| `--speech-language NAME` | Read from the text | With `--tts`: the language of the text, as a name or a code such as `French` or `fr`. |
+
 These flags inspect and benchmark:
 
 | Flag | Default | Meaning |
@@ -717,6 +731,10 @@ The recommended models:
 
 | Name | Params | License | Good for |
 |------|--------|---------|----------|
+| `lfm3-1.7b` | 1.7B | LFM Open License v1.0 | chat on a small Mac |
+| `lfm3-vl-2b` | 2B | LFM Open License v1.0 | images and video on a small Mac |
+| `lfm3-audio-2b` | 2B | LFM Open License v1.0 | voice chat and transcription |
+| `lfm3-omni-2b` | 2B | LFM Open License v1.0 | voice chat, images and video |
 | `qwen3.5-4b` | 4B | Apache 2.0 | chat and questions about images |
 | `ternary-bonsai-2-9b` | 9B | Apache 2.0 | chat on a small Mac |
 | `nemotron-3.5-bolt-e4b` | E4B | NVIDIA Open Model License | tool calls and voice assistants |
@@ -778,7 +796,7 @@ names the encoder file and the vision tower that `pull` adds.
 | `--list` | Off | Print the recommended models and the image models for this Mac, or one model's quality tiers or quants, and download nothing. |
 | `--verbose`, `-v` | Off | With `--list`, add each model's quality tiers, their sizes and room for context, and its extras. |
 | `--quant QUANT` | The tier for this Mac | A model name: a quality tier, `fastest`, `balanced`, `high` or `xhigh`, or a quant name such as `Q6_K`. An image model name: the DiT quant. |
-| `--vision`, `--no-vision` | On where it fits | Download the model's vision tower for image input, or leave it out. |
+| `--vision`, `--no-vision` | On where it fits | Download the model's projector for image input, or leave it out. On a model that hears or speaks, it also carries audio and speech. |
 | `--drafter`, `--no-drafter` | On where it fits | Download the model's companion file for faster replies, or leave it out. |
 | `--to DIR`, `--out DIR` | The first `model_dirs` root | Download into this directory instead, with no repo subfolder. A file outside every `model_dirs` root is not added to the config. |
 | `--config FILE` | The first default location | Read `model_dirs` from this config. With no config at all, a pull by name or from the picker asks for a model folder and writes one. |

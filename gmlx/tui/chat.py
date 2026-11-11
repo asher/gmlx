@@ -53,6 +53,9 @@ the terminal it runs in is upgraded:
   stages it. Media markers stay on the turn that sent them, so follow-up
   questions reference earlier images correctly. (VLM turns re-prefill the
   conversation each time; the KV-cached fast path is text-only for now.)
+* on a model with speech output, ``/speak on`` has the model speak its
+  replies while their text prints, and ``/speak save DIR`` writes each
+  one to a WAV file. The conversation keeps a spoken reply as its text;
 * ``/reset`` restarts the conversation; ``/clear`` also wipes the screen;
 * sessions **autosave** per turn (schema-v1 JSON under
   ``$XDG_DATA_HOME/gmlx/chats``; ``--no-autosave`` opts out). ``/save``,
@@ -444,6 +447,12 @@ class ChatState:
     # The user text of an empty line with staged audio, for a model that
     # transcribes through its own speech encoder.
     audio_instruction: str = ""
+    # /speak: why it is refused here (None when the model speaks), and
+    # whether replies are played, saved to a folder, or both.
+    speak_refusal: str | None = "this model has no speech output"
+    speak_play: bool = False
+    speak_dir: str | None = None
+    speak_player: Any = None
     pending_send: str | None = None      # /retry auto-resend
     pending_insert: str | None = None    # /load prompt prefill
 
@@ -680,6 +689,17 @@ def _audio_turn(state: ChatState, tok, messages: list, template_kwargs: dict,
     if cp is not None:
         cp["user_content"] = "\n".join([t or asr.EMPTY_TRANSCRIPT for t in texts] + [line])
     return ids, prompt_text
+
+
+def _speak_refusal(args, vlm_mtp: bool) -> str | None:
+    """Why ``/speak`` is refused on this model, or None when it speaks."""
+    from gmlx.load.discovery import projector_caps
+
+    if not projector_caps(getattr(args, "mmproj", None)).speech_out:
+        return "this model has no speech output"
+    if vlm_mtp:
+        return "speech output does not run with a drafter"
+    return None
 
 
 def _speech_context(args) -> int | None:
@@ -919,6 +939,11 @@ def _print_shim_help(state: ChatState) -> None:
         print(
             "- '/image <file>' / '/audio <file>' stage media for the next "
             "message (or just drag a file in)"
+        )
+    if state.speak_refusal is None and state.assistant_brain is None:
+        print(
+            "- '/speak [on|off|save DIR]' have the model speak its replies: "
+            "play them, or save each one as a WAV file"
         )
     if state.assistant_brain is not None:
         print(
@@ -1299,6 +1324,16 @@ def _slash_media(cmd, arg, state):
               f"{_served_mode_flag(state)}")
         return None
     _handle_media_command(cmd, arg, state)
+    return None
+
+
+def _slash_speak(cmd, arg, state):
+    if state.assistant_brain is not None:
+        print(f"[chat] /speak is not available with {_served_mode_flag(state)}")
+        return None
+    from . import chat_speech
+
+    chat_speech.command(arg, state)
     return None
 
 
@@ -1760,6 +1795,7 @@ _SLASH_HANDLERS = {
     "/drop": _slash_drop,
     "/image": _slash_media,
     "/audio": _slash_media,
+    "/speak": _slash_speak,
     "/sampling": _slash_sampling,
     "/reasoning": _slash_reasoning,
     "/retry": _slash_rewind,
@@ -2408,6 +2444,53 @@ def _stream_reply(
                   "raise it, or `/max-tokens 0` to generate until the model "
                   "stops", file=sys.stderr)
     return "".join(reply), canceled
+
+
+def _spoken_reply(state: ChatState, model, processor, prompt, images, audios,
+                  sampling: dict, logit_bias, resize_shape, kv_kwargs: dict,
+                  stops) -> tuple[str, bool]:
+    """Stream one spoken reply: print its text, play or save its speech.
+    Returns ``(text, canceled)`` as :func:`_stream_reply` does."""
+    from gmlx._vendor.mlx_lm.sample_utils import (make_logits_processors,
+                                                  make_sampler)
+    from gmlx.models.lfm3 import speak
+
+    from . import chat_speech
+
+    spoken = chat_speech.SpokenReply(
+        model.speech_capabilities()["sample_rate"],
+        state.speak_player if state.speak_play else None)
+    rep = sampling["repetition_penalty"]
+    extra = {} if resize_shape is None else {"resize_shape": resize_shape}
+    events = speak.stream_speech(
+        model, processor, prompt, image=list(images) or None,
+        audio=list(audios) or None, mode=speak.INTERLEAVED,
+        max_tokens=sampling["max_tokens"],
+        sampler=make_sampler(temp=sampling["temp"], top_p=sampling["top_p"],
+                             top_k=sampling["top_k"], min_p=sampling["min_p"]),
+        logits_processors=make_logits_processors(
+            logit_bias=logit_bias or None,
+            repetition_penalty=None if rep in (0.0, 1.0) else rep,
+            repetition_context_size=sampling["repetition_context_size"],
+            presence_penalty=sampling["presence_penalty"] or None,
+            frequency_penalty=sampling["frequency_penalty"] or None),
+        prefill_step_size=(kv_kwargs.get("prefill_step_size")
+                           or speak.DEFAULT_PREFILL_STEP),
+        max_kv_size=kv_kwargs.get("max_kv_size"), **extra)
+    reply, canceled = _stream_reply(spoken.chunks(events), state, stops=stops)
+    if canceled:
+        spoken.cancel()
+    if not spoken.audio:
+        if not canceled:
+            print("[chat] the model gave no speech for this reply")
+    elif state.speak_dir:
+        try:
+            path = spoken.save(state.speak_dir)
+        except OSError as e:
+            print(f"[chat] speech not saved: {e}")
+        else:
+            print(f"[chat] speech: {spoken.seconds:.1f} s saved to {path}")
+    return reply, canceled
 
 
 def _opens_thinking(prompt) -> bool:
@@ -3528,10 +3611,11 @@ def _load_chat_backend(args, kv_kwargs, *, speculative: bool,
         b = _ChatBackend()
         b.config = {}
         return b
-    from gmlx.commands.tool_preflight import check_or_exit
+    from gmlx.commands.tool_preflight import args_kv_fp16, check_or_exit
 
     check_or_exit(args.gguf,
-                  streaming=getattr(args, "stream_experts", False))
+                  streaming=getattr(args, "stream_experts", False),
+                  kv_fp16=args_kv_fp16(args))
     from gmlx.serve.memory import apply_local_cache_limit
 
     apply_local_cache_limit(
@@ -3778,6 +3862,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
 
     state = _wire_input(no_history=args.no_history)
     state.vlm = args.mmproj is not None
+    state.speak_refusal = _speak_refusal(args, vlm_mtp)
     if args.adapter:
         import gmlx.lora_rows as lora_rows
 
@@ -4002,6 +4087,8 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             "[chat] multimodal: /image or /audio stage media - or just drag "
             "a file from Finder into the prompt"
         )
+    if state.speak_refusal is None and state.assistant_brain is None:
+        print("[chat] this model speaks: '/speak on' has it speak its replies")
     if drafter is not None:
         kind = _drafter_kind_label(drafter, args)
         if vlm_mtp and _speech_context(args):
@@ -4467,8 +4554,17 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             )
             from .reasoning import with_thinking_prefill
 
+            history = vlm_msgs + turn_msgs
+            speaking = bool(state.speak_play or state.speak_dir)
+            if speaking:
+                from gmlx.models.lfm3 import speak
+
+                from . import chat_speech
+
+                history = chat_speech.messages(
+                    history, speak.INTERLEAVED_SYSTEM)
             prompt = with_thinking_prefill(get_chat_template(
-                processor, vlm_msgs + turn_msgs, add_generation_prompt=True,
+                processor, history, add_generation_prompt=True,
                 **turn_kwargs
             ), turn_prefill)
             if speech_ctx:
@@ -4495,6 +4591,15 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             vlm_images.extend(imgs)
             vlm_audios.extend(auds)
             first_turn = False
+            if speaking:
+                reply, _canceled = _spoken_reply(
+                    state, model, processor, prompt, vlm_images, vlm_audios,
+                    turn_sampling, logit_bias, resize_shape, kv_kwargs,
+                    args.stop)
+                if reply:
+                    vlm_msgs.append(_vlm_message(model_type, reply, "assistant"))
+                _end_turn(state, reply, _canceled)
+                continue
             # No cross-turn KV cache on the VLM path yet: each turn
             # re-prefills the whole conversation (and re-encodes media).
             # mlx-vlm's own criteria enforces thinking_budget here; the

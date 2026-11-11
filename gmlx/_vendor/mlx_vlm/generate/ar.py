@@ -61,6 +61,7 @@ from gmlx.gen.logprobs import raw_logprobs, top_logprobs
 from gmlx.serve.tick_guard import mark_broken as _mark_broken
 from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
+from gmlx.serve import speech_rows as _speech_rows
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
@@ -1205,6 +1206,8 @@ class GenerationBatch:
         token_logprob: Optional[float]
         finish_reason: Optional[str]
         top_logprobs: Optional[List[Tuple[int, float]]] = None
+        # gmlx: a speaking row's slot (gmlx.serve.speech_rows.Slot).
+        speech: Any = None
 
     def __init__(
         self,
@@ -1352,7 +1355,13 @@ class GenerationBatch:
         # gmlx: from the forward to the sample, a failure leaves the KV and
         # a grammar holding ``inputs``; a retry would feed it again.
         try:
-            sampled = self._fused_greedy_step(inputs, fwd_kwargs, rows)
+            # gmlx: a speaking row needs the hidden state, which the fused
+            # step does not give.
+            sampled = (
+                None
+                if _speech_rows.rows_of(self)
+                else self._fused_greedy_step(inputs, fwd_kwargs, rows)
+            )
             raw = None
             if sampled is None:
                 sampled, raw = self._forward_and_sample(
@@ -1407,18 +1416,32 @@ class GenerationBatch:
         return out
 
     def _forward_and_sample(self, inputs, fwd_kwargs, wants_lp, k):
-        output = self._language_model(
-            inputs[:, None], cache=self.prompt_cache, **fwd_kwargs
-        )
-        logits = output.logits if hasattr(output, "logits") else output
-        logits = logits[:, -1, :]
+        # gmlx: a batch that holds a speaking row runs the text model for
+        # its hidden state and gives each row its own mask. Any other
+        # batch takes the stock forward.
+        speaking = _speech_rows.rows_of(self)
+        hidden = None
+        quiet = ()
+        if speaking:
+            logits, hidden, quiet = _speech_rows.forward(
+                self, inputs, fwd_kwargs, speaking
+            )
+        else:
+            output = self._language_model(
+                inputs[:, None], cache=self.prompt_cache, **fwd_kwargs
+            )
+            logits = output.logits if hasattr(output, "logits") else output
+            logits = logits[:, -1, :]
         raw = raw_logprobs(logits) if (wants_lp or k) else None
 
         if self.logits_processors and any(self.logits_processors):
             last_tokens = inputs.tolist()
             self._ensure_token_context()
             for i, token in enumerate(last_tokens):
-                self.token_context[i].append(token)
+                # gmlx: a speaking row's processors read its text slots
+                # only, not its marker or its frames.
+                if i not in quiet:
+                    self.token_context[i].append(token)
 
             processed_logits = []
             for i in range(logits.shape[0]):
@@ -1444,6 +1467,9 @@ class GenerationBatch:
                 row_ids=[0] * len(self.uids),
                 positions=[n + 1 for n in self._num_tokens],
             )
+        if speaking:
+            # gmlx: a frame for the rows whose next slot is one.
+            sampled = _speech_rows.sample_frames(self, sampled, hidden, speaking)
         return sampled, raw
 
     def _emit(self, inputs, current_lps, prev_top_idx, prev_top_lp):
@@ -1668,7 +1694,18 @@ class GenerationBatch:
                 criteria(tok)
                 forced_next_tokens[i] = criteria.pop_forced_token_id()
 
-            if self.stop_criteria(tok):
+            # gmlx: a speaking row ends when its reply state says so. A
+            # token of the stop set can steer a spoken reply.
+            speech = _speech_rows.record_of(rows[i])
+            if speech is not None and speech.closed:
+                speech = None
+            slot = None
+            if speech is not None:
+                finish_reason = _speech_rows.finish_reason(
+                    speech, self._num_tokens[i], self.max_tokens[i]
+                )
+                slot = _speech_rows.emit(speech, finish_reason)
+            elif self.stop_criteria(tok):
                 finish_reason = "stop"
             elif self._num_tokens[i] >= self.max_tokens[i]:
                 finish_reason = "length"
@@ -1692,6 +1729,7 @@ class GenerationBatch:
                     ),
                     finish_reason=finish_reason,
                     top_logprobs=top_lp,
+                    speech=slot,
                 )
             )
 
@@ -2588,6 +2626,12 @@ class PromptProcessingBatch:
             ask = getattr(criteria, "first_forced_token_id", None)
             if ask is not None:
                 forced_first[i] = ask(speculative)
+        # gmlx: a speaking row's mode marker is its first token. The prompt
+        # ends before it, so the prefix cache keys the prompt alone.
+        for i, row in enumerate(_rows_for(self, self.uids)):
+            speech = _speech_rows.record_of(row)
+            if speech is not None and not speech.closed:
+                forced_first[i] = speech.marker
         if any(token is not None for token in forced_first):
             force_mask = mx.array(
                 [token is not None for token in forced_first], dtype=mx.bool_
@@ -3334,6 +3378,8 @@ class BatchGenerator:
 
     def remove(self, uid) -> bool:
         """Remove a sequence from the batch by uid."""
+        # gmlx: a speaking row never requeues, so its record closes here.
+        _speech_rows.close_row(self, uid)
         with mx.stream(self._stream):
             # Waiting in the queue.
             for i, (seq_uid, _, _, _, _, _) in enumerate(self._unprocessed_sequences):
@@ -3690,6 +3736,8 @@ class BatchGenerator:
     def _retire_row(self, uid) -> None:
         store = getattr(self, "_row_settings", None)
         if store is not None:
+            # gmlx: a spoken reply's record closes with its row.
+            _speech_rows.close_row(self, uid)
             store.pop(uid, None)
         # gmlx: a finished row still physical in a round reads as retired,
         # not as a uid that never had settings.

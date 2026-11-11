@@ -124,6 +124,9 @@ class ClassifiedGguf:
     # The NeMo checkpoint id of a Nemotron speech model or its encoder
     # (``nemo_speech.checkpoint_id``), which pairs the two.
     speech_checkpoint: str | None = None
+    # On an mmproj, the projector types its header declares
+    # (``clip.vision.projector_type``, ``clip.audio.projector_type``).
+    projectors: tuple = ()
 
 
 # Classification
@@ -237,8 +240,12 @@ def _classify_meta(
         # Its older LLaVA converter stores CLIP's own width there (768).
         width = (read_int(meta, "clip.vision.projection_dim")
                  if read_string(meta, "general.type") == "mmproj" else None)
+        projectors = tuple(
+            t for t in (read_string(meta, "clip.vision.projector_type"),
+                        read_string(meta, "clip.audio.projector_type")) if t)
         return ClassifiedGguf(ap, "mmproj", arch, False, quant, False,
-                              n_embd=width, declared=declared_base_ids(meta))
+                              n_embd=width, declared=declared_base_ids(meta),
+                              projectors=projectors)
     # A LoRA adapter (`gmlx train` / llama.cpp export) carries its base model's
     # `general.architecture`, so without this check it classifies as a loadable
     # chat model and serves a phantom id that 500s on request.
@@ -614,6 +621,52 @@ def is_speech_encoder(path) -> bool:
     embeddings (Nemotron 3.5 Transcribe's)."""
     meta = header_meta(os.path.expanduser(path)) if path else None
     return bool(meta) and meta.get("arch") in _arch_table.NATIVE_ASR_ENCODER_ARCHES
+
+
+@dataclass(frozen=True)
+class Caps:
+    """What a projector GGUF gives its text model: image and video input,
+    audio input, speech output. ``speech_encoder`` is a Nemotron speech
+    encoder, which pairs by checkpoint id."""
+
+    vision: bool = False
+    audio_in: bool = False
+    speech_out: bool = False
+    speech_encoder: bool = False
+
+
+_NO_CAPS = Caps()
+_CAPS_MEMO: dict = {}
+
+
+def projector_caps(path) -> Caps:
+    """The :class:`Caps` of the projector at ``path``, from its header. A
+    missing or unreadable file has none."""
+    if not path:
+        return _NO_CAPS
+    ap = os.path.abspath(os.path.expanduser(str(path)))
+    try:
+        st = os.stat(ap)
+    except OSError:
+        return _NO_CAPS
+    key = (ap, st.st_mtime_ns, st.st_size)
+    caps = _CAPS_MEMO.get(key)
+    if caps is None:
+        from .headerscan import scan_gguf
+
+        try:
+            kv = scan_gguf(ap, include_tensors=False).kv
+        except Exception:  # noqa: BLE001  not a GGUF
+            caps = _NO_CAPS
+        else:
+            caps = Caps(
+                vision=bool(kv.get("clip.has_vision_encoder")),
+                audio_in=bool(kv.get("clip.has_audio_encoder")),
+                speech_out=bool(kv.get("clip.has_gen_audio_encoder")),
+                speech_encoder=kv.get("general.architecture")
+                in _arch_table.NATIVE_ASR_ENCODER_ARCHES)
+        _CAPS_MEMO[key] = caps
+    return caps
 
 
 def find_speech_encoder(path: str) -> str | None:
@@ -1099,19 +1152,41 @@ def find_retrieval_models(dirs, *, recursive=True):
     return embedders, rerankers
 
 
+def projector_rank(path: str, lower: tuple = ()) -> tuple:
+    """Sort key of a projector file: the 16-bit type this chip runs
+    natively first (BF16 on M3 and later, F16 on M1 and M2), then the
+    other 16-bit type, then the ``lower`` quant tags in the order given,
+    then any other file. Ties keep name order."""
+    from .dtypes import has_native_bfloat16
+
+    want = (("BF16", "F16") if has_native_bfloat16() else ("F16", "BF16"))
+    want += tuple(lower)
+    tag = (quant_tag(os.path.basename(path)) or "").upper()
+    return (want.index(tag) if tag in want else len(want), path)
+
+
 def pick_projector(paths: list[str]) -> str | None:
     """The projector to load of several for one model: BF16 on chips that
     run bfloat16 natively (M3 and later), F16 on M1 and M2, then any other
     in name order. Weights stay 16-bit at rest in each chip's own type."""
-    from .dtypes import has_native_bfloat16
+    return min(paths, key=projector_rank) if paths else None
 
-    want = ("BF16", "F16") if has_native_bfloat16() else ("F16", "BF16")
 
-    def rank(path: str) -> tuple:
-        tag = (quant_tag(os.path.basename(path)) or "").upper()
-        return (want.index(tag) if tag in want else len(want), path)
+# The LFM3 repositories ship one projector per quant beside the models.
+# Beside any model, the 16-bit one for this chip pairs first.
+_LFM3_PROJECTORS = ("lfm3vl", "lfm3a")
+_LFM3_PROJECTOR_QUANTS = ("Q8_0", "Q4_K_M", "Q4_0")
 
-    return min(paths, key=rank) if paths else None
+
+def _pairing_order(mmprojs: list) -> list:
+    """The projectors of one folder in the order they pair, where the
+    first to match a model wins. LFM3 projectors go by
+    :func:`projector_rank`. Every other family keeps scan order, which is
+    name order."""
+    if not any(t in _LFM3_PROJECTORS for c in mmprojs for t in c.projectors):
+        return mmprojs
+    return sorted(mmprojs, key=lambda c: projector_rank(
+        c.path, _LFM3_PROJECTOR_QUANTS))
 
 
 def embedder_mmproj_beside(path: str) -> str | None:
@@ -1476,7 +1551,7 @@ def _emit_dir(classified, spec, used_ids, out, *, configured=None,
             out.append(mc)
 
         if spec.pair_mmproj:
-            mms = [c for c in group if c.kind == "mmproj"]
+            mms = _pairing_order([c for c in group if c.kind == "mmproj"])
             # A configured model is a candidate beside the scanned ones; the
             # scanned ones pair as they would without it.
             old_mm = _configured_in_dir(_dir, configured) if mms else []
@@ -1730,9 +1805,9 @@ def _pair_parent_mmproj(by_dir, made, configured, mmproj_pairs) -> None:
     unsloth's do. A projector whose header gives another hidden size, or
     names another model, than the models' headers stays unpaired. A
     configured model without an mmproj lands in ``mmproj_pairs``. Several
-    projectors: the first in scan order wins, as beside a model."""
+    projectors: the first in pairing order wins, as beside a model."""
     for parent, group in sorted(by_dir.items()):
-        mmprojs = [c for c in group if c.kind == "mmproj"]
+        mmprojs = _pairing_order([c for c in group if c.kind == "mmproj"])
         if (not mmprojs or any(c.kind == "model" for c in group)
                 or _configured_in_dir(parent, configured)):
             continue

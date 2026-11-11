@@ -102,6 +102,8 @@ class Model:
     native_mtp: bool = False         # every rung carries a head
     mmproj: str | None = None
     mmproj_bytes: int = 0
+    mmproj_f16: str | None = None    # the same projector in F16, for a chip with no native bfloat16
+    modalities: tuple = ()           # what a projector with more than vision adds: vision, audio, speech
     hears: bool = False              # the mmproj is a speech encoder: every pull takes it
     drafter: Drafter | None = None
     asr: Asr | None = None
@@ -109,6 +111,7 @@ class Model:
     kv_cost: KvCost | None = None
     heads: int = 0
     trained_ctx: int = 0
+    prefill_fused_head_dim: int = 0  # prefill attention runs fused at this head dim; 0 prices dense
     preferred_at: tuple = ()         # (memory class, tier) pairs, over preferred on that class
     head_from_class: int = 0         # the smallest memory class that keeps the native head on
 
@@ -173,6 +176,7 @@ class Seed:
     speed: str
     aliases: tuple = ()
     mmproj: str | None = None
+    mmproj_f16: str | None = None   # the F16 twin of a BF16 ``mmproj``, pulled on M1 and M2
     drafter_repo: str = ""
     drafter_file: str = ""
     cross_base: bool = False
@@ -189,10 +193,45 @@ class Seed:
     head_from_class: int = 0  # the smallest memory class that keeps the native head on
 
 
+_LFM_LICENSE = dict(
+    license_note="LFM Open License v1.0",
+    license_detail="Commercial use is licensed only below $10 million in annual revenue.")
+
 _SEED = (
+    Seed("lfm3-1.7b", "LFM3-1.7B", "LiquidAI/LFM3-1.7B-GGUF", "Q8_0",
+         "A very small chat model with a long context.",
+         "Very quick on any Mac: the smallest model here.",
+         quants=("Q4_K_M", "NVFP4", "Q8_0"),
+         use="chat on a small Mac",
+         **_LFM_LICENSE),
+    Seed("lfm3-vl-2b", "LFM3-VL-2B", "LiquidAI/LFM3-VL-2B-GGUF", "Q8_0",
+         "A very small model that reads images and video.",
+         "Very quick on any Mac.",
+         mmproj="mmproj-LFM3-VL-2B-BF16.gguf",
+         mmproj_f16="mmproj-LFM3-VL-2B-F16.gguf",
+         quants=("NVFP4", "Q8_0"),
+         use="images and video on a small Mac",
+         **_LFM_LICENSE),
+    Seed("lfm3-audio-2b", "LFM3-Audio-2B", "LiquidAI/LFM3-Audio-2B-GGUF", "xhigh",
+         "Hears and speaks: voice chat and transcription.",
+         "Very quick on any Mac.",
+         mmproj="mmproj-LFM3-Audio-2B-BF16.gguf",
+         mmproj_f16="mmproj-LFM3-Audio-2B-F16.gguf",
+         use="voice chat and transcription",
+         **_LFM_LICENSE),
+    Seed("lfm3-omni-2b", "LFM3-Omni-2B", "LiquidAI/LFM3-Omni-2B-GGUF", "xhigh",
+         "Hears, sees and speaks, all in one small model.",
+         "Very quick on any Mac.",
+         mmproj="mmproj-LFM3-Omni-2B-BF16.gguf",
+         mmproj_f16="mmproj-LFM3-Omni-2B-F16.gguf",
+         # On 8 GB the Q8_0 file and the projector leave about 0.1 GB over
+         # a full context, with nothing for an image or a spoken reply.
+         preferred_at=((8, "balanced"),),
+         use="voice chat, images and video",
+         **_LFM_LICENSE),
     Seed("qwen3.5-4b", "Qwen3.5-4B", "unsloth/Qwen3.5-4B-GGUF", "high",
          "A small all-rounder for chat and questions about images.",
-         "Quick on any Mac: the smallest model here.",
+         "Quick on any Mac.",
          mmproj="mmproj-F16.gguf",
          use="chat and questions about images"),
     Seed("ternary-bonsai-2-9b", "Ternary Bonsai 2 9B", "prism-ml/Ternary-Bonsai-2-9B-gguf",
@@ -440,10 +479,13 @@ def _build(seed: Seed, facts: dict) -> Model:
         license_detail=seed.license_detail, aliases=seed.aliases, arch=facts.get("arch", ""), moe=facts.get("moe", False),
         native_mtp=facts.get("native_mtp", False),
         mmproj=seed.mmproj, mmproj_bytes=facts.get("mmproj_bytes", 0) if seed.mmproj else 0,
+        mmproj_f16=seed.mmproj_f16 if seed.mmproj else None,
+        modalities=tuple(facts.get("modalities", ())) if seed.mmproj else (),
         hears=seed.hears and seed.mmproj is not None,
         drafter=drafter, asr=asr, ignored_files=seed.ignored_files,
         kv_cost=KvCost(tuple(tuple(row) for row in kv)) if kv else None,
         heads=facts.get("heads", 0), trained_ctx=facts.get("trained_ctx", 0),
+        prefill_fused_head_dim=facts.get("prefill_fused_head_dim", 0),
         preferred_at=seed.preferred_at, head_from_class=seed.head_from_class)
 
 
@@ -603,6 +645,58 @@ def resident_bytes(m: Model, r: Rung, speculative: bool) -> int:
     return n
 
 
+def mmproj_file(m: Model) -> str | None:
+    """The projector file a pull takes on this Mac. An entry with an F16
+    twin gets it where the chip has no native bfloat16 (M1 and M2)."""
+    if m.mmproj and m.mmproj_f16:
+        from gmlx.load.dtypes import has_native_bfloat16
+
+        if not has_native_bfloat16():
+            return m.mmproj_f16
+    return m.mmproj
+
+
+def keeps_projector(m: Model) -> bool:
+    """Whether every default pull takes the projector: it is the model's
+    audio input or its speech output, and not only a vision tower."""
+    return m.mmproj is not None and (
+        m.hears or bool({"audio", "speech"} & set(m.modalities)))
+
+
+_PROJECTOR_WORDS = (("vision", "image input"), ("audio", "audio input"),
+                    ("speech", "speech output"))
+
+
+def _join_words(words: list) -> str:
+    return (", ".join(words[:-1]) + " and " + words[-1] if len(words) > 1
+            else "".join(words))
+
+
+def projector_label(m: Model) -> str:
+    """What the projector adds: ``image input``, or each of its parts."""
+    if m.hears:
+        return "audio input"
+    words = [w for key, w in _PROJECTOR_WORDS if key in m.modalities]
+    return _join_words(words) or "image input"
+
+
+def projector_short_label(m: Model) -> str:
+    """The projector in the picker's 18 columns. ``voice`` is audio input
+    and speech output together."""
+    if not keeps_projector(m) or m.hears:
+        return projector_label(m)
+    return "images and voice" if "vision" in m.modalities else "voice"
+
+
+def projector_dropped_text(m: Model) -> str:
+    """What a pull with ``--no-vision`` leaves out, for an entry whose
+    projector is more than a vision tower, else ""."""
+    if m.hears or not keeps_projector(m):
+        return ""
+    words = [f"no {w}" for key, w in _PROJECTOR_WORDS if key in m.modalities]
+    return f"Without its projector, {m.name} has {_join_words(words)}."
+
+
 def addon_bytes(m: Model, mmproj: bool, drafter: bool) -> int:
     n = 0
     if mmproj and m.mmproj:
@@ -696,10 +790,27 @@ def context_estimate(m: Model, r: Rung, box: Box, addon: int, speculative: bool)
     costs = kv_costs(m.kv_cost)
     fixed = resident_bytes(m, r, speculative) + addon
 
-    def fits(t: int) -> bool:
+    decl = None
+    if m.prefill_fused_head_dim:
+        from gmlx.gen.prefill_decay import TransientDeclaration
+
+        decl = TransientDeclaration(m.prefill_fused_head_dim)
+
+    def transient(t: int) -> float:
+        # One served row, as the boot table prices width 1. The recorded
+        # cost row is fp16 KV.
+        if decl is not None:
+            from gmlx.gen.prefill_decay import declared_transient_bytes
+
+            declared = declared_transient_bytes(
+                decl, m.heads, True, t, 1, box.cap, 2048)
+            if declared is not None:
+                return declared
         s = min(2048, t)
-        return (fixed + prompt_kv_bytes(costs, t)
-                + min(box.cap, m.heads * s * (t + s) * 2) <= box.ceiling)
+        return min(box.cap, m.heads * s * (t + s) * 2)
+
+    def fits(t: int) -> bool:
+        return fixed + prompt_kv_bytes(costs, t) + transient(t) <= box.ceiling
 
     top = m.trained_ctx // K
     if top < 1 or not fits(K):
@@ -739,7 +850,8 @@ def _addon_sets(m: Model) -> list:
     """The add-on sets the default walk tries: all on, drafter off, both off."""
     out = []
     for mm, dr in ((True, True), (True, False), (False, False)):
-        pair = ((mm or m.hears) and m.mmproj is not None, dr and m.drafter is not None)
+        pair = ((mm or keeps_projector(m)) and m.mmproj is not None,
+                dr and m.drafter is not None)
         if pair not in out:
             out.append(pair)
     return out
@@ -775,7 +887,7 @@ def default_plan(m: Model, box: Box) -> PullPlan | None:
     ladder = tiers(m) if has_tiers(m) else list(m.rungs)
     for r in sorted(ladder, key=lambda r: r.bytes) + compacts:
         if rung_state(m, r, box) == STREAMS:
-            return PullPlan(m, r, m.hears, False, True)
+            return PullPlan(m, r, keeps_projector(m), False, True)
     return None
 
 
@@ -829,12 +941,14 @@ def rung_label(m: Model, r: Rung, box: Box, addon: int, speculative: bool) -> tu
 
 def tags(m: Model) -> list:
     out = []
-    if m.mmproj and not m.hears:
+    if m.mmproj and not m.hears and (not m.modalities or "vision" in m.modalities):
         out.append("images")
     if m.drafter is not None or m.native_mtp or any(r.head for r in m.rungs):
         out.append("faster replies")
-    if m.asr is not None or m.hears:
+    if m.asr is not None or m.hears or "audio" in m.modalities:
         out.append("audio")
+    if "speech" in m.modalities:
+        out.append("speech")
     return out
 
 
@@ -998,11 +1112,12 @@ def plan_for(m: Model, box: Box, *, quant: str | None = None,
     state = rung_state(m, rung, box)
     streaming = state != RESIDENT and m.moe
     if streaming:
-        return PullPlan(m, rung, bool(mmproj) or m.hears, False, True)
+        keep = m.hears or (mmproj is None and keeps_projector(m))
+        return PullPlan(m, rung, bool(mmproj) or keep, False, True)
     if dp is not None and not dp.streaming:
         d_mm, d_dr = dp.mmproj, dp.drafter
     else:
-        d_mm, d_dr = False, False
+        d_mm, d_dr = keeps_projector(m), False
     return PullPlan(m, rung,
                     d_mm if mmproj is None else bool(mmproj),
                     d_dr if drafter is None else bool(drafter), False, head_on(m, box))
@@ -1016,10 +1131,11 @@ def plan_command(plan: PullPlan, box: Box) -> str:
     if dp is None or plan.rung != dp.rung:
         parts += ["--quant", plan.rung.tier or plan.rung.quant]
     if plan.streaming:
-        if plan.mmproj and not m.hears:
-            parts.append("--vision")
+        if not m.hears and plan.mmproj != keeps_projector(m):
+            parts.append("--vision" if plan.mmproj else "--no-vision")
         return " ".join(parts)
-    d_mm, d_dr = (dp.mmproj, dp.drafter) if dp is not None and not dp.streaming else (False, False)
+    d_mm, d_dr = ((dp.mmproj, dp.drafter) if dp is not None and not dp.streaming
+                  else (keeps_projector(m), False))
     if m.mmproj and not m.hears and plan.mmproj != d_mm:
         parts.append("--vision" if plan.mmproj else "--no-vision")
     if m.drafter is not None and plan.drafter != d_dr:
@@ -1067,10 +1183,11 @@ def live_plan(plan: PullPlan, listing) -> PullPlan:
             raise GoneFromRepo(f"{m.repo} has no {rung.quant} file at main now (it has: {have}); "
                                "pick another --quant")
         rung = replace(rung, path=first, bytes=groups[first][3])
-        if plan.mmproj and m.mmproj:
-            if m.mmproj not in files:
-                raise GoneFromRepo(f"{m.repo} has no {m.mmproj} at main now; pass --no-vision")
-            m = replace(m, mmproj_bytes=files[m.mmproj])
+        tower = mmproj_file(m)
+        if plan.mmproj and tower:
+            if tower not in files:
+                raise GoneFromRepo(f"{m.repo} has no {tower} at main now; pass --no-vision")
+            m = replace(m, mmproj_bytes=files[tower])
     d = m.drafter
     if plan.drafter and d is not None:
         dfiles = files if d.repo == m.repo else listing(d.repo)
@@ -1095,7 +1212,7 @@ def plan_refs(plan: PullPlan) -> list:
     m = plan.model
     refs = [rung_ref(m, plan.rung)]
     if plan.mmproj and m.mmproj:
-        refs.append(f"hf:{m.repo}/{m.mmproj}")
+        refs.append(f"hf:{m.repo}/{mmproj_file(m)}")
     if plan.drafter and m.drafter is not None:
         d = m.drafter
         refs.append(f"hf:{d.repo}/{d.file}")
@@ -1123,7 +1240,7 @@ def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
     model_path = dest_path(m.repo, first, base_dir, nest)
     pairs: dict = {"alias": m.name}
     if plan.mmproj and m.mmproj:
-        pairs["mmproj"] = dest_path(m.repo, m.mmproj, base_dir, nest)
+        pairs["mmproj"] = dest_path(m.repo, mmproj_file(m), base_dir, nest)
     if plan.drafter and m.drafter is not None:
         pairs["draft_gguf"] = dest_path(m.drafter.repo, m.drafter.file, base_dir, nest)
     if m.asr is not None:
@@ -1138,7 +1255,8 @@ def _plan_items(plan: PullPlan) -> list:
     m = plan.model
     items = [(rung_ref(m, plan.rung), m.repo, plan.rung.path, plan.rung.bytes)]
     if plan.mmproj and m.mmproj:
-        items.append((f"hf:{m.repo}/{m.mmproj}", m.repo, m.mmproj, m.mmproj_bytes))
+        tower = mmproj_file(m)
+        items.append((f"hf:{m.repo}/{tower}", m.repo, tower, m.mmproj_bytes))
     if plan.drafter and m.drafter is not None:
         d = m.drafter
         items.append((f"hf:{d.repo}/{d.file}", d.repo, d.file, d.bytes))
@@ -1228,8 +1346,7 @@ def extras_text(m: Model) -> str:
     """``image input 0.8 GB, faster replies 2.6 GB``, or "" for an entry with no add-on."""
     extras = []
     if m.mmproj:
-        label = "audio input" if m.hears else "image input"
-        extras.append(f"{label} {human_gb(m.mmproj_bytes)}")
+        extras.append(f"{projector_label(m)} {human_gb(m.mmproj_bytes)}")
     if m.drafter is not None:
         extras.append(f"faster replies {human_gb(m.drafter.bytes)}")
     if m.asr is not None:
@@ -1281,7 +1398,8 @@ def group_titles(groups: tuple) -> tuple:
 
 
 def images_cell(m: Model) -> str:
-    return "yes" if m.mmproj else ""
+    sees = not m.hears and (not m.modalities or "vision" in m.modalities)
+    return "yes" if m.mmproj and sees else ""
 
 
 def _chat_row(m: Model, box: Box, verbose: bool) -> tuple:

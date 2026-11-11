@@ -16,6 +16,7 @@ so the server needs its speech services first, as
 does the work while the microphone and speakers stay on your Mac.
 
 - [Setting up](#setting-up)
+- [One model for the whole turn](#one-model-for-the-whole-turn)
 - [A session](#a-session)
 - [Listening modes](#listening-modes)
 - [Keys and commands](#keys-and-commands)
@@ -47,7 +48,9 @@ does the work while the microphone and speakers stay on your Mac.
 A served model that hears audio, such as
 [Nemotron 3.5 Transcribe](nemotron-transcribe.md#a-voice-session-on-one-model),
 can hear you and answer you in one model. The server then needs only
-`tts`, because `server.stt` left unset picks that model.
+`tts`, because `server.stt` left unset picks that model. A model that
+also speaks needs neither service, as
+[One model for the whole turn](#one-model-for-the-whole-turn) shows.
 
 The first session downloads two small models, for the wake phrase and for
 speech detection, into the cache folder that
@@ -57,6 +60,31 @@ lists.
 macOS asks once for permission to use the microphone, in your terminal's
 name. [The mic never works in talk](troubleshooting.md#the-mic-never-works-in-talk)
 shows how to allow it later.
+
+## One model for the whole turn
+
+A model that hears audio and speaks, such as
+[LFM3-Omni-2B](lfm3.md), runs the whole turn by itself:
+
+```sh
+gmlx pull lfm3-omni-2b
+gmlx talk lfm3-omni-2b
+```
+
+The server needs no `stt` and no `tts` service, and no speech extras. The
+model transcribes what you say, hears the recording itself, and speaks its
+reply as it writes it. talk picks this mode when the model's entry in
+`/v1/models` lists both `audio` and `speech`.
+
+A session differs from the two-service pipeline in these ways:
+
+| Setting | In this mode |
+|---------|--------------|
+| Voice | The model's own voices, `female` and `male`. A configured voice of a speech service is not used, and talk says so at start. |
+| `male` voice | The model writes each reply first and then speaks it, so a long reply starts later. |
+| Speed | The model speaks at one speed. `--speed` and `/speed` are not used. |
+| Language | `--language` or `talk.language` names the language you speak. Without it, the model decides. |
+| [The assistant](#the-assistant-by-voice) | With tools, the model writes each reply first and then speaks it. |
 
 ## A session
 

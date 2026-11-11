@@ -155,11 +155,23 @@ def frontier_width(min_ctx: int = _FRONTIER_MIN_CTX) -> int | None:
     return best
 
 
-def _transient_bytes(heads: int | None, depth: int) -> float:
+def _transient_bytes(heads: int | None, depth: int, *, decl=None,
+                     kv_fp16: bool = False, rows: int = 1) -> float:
+    """The prefill score transient at ``depth`` for ``rows`` prompts that
+    prefill together: the declared fused price when the model type has
+    one that applies (``decl``, ``kv_fp16``), else the dense price, which
+    is the same at every width. The declared price is held at the cap, so
+    it never falls with depth and the table's search is sound."""
     from gmlx.commands.tool_preflight import _SCORE_CHUNK
+    from gmlx.gen.prefill_decay import declared_transient_bytes
 
     if not heads:
         return 0.0
+    declared = declared_transient_bytes(
+        decl, heads, kv_fp16, depth, rows, None, _SCORE_CHUNK,
+        hold_at_cap=True)
+    if declared is not None:
+        return declared
     step = min(_SCORE_CHUNK, max(1, depth))
     return heads * step * (depth + step) * 2.0
 
@@ -330,7 +342,10 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         ws = working_set_bytes()
         if not (priced and ws):
             return None
-        cfg, costs, heads = priced
+        cfg, costs, heads, kv_fp16 = priced
+        from gmlx.gen.prefill_decay import transient_declaration
+
+        decl = transient_declaration(cfg)
         info = metal_info() or {}
         max_buffer = float(info.get("max_buffer_length", 0) or 0)
         resource_limit = int(info.get("resource_limit", 0) or 0)
@@ -343,7 +358,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
 
     def fits(w: int, d: int) -> bool:
         kv = prompt_kv_bytes(costs, d)
-        tr = _transient_bytes(heads, d)
+        tr = _transient_bytes(heads, d, decl=decl, kv_fp16=kv_fp16, rows=w)
         if weights + w * kv + tr + reserve > budget:
             return False
         if max_buffer > 0:
@@ -394,11 +409,13 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
 
 def boot_costs(gguf_path: str | None, env: dict | None = None, *,
                scans=None):
-    """``(config, kv_layer_costs, attention heads)`` priced from the GGUF
-    header under the model's env window, or None when the header cannot
-    be read. The one cost model the boot table, the streaming KV room,
-    the seeded admission rates and the streaming planner share. ``scans``
-    supplies the header scans (a remote header) in place of the path."""
+    """``(config, kv_layer_costs, attention heads, kv_fp16)`` priced from
+    the GGUF header under the model's env window, or None when the header
+    cannot be read. ``kv_fp16`` is true when no layer's KV is quantized
+    under that window. The one cost model the boot table, the streaming
+    KV room, the seeded admission rates and the streaming planner share.
+    ``scans`` supplies the header scans (a remote header) in place of the
+    path."""
     from .mem_preflight import (_get, _lm_config, config_geometry,
                                 kv_layer_costs)
     from gmlx.commands.tool_preflight import (_shards, _synth_config,
@@ -415,8 +432,10 @@ def boot_costs(gguf_path: str | None, env: dict | None = None, *,
         model = SimpleNamespace(config=cfg)
         geometry = config_geometry(_lm_config(model)) if cfg else None
         costs = None
+        kv_fp16 = True
         if geometry:
             bpe, regions, steps = _boot_pricing(geometry, env, gguf_path, cfg)
+            kv_fp16 = bpe is None and regions is None and steps is None
             costs = kv_layer_costs(
                 model, per_layer_bpe=bpe, per_layer_regions=regions,
                 per_layer_steps=steps, geometry=geometry)
@@ -426,7 +445,7 @@ def boot_costs(gguf_path: str | None, env: dict | None = None, *,
         return None
     heads = _get(_lm_config(model), "num_attention_heads")
     heads = heads if isinstance(heads, int) and heads > 0 else None
-    return cfg, costs, heads
+    return cfg, costs, heads, kv_fp16
 
 
 def boot_kv_costs(gguf_path: str) -> list:
@@ -931,6 +950,11 @@ def trained_context_length(gguf_path) -> int | None:
                         if k.endswith(".context_length")), None)
         if isinstance(raw, (int, float)) and int(raw) > 0:
             value = int(raw)
+            from gmlx.load.config_synth import trained_context_cap
+
+            cap = trained_context_cap(kv)
+            if cap:
+                value = min(value, cap)
     except Exception:
         _log.debug("context_length scan failed for %s", gguf_path, exc_info=True)
     _CTX_CACHE[gguf_path] = (mtime, value)

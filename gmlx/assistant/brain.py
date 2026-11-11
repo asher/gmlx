@@ -33,7 +33,8 @@ import threading
 from dataclasses import dataclass, field
 from collections.abc import Callable, Iterator
 
-from gmlx.talk.client import BrainEvent, stream_chat
+from gmlx.talk.client import (BrainEvent, SpokenDeltas, clip_message,
+                              stream_chat)
 
 
 @dataclass
@@ -110,7 +111,7 @@ class AssistantBrain:
                  system: str | None = None, max_tokens: int | None = 512,
                  tools: ToolRegistry | None = None,
                  max_tool_rounds: int = 8, tool_timeout_s: float = 60.0,
-                 memory=None, stream=None):
+                 memory=None, stream=None, speech: dict | None = None):
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
@@ -120,6 +121,8 @@ class AssistantBrain:
         self.max_tool_rounds = max_tool_rounds
         self.tool_timeout_s = tool_timeout_s
         self.memory = memory
+        # Request fields that ask for a spoken reply, or None for text.
+        self.speech = speech
         self._stream = stream or stream_chat
         self.messages: list = []                  # clean history, no system
         self.served_ids: list = []                # chat ids the server lists
@@ -148,6 +151,17 @@ class AssistantBrain:
 
     # -- the tool loop -------------------------------------------------------
     def turn(self, user_text: str) -> Iterator[BrainEvent]:
+        yield from self._turn({"role": "user", "content": user_text},
+                              user_text)
+
+    def turn_audio(self, clip: bytes,
+                   transcript: str) -> Iterator[BrainEvent]:
+        """A turn the user spoke: the model hears ``clip`` (WAV bytes) in
+        every request of the turn, tool rounds included. Once the turn
+        ends, the history keeps it as ``transcript``."""
+        yield from self._turn(clip_message(clip), transcript)
+
+    def _turn(self, message: dict, user_text: str) -> Iterator[BrainEvent]:
         from gmlx.tui.reasoning import ReasoningFilter
 
         memory_facts: list = []
@@ -157,7 +171,7 @@ class AssistantBrain:
             except Exception:                     # noqa: BLE001 - best-effort
                 memory_facts = []
 
-        self.messages.append({"role": "user", "content": user_text})
+        self.messages.append(message)
         spoken: list = []                # all answer text this turn (memory)
         text_parts: list = []            # current round's uncommitted text
         stats: dict = {}
@@ -170,6 +184,7 @@ class AssistantBrain:
             for r in range(self.max_tool_rounds + 1):
                 offer_tools = bool(self.tools) and r < self.max_tool_rounds
                 rf = ReasoningFilter()
+                speech = SpokenDeltas()
                 text_parts = []
                 calls: dict = {}                  # index -> {id, name, args}
                 finish = None
@@ -177,7 +192,8 @@ class AssistantBrain:
                     self.base_url, model=self.model,
                     messages=self._request_messages(memory_facts),
                     max_tokens=self.max_tokens, api_key=self.api_key,
-                    tools=self.tools.specs() if offer_tools else None)
+                    tools=self.tools.specs() if offer_tools else None,
+                    **({"extra": self.speech} if self.speech else {}))
                 try:
                     for delta in deltas:
                         if "_usage" in delta:
@@ -206,6 +222,10 @@ class AssistantBrain:
                                 slot["name"] += fn["name"]
                             if fn.get("arguments"):
                                 slot["args"].append(fn["arguments"])
+                        for event in speech.events(delta):
+                            if event[0] == "say":
+                                text_parts.append(event[1])
+                            yield event
                         text = delta.get("content")
                         if not text:
                             continue
@@ -271,6 +291,7 @@ class AssistantBrain:
             # drop the paired user message instead, so the next turn doesn't send
             # two consecutive user messages that strict chat templates reject.
             if text_parts or committed_tool_round or completed:
+                message["content"] = user_text
                 self.messages.append({"role": "assistant",
                                       "content": "".join(text_parts)})
             elif self.messages and self.messages[-1].get("role") == "user":

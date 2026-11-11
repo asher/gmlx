@@ -3406,6 +3406,24 @@ def test_register_downloads_writes_the_pairs_onto_a_new_entry(
     assert banned_words(out.out + out.err) == []
 
 
+def test_register_downloads_names_what_the_projector_gives(
+        monkeypatch, tmp_path, capsys):
+    """The note names what the projector's header says it gives, as an
+    LFM3 projector gives images, audio and speech."""
+    from lfm3_header import write_projector_header
+    cfg_path, lib = _reg_config(tmp_path)
+    model, mmproj, drafter = _bonsai_library(monkeypatch, lib)
+    write_projector_header(mmproj, vision=True, audio=True, speech=True)
+    srv.register_downloads([str(model), str(mmproj), str(drafter)],
+                           str(cfg_path),
+                           pairs=_bonsai_pairs(model, mmproj, drafter))
+    assert ("registered ternary-bonsai-2-27b-pq2 in "
+            f"{cfg_path}  (images, audio, speech, faster replies)\n"
+            ) in capsys.readouterr().out
+    assert srv._and(srv._projector_gives(mmproj)) == (
+        "image input, audio input and speech output")
+
+
 def test_register_downloads_takes_the_catalogs_tower_over_the_scans(
         monkeypatch, tmp_path):
     """Two generic towers beside the model: the scan takes the first by

@@ -48,6 +48,7 @@ from .gguf_meta import (
     read_int as _read_int,
     read_int_array as _read_int_array,
     read_string as _read_string,
+    read_str_array as _read_str_array,
     scalar as _scalar,
 )
 
@@ -192,6 +193,10 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # full ones, and a sigmoid MoE with an ungated shared expert after two
     # dense layers. Model class owned by gmlx (no mlx-lm class).
     "flint": "flint",
+    # Liquid AI LFM3: gated short convolutions with sliding-window and full
+    # attention layers, per-head QK-norm, a per-head sigmoid output gate,
+    # sandwich norms and a tied head. Model class owned by gmlx.
+    "lfm3": "lfm3",
     # Ricursive Ripple: dense GQA with per-head QK-norm, sandwich norms, a
     # sigmoid output gate, a value residual from the scaled embeddings,
     # NeoX RoPE on the sliding-window layers and NoPE on the full ones, and
@@ -2467,6 +2472,125 @@ def _synth_ricursive(meta, shapes, config: dict) -> None:
         config[flag] = all(present)
 
 
+# lfm3 (Liquid AI LFM3)
+
+# The speaking checkpoints (Omni, Audio) are trained to this context. Their
+# GGUFs carry the text backbone's larger context_length and a named `tts`
+# chat template.
+LFM3_SPEECH_CONTEXT = 32768
+
+
+def lfm3_context_cap(kv) -> int | None:
+    """The context cap of an LFM3 GGUF, from its header KV, or None when it
+    has none. A file with a named ``tts`` chat template is a speaking
+    checkpoint, which is capped at ``LFM3_SPEECH_CONTEXT``."""
+    names = _read_str_array(kv, "tokenizer.chat_templates") or ()
+    return LFM3_SPEECH_CONTEXT if "tts" in names else None
+
+
+def trained_context_cap(kv) -> int | None:
+    """The cap gmlx sets under a GGUF's trained context, from its header
+    KV, or None when the file has none. Every reader of the trained
+    context applies it: the synthesized config, the serve capacity and
+    the pull catalog."""
+    if _read_string(kv, "general.architecture") == "lfm3":
+        return lfm3_context_cap(kv)
+    return None
+
+
+def _synth_lfm3(meta, shapes, config: dict) -> None:
+    """Synthesize an lfm3 config from an 'lfm3'-arch GGUF.
+
+    The universal fields cover hidden/layers/heads/ffn/ctx/eps/head_dim/
+    rope_theta/tie/vocab. This adds the per-layer operator schedule, the
+    sliding window and its rope base, and the short-convolution width.
+    Refusals follow llama.cpp's lfm3 loader. A layer with no KV heads is a
+    short convolution; of the rest, ``sliding_window_pattern`` marks the
+    sliding ones. The full layers' partial rotation is in the
+    ``rope_freqs`` tensor, which the loader applies after the build.
+    """
+    arch = "lfm3"
+    n_layers = config["num_hidden_layers"]
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    if _read_bool(meta, f"{arch}.attention.causal") is False:
+        raise NotImplementedError(
+            "lfm3 synth: this GGUF is a d1 decision model "
+            f"({arch}.attention.causal is false), which reads the prompt "
+            "in both directions. d1 decision models are not supported yet.")
+
+    _require(config.get("rms_norm_eps"), arch=arch,
+             gguf_field=f"{arch}.attention.layer_norm_rms_epsilon")
+    head_dim = req(_read_int, "attention.key_length")
+    value_length = _read_int(meta, f"{arch}.attention.value_length")
+    if value_length is not None and value_length != head_dim:
+        raise NotImplementedError(
+            f"lfm3 synth: value_length {value_length} differs from "
+            f"key_length {head_dim}; llama.cpp requires them equal.")
+    config["head_dim"] = head_dim
+
+    key = "attention.head_count_kv"
+    kv_heads = req(_read_int_array, key)
+    if len(kv_heads) != n_layers:
+        raise ValueError(
+            f"lfm3 synth: {arch}.{key} has {len(kv_heads)} entries for "
+            f"{n_layers} layers")
+    attn_kv = {int(v) for v in kv_heads if v}
+    if len(attn_kv) != 1:
+        raise ValueError(
+            f"lfm3 synth: {arch}.{key} must give one KV head count for "
+            f"every attention layer, got {sorted(attn_kv)}")
+    config["num_key_value_heads"] = attn_kv.pop()
+
+    key = "attention.sliding_window_pattern"
+    swa = req(_read_bool_array, key)
+    if len(swa) != n_layers:
+        raise ValueError(
+            f"lfm3 synth: {arch}.{key} has {len(swa)} entries for "
+            f"{n_layers} layers")
+    if not any(swa):
+        raise ValueError("lfm3 synth: LFM3 requires sliding window "
+                         "attention layers")
+    types = []
+    for i, (heads, sliding) in enumerate(zip(kv_heads, swa)):
+        if not heads:
+            if sliding:
+                raise ValueError(
+                    f"lfm3 synth: layer {i} is a short convolution and "
+                    f"{arch}.{key} marks it sliding")
+            types.append("conv")
+        else:
+            types.append("sliding_attention" if sliding else "full_attention")
+    config["layer_types"] = types
+
+    window = req(_read_int, "attention.sliding_window")
+    if window <= 0:
+        raise ValueError("lfm3 synth: attention.sliding_window must be positive")
+    config["sliding_window"] = window
+    config["rope_theta"] = req(_read_float, "rope.freq_base")
+    config["rope_theta_swa"] = req(_read_float, "rope.freq_base_swa")
+
+    width = req(_read_int, "shortconv.l_cache")
+    if width < 2:
+        raise ValueError("lfm3 synth: shortconv.l_cache must be at least 2")
+    config["conv_L_cache"] = width
+
+    # Both post norms or neither, as llama.cpp requires.
+    post = [_has_tensor(shapes, f"blk.0.{n}.weight")
+            for n in ("post_attention_norm", "post_ffw_norm")]
+    if post[0] != post[1]:
+        raise ValueError("lfm3 synth: LFM3 requires both post norms or neither")
+    config["use_sandwich_norm"] = post[0]
+
+    cap = lfm3_context_cap(meta)
+    ctx = config.get("max_position_embeddings")
+    if cap is not None and (ctx is None or ctx > cap):
+        config["max_position_embeddings"] = cap
+
+
 # granitehybrid (IBM Granite 4.x hybrid: H-Micro / H-Tiny / H-Small)
 
 def _synth_granite_hybrid(meta, shapes, config: dict) -> None:
@@ -4524,6 +4648,7 @@ _SYNTH = {
     "k2-horizon": _synth_k2_horizon,
     "beam": _synth_beam,
     "flint": _synth_flint,
+    "lfm3": _synth_lfm3,
     "ricursive": _synth_ricursive,
     "graniteswitch": _synth_graniteswitch,
     "granitehybrid": _synth_granite_hybrid,

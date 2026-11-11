@@ -68,6 +68,7 @@ CANDIDATE_ARCHES = [
     "ricursive",
     "graniteswitch",
     "gemma3n",
+    "lfm3",
 ]
 
 # Deliberately varying lengths -> a ragged batch -> exercises the left-padding /
@@ -152,14 +153,17 @@ def _first_divergence(a, b):
     return None
 
 
-def _native_fp_codecs(path):
-    """The MXFP4 and NVFP4 codecs of a GGUF's tensors, every shard."""
+def _native_fp_codecs(path, stacks_only=False):
+    """The MXFP4 and NVFP4 codecs of a GGUF's tensors, every shard.
+    ``stacks_only`` keeps the 3-D expert stacks, the only tensors with a
+    packed layout: a dense layer stays wire bytes in packed mode."""
     from gmlx.load.headerscan import scan_gguf
     from gmlx.load.native_fp import NATIVE_FP_CODECS
     from gmlx.load.preflight import find_split_shards
 
     return {t.type_name.lower() for p in find_split_shards(path)
-            for t in scan_gguf(p).tensors} & NATIVE_FP_CODECS
+            for t in scan_gguf(p).tensors
+            if not stacks_only or len(t.shape) >= 3} & NATIVE_FP_CODECS
 
 
 def _native_fp_layouts(model):
@@ -257,6 +261,9 @@ def test_batch_divergence_only_at_ties_native_fp(gguf_index, arch, layout,
         pytest.skip(f"{arch}: no MXFP4 or NVFP4 tensors, so no layout choice")
     if layout == "wire" and not codecs <= set(kq.codecs()):
         pytest.skip(f"this mlx-kquant build lacks {sorted(codecs)} wire kernels")
+    if layout == "packed" and not _native_fp_codecs(path, stacks_only=True):
+        pytest.skip(f"{arch}: its MXFP4 or NVFP4 tensors are dense layers, "
+                    "which stay wire bytes in packed mode")
     monkeypatch.setenv("GMLX_NATIVE_FP", layout)
     model, _config, tok = load_model(path, verbose=False)
     assert layout in _native_fp_layouts(model)

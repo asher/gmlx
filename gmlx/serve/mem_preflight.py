@@ -128,7 +128,8 @@ def recurrent_state_bytes(c) -> float | None:
     recurrent state plus the conv tails), or None when the config carries
     no recurrent geometry this can read. Families: gated DeltaNet
     (qwen3_5, qwen3_next, qwen4_exp), Mamba2 (nemotron_h, falcon_h1,
-    granitemoehybrid), KDA (kimi_k3, glm5_next)."""
+    granitemoehybrid), KDA (kimi_k3, glm5_next). LFM3's gated short
+    convolution holds only its tail."""
     nv = _get(c, "linear_num_value_heads")
     if nv:
         nk = _get(c, "linear_num_key_heads") or nv
@@ -158,6 +159,10 @@ def recurrent_state_bytes(c) -> float | None:
         conv_dim = inner + 2 * groups * state
         return float((k - 1) * conv_dim * _CONV_BYTES
                      + inner * state * _STATE_BYTES)
+    width = _get(c, "conv_L_cache")
+    hidden = _get(c, "hidden_size")
+    if width and hidden:
+        return float((width - 1) * hidden * _CONV_BYTES)
     return None
 
 

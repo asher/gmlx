@@ -977,6 +977,126 @@ def test_quants_beside_several_mmprojs_each_take_the_first_by_file_name(
         [str(tmp_path / "mmproj-BF16.gguf")] * len(quants)
 
 
+# The header fields of the LFM3 repositories, which keep one projector per
+# quant beside the models.
+def _lfm3_mm(name: str, vision: bool) -> dict:
+    meta = {"general.architecture": "clip", "general.type": "mmproj",
+            "general.name": f"LFM3 {name} 2B",
+            "general.basename": f"LFM3-{name}", "general.size_label": "475M",
+            "clip.has_audio_encoder": True,
+            "clip.audio.projection_dim": 2048,
+            "clip.audio.projector_type": "lfm3a"}
+    if vision:
+        meta.update({"clip.has_vision_encoder": True,
+                     "clip.vision.projection_dim": 2048,
+                     "clip.vision.projector_type": "lfm3vl"})
+    return meta
+
+
+def _lfm3_model(name: str) -> dict:
+    return {"general.architecture": "lfm3", "general.type": "model",
+            "general.name": f"LFM3 {name} 2B",
+            "general.basename": f"LFM3-{name}", "general.size_label": "2B",
+            "lfm3.embedding_length": 2048}
+
+
+_LFM3_FOLDERS = {
+    # name: (vision, projector quants shipped)
+    "Omni": (True, ("BF16", "F16", "Q4_0", "Q4_K_M", "Q8_0")),
+    "Audio": (False, ("BF16", "F16", "Q4_0", "Q4_K_M")),
+}
+
+
+def _lfm3_folder(tmp_path, monkeypatch, name, quants, bf16):
+    import gmlx.load.dtypes as dtypes
+
+    vision, _shipped = _LFM3_FOLDERS[name]
+    monkeypatch.setattr(dtypes, "has_native_bfloat16", lambda: bf16)
+
+    def _f(path):
+        base = os.path.basename(path)
+        meta = (_lfm3_mm(name, vision) if base.startswith("mmproj")
+                else _lfm3_model(name))
+        return disc._classify_meta(meta, basename=base, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    models = (f"LFM3-{name}-2B-Q4_K_M.gguf", f"LFM3-{name}-2B-Q8_0.gguf")
+    _write(tmp_path, *models,
+           *(f"mmproj-LFM3-{name}-2B-{q}.gguf" for q in quants))
+    got = {os.path.basename(m.mmproj) for m in _scan(tmp_path)}
+    assert len(got) == 1
+    return got.pop()
+
+
+@pytest.mark.parametrize("name", sorted(_LFM3_FOLDERS))
+@pytest.mark.parametrize("bf16, want", [(True, "BF16"), (False, "F16")])
+def test_lfm3_quants_pair_with_the_16_bit_projector_of_this_chip(
+        tmp_path, monkeypatch, name, bf16, want):
+    """Every quant of the model takes the BF16 projector on M3 and later,
+    and the F16 one on M1 and M2."""
+    got = _lfm3_folder(tmp_path, monkeypatch, name, _LFM3_FOLDERS[name][1],
+                       bf16)
+    assert got == f"mmproj-LFM3-{name}-2B-{want}.gguf"
+
+
+@pytest.mark.parametrize("quants, want", [
+    (("F16", "Q8_0"), "F16"),           # the other 16-bit type is next
+    (("Q4_0", "Q4_K_M", "Q8_0"), "Q8_0"),
+    (("Q4_0", "Q4_K_M"), "Q4_K_M"),
+    (("Q4_0",), "Q4_0"),
+])
+def test_lfm3_quants_pair_with_the_best_projector_on_disk(
+        tmp_path, monkeypatch, quants, want):
+    """Without the chip's 16-bit projector, the other 16-bit one pairs,
+    then Q8_0, Q4_K_M and Q4_0. Name order would give Q4_0 first."""
+    got = _lfm3_folder(tmp_path, monkeypatch, "Omni", quants, True)
+    assert got == f"mmproj-LFM3-Omni-2B-{want}.gguf"
+
+
+def test_a_root_lfm3_projector_pairs_by_chip_into_the_quant_folders(
+        tmp_path, monkeypatch):
+    import gmlx.load.dtypes as dtypes
+
+    monkeypatch.setattr(dtypes, "has_native_bfloat16", lambda: False)
+
+    def _f(path):
+        base = os.path.basename(path)
+        meta = (_lfm3_mm("Omni", True) if base.startswith("mmproj")
+                else _lfm3_model("Omni"))
+        return disc._classify_meta(meta, basename=base, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, "mmproj-LFM3-Omni-2B-BF16.gguf",
+           "mmproj-LFM3-Omni-2B-F16.gguf")
+    for quant in ("Q4_K_M", "Q8_0"):
+        (tmp_path / quant).mkdir()
+        _write(tmp_path / quant, f"LFM3-Omni-2B-{quant}.gguf")
+    models = _scan(tmp_path, recursive=True)
+    assert [m.mmproj for m in models] == \
+        [str(tmp_path / "mmproj-LFM3-Omni-2B-F16.gguf")] * 2
+
+
+def test_another_family_keeps_name_order_on_every_chip(tmp_path, monkeypatch):
+    """The by-chip order is LFM3's alone. A Qwen3-VL folder with BF16 and
+    F16 projectors pairs the first by name on M1 and M2 too."""
+    import gmlx.load.dtypes as dtypes
+
+    monkeypatch.setattr(dtypes, "has_native_bfloat16", lambda: False)
+    mm_name, mm_meta, quants, model_meta = _SAME_MODEL_QUANTS[
+        "generic, Qwen3-VL-8B"]
+    mms = ("mmproj-F32.gguf", "mmproj-F16.gguf", mm_name)
+
+    def _f(path):
+        name = os.path.basename(path)
+        meta = mm_meta if name in mms else model_meta
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    _write(tmp_path, *mms, *quants)
+    assert [m.mmproj for m in _scan(tmp_path)] == \
+        [str(tmp_path / "mmproj-BF16.gguf")] * len(quants)
+
+
 def _known(*paths):
     """``known_models`` for configured entries at ``paths``."""
     return {str(p): ModelCfg(id=f"m{i}", path=str(p))

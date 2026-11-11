@@ -439,6 +439,15 @@ class OpenAIRequest(FlexibleBaseModel):
 
 class PromptTokensDetails(BaseModel):
     cached_tokens: int = 0
+    # gmlx: the prompt tokens of the speech passes of a reply with audio.
+    tts_tokens: Optional[int] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_tts(self, handler):
+        out = handler(self)
+        if isinstance(out, dict) and out.get("tts_tokens") is None:
+            out.pop("tts_tokens", None)
+        return out
 
 
 class OpenAIUsage(BaseModel):
@@ -869,6 +878,15 @@ class UsageStats(BaseModel):
     prompt_tokens_details: PromptTokensDetails = Field(
         default_factory=PromptTokensDetails
     )
+    # gmlx: ``audio_tokens``, on a reply with audio only.
+    completion_tokens_details: Optional[dict] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_details(self, handler):
+        out = handler(self)
+        if isinstance(out, dict) and out.get("completion_tokens_details") is None:
+            out.pop("completion_tokens_details", None)
+        return out
 
     @classmethod
     def from_metrics(
@@ -907,6 +925,13 @@ class ChatRequest(GenerationRequest):
         description=(
             "Return the prompt's token ids and each choice's generated token ids."
         ),
+    )
+    # gmlx: OpenAI's audio output fields, for a model that speaks.
+    modalities: Optional[List[str]] = Field(
+        None, description='Output kinds. ["text", "audio"] asks for a spoken reply.'
+    )
+    audio: Optional[dict] = Field(
+        None, description="Audio output: voice, format and language."
     )
 
 

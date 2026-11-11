@@ -13,6 +13,10 @@ leaves ``BatchGenerator.next``, and the uid joins the generator's retired
 set. Past ``MAX_ROWS`` entries an insert drops every uid that is not live,
 never a live one, and the retired marks of uids that are not live.
 
+Speech. A spoken reply's record is the ``speech`` field. It is mutable
+and never requeues, so ``remove(uid)``, the finish and a failed requeue
+each close it (:mod:`gmlx.serve.speech_rows`).
+
 Seeds. Each row's sampler is built without the request's seed, so its base
 seed is the stock default. The seed rides in the settings and is
 registered on the row's own sampler instance. A seed guarantees the row's
@@ -46,6 +50,7 @@ class RowSettings:
     top_k: int = 0                    # logprob alternatives, 0..cap
     key: tuple = GREEDY_KEY           # sampler config without the seed
     lora: Any = None                  # gmlx.serve.lora_request.RowLora, salted
+    speech: Any = None                # gmlx.serve.speech_rows.SpeechRow
 
 
 def sampler_key(args) -> tuple:

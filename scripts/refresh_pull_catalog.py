@@ -56,8 +56,9 @@ from gmlx.load.catalog import MEMORY_CLASSES, TIERS, Seed  # noqa: E402
 from gmlx.load.discovery import (_classify_meta, declared_base_ids,  # noqa: E402
                                  _drafter_kind, _looks_like_drafter,
                                  _target_ids)
-from gmlx.load.config_synth import supported_arches  # noqa: E402
+from gmlx.load.config_synth import supported_arches, trained_context_cap  # noqa: E402
 from gmlx.load.gguf_meta import read_int, read_string  # noqa: E402
+from gmlx.gen.prefill_decay import transient_declaration  # noqa: E402
 from gmlx.load.headerscan import scan_bytes  # noqa: E402
 from gmlx.load.preflight import shard_names  # noqa: E402
 from gmlx.load.repo_files import (file_for_quant, is_companion, model_files,  # noqa: E402,F401
@@ -243,6 +244,14 @@ def _streams_from(mp, ram_classes=MEMORY_CLASSES) -> tuple:
     return streams_from, ladder
 
 
+def recorded_context(kv, arch: str) -> int:
+    """The trained context the catalog records: the header's, under the
+    cap gmlx serves the file at."""
+    ctx = int(read_int(kv, f"{arch}.context_length") or 0)
+    cap = trained_context_cap(kv)
+    return min(ctx, cap) if cap else ctx
+
+
 def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     """``(facts, problems, notes)`` for one seed. ``recorded`` is the
     current FACTS row, which names the compact quants to keep. Every repo
@@ -340,13 +349,15 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     pref_quant = next((q for q, t, _f in chosen if (t or q) == seed.preferred), None)
     scans = scans_by_quant.get(pref_quant) or next(iter(scans_by_quant.values()))
     got = boot_costs(None, env={}, scans=scans)
-    kv_cost, heads = (), 0
+    kv_cost, heads, fused_head_dim = (), 0, 0
     if got:
-        _cfg, costs, heads = got
+        cfg, costs, heads, _kv_fp16 = got
         kv_cost = catalog.serialise_costs(costs).costs
+        decl = transient_declaration(cfg)
+        fused_head_dim = int(decl.head_dim) if decl else 0
     else:
         problems.append(f"{seed.name}: boot_costs priced nothing from the header")
-    trained_ctx = int(read_int(scans[0].kv, f"{arch}.context_length") or 0)
+    trained_ctx = recorded_context(scans[0].kv, arch)
     params = read_string(scans[0].kv, "general.size_label") or ""
     n_params = sum(math.prod(t.shape) for s in scans for t in s.tensors)
     model_cls = _classify_meta(scans[0].kv, basename=os.path.basename(chosen[0][2]),
@@ -355,6 +366,7 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
 
     # The vision tower.
     mmproj_bytes = 0
+    modalities: tuple = ()
     if seed.mmproj:
         if seed.mmproj not in files:
             problems.append(f"{seed.name}: {seed.mmproj} is not in the listing")
@@ -366,6 +378,20 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
             except Exception as e:  # the pair gmlx cannot load
                 problems.append(f"{seed.name}: tower {seed.mmproj} does not load with "
                                 f"{arch}: {e}")
+            modalities = tuple(word for word, key in (
+                ("vision", "clip.has_vision_encoder"),
+                ("audio", "clip.has_audio_encoder"),
+                ("speech", "clip.has_gen_audio_encoder")) if mm.kv.get(key))
+            if seed.mmproj_f16:
+                # The F16 twin a pull takes on M1 and M2: the same tensors,
+                # so the same size to within its header.
+                twin = files.get(seed.mmproj_f16)
+                if twin is None:
+                    problems.append(f"{seed.name}: {seed.mmproj_f16} is not in the listing")
+                elif abs(twin - mmproj_bytes) > 1 << 20:
+                    problems.append(
+                        f"{seed.name}: {seed.mmproj_f16} is {twin} bytes and "
+                        f"{seed.mmproj} is {mmproj_bytes}")
     else:
         towers = [p for p in files if os.path.basename(p).lower().startswith("mmproj")
                   and p not in seed.ignored_files]
@@ -442,6 +468,11 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     }
     if asr is not None:
         facts["asr"] = asr
+    if fused_head_dim:
+        facts["prefill_fused_head_dim"] = fused_head_dim
+    if set(modalities) - {"vision"}:
+        # A projector that is more than a vision tower.
+        facts["modalities"] = modalities
     if c["license"] == "other" and not seed.license_note:
         problems.append(f"{seed.name}: license is other ({c['license_name']}); the seed "
                         "needs a license_note")
@@ -462,6 +493,11 @@ def facts_text(facts: dict) -> str:
             lines.append(f"        {key!r}: {f[key]!r},")
         if f.get("asr"):
             lines.append(f"        'asr': {f['asr']!r},")
+        if f.get("prefill_fused_head_dim"):
+            lines.append("        'prefill_fused_head_dim': "
+                         f"{f['prefill_fused_head_dim']!r},")
+        if f.get("modalities"):
+            lines.append(f"        'modalities': {tuple(f['modalities'])!r},")
         lines.append("        'rungs': (")
         for r in f["rungs"]:
             lines.append(f"            {tuple(r)!r},")

@@ -92,6 +92,8 @@ CHAT_CONSUMED = _GEN_ARGS_CONSUMED | _GMLX_CONSUMED | frozenset({
     "mm_processor_kwargs", "timestamp_granularities",
     # Assistant prefill (prefill.py).
     "continue_final_message", "add_generation_prompt",
+    # Audio output on a model that speaks (speech_chat.py).
+    "modalities", "audio",
 })
 
 # /v1/responses (openai.py responses_endpoint). No ``stop`` here: the gmlx

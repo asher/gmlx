@@ -47,7 +47,7 @@ CANDIDATE_ARCHES = [
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
     "kimi-k3", "muse-glimmer", "muse-spark", "qwen4exp", "glm5-next", "glm5next", "hyv4",
     "k2-horizon", "beam", "flint", "ricursive", "graniteswitch",
-    "qwen3vl",
+    "qwen3vl", "lfm3",
 ]
 
 # Per-arch extra flags for the llama.cpp reference run.
@@ -213,6 +213,12 @@ def _max_run(ids) -> int:
 # the spam check is scoped to this window while finite/in-range cover full depth.
 _SPAM_WINDOW = 2048
 
+# Arches that decode from another seed.
+#   lfm3 - after a whole sentence, Omni Q4_0 writes a run of spaces, in
+#   llama.cpp too. A seed that stops mid-sentence keeps every quant in text.
+DECODE_SEED = {"lfm3": ("Chapter One\n\nThe history of science is a long and "
+                        "winding story. It begins")}
+
 
 def _build_prompt(tok, n_tokens):
     """A natural ``n_tokens``-long prompt, rebuilt from a decoded token slice so
@@ -290,7 +296,7 @@ def test_long_decode_integrity(arch, dtype, gguf_index, monkeypatch):
         return logits
 
     procs = [_suppress_eos] if eos_ids else None
-    seed_ids = tok.encode(_SEED)
+    seed_ids = tok.encode(DECODE_SEED.get(arch, _SEED))
     # Belt and braces with the logit mask above: stream_generate also STOPS
     # at an EOS token id, and a NaN-corrupted argmax could land on one and
     # end the run before depth; clearing the EOG set keeps it decoding.

@@ -592,11 +592,13 @@ def _retire_largest(gen, st: _GovState) -> bool:
     it as itself through the tick guard's ledger (replay = prompt +
     delivered; APC makes the re-prefill warm). A row in the middle of a
     forced close is passed over: the retire can wait, and a close is a
-    few tokens long."""
+    few tokens long. A speaking row is passed over too: it cannot
+    replay, so a retire would end its reply."""
     from . import tick_guard as tg
 
     tg_st = tg._state(gen)
-    victim = tg._pick_victim(gen, tg_st, spare=tg.mid_close)
+    victim = tg._pick_victim(gen, tg_st, spare=tg.mid_close,
+                             spare_uid=lambda uid: tg.speaks(gen, uid))
     if victim is None:
         return False
     if victim == st.last_victim_uid:
