@@ -27,9 +27,9 @@ end, so a rollback trims each row by its own rejected count.
 
 Each round checks the per-model width cap, the number of rows that can
 speculate before verification widens each row's weight reads past the
-point where drafting pays. A batch wider than the cap becomes a mixed
-batch, described below, or decodes plain where a mixed batch does not
-apply.
+point where drafting pays. A batch wider than the cap decodes plain, or
+becomes a mixed batch, described below, when `GMLX_MTP_MIXED` turns that
+on.
 
 New requests join between verify rounds, when the loop drains an injection
 queue. It checks the cap against the width the admission would reach,
@@ -41,16 +41,19 @@ stateDiagram-v2
     [*] --> Scalar: first request
     Scalar --> [*]: request finishes, no waiters
     Scalar --> Batched: waiters arrive (preempt)
-    Batched --> Mixed: over the cap
-    Mixed --> Batched: back within the cap
-    Batched --> Gated: over the cap, no mixed batch
+    Batched --> Gated: over the cap
     Gated --> Batched: back within the cap
+    Batched --> Mixed: over the cap, mixed batches on
+    Mixed --> Batched: back within the cap
     Batched --> [*]: last row finishes
     Mixed --> [*]: last row finishes
     Gated --> [*]: last row finishes
 ```
 
 ## Mixed batches
+
+Mixed batches are off by default, since a mixed batch decodes slower than
+the same rows plain. `GMLX_MTP_MIXED=1` turns them on.
 
 A mixed batch speculates on its oldest rows, as many as the cap allows,
 and decodes the other rows plain in the same verify forward. Each plain
@@ -81,12 +84,22 @@ start the promoted row cold from the round's verify capture, as a resumed
 batch does.
 
 A mixed batch needs a drafter that holds its own per-row state and a
-target that rolls back each row separately. Drafters that read the
-target's shared KV stay on the plain-decode gate. Targets with routed
-experts stay on the gate too: a plain row's padded block widens the set
+target that rolls back each row separately. These stay on the plain-decode
+gate whatever the switch says:
+
+- The gemma-4 assistant drafter, which reads the target's shared KV.
+- gemma-4 and MiniMax-M3 models, and the MTP heads of GLM-DSA, Inkling and
+  Hy-V4 models, which accept the same number of drafts for every row of a
+  batch.
+- Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and
+  GLM-5.3-Flash models, which undo the rejected drafts of one row at a
+  time.
+- A quantized KV cache that cannot roll back each row separately.
+
+On a target with routed experts, a plain row's padded block widens the set
 of experts each step reads, which costs the same as speculating on every
-row. `GMLX_MTP_MIXED=1` forces mixed batches on such targets, and
-`GMLX_MTP_MIXED=0` restores the gate for every model.
+row. `GMLX_MTP_MIXED=auto` therefore leaves such targets on the gate and
+turns mixed batches on for the others, and `1` turns them on for both.
 
 A target marks a rollback that takes each row's accept count with
 `ragged_spec_rollback`. A target whose rollback takes one count gets no
@@ -109,18 +122,18 @@ the server therefore preempts it:
 2. The generation is rebuilt as an unarmed batch-loop generator that
    restarts from the round's bonus token, with its real emitted count. Single-sequence caches convert to their batch classes.
 3. The rebuilt loop's first injection drain admits the waiters. If
-   the new width exceeds the cap, the batch decodes as a mixed batch or
-   plain. Otherwise it arms itself with a capture round and keeps
-   speculating.
+   the new width exceeds the cap, the batch decodes plain, or as a mixed
+   batch when those are on. Otherwise it arms itself with a capture round
+   and keeps speculating.
 
-At a cap of 1 with a mixed batch, the closing round commits its accepted
+At a cap of 1 with mixed batches on, the closing round commits its accepted
 positions into the drafter before the rebuild. The rebuilt row keeps that
 drafter and speculates from its first round, with no capture round.
 
 ## Re-arming a drained batch
 
-A batch gated to plain decode, when a mixed batch does not apply, re-arms
-when finishing rows bring it back within the cap. Re-arming needs fresh hidden state and shared KV for each
+A batch gated to plain decode re-arms when finishing rows bring it back
+within the cap. Re-arming needs fresh hidden state and shared KV for each
 surviving row, so the resume path runs the generator's cold-start
 sequence again instead of reusing per-row state:
 

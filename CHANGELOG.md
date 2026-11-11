@@ -48,6 +48,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With ffmpeg installed, the server reads video input with it, so chat and
   embeddings models get the frames their reference code gets. OpenCV reads
   video only when ffmpeg is missing.
+- Past the drafter's width cap a batch decodes without speculation, and a dense
+  Qwen model's native head has a cap of 3. `GMLX_MTP_MIXED=1` undoes the first.
 
 ### Fixed
 
