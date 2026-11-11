@@ -1427,7 +1427,9 @@ def _install_plain_ckpt_decode() -> None:
     batch happens to drain to one row. Stashes live in a
     uid-keyed registry lifted across ``extend`` (the seam that rebuilds
     cache objects at continuous-batch injection).
-    GMLX_APC_RETIRE_BATCH=0 restores the lone-row-only v1 scope.
+    GMLX_APC_RETIRE_BATCH=0 turns the extract off: only a lone row
+    retires, off its live caches, and in ckpt mode only while they are
+    single-row classes.
     Idempotent."""
     from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 

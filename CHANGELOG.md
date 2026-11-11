@@ -64,9 +64,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On Qwen3.5 and other hybrid models the prompt cache stopped well short of
   its memory share, so long conversations side by side reran their prompts.
 - On a hybrid model with no drafter, the last of several overlapping requests
-  to finish did not cache its turn when its next turn replays that turn whole.
+  to finish could end its turn uncached, so its next turn reran it.
 - On a hybrid model with no drafter, a chat request that others had joined
-  held extra memory while it decoded alone, more the longer its context.
+  could hold extra memory while it decoded alone, more the longer its context.
 
 ## [0.5.5] - 2026-11-08
 
