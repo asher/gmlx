@@ -184,6 +184,57 @@ def test_dense_entry_records_tiers_costs_and_the_tower(refresh, dense_repo, monk
         sorted(r.quant for r in catalog.compact_candidates(m)) == ["UD-IQ2_M", "UD-IQ3_XXS"]
 
 
+def _projector(tmp_path, name, **flags):
+    meta = {"general.architecture": "clip", "clip.has_llava_projector": True,
+            "general.type": "mmproj", **flags}
+    return _gguf(tmp_path, name, meta, {"mm.0.weight": (8, 8)})
+
+
+def test_a_projector_with_more_than_vision_records_its_modalities(
+        refresh, dense_repo, monkeypatch, tmp_path):
+    """The fact names what the projector adds when that is more than
+    vision, and a vision tower records none."""
+    files = dense_repo.repos["org/dense"]
+    files["mmproj-Voice-BF16.gguf"] = _projector(
+        tmp_path, "mmproj-Voice-BF16.gguf", **{
+            "clip.has_vision_encoder": True, "clip.has_audio_encoder": True,
+            "clip.has_gen_audio_encoder": True})
+    files["mmproj-Ears-BF16.gguf"] = _projector(
+        tmp_path, "mmproj-Ears-BF16.gguf", **{
+            "clip.has_audio_encoder": True, "clip.has_gen_audio_encoder": True})
+    files["mmproj-Eyes-BF16.gguf"] = _projector(
+        tmp_path, "mmproj-Eyes-BF16.gguf", **{"clip.has_vision_encoder": True})
+    monkeypatch.setattr("gmlx.load.vlm.resolve_vlm_model_type", lambda arch, kv: "any")
+    got = {}
+    for name in ("Voice", "Ears", "Eyes"):
+        facts, problems, _n = refresh.record_entry(
+            _seed(mmproj=f"mmproj-{name}-BF16.gguf"), None, None)
+        assert problems == []
+        got[name] = facts.get("modalities")
+    assert got == {"Voice": ("vision", "audio", "speech"), "Ears": ("audio", "speech"),
+                   "Eyes": None}
+    seed = _seed(mmproj="mmproj-Voice-BF16.gguf")
+    facts, _p, _n = refresh.record_entry(seed, None, None)
+    assert "'modalities': ('vision', 'audio', 'speech')," in refresh.facts_text(
+        {"dense": facts})
+    assert catalog._build(seed, facts).modalities == ("vision", "audio", "speech")
+    assert refresh.compare("dense", dict(facts, modalities=("audio",)), facts) == [
+        "dense: modalities ('audio',) -> ('vision', 'audio', 'speech')"]
+
+
+def test_the_f16_twin_of_a_projector_is_checked(refresh, dense_repo, monkeypatch, tmp_path):
+    files = dense_repo.repos["org/dense"]
+    twin = _seed(mmproj="mmproj-BF16.gguf", mmproj_f16="mmproj-F16.gguf")
+    assert refresh.record_entry(twin, None, None)[1] == []
+    gone = _seed(mmproj="mmproj-BF16.gguf", mmproj_f16="mmproj-Other-F16.gguf")
+    assert refresh.record_entry(gone, None, None)[1] == [
+        "dense: mmproj-Other-F16.gguf is not in the listing"]
+    # A twin of another size is another projector.
+    files["mmproj-Big-F16.gguf"] = files["mmproj-F16.gguf"] + b"\0" * (2 << 20)
+    big = _seed(mmproj="mmproj-BF16.gguf", mmproj_f16="mmproj-Big-F16.gguf")
+    assert len(refresh.record_entry(big, None, None)[1]) == 1
+
+
 def test_the_header_cache_is_per_revision(refresh, dense_repo, tmp_path):
     cache = str(tmp_path / "cache")
     a = refresh.header("org/dense", "Model-Q4_0.gguf", "aaaa", cache)

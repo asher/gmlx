@@ -602,6 +602,96 @@ def test_a_speech_encoder_rides_every_plan(tmp_path):
     assert "images" in catalog.tags(MOE)
 
 
+# A projector that is the model's ears and voice as well as its eyes, in
+# BF16 with an F16 twin.
+VOICE = dataclasses.replace(
+    DENSE, name="voice", mmproj="mmproj-Voice-BF16.gguf", mmproj_f16="mmproj-Voice-F16.gguf",
+    modalities=("vision", "audio", "speech"), drafter=None)
+
+
+def test_a_voice_projector_rides_the_default_plan_and_can_be_left_out():
+    """A projector with audio input or speech output is in every default
+    plan, where a plain vision tower drops when memory is tight. The pull
+    still takes --no-vision, and says what goes with the file."""
+    plain = _m("snug", [_r("Q4_K_M", 17.5, "balanced")], "balanced", mmproj=3.0)
+    voice = dataclasses.replace(plain, modalities=("audio", "speech"))
+    tight = next(b for b in (box(32, g / 4) for g in range(60, 120))
+                 if (p := catalog.default_plan(plain, b)) is not None and not p.mmproj)
+    # No default plan leaves the voice out: the entry does not run here.
+    assert catalog.default_plan(voice, tight) is None
+    assert catalog.keeps_projector(voice) and not catalog.keeps_projector(plain)
+    assert catalog.default_plan(voice, box(64)).mmproj
+    # A named quant with no default plan behind it still takes the projector.
+    assert catalog.plan_for(voice, tight, quant="balanced").mmproj
+    assert not catalog.plan_for(plain, tight, quant="balanced").mmproj
+    b = box(64)
+    assert catalog.plan_command(catalog.plan_for(VOICE, b), b) == "gmlx pull voice"
+    off = catalog.plan_for(VOICE, b, mmproj=False)
+    assert not off.mmproj and catalog.plan_command(off, b) == "gmlx pull voice --no-vision"
+    assert catalog.projector_dropped_text(VOICE) == (
+        "Without its projector, voice has no image input, no audio input "
+        "and no speech output.")
+    assert catalog.projector_dropped_text(plain) == ""
+    assert catalog.projector_dropped_text(dataclasses.replace(MOE, hears=True)) == ""
+
+
+def test_a_projectors_words_follow_what_it_adds():
+    ears = dataclasses.replace(VOICE, modalities=("audio", "speech"))
+    assert catalog.tags(VOICE) == ["images", "faster replies", "audio", "speech"]
+    assert catalog.tags(ears) == ["faster replies", "audio", "speech"]
+    assert catalog.images_cell(VOICE) == "yes" and catalog.images_cell(ears) == ""
+    assert catalog.images_cell(dataclasses.replace(MOE, hears=True)) == ""
+    assert catalog.projector_label(VOICE) == "image input, audio input and speech output"
+    assert catalog.projector_label(ears) == "audio input and speech output"
+    assert catalog.projector_label(DENSE) == "image input"
+    assert catalog.extras_text(ears).startswith("audio input and speech output 0.9 GB")
+    # The picker's label column is 18 wide.
+    for m in (VOICE, ears, DENSE, dataclasses.replace(MOE, hears=True)):
+        assert len(catalog.projector_short_label(m)) <= 18
+    assert catalog.projector_short_label(VOICE) == "images and voice"
+    assert catalog.projector_short_label(ears) == "voice"
+    assert catalog.projector_short_label(DENSE) == "image input"
+
+
+def test_the_projector_file_follows_the_chip(tmp_path, monkeypatch):
+    """An entry with an F16 twin pulls it on a chip with no native
+    bfloat16, and the BF16 file elsewhere."""
+    from gmlx.load import dtypes
+
+    plan = catalog.plan_for(VOICE, box(64))
+    for native, name in ((True, "mmproj-Voice-BF16.gguf"), (False, "mmproj-Voice-F16.gguf")):
+        monkeypatch.setattr(dtypes, "has_native_bfloat16", lambda native=native: native)
+        assert catalog.mmproj_file(VOICE) == name
+        assert catalog.plan_refs(plan)[1] == f"hf:org/dense/{name}"
+        pairs = next(iter(catalog.plan_pairs(plan, str(tmp_path), True).values()))
+        assert pairs["mmproj"] == str(tmp_path / "org__dense" / name)
+        assert f"hf:org/dense/{name}" in catalog.local_state(plan, str(tmp_path), True)[2]
+    # An entry with one projector file takes it on every chip.
+    assert catalog.mmproj_file(DENSE) == "mmproj-F16.gguf"
+    assert catalog.mmproj_file(dataclasses.replace(DENSE, mmproj=None)) is None
+
+
+def test_the_lfm3_entries_name_their_projectors_and_license():
+    omni, audio = catalog.model("lfm3-omni-2b"), catalog.model("lfm3-audio-2b")
+    vl, text = catalog.model("lfm3-vl-2b"), catalog.model("lfm3-1.7b")
+    assert omni.modalities == ("vision", "audio", "speech")
+    assert audio.modalities == ("audio", "speech")
+    # A projector with vision alone is a plain vision tower.
+    assert vl.modalities == () and vl.mmproj and not catalog.keeps_projector(vl)
+    assert text.mmproj is None
+    for m in (omni, audio, vl):
+        assert m.mmproj.endswith("-BF16.gguf") and m.mmproj_f16.endswith("-F16.gguf")
+    for m in (omni, audio, vl, text):
+        assert m.arch == "lfm3" and m.prefill_fused_head_dim == 128
+        assert catalog.license_text(m) == "LFM Open License v1.0"
+        assert "$10 million" in m.license_detail
+    assert omni.trained_ctx == audio.trained_ctx == 32768
+    # On 8 GB the Omni default leaves room beside a full context.
+    small = catalog.default_plan(omni, catalog.box_for_class(8))
+    assert small.rung.tier == "balanced" and small.mmproj
+    assert catalog.default_plan(omni, catalog.box_for_class(16)).rung.tier == "xhigh"
+
+
 def test_the_transcribe_entry_keeps_its_encoder_and_drops_the_head_on_32_gb(tmp_path):
     m = catalog.model("nemotron-transcribe")
     assert m is not None and m.hears and m.head_from_class == 48
