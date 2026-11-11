@@ -64,6 +64,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On Qwen3.5 and other hybrid models the prompt cache stopped well short of
   its memory share, so long conversations served side by side pushed each
   other out of it and reran their prompts.
+- On hybrid models, a request that others had joined and that finished
+  alone stored nothing in the prompt cache for its turn, and while alone
+  could hold two spare copies of its attention cache.
 
 ## [0.5.5] - 2026-11-08
 

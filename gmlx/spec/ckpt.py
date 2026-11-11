@@ -1404,15 +1404,27 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
         _log.warning("APC retire failed; continuing", exc_info=True)
 
 
+def _retires_live(stash: dict, prompt_cache: list) -> bool:
+    """Whether a lone row retires off its live caches. A row that was
+    joined keeps its batch classes after the other rows leave, and the
+    checkpoint store takes single-row classes only."""
+    if stash.get("mode") != "ckpt":
+        return True
+    from gmlx.cache.snapshot import ckpt_supported
+    bs = int(getattr(stash.get("manager"), "block_size", 0) or 16)
+    return ckpt_supported(prompt_cache, bs)
+
+
 def _install_plain_ckpt_decode() -> None:
     """Stock-path decode hooks for the retirement store (ckpt + exact).
 
     Token accounting rides ``_step``; retirement fires from ``filter``
     for every leaving row (finish or client abort). A lone row retires
-    off its live single-row caches; a row leaving a B>1 batch is first
-    extracted via ``row_snapshot`` (padding-trimmed clones with row-true
-    offsets), so retirement survives concurrency instead of firing only
-    when the batch happens to drain to one row. Stashes live in a
+    off its live single-row caches; a row leaving a B>1 batch, or left
+    alone on batch classes after a join, is first extracted via
+    ``row_snapshot`` (padding-trimmed clones with row-true offsets), so
+    retirement survives concurrency instead of firing only when the
+    batch happens to drain to one row. Stashes live in a
     uid-keyed registry lifted across ``extend`` (the seam that rebuilds
     cache objects at continuous-batch injection).
     GMLX_APC_RETIRE_BATCH=0 restores the lone-row-only v1 scope.
@@ -1445,7 +1457,7 @@ def _install_plain_ckpt_decode() -> None:
                     stash = reg.pop(uid, None)
                     if stash is None:
                         continue
-                    if solo:
+                    if solo and _retires_live(stash, self.prompt_cache):
                         _plain_retire(stash, self.prompt_cache)
                     elif batched_ok:
                         from gmlx.cache.snapshot import row_snapshot

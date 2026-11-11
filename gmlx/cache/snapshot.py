@@ -2340,10 +2340,14 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             _log.info("APC decode ckpt frozen: render diverges at %d "
                       "(live %d)", pred, p)
             return
-        from .kv_cache import KVCache, RotatingKVCache
+        from .kv_cache import BatchKVCache, KVCache, RotatingKVCache
         states = []
         for c in prompt_cache:
-            if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
+            # Plain KV is sliced from the row at retirement. A row that
+            # was joined holds it in the batch class.
+            if isinstance(c, BatchKVCache) or (
+                    isinstance(c, KVCache)
+                    and not isinstance(c, RotatingKVCache)):
                 continue
             clone = _clone_single_row(c)
             if clone is None:
