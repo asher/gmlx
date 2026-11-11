@@ -542,6 +542,44 @@ def test_autosize_counts_block_tensors_on_attention_layers(monkeypatch):
     assert m.num_blocks == share
 
 
+def test_block_layer_count_matches_a_stored_checkpoint_block():
+    # The count that caps the pool is the K and V arrays one block of the
+    # model's own cache list holds. A lower count would let the pool grow
+    # past the tensor limit, where the store skips blocks.
+    pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
+    import mlx.core as mx
+
+    from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig
+    from gmlx.cache.apc_manager import _block_layers
+    from gmlx.cache.snapshot import ckpt_store
+    from gmlx.models.qwen35.language import LanguageModel
+    from gmlx.serve.mem_preflight import kv_layer_costs
+
+    cfg = TextConfig(
+        model_type="qwen3_5", hidden_size=64, intermediate_size=128,
+        linear_num_value_heads=4, linear_num_key_heads=2,
+        linear_key_head_dim=32, linear_value_head_dim=32,
+        linear_conv_kernel_dim=4, num_hidden_layers=8,
+        num_attention_heads=4, rms_norm_eps=1e-6, vocab_size=128,
+        num_key_value_heads=2, max_position_embeddings=2048,
+        tie_word_embeddings=True, head_dim=32, full_attention_interval=4,
+        rope_parameters={"type": "default", "mrope_section": [2, 1, 1],
+                         "rope_theta": 100000,
+                         "partial_rotary_factor": 0.25})
+    cache = LanguageModel(cfg).make_cache()
+    for c in cache:
+        if hasattr(c, "keys"):
+            c.state = (mx.zeros((1, 2, 64, 32)), mx.zeros((1, 2, 64, 32)))
+        else:
+            c.cache = [mx.zeros((1, 3, 192)), mx.zeros((1, 4, 32, 32))]
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    assert ckpt_store(m, list(range(64)), cache)
+    held = {len(b.keys) + len(b.values)
+            for b in m.pool if b.block_hash is not None}
+    costs = kv_layer_costs(SimpleNamespace(config=cfg))
+    assert held == {2 * _block_layers(costs)} == {4}
+
+
 def test_autosize_env_and_floor_win(monkeypatch):
     _autosize_rig(monkeypatch, budget=100 * GB)
     m = GmlxAPCManager(num_blocks=2048, block_size=16)
