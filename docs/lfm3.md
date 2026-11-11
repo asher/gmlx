@@ -175,8 +175,10 @@ The model speaks in one of two ways:
   reply as text first and then speaks it. `content` holds the text, and
   the audio starts after the text ends. A tool call has no audio.
 
-Speech counts toward `max_tokens`, at 12.5 tokens for each second, and
-`completion_tokens_details.audio_tokens` reports it. To continue the
+A reply that speaks as it writes counts its speech toward `max_tokens`,
+at 12.5 tokens for each second. In a reply written first, `max_tokens`
+limits the text, and the whole text is spoken.
+`completion_tokens_details.audio_tokens` reports the speech. To continue the
 conversation, send the earlier reply back as its `audio.id`, which the
 server keeps for an hour, or as its transcript. `/v1/responses` returns
 text only.
@@ -192,8 +194,8 @@ curl localhost:8080/v1/audio/transcriptions -F file=@memo.wav -F model=whisper-1
 curl localhost:8080/v1/audio/translations -F file=@memo-fr.wav -F model=whisper-1
 ```
 
-Send `language` when you know it, because the transcript is more
-accurate with it. A translation is always into English.
+Without `language`, the model finds the language itself. A translation
+is always into English.
 
 `response_format` is `json` or `text`. These models give no word times
 and no speakers, so the other formats, `timestamp_granularities[]` and
