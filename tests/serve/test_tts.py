@@ -337,7 +337,9 @@ def test_config_tts_key_round_trips():
     cfg = build_config({"server": {"tts": "kokoro-8bit"}})
     assert cfg.tts == "kokoro-8bit"            # raw; resolved at serve time
     assert build_config({"server": {}}).tts is None
-    assert build_config({"server": {"tts": False}}).tts is None
+    # False is kept apart from unset: unset picks a served model that
+    # speaks, and false leaves text-to-speech off.
+    assert build_config({"server": {"tts": False}}).tts is False
     assert build_config({"server": {"tts": True}}).tts is True
     assert tts.resolve_tts_model(True) == KOKORO
 

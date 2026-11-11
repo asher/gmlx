@@ -44,6 +44,10 @@ VOICES = ("female", "male")
 TTS_TEMPLATE = "tts"
 # The card's speech instruction without its language.
 TTS_ANY = "Perform TTS using a {voice} voice."
+# The codes the tts template names a language for.
+TTS_LANGUAGES = (
+    "ar", "da", "de", "el", "en", "en-gb", "en-us", "es", "fi", "fr", "he",
+    "it", "ja", "ko", "nl", "pl", "pt", "sv", "tr", "zh")
 # The card's system prompt for a spoken reply with its transcript.
 INTERLEAVED_SYSTEM = "Respond with interleaved text and audio."
 

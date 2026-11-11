@@ -3141,9 +3141,17 @@ def _resolve_service_models(cfg, a) -> None:
     if unset:
         # A served model that hears audio answers the STT routes itself.
         cfg.stt = stt_mod.auto_native(cfg)
+    from . import native_tts
+
+    unset = getattr(a, "tts", None) is None and getattr(cfg, "tts", None) is None
     cfg.tts = _speech_service("tts", getattr(a, "tts", None), cfg,
-                              tts_mod.resolve_tts_model,
-                              lambda _model: tts_mod.import_mlx_audio())
+                              lambda v: (native_tts.native_for(v, cfg)
+                                         or tts_mod.resolve_tts_model(v)),
+                              lambda model: (None if native_tts.is_native(model)
+                                             else tts_mod.import_mlx_audio()))
+    if unset:
+        # A served model that speaks answers the speech route itself.
+        cfg.tts = native_tts.auto_native(cfg)
 
     # Relative GGUF paths search server.model_dirs, as a models: entry does.
     model_dirs = getattr(cfg, "model_dirs", None) or []
@@ -3469,8 +3477,13 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
               + (", the served model itself)" if is_native(cfg.stt)
                  else ", pre-warming in background)"))
     if cfg.tts:
-        print(f"[server] tts: {cfg.tts}  (POST /v1/audio/speech, "
-              f"pre-warming in background)")
+        from .native_tts import is_native as speaks_itself
+        from .subservice import service_display
+
+        print(f"[server] tts: {service_display(cfg.tts)}  (POST "
+              "/v1/audio/speech"
+              + (", the served model itself)" if speaks_itself(cfg.tts)
+                 else ", pre-warming in background)"))
     if getattr(cfg, "embeddings", None):
         print(f"[server] embeddings: {cfg.embeddings}  (POST /v1/embeddings, "
               f"pre-warming in background)")

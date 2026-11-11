@@ -1038,8 +1038,11 @@ class ServerCfg:
     # Optional text-to-speech model (POST /v1/audio/speech; needs the `tts`
     # extra). An alias (`kokoro`), an HF repo id in MLX-audio format, a local
     # model dir, or `true` for the default alias - resolved by
-    # tts.resolve_tts_model at serve time.
-    tts: str | None = None
+    # tts.resolve_tts_model at serve time. A configured model that speaks
+    # resolves to `model:<id>` and needs no extra. Unset picks such a model
+    # when the default model is one, or when exactly one is configured;
+    # `false` turns text-to-speech off.
+    tts: str | bool | None = None
     # Optional embeddings model (POST /v1/embeddings). A GGUF embedder
     # (alias `qwen3-embed-0.6b` or `embeddinggemma-2-gguf`, a *.gguf path, or
     # hf:<org>/<repo>/<file>.gguf, loaded by the runtime), or a safetensors
@@ -3887,7 +3890,7 @@ def build_config(doc: dict) -> ServerCfg:
         cache=srv_cache,
         # raw; resolved (aliases etc.) at serve time. False stays False.
         stt=False if srv.get("stt") is False else (srv.get("stt") or None),
-        tts=srv.get("tts") or None,   # raw; resolved (aliases etc.) at serve time
+        tts=False if srv.get("tts") is False else (srv.get("tts") or None),
         embeddings=srv.get("embeddings") or None,   # raw; resolved at serve time
         embeddings_mmproj=_embeddings_mmproj(srv.get("embeddings_mmproj")),
         rerank=srv.get("rerank") or None,           # raw; resolved at serve time

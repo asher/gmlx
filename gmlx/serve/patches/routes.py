@@ -102,6 +102,9 @@ def _models_payload() -> dict:
             "pinned": bool(rm.pin) or rm.path in pinned,
             "speculative": bool(rm.speculative),
             "vlm": rm.mmproj is not None,
+            # What the model takes and gives: text, vision, audio (audio
+            # input) and speech (speech output).
+            "modalities": _modalities(rm),
             "profile": profile if alias_of else rm.profile_name,
             "family": getattr(rm, "family", None),   # sampling family (profiles.py)
             "default": mid == default_id,            # aliases never == default_id
@@ -132,6 +135,29 @@ def _models_payload() -> dict:
                                  pinned=rm.path in pinned,
                                  default=iid == default_image))
     return {"object": "list", "data": data}
+
+
+def _modalities(rm) -> list:
+    """The ``modalities`` of a chat entry, from its projector's header."""
+    from gmlx.load.discovery import projector_caps
+
+    from ..native_tts import tts_adapter
+
+    out = ["text"]
+    mmproj = getattr(rm, "mmproj", None)
+    if not mmproj:
+        return out
+    try:
+        caps = projector_caps(mmproj)
+        if caps.vision:
+            out.append("vision")
+        if caps.audio_in or caps.speech_encoder:
+            out.append("audio")
+        if tts_adapter(rm.path, mmproj):
+            out.append("speech")
+    except Exception:  # noqa: BLE001  a bad file is listed as text
+        return ["text"]
+    return out
 
 
 _IMAGE_IDENTITY: dict = {}
@@ -864,7 +890,7 @@ def install_audio_speech_route(tts_model: str | None) -> None:
     from fastapi.responses import Response
     from starlette.concurrency import run_in_threadpool
 
-    from .. import tts
+    from .. import native_tts, tts
 
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app").app
 
@@ -873,6 +899,22 @@ def install_audio_speech_route(tts_model: str | None) -> None:
         body, err = await _aux_json_body(request)
         if err is not None:
             return err
+        # A served model that speaks answers the request itself.
+        try:
+            native = native_tts.target(str(body.get("model") or ""), tts_model)
+            answer = (None if native is None
+                      else await native_tts.answer(request, body, native))
+        except tts.TTSRequestError as exc:
+            return _aux_error(exc.status_code, str(exc))
+        except Exception as exc:
+            return _aux_server_error("/v1/audio/speech", tts_model, started, exc)
+        if answer is not None:
+            _log_aux_request("/v1/audio/speech", native, started,
+                             voice=(str(body.get("voice") or "") or None),
+                             chars=len(str(body.get("input") or "")),
+                             fmt=(str(body.get("response_format") or "")
+                                  or None))
+            return answer
         try:
             content, media_type = await run_in_threadpool(
                 tts.run_synthesis, str(body.get("input") or ""),
@@ -910,9 +952,13 @@ def install_audio_voices_route(tts_model: str | None) -> None:
         return
     from starlette.concurrency import run_in_threadpool
 
-    from .. import tts
+    from .. import native_tts, tts
 
     async def voices_endpoint():
+        if native_tts.is_native(tts_model):
+            names = list(native_tts.voices())
+            return {"model": service_display(tts_model), "voices": names,
+                    "default": names[0]}
         voices = await run_in_threadpool(tts.available_voices, tts_model)
         # The Kokoro preset is the default only where the model ships it,
         # as in synthesis; qwen3-tts uses its own default speaker.

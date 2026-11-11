@@ -784,12 +784,13 @@ def _needed_extras(cfg) -> list[str]:
     if cfg is None:
         return []
     from gmlx.config import TalkCfg
+    from gmlx.serve.native_tts import needs_mlx_audio
     from gmlx.serve.stt import needs_whisper
 
     need = []
     if needs_whisper(cfg.stt, cfg):
         need.append("stt")
-    if cfg.tts:
+    if needs_mlx_audio(cfg.tts, cfg):
         need.append("tts")
     if cfg.talk != TalkCfg():           # any talk: key set in the YAML
         need.append("talk")

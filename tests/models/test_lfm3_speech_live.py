@@ -385,3 +385,47 @@ def _round_trip(model, processor) -> None:
     assert heard.summary.frames == 0 and heard.audio.size == 0
     assert _edits(_words(ROUND_TRIP), _words(heard.text)) <= ROUND_TRIP_EDITS, \
         heard.text
+
+
+# -- the speech prompt on serve -----------------------------------------------
+
+
+def test_the_speech_template_names_every_listed_language(loaded):
+    """Each code of ``speak.TTS_LANGUAGES`` gets a language name from the
+    model's speech template, and a code outside the list passes through
+    as it is."""
+    from gmlx.models.lfm3 import speak
+
+    processor = loaded[2]
+    tok = processor.tokenizer
+    for code in speak.TTS_LANGUAGES:
+        prompt = speak.tts_prompt(tok, "x", "female", code)
+        assert f"Perform TTS in {code} " not in prompt, code
+    assert "Perform TTS in qq " in speak.tts_prompt(tok, "x", "female", "qq")
+
+
+def test_serve_takes_the_marker_off_the_speech_prompt(loaded):
+    """The model's speech template ends in the marker that the serve
+    engine forces as the reply's first token. With no language the
+    prompt has no marker."""
+    from gmlx.models.lfm3 import speak
+    from gmlx.serve import speech_chat
+
+    model, processor = loaded[0], loaded[2]
+    tok = processor.tokenizer
+    marker = model.config.speech_config.audio_start_token_id
+    piece = tok.convert_ids_to_tokens(marker)
+    named = speak.tts_prompt(tok, "Read this.", "male", "de")
+    assert named.endswith(piece)
+    served = speech_chat.speech_prompt(processor, "Read this.", "male", "de",
+                                       marker)
+    assert served + piece == named
+    plain = speak.tts_prompt(tok, "Read this.", "male")
+    assert not plain.endswith(piece)
+    assert speech_chat.speech_prompt(processor, "Read this.", "male", None,
+                                     marker) == plain
+    # Both forms start a reply in the audio mode once the marker is fed.
+    for prompt in (served, plain):
+        ids = tok.encode(prompt, add_special_tokens=False)
+        _, forced = model.speech_start(ids[-1], "audio")
+        assert forced == marker

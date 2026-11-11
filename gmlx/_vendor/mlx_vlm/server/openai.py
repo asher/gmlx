@@ -17,6 +17,8 @@ import mlx.core as mx
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from gmlx.serve import speech_chat as _speech_chat  # gmlx
+
 from ..generate import generate, stream_generate
 from ..generate.edit_image import ImageEditRequest as CoreImageEditRequest
 from ..generate.edit_image import edit_image
@@ -306,6 +308,18 @@ def _chat_usage_chunk(
         usage=UsageStats.from_metrics(metrics, prompt_tokens, output_tokens),
         choices=[],
         timings=GenerationTimings.from_metrics(metrics, prompt_tokens, output_tokens),
+    )
+
+
+def _chat_audio_chunk(request_id: str, model: str, audio: dict) -> ChatStreamChunk:
+    """gmlx: a stream chunk that carries only audio."""
+    return ChatStreamChunk(
+        id=request_id,
+        created=int(time.time()),
+        model=model,
+        choices=[
+            ChatStreamChoice(delta=ChatMessage(role="assistant", audio=audio))
+        ],
     )
 
 
@@ -1695,6 +1709,11 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
             if message.reasoning_content is not None:
                 msg["reasoning_content"] = message.reasoning_content
                 msg["reasoning"] = message.reasoning_content
+            # gmlx: an earlier spoken reply goes back as its transcript.
+            if not msg.get("content"):
+                spoken_text = _speech_chat.history_text(message)
+                if spoken_text is not None:
+                    msg["content"] = spoken_text
 
             processed_messages.append(msg)
 
@@ -1708,6 +1727,13 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
         )
 
         model, processor, config = get_cached_model(request.model, adapter_path)
+
+        # gmlx: the request's audio output, or None for a text reply.
+        speech = _speech_chat.plan(
+            request, model, runtime.response_generator, tools
+        )
+        if speech is not None:
+            processed_messages = speech.messages(processed_messages)
 
         video_resolution = resolve_video_inputs(
             processor,
@@ -1760,6 +1786,12 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
             **template_kwargs,
         )
 
+        if speech is not None:  # gmlx
+            formatted_prompt = speech.prompt(
+                processor, formatted_prompt, gen_args, runtime.response_generator
+            )
+            speech.stamp(gen_args)
+
         logger.debug(
             "chat/completions request: model=%s images=%d audio=%d videos=%d "
             "max_tokens=%s temp=%s stream=%s",
@@ -1792,6 +1824,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
             async def stream_generator():
                 token_iterator = None
                 token_iter = None  # For ResponseGenerator cleanup
+                speech_pass = None  # gmlx: the speech pass, for cleanup
                 metrics_finalized = False
                 metrics = GenerationMetrics()
                 finish_reason = None
@@ -1870,6 +1903,14 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 delta_content, last=bool(token.finish_reason)
                             )
 
+                            # gmlx: a slot's audio, and the text of a spoken
+                            # reply as its transcript.
+                            delta_audio = None
+                            if speech is not None:
+                                delta_content, delta_audio = speech.delta(
+                                    token, delta_content
+                                )
+
                             chunk_logprobs = None
                             # gmlx: the stop token keeps its entry; a row
                             # with no token adds none.
@@ -1906,6 +1947,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 or bool(delta_reasoning)
                                 or chunk_logprobs is not None
                                 or chunk_ids is not None
+                                or delta_audio is not None
                             )
                             if has_payload:
                                 choices = [
@@ -1914,6 +1956,11 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                             role="assistant",
                                             content=delta_content,
                                             reasoning=delta_reasoning,
+                                            **(
+                                                {"audio": delta_audio}
+                                                if delta_audio is not None
+                                                else {}
+                                            ),
                                         ),
                                         logprobs=chunk_logprobs,
                                         token_ids=chunk_ids,
@@ -1966,6 +2013,36 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 )
                                 pending_prompt_ids = None
                                 yield f"data: {chunk_data.model_dump_json()}\n\n"
+                        if speech is not None:
+                            # gmlx: a text reply is read aloud by a speech
+                            # pass, and the audio ends with its id.
+                            if speech.wants_pass(tool_calls_made):
+                                speech_pass = speech.speak(
+                                    runtime.response_generator,
+                                    processor,
+                                    gen_args,
+                                    output_tokens,
+                                )
+                            first_chunk = True
+                            while speech_pass is not None:
+                                pcm = await asyncio.to_thread(next, speech_pass, None)
+                                if pcm is None:
+                                    speech_pass = None
+                                    finish_reason = speech.finish_reason(finish_reason)
+                                    break
+                                chunk_data = _chat_audio_chunk(
+                                    request_id,
+                                    request.model,
+                                    speech.audio_delta(pcm, first_chunk),
+                                )
+                                first_chunk = False
+                                yield f"data: {chunk_data.model_dump_json()}\n\n"
+                            closing_audio = speech.close_stream()
+                            if closing_audio is not None:
+                                chunk_data = _chat_audio_chunk(
+                                    request_id, request.model, closing_audio
+                                )
+                                yield f"data: {chunk_data.model_dump_json()}\n\n"
                         if not terminal_emitted:
                             finish_reason = finish_reason or "stop"
                             chunk_data = _final_chat_chunk(
@@ -1985,6 +2062,11 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                                 ctx.prompt_tokens,
                                 output_tokens,
                             )
+                            if speech is not None:  # gmlx
+                                _speech_chat.apply_usage(
+                                    chunk_data.usage,
+                                    speech.usage(ctx.prompt_tokens, output_tokens),
+                                )
                             yield f"data: {chunk_data.model_dump_json()}\n\n"
                     else:
                         # Fallback to stream_generate
@@ -2143,6 +2225,11 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             token_iter.close()
                         except Exception:
                             pass
+                    if speech_pass is not None:  # gmlx
+                        try:
+                            speech_pass.close()
+                        except Exception:
+                            pass
                     if not metrics_finalized:
                         runtime.metrics.record_failure(
                             endpoint="/chat/completions",
@@ -2205,6 +2292,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             text += token.text
                             gt += getattr(token, "token_count", 1)
                             metrics.record_chunk(token)
+                            if speech is not None:  # gmlx
+                                speech.take(token)
                             # gmlx: as in the stream.
                             if request.logprobs and _has_logprob_entry(token):
                                 logprobs.append(
@@ -2306,6 +2395,25 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             ).strip()
                         content = clean_remaining or None
 
+                # gmlx: the reply's audio. A text reply is read aloud by a
+                # speech pass first.
+                message_audio = None
+                if speech is not None:
+                    message_audio = await asyncio.to_thread(
+                        speech.message_audio,
+                        runtime.response_generator,
+                        processor,
+                        gen_args,
+                        output_tokens,
+                        content,
+                        bool(parsed_tool_calls),
+                    )
+                    content = speech.message_content(content, message_audio)
+                    finish_reason = speech.finish_reason(finish_reason)
+                    _speech_chat.apply_usage(
+                        usage_stats, speech.usage(prompt_tokens, completion_tokens)
+                    )
+
                 response_logprobs = None
                 if request.logprobs and collected_logprobs:
                     tokenizer = (
@@ -2343,6 +2451,11 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                             content=content if content else None,
                             reasoning=reasoning,
                             tool_calls=parsed_tool_calls,
+                            **(
+                                {"audio": message_audio}
+                                if message_audio is not None
+                                else {}
+                            ),
                         ),
                         logprobs=response_logprobs,
                         token_ids=generated_ids if request.return_token_ids else None,

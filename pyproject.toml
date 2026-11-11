@@ -277,6 +277,7 @@ include = [
     "gmlx/serve/patches/spec_processors.py",
     "gmlx/serve/patches/tokenize.py",
     "gmlx/serve/residency_footprint.py",
+    "gmlx/serve/speech_chat.py",
     "gmlx/serve/speech_rows.py",
     "gmlx/spec/admission.py",
     "gmlx/spec/ckpt.py",
