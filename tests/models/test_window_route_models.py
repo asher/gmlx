@@ -1,5 +1,5 @@
-"""The sliding layers of Flint, Ripple, Muse Glimmer, Muse Spark and Gemma 4 run a
-prefill chunk on kq's window kernel and give the logits stock attention
+"""The sliding layers of Flint, Ripple, Muse Glimmer, Muse Spark, Gemma 4 and
+LFM3 run a prefill chunk on kq's window kernel and give the logits stock attention
 gives under the band mask. A Gemma 4 chunk that carries image tokens, whose
 sliding mask has the bidirectional block overlay, stays on stock attention.
 A call the route declines reaches the model module's own SDPA global, where
@@ -63,6 +63,19 @@ def _spark():
     args = _tiny_args(head_dim=128, sliding_window=_WINDOW,
                       num_experts_per_tok=8)
     return Model(args), _LAYER_TYPES
+
+
+def _lfm3():
+    from gmlx.models.lfm3.model import CONV, FULL, SLIDING, Model
+    from test_lfm3 import _factors, _tiny_args
+
+    types = [CONV, SLIDING, FULL, SLIDING]
+    args = _tiny_args(head_dim=128, sliding_window=_WINDOW, vocab_size=_VOCAB,
+                      layer_types=types, num_hidden_layers=len(types))
+    model = Model(args)
+    # The full layer rotates the leading half of each head, as the GGUFs do.
+    model.set_full_rope_factors(_factors(64, 128))
+    return model, types
 
 
 def _gemma4():
@@ -138,9 +151,10 @@ def _errs(model, ids, monkeypatch, token_types=None):
     return [(mx.abs(got - want).max() / scale).item() for got in (routed, stock)]
 
 
-@pytest.mark.parametrize("build", [_flint, _ripple, _glimmer, _spark, _gemma4],
+@pytest.mark.parametrize("build", [_flint, _ripple, _glimmer, _spark, _gemma4,
+                                   _lfm3],
                          ids=["flint", "ricursive", "muse_glimmer", "muse_spark",
-                              "gemma4"])
+                              "gemma4", "lfm3"])
 def test_sliding_layers_take_the_window_kernel(build, calls, monkeypatch):
     model, types = _built(build)
     sliding = types.count("sliding_attention")
