@@ -1618,10 +1618,24 @@ class GenerationBatch:
             self._rope_deltas = mx.concatenate([self._rope_deltas, other._rope_deltas])
         self._kq_extending = False
 
+    def _kq_eval_filtered(self):
+        # gmlx: the layers a failed filter left unevaluated, one at a time.
+        if getattr(self, "_kq_filter_lazy", False):
+            for c in self.prompt_cache:
+                _eval_cache(c)
+            self._kq_filter_lazy = False
+
     def filter(self, keep: List[int]):
         """Filter the batch to keep only the specified indices."""
+        # gmlx: a failed eval is the filter's last. The rest runs
+        # unevaluated, so the batch is filtered whole when it is raised.
+        failed = None
         if len(keep) < len(self.uids):
-            self._eval_pending_state()
+            try:
+                self._kq_eval_filtered()
+                self._eval_pending_state()
+            except BaseException as e:
+                failed = e
 
         self.uids = [self.uids[idx] for idx in keep]
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
@@ -1649,14 +1663,21 @@ class GenerationBatch:
             self.token_context = []
             self.logits_processors = []
             self.thinking_budget_criteria = []
+            self._kq_filter_lazy = False
         else:
             keep_arr = mx.array(keep, mx.int32)
-            failed = None
             for c in self.prompt_cache:
-                c.filter(keep_arr)
+                try:
+                    c.filter(keep_arr)
+                except BaseException as e:
+                    # gmlx: a layer's own filter stopped, so the layers
+                    # disagree and no filter can finish the batch. The
+                    # guard drops it whole and rebuilds every row.
+                    self._kq_torn = True
+                    _mark_broken(e, self.uids)
+                    raise
                 # gmlx: one layer's kept rows at a time, not every layer's
-                # at the next step. A failed eval is the last: the rest of
-                # the filter runs unevaluated, so the batch stays whole.
+                # at the next step.
                 if failed is None:
                     try:
                         _eval_cache(c)
@@ -1677,11 +1698,12 @@ class GenerationBatch:
                     a[keep_arr] if a is not None else None for a in owed
                 )
             if failed is not None:
-                # gmlx: raised from a filtered batch. next() evaluates the
-                # layers left.
                 self._kq_filter_lazy = True
-                failed._kq_filtered = True
-                raise failed
+        if failed is not None:
+            # gmlx: raised from a filtered batch. The next filter or step
+            # evaluates the layers left.
+            failed._kq_filtered = True
+            raise failed
 
     def next(self) -> List[Response]:
         """Generate the next batch of tokens."""
@@ -1693,11 +1715,7 @@ class GenerationBatch:
             keep = [i for i, uid in enumerate(self.uids) if uid not in drop]
             if len(keep) < len(self.uids):
                 self.filter(keep)
-        # gmlx: the layers a failed filter left unevaluated, one at a time.
-        if getattr(self, "_kq_filter_lazy", False):
-            for c in self.prompt_cache:
-                _eval_cache(c)
-            self._kq_filter_lazy = False
+        self._kq_eval_filtered()
         if not self.uids:
             return []
 
@@ -3439,6 +3457,13 @@ class BatchGenerator:
                         and _is_allocator_refusal(e)
                     ):
                         raise
+                    logger.warning(
+                        "remove: the allocator refused an eval of the rows "
+                        "left by uid %s; the next step evaluates them: %s",
+                        uid,
+                        str(e).splitlines()[0][:200],
+                    )
+                    mx.clear_cache()
                 return True
 
             return False

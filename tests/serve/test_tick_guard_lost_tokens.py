@@ -154,7 +154,7 @@ def _offsets(gen):
     return dict(zip(gb.uids, off))
 
 
-def run(make, *, plan=None, b_max=6, c_at=None, forcing=False,
+def run(make, *, plan=None, b_max=6, c_at=None, c_max=2, forcing=False,
         chunked=False, eval_every=0, processors=None):
     """Drive two or three rows to the end. ``plan(tick, gen, out)`` arms
     an injection. Returns the streams, the finishes and the gaps."""
@@ -182,7 +182,7 @@ def run(make, *, plan=None, b_max=6, c_at=None, forcing=False,
                 prompts[ub] = B_PROMPT
             if (c_at is not None and not late
                     and len(out.get(1, [])) == c_at):
-                (uc,) = gen.insert([C_PROMPT], 2,
+                (uc,) = gen.insert([C_PROMPT], c_max,
                                    prompt_kwargs=[_kw(lm, C_PROMPT)])
                 prompts[uc] = C_PROMPT
                 late.append(uc)
@@ -291,23 +291,44 @@ def test_d_filter(engine, monkeypatch, shot):
     check(engine, shot, plan=plan, b_max=3)
 
 
-def _throw_in_filter_eval(monkeypatch, shot, layer, again=None):
-    """Throw at the eval of one layer's kept rows inside a filter, and
-    ``again`` at the eval the next step makes for the layers left."""
-    orig = ar._eval_cache
-    seen = []
+class _Refusals:
+    """Throws at the cache evals of a filter and of what follows it.
+    ``shot`` goes off at the eval of layer ``layer``'s kept rows inside a
+    filter. Each site of ``later`` then gets one allocator refusal, in
+    order: "next" is the eval a step makes first for the layers a failed
+    filter left, "before" the evals a filter makes before it changes the
+    batch."""
 
-    def eval_cache(c):
-        caller = sys._getframe(1).f_code.co_name
-        if caller == "filter" and shot.armed:
-            seen.append(c)
-            if len(seen) == layer + 1:
-                shot.fire()
-        elif caller == "next" and again is not None and shot.fired:
-            again.fire()
-        return orig(c)
+    def __init__(self, monkeypatch, shot, *later, layer=0):
+        self.shot, self.later, self.layer = shot, list(later), layer
+        self.seen = 0
+        orig = ar._eval_cache
 
-    monkeypatch.setattr(ar, "_eval_cache", eval_cache)
+        def eval_cache(c):
+            caller = sys._getframe(1).f_code.co_name
+            if caller == "filter":
+                self.at("filter")
+            elif caller == "_kq_eval_filtered":
+                outer = sys._getframe(2).f_code.co_name
+                self.at("next" if outer == "next" else "before")
+            return orig(c)
+
+        monkeypatch.setattr(ar, "_eval_cache", eval_cache)
+        monkeypatch.setattr(ar, "mx", _Mx(ar.mx, self, "_eval_pending_state",
+                                          name="eval"))
+
+    def fire(self):
+        self.at("before")
+
+    def at(self, site):
+        if not self.shot.fired:
+            if site == "filter" and self.shot.armed:
+                self.seen += 1
+                if self.seen == self.layer + 1:
+                    self.shot.fire()
+        elif self.later and self.later[0] == site:
+            self.later.pop(0)
+            raise RuntimeError(MEM)
 
 
 def _arm_at_b_finish(shot):
@@ -323,42 +344,91 @@ def test_d_filter_cache_eval(engine, monkeypatch, shot, layer):
     finishing row. The filter still takes the row out of every layer and
     of the pending tokens, so the retried tick decodes the row that is
     left."""
-    _throw_in_filter_eval(monkeypatch, shot, layer)
+    _Refusals(monkeypatch, shot, layer=layer)
     check(engine, shot, plan=_arm_at_b_finish(shot), b_max=3)
 
 
-def test_d_filter_cache_eval_refused_again(engine, monkeypatch):
+@pytest.mark.parametrize("later", [("next",), ("next", "before")],
+                         ids=["retry", "retry-and-victim"])
+def test_d_filter_cache_eval_refused_again(engine, monkeypatch, later):
     """D: the allocator refuses the same eval on the retried tick, before
-    its step. Nothing was computed, so the guard goes on to its next
-    strike."""
-    shot, again = Shot(MEM), Shot(MEM)
-    again.armed = True
-    _throw_in_filter_eval(monkeypatch, shot, 0, again)
+    its step, and then again in the filter that takes the guard's victim
+    out. The victim leaves without an eval, and is rebuilt."""
+    shot = Shot(MEM)
+    refusals = _Refusals(monkeypatch, shot, *later)
     check(engine, shot, plan=_arm_at_b_finish(shot), b_max=3)
-    assert again.fired == 1
+    assert not refusals.later
+
+
+def test_d_filter_host_read(engine, monkeypatch, shot):
+    """D: a layer's own filter throws, after the layer before it dropped
+    the finished row. No filter can finish that batch, so every row left
+    in it is rebuilt."""
+    def plan(t, gen, out):
+        if len(out.get(1, [])) == 2 and not shot.armed:
+            shot.armed = True
+            second = gen._generation_batch.prompt_cache[1]
+            orig = type(second).filter
+
+            def filt(self, idx):
+                if self is second:
+                    shot.fire()
+                return orig(self, idx)
+
+            monkeypatch.setattr(type(second), "filter", filt)
+
+    check(engine, shot, plan=plan, b_max=3)
+
+
+def _cancel(uid, when, shot=None):
+    done = []
+
+    def plan(t, gen, out):
+        if shot is not None and len(out.get(1, [])) == 2:
+            shot.armed = True
+        if not done and uid in gen._generation_batch.uids and when(out):
+            done.append(getattr(gen._generation_batch, "_kq_filter_lazy",
+                                False))
+            assert gen.remove(uid)
+            tg.forget(gen, uid)
+            assert uid not in gen._generation_batch.uids
+    return plan, done
 
 
 def test_remove_cache_eval_refused(engine, monkeypatch):
     """A cancelled row is taken out beside one that decodes, and the
     allocator refuses the eval of the rows left. The row is out, and the
     other stream is whole."""
-    def cancel(shot):
-        def plan(t, gen, out):
-            if 1 in gen._generation_batch.uids and len(out.get(1, [])) == 2:
-                if shot is not None:
-                    shot.armed = True
-                assert gen.remove(1)
-                tg.forget(gen, 1)
-                assert 1 not in gen._generation_batch.uids
-        return plan
+    def when(out):
+        return len(out.get(1, [])) == 2
 
     shot = Shot(MEM)
-    _throw_in_filter_eval(monkeypatch, shot, 0)
-    ref, ref_fin, _ = run(engine, plan=cancel(None), b_max=6)
-    got, fin, gaps = run(engine, plan=cancel(shot), b_max=6)
-    assert shot.fired == 1
+    _Refusals(monkeypatch, shot)
+    ref, ref_fin, _ = run(engine, plan=_cancel(1, when)[0], b_max=6)
+    plan, done = _cancel(1, when, shot)
+    got, fin, gaps = run(engine, plan=plan, b_max=6)
+    assert done == [False] and shot.fired == 1
     assert _tokens(got) == _tokens(ref) and len(got[1]) == 2
     assert fin == ref_fin and set(fin) == {0}
+    assert gaps[0] == {0}
+
+
+def test_remove_after_a_refused_filter(engine, monkeypatch):
+    """A row is cancelled after a finish whose filter was refused, before
+    the next step evaluated the layers it left, and the allocator refuses
+    again. The row is out, and the stream beside it is whole."""
+    def when(out):
+        return len(out.get(1, [])) == 3
+
+    kw = dict(b_max=3, c_at=1, c_max=6)
+    shot = Shot(MEM)
+    refusals = _Refusals(monkeypatch, shot, "before")
+    ref, ref_fin, _ = run(engine, plan=_cancel(2, when)[0], **kw)
+    plan, done = _cancel(2, when, shot)
+    got, fin, gaps = run(engine, plan=plan, **kw)
+    assert done == [True] and shot.fired == 1 and not refusals.later
+    assert _tokens(got) == _tokens(ref) and len(got[2]) < 6
+    assert fin == ref_fin and set(fin) == {0, 1}
     assert gaps[0] == {0}
 
 

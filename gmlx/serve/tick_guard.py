@@ -552,9 +552,10 @@ def _rebuild_broken(gen, st: _TickState, e: BaseException) -> bool:
     if not decode and prefill is None:
         return False
     gb = gen._generation_batch
-    if getattr(gb, "_kq_extending", False):
-        # extend threw half way: the batch's fields disagree, so no filter
-        # can run on it. Every row in it is marked; drop it whole.
+    if getattr(gb, "_kq_extending", False) or getattr(gb, "_kq_torn", False):
+        # extend threw half way, or a layer's filter did: the batch's
+        # fields disagree, so no filter can run on it. Every row in it is
+        # marked; drop it whole.
         gen._kq_empty_generation_batch()
     else:
         for uid in decode:
