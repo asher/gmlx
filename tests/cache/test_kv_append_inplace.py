@@ -682,6 +682,57 @@ def test_join_copies_one_layer_at_a_time(route, decode_caps, monkeypatch):
             np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
 
 
+@metal
+@pytest.mark.parametrize("route", ["spec", "vendored"])
+def test_first_append_after_a_lone_row_is_joined_regrows_nothing(
+        route, decode_caps):
+    # A request joins a row that decoded alone near 8000 tokens. Both are
+    # lifted at their exact lengths, so the joined batch takes the grid
+    # point above its index and the next token is written into it. With
+    # no spare row, that token regrows every layer in one graph.
+    live, joiner, rows = [], [], []
+    for layer in range(JOIN_LAYERS):
+        pair = []
+        for lst, n, seed in ((live, 8000, 10 * layer),
+                             (joiner, 8100, 10 * layer + 5)):
+            c = owned.KVCache()
+            k, v = _rows(n, seed)
+            c.update_and_fetch(k, v)
+            mx.eval(c.keys, c.values)
+            lst.append(c)
+            pair.append((np.asarray(k), np.asarray(v)))
+        rows.append(pair)
+    if route == "spec":
+        _join_injected_caches(live, joiner)
+    else:
+        live = _VENDORED_EXTEND(live, joiner)
+    mx.eval(_layer_arrays(live))
+    assert all(c._idx == 8100 for c in live)
+
+    # One row of one layer, at the joined capacity.
+    row = (live[0].keys.nbytes + live[0].values.nbytes) // 2
+    assert JOIN_LAYERS * row > 30 << 20
+    k, v = _rows(1, 999, b=2)
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    for c in live:
+        c.update_and_fetch(k, v)
+    mx.eval(_layer_arrays(live))
+    mx.synchronize()
+    assert mx.get_peak_memory() - base < 2 * row
+
+    tk, tv = np.asarray(k), np.asarray(v)
+    for c, want in zip(live, rows):
+        assert c.keys.shape[0] == 2
+        for i, (wk, wv) in enumerate(want):
+            gk, gv = _batch_row(c, i)
+            np.testing.assert_array_equal(gk[:, :, :-1], wk)
+            np.testing.assert_array_equal(gv[:, :, :-1], wv)
+            np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
+            np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
+
+
 # Memory: a finish filters one layer at a time.
 
 @metal

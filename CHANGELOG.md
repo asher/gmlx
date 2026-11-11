@@ -73,6 +73,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   memory far past what its admission had counted, for the length of one step.
 - A request that finished beside others decoding long contexts could push
   memory up by several gigabytes for the length of one step.
+- A request that joined one decoding alone at a long context could push
+  memory up by several gigabytes for the length of one step.
 - On Qwen3.5 and other hybrid models with a drafter, the last request left
   of a batch decoded slower than a request alone, more the longer its context.
 

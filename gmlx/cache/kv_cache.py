@@ -2093,6 +2093,10 @@ class BatchKVCache(_BaseCache):
             B, H, L2, D = other.keys.shape
             M = other.values.shape[3]
         max_size = max(L1, L2)
+        # gmlx: a join of buffers with no spare row takes the grid point,
+        # or the first append after it regrows every layer in one graph.
+        if max_size == max_idx and self._kv_grid:
+            max_size = grid_capacity(max_idx + 1, self.step)
 
         # Pad the keys and values so they are right-justified
         # with the index and the same size
@@ -2926,6 +2930,10 @@ class BatchQuantizedKVCache(_BaseCache):
         self_len = 0 if self.keys is None else self.keys[0].shape[-2]
         other_len = 0 if other.keys is None else other.keys[0].shape[-2]
         max_size = max(max_idx, self_len, other_len)
+        # gmlx: as BatchKVCache.extend, the grid point for a join with no
+        # spare row.
+        if max_size == max_idx and self._kv_grid:
+            max_size = grid_capacity(max_idx + 1, self.step)
         ref_keys = self.keys if self.keys is not None else other.keys
         ref_values = self.values if self.values is not None else other.values
 
