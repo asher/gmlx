@@ -20,6 +20,7 @@ import pytest
 pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
 
 from gmlx._vendor.mlx_vlm.models.cache import ArraysCache, BatchKVCache
+from gmlx.cache import kv_cache as owned_cache
 from gmlx._vendor.mlx_vlm.models.qwen3_5.config import TextConfig as Q35TextConfig
 from gmlx.models.qwen35.language import LanguageModel as Q35LanguageModel
 from gmlx.models.qwen35.language import Qwen3_5GatedDeltaNet
@@ -387,3 +388,59 @@ def test_ragged_bucket_straddle_identity(_restore_patches, monkeypatch):
     assert counts["engaged"] > 0
     assert mx.array_equal(toks_p, toks_o).item()
     assert _close(log_p, log_o, ATOL)
+
+
+
+# ---------------------------------------------------------------------------
+# a row left alone on a batch cache
+# ---------------------------------------------------------------------------
+
+
+def _lone_row_verify(cache, seen, sdpa, depth=12, L=3):
+    """One verify-width attention call on a one-row ``cache`` that holds
+    ``depth`` rows. Returns the mask the SDPA got, the output and the
+    output under the cache's own array mask."""
+    mx.random.seed(5)
+    q = mx.random.normal((1, 4, L, 64))
+    k = mx.random.normal((1, 2, depth + L, 64))
+    v = mx.random.normal((1, 2, depth + L, 64))
+    cache.update_and_fetch(k[:, :, :depth], v[:, :, :depth])
+    mask = cache.make_mask(L)
+    keys, values = cache.update_and_fetch(k[:, :, depth:], v[:, :, depth:])
+    del seen[:]
+    out = qwen35_attn._verify_attention(
+        q, keys, values, cache=cache, scale=64**-0.5, mask=mask
+    )
+    ref = sdpa(q, keys, values, scale=64**-0.5, mask=mask)
+    mx.eval(out, ref)
+    assert len(seen) == 1
+    return seen[0], out, ref
+
+
+def test_a_lone_unpadded_batch_row_verifies_on_the_causal_call(monkeypatch):
+    """A row left alone on a batch cache gets an array mask from the
+    cache. With no padding and no window that mask is the plain causal
+    one, so its verify makes the "causal" call a single-stream cache
+    makes, the one the fused verify kernels claim. A padded or windowed
+    row keeps its array mask."""
+    seen = []
+    sdpa = mx.fast.scaled_dot_product_attention
+
+    def spy(*args, **kw):
+        seen.append(kw.get("mask"))
+        return sdpa(*args, **kw)
+
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", spy)
+
+    got, out, ref = _lone_row_verify(owned_cache.BatchKVCache([0]), seen, sdpa)
+    assert isinstance(got, str) and got == "causal"
+    assert _close(out, ref, 1e-3)
+
+    got, out, ref = _lone_row_verify(owned_cache.BatchKVCache([3]), seen, sdpa)
+    assert isinstance(got, mx.array)
+    assert _close(out, ref, 1e-3)
+
+    windowed = owned_cache.BatchRotatingKVCache(64, [0])
+    got, out, ref = _lone_row_verify(windowed, seen, sdpa)
+    assert isinstance(got, mx.array)
+    assert _close(out, ref, 1e-3)

@@ -754,6 +754,22 @@ def _kvarn_attention(queries, *, cache, scale, mask):
     return kvarn_attention(queries, cache, scale, mask)
 
 
+def _lone_row_is_causal(queries, keys, cache, mask):
+    """Whether a batch cache's array mask is the plain causal one: a single
+    row with no padding on either side and no window. A row left alone on
+    a batch cache is in this state, and its verify then makes the "causal"
+    call a single-stream cache makes, which the fused verify kernels
+    claim. An array mask sends the call to the stock SDPA."""
+    if queries.shape[0] != 1 or hasattr(cache, "max_size"):
+        return False
+    if getattr(cache, "_right_padding", None) is not None:
+        return False
+    if mask.shape[-2] != queries.shape[-2] or mask.shape[-1] != keys.shape[-2]:
+        return False
+    info = _qwen3_5_left_padding_info(cache)
+    return info is not None and info[1] <= 0
+
+
 def _verify_attention(queries, keys, values, *, cache, scale, mask):
     """Composed verify/left-padded-decode attention resolver.
 
@@ -810,8 +826,12 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
         end = (T - L) + mx.arange(L)[None, :, None]
         pad_arr = mx.array(pads, dtype=mx.int32)[:, None, None]
         sdpa_mask = ((t >= pad_arr) & (t <= end))[:, None, :, :]
+    elif isinstance(mask, mx.array) and not _lone_row_is_causal(
+        queries, keys, cache, mask
+    ):
+        sdpa_mask = mask
     else:
-        sdpa_mask = mask if isinstance(mask, mx.array) else "causal"
+        sdpa_mask = "causal"
     return mx.fast.scaled_dot_product_attention(
         queries, keys, values, scale=scale, mask=sdpa_mask
     )
