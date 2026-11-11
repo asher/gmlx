@@ -104,8 +104,11 @@ def stt_adapter(path, mmproj) -> str | None:
         return "nemotron"
     if not caps.audio_in or not path:
         return None
-    meta = header_meta(str(path))
-    return _AUDIO_IN_ADAPTERS.get((meta or {}).get("arch"))
+    meta = header_meta(str(path)) or {}
+    if meta.get("decision"):
+        # A decision model hears, but it answers decisions only.
+        return None
+    return _AUDIO_IN_ADAPTERS.get(meta.get("arch"))
 
 
 def native_models(cfg) -> list[str]:

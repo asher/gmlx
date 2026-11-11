@@ -1075,8 +1075,10 @@ def test_every_decoder_architecture_runs_causal_false_by_a_test_or_refuses_it(
         tmp_path):
     # A decoder architecture that gmlx builds runs a GGUF that sets
     # attention.causal to false only when a tiny decoder of it shows above
-    # that each token sees all; every other one refuses the GGUF.
+    # that each token sees all; every other one refuses the GGUF. A
+    # decision architecture refuses it with the decision-model message.
     from gmlx.load.config_synth import supported_arches
+    from gmlx.load.decision import DECISION_ARCHES, DecisionModelOnly
     from gmlx.load.discovery import ENCODER_ARCHES
 
     runs = set()
@@ -1086,6 +1088,8 @@ def test_every_decoder_architecture_runs_causal_false_by_a_test_or_refuses_it(
         reason = emb._gguf_refusal(path)
         if reason is None:
             runs.add(arch)
+        elif arch in DECISION_ARCHES:
+            assert reason.startswith(str(DecisionModelOnly("this GGUF"))), arch
         else:
             assert reason.startswith(
                 f"this {arch} GGUF sets {arch}.attention.causal to false, "

@@ -86,7 +86,8 @@ def fake_load_vlm_model(monkeypatch):
     calls = []
     processor = object()
 
-    def _fake(gguf_path, mmproj_path, *, hf_source=None, verbose=True):
+    def _fake(gguf_path, mmproj_path, *, hf_source=None, verbose=True,
+              decision=False):
         calls.append(
             {"gguf": gguf_path, "mmproj": mmproj_path,
              "hf_source": hf_source, "verbose": verbose}
@@ -260,7 +261,7 @@ def installed_bridge(monkeypatch):
             adapter_gguf=None, stream=None, moe_experts=None,
             moe_expert_mass=None, moe_miss_shed=None, moe_layer_shed=None,
             moe_prestage=None, feeder_prefill=None, feeder_decode=None,
-            fast_disk=None):
+            fast_disk=None, decision=False):
         serveable_calls.append((model_path, mmproj_path, hf_source, chat_template))
         return ("SERVEABLE", model_path, mmproj_path)
 

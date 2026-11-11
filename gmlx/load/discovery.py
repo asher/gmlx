@@ -127,6 +127,9 @@ class ClassifiedGguf:
     # On an mmproj, the projector types its header declares
     # (``clip.vision.projector_type``, ``clip.audio.projector_type``).
     projectors: tuple = ()
+    # A decision model (``gmlx.load.decision``): it answers on
+    # /v1/systemone and never chats (model kind only).
+    decision: bool = False
 
 
 # Classification
@@ -272,12 +275,15 @@ def _classify_meta(
     loadable = bool(arch) and arch in supported_arches()
     if not loadable and _image_dit_arch(arch):
         return ClassifiedGguf(ap, "image-dit", arch, False, quant, False)
+    from .decision import decision_header
+
     return ClassifiedGguf(ap, "model", arch, mtp, quant, loadable,
                           moe=bool(experts and experts > 0),
                           name=read_string(meta, "general.name"),
                           n_embd=_hidden_size(meta, arch),
                           declared=declared_base_ids(meta),
-                          speech_checkpoint=speech_checkpoint)
+                          speech_checkpoint=speech_checkpoint,
+                          decision=decision_header(meta))
 
 
 def _image_dit_arch(arch: str | None) -> bool:
@@ -439,14 +445,15 @@ def _read_header(path: str) -> tuple:
     return c, read_string(kv, "general.name"), _read_sampling(kv)
 
 
-_HEADER_CACHE_V = 5
+_HEADER_CACHE_V = 6
 _HEADER_META_KEYS = ("arch", "name", "kind", "mtp", "sampling",
-                     "drafter_kind", "declared", "speech_checkpoint")
+                     "drafter_kind", "declared", "speech_checkpoint",
+                     "decision")
 
 
 def header_meta(path: str) -> dict | None:
     """``{"arch", "name", "kind", "mtp", "sampling", "drafter_kind",
-    "declared", "speech_checkpoint"}`` from a GGUF's header, or ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
+    "declared", "speech_checkpoint", "decision"}`` from a GGUF's header, or ``None`` when the file is missing/unreadable. Unlike :func:`classify_gguf`
     this is **silent** on failure - registration over a config that references a
     not-yet-pulled file must not spam stderr. A sharded model's configured path
     is its first shard, which carries the full KV block, so a plain read of the
@@ -461,7 +468,7 @@ def header_meta(path: str) -> dict | None:
     disk = _load_header_cache()
     ent = disk.get(ap)
     # v3 adds the declared base ids; v4 the speech companion kind; v5 the
-    # speech encoder kind and the NeMo checkpoint id.
+    # speech encoder kind and the NeMo checkpoint id; v6 the decision mark.
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
             and ent.get("size") == st.st_size and ent.get("v") == _HEADER_CACHE_V):
         meta = {k: ent.get(k) for k in _HEADER_META_KEYS}
@@ -475,7 +482,8 @@ def header_meta(path: str) -> dict | None:
     meta = {"arch": c.arch, "name": name, "kind": c.kind, "mtp": c.mtp,
             "sampling": sampling, "drafter_kind": c.drafter_kind,
             "declared": list(c.declared),
-            "speech_checkpoint": c.speech_checkpoint}
+            "speech_checkpoint": c.speech_checkpoint,
+            "decision": c.decision}
     _HEADER_MEMO[ap] = meta
     disk[ap] = {"mtime": int(st.st_mtime), "size": st.st_size,
                 "v": _HEADER_CACHE_V, **meta}
@@ -1975,6 +1983,7 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
 
     cands = [(mc, c) for mc, c in made
              if _arch_table.mtp_wired(c.arch) and not mc.stream
+             and not getattr(c, "decision", False)
              and _open(mc)
              and _arch_table.drafter_serves(dr.arch, c.arch) is not False
              and _arch_table.container_serves(dr.container, c.arch)

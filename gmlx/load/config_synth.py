@@ -2482,8 +2482,13 @@ LFM3_SPEECH_CONTEXT = 32768
 
 def lfm3_context_cap(kv) -> int | None:
     """The context cap of an LFM3 GGUF, from its header KV, or None when it
-    has none. A file with a named ``tts`` chat template is a speaking
-    checkpoint, which is capped at ``LFM3_SPEECH_CONTEXT``."""
+    has none. A decision model is capped at its state cap. A file with a
+    named ``tts`` chat template is a speaking checkpoint, which is capped
+    at ``LFM3_SPEECH_CONTEXT``."""
+    from .decision import DECISION_STATE_CAP, decision_header
+
+    if decision_header(kv):
+        return DECISION_STATE_CAP
     names = _read_str_array(kv, "tokenizer.chat_templates") or ()
     return LFM3_SPEECH_CONTEXT if "tts" in names else None
 
@@ -2517,10 +2522,8 @@ def _synth_lfm3(meta, shapes, config: dict) -> None:
                         gguf_field=f"{arch}.{key}")
 
     if _read_bool(meta, f"{arch}.attention.causal") is False:
-        raise NotImplementedError(
-            "lfm3 synth: this GGUF is a d1 decision model "
-            f"({arch}.attention.causal is false), which reads the prompt "
-            "in both directions. d1 decision models are not supported yet.")
+        # A d1 decision model. Only the decision forward runs it.
+        config["decision"] = True
 
     _require(config.get("rms_norm_eps"), arch=arch,
              gguf_field=f"{arch}.attention.layer_norm_rms_epsilon")

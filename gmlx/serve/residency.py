@@ -360,7 +360,12 @@ def _http_from_resolver_error(exc):
     resolver error."""
     from fastapi import HTTPException
 
+    from gmlx.load.decision import DecisionModelOnly
+
     from . import bridge_vlm as _serving
+    if isinstance(exc, DecisionModelOnly):
+        return HTTPException(status_code=400, detail={"error": {
+            "type": "decision_model_only", "message": str(exc)}})
     if isinstance(exc, _serving.WrongModelKind):
         return HTTPException(status_code=400, detail={"error": {
             "type": "wrong_model_kind", "message": str(exc),
@@ -381,6 +386,22 @@ def _http_from_resolver_error(exc):
             "type": "no_model_specified", "message": str(exc),
             "available_models": exc.available}})
     return None
+
+
+def _refuse_decision_model(load_path, spec) -> None:
+    """A 400 for a decision model outside the systemone route and the
+    startup preload, read from its header before any load. Every route
+    that generates loads through here, so a new one is refused unless it
+    opens a decision scope."""
+    from gmlx.load.decision import DecisionModelOnly, in_decision_scope
+    from gmlx.load.discovery import header_meta
+
+    if in_decision_scope() or not isinstance(load_path, str):
+        return
+    if not (header_meta(load_path) or {}).get("decision"):
+        return
+    exc = DecisionModelOnly(getattr(spec, "id", None) or "this model")
+    raise _http_from_resolver_error(exc) from exc
 
 
 def _installed_pool():
@@ -552,6 +573,7 @@ def install_gguf_residency_pool(budget_bytes=None, max_models=None, pinned=None)
         except (_serving.ModelNotFound, _serving.ModelFileMissing,
                 _serving.UnknownProfile, _serving.NoModelSpecified) as e:
             raise (_http_from_resolver_error(e) or e) from e
+        _refuse_decision_model(load_path, spec)
         _serving.set_active_spec(spec)
         ttl = spec.ttl_s
         cache_key_extra = spec.load_signature()

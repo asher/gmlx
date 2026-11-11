@@ -103,6 +103,9 @@ def _models_payload() -> dict:
             "pinned": bool(rm.pin) or rm.path in pinned,
             "speculative": bool(rm.speculative),
             "vlm": rm.mmproj is not None,
+            # A decision model answers on /v1/systemone and never chats;
+            # chat clients skip an entry that carries this marker.
+            **({"decision": True} if _decision(rm) else {}),
             # What the model takes and gives: text, vision, audio (audio
             # input) and speech (speech output).
             "modalities": modalities,
@@ -144,6 +147,14 @@ def _voices() -> list:
     from ..native_tts import voices
 
     return list(voices())
+
+
+def _decision(rm) -> bool:
+    from gmlx.load.discovery import header_meta
+
+    path = getattr(rm, "path", None)
+    return bool(isinstance(path, str)
+                and (header_meta(path) or {}).get("decision"))
 
 
 def _modalities(rm) -> list:
@@ -1249,7 +1260,12 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT, *, images: bool = False):
 
     An image id loads only with ``images`` (keep and preload). The chat
     routes' warm passes none: it returns None without a load, and the
-    route answers the image id 400."""
+    route answers the image id 400. Keep and preload load a decision model
+    too; the chat warm leaves it to the route's 400."""
+    import contextlib
+
+    from gmlx.load.decision import decision_scope
+
     from .. import residency
     if serving.is_image_model(model_id):
         if not images:
@@ -1257,10 +1273,11 @@ def _load_resident(model_id, adapter=_WARM_DEFAULT, *, images: bool = False):
         # An image model loads through its own kind, never the chat seam.
         return residency.acquire_image_model(model_id)
     app = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
-    if adapter is _WARM_DEFAULT:
-        app.get_cached_model(model_id)            # pooled: resolve -> acquire
-    else:
-        app.get_cached_model(model_id, adapter)
+    with decision_scope() if images else contextlib.nullcontext():
+        if adapter is _WARM_DEFAULT:
+            app.get_cached_model(model_id)        # pooled: resolve -> acquire
+        else:
+            app.get_cached_model(model_id, adapter)
     return residency._active_hold.get()
 
 
@@ -1482,6 +1499,12 @@ def install_resolver_error_handlers() -> None:
     async def _wrong_model_kind(request, exc):
         return _resolver_response(request, 400, "wrong_model_kind", exc,
                                   available_models=exc.available)
+
+    from gmlx.load.decision import DecisionModelOnly
+
+    @app.exception_handler(DecisionModelOnly)
+    async def _decision_model_only(request, exc):
+        return _resolver_response(request, 400, "decision_model_only", exc)
 
     @app.exception_handler(serving.ModelFileMissing)
     async def _model_file_missing(request, exc):

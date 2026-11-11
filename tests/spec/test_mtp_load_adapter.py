@@ -73,7 +73,8 @@ def fake_load(monkeypatch):
     order = []
     nothing = lambda *a, **k: None  # noqa: E731
     monkeypatch.setattr(ml, "preflight", lambda path, arch=None: SimpleNamespace(
-        arch="qwen35moe", shards=[path]))
+        arch="qwen35moe", shards=[path],
+        refuse_decision=lambda allowed=False: None))
     monkeypatch.setattr(ml, "maybe_populate_for_load", nothing)
     monkeypatch.setattr(ml, "load_gguf_wire_bytes",
                         lambda *a, **k: ({}, {}, {}, {}, {}))

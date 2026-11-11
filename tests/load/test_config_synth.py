@@ -3657,14 +3657,20 @@ def test_lfm3_speaking_file_is_capped_at_its_trained_context():
     assert c["max_position_embeddings"] == 4096
 
 
-def test_lfm3_decision_file_is_refused():
+def test_lfm3_decision_file_is_marked_and_capped():
+    """A d1 header synthesizes, marked as a decision model, with its
+    context at the state cap. The loaders refuse it unless the caller runs
+    the decision forward (tests/load/test_decision_model_refusals.py)."""
+    from gmlx.load.decision import DECISION_STATE_CAP
+
     m = _lfm3_meta()
     m["lfm3.attention.causal"] = False
-    with pytest.raises(NotImplementedError,
-                       match="d1 decision models are not supported yet"):
-        synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+    c = synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+    assert c["decision"] is True
+    assert c["max_position_embeddings"] == DECISION_STATE_CAP
     m["lfm3.attention.causal"] = True
-    assert synthesize_config(m, tensor_shapes=_LFM3_SHAPES)["model_type"] == "lfm3"
+    c = synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+    assert c["model_type"] == "lfm3" and "decision" not in c
 
 
 @pytest.mark.parametrize("key, value, match", [

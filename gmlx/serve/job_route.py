@@ -42,10 +42,13 @@ def salted(lora, rg):
         raise HTTPException(status_code=500, detail=str(e)) from None
 
 
-def resolve_engine(pick: Callable[[], str], profile, runtime):
+def resolve_engine(pick: Callable[[], str], profile, runtime, *,
+                   decisions: bool = False):
     """Load the model ``pick()`` names and return ``(rg, hold, spec,
     model_str)``: the engine, its residency hold, the model spec and the
-    model string. The caller releases ``hold``."""
+    model string. The caller releases ``hold``. ``decisions``: the route
+    answers with the decision forward, so a decision model may load."""
+    from gmlx.load.decision import decision_scope
     from gmlx.serve.residency import _http_from_resolver_error
 
     app_mod = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
@@ -58,7 +61,8 @@ def resolve_engine(pick: Callable[[], str], profile, runtime):
         except (serving.ModelNotFound, serving.ModelFileMissing,
                 serving.UnknownProfile, serving.NoModelSpecified) as e:
             raise _http_from_resolver_error(e) from e
-        app_mod.get_cached_model(model_str)
+        with decision_scope() if decisions else contextlib.nullcontext():
+            app_mod.get_cached_model(model_str)
         spec = serving.get_active_spec()
     finally:
         serving.reset_request_profile(token)
