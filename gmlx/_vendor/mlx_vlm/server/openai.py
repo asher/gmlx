@@ -165,6 +165,20 @@ def _present(item) -> bool:
         return bool(item)
 
 
+def _refuse_unread_media(model, images=(), videos=(), audio=()) -> None:
+    """gmlx: a 400 for media an LFM3 model has no tower for, before its
+    processor fails on it."""
+    config = getattr(model, "config", None)
+    if not str(getattr(config, "model_type", "")).startswith("lfm3_"):
+        return
+    from gmlx.models.lfm3.vlm_model import media_refusal
+
+    reason = media_refusal(config, images=len(images or ()),
+                           videos=len(videos or ()), audio=len(audio or ()))
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+
 def _ensure_effective_input(messages, *, images=None, audio=None):
     if any(image for image in (images or [])) or any(
         _present(item) for item in (audio or [])
@@ -834,6 +848,7 @@ async def responses_input_tokens_endpoint(request: Request):
         model, processor, config = get_cached_model(
             openai_request.model, _adapter_path_or_inherit(openai_request)
         )
+        _refuse_unread_media(model, images, (), audio)  # gmlx
         del model
         chat_tools, _ = _response_tool_registry(openai_request.tools)
         gen_args = _build_gen_args(
@@ -999,6 +1014,7 @@ async def responses_endpoint(request: Request):
         model, processor, config = get_cached_model(
             openai_request.model, _adapter_path_or_inherit(openai_request)
         )
+        _refuse_unread_media(model, images, (), audio)  # gmlx
 
         chat_tools, tool_registry = _response_tool_registry(openai_request.tools)
         tool_parser_type = _infer_tool_parser_from_processor(
@@ -1727,6 +1743,7 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
         )
 
         model, processor, config = get_cached_model(request.model, adapter_path)
+        _refuse_unread_media(model, images, videos, audio)  # gmlx
 
         # gmlx: the request's audio output, or None for a text reply.
         speech = _speech_chat.plan(

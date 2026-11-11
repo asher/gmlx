@@ -48,6 +48,17 @@ MODEL_TYPES = ("lfm3_omni", "lfm3_vl", "lfm3_audio")
 __all__ = ["AudioConfig", "LanguageModel", "Model", "ModelConfig",
            "TextConfig", "VisionConfig"]
 
+def media_refusal(config, *, images: int = 0, videos: int = 0,
+                  audio: int = 0) -> Optional[str]:
+    """Why the model of ``config`` cannot read a request's media, or None.
+    LFM3-Audio has no vision tower, and LFM3-VL no audio encoder."""
+    if (images or videos) and getattr(config, "vision_config", None) is None:
+        return "this model takes no image or video input"
+    if audio and getattr(config, "audio_config", None) is None:
+        return "this model takes no audio input"
+    return None
+
+
 # "1" runs the vision tower, the speech encoder and the speech decoders
 # in a float32 stream on their 16-bit weights, to tell a 16-bit rounding
 # effect from a defect.
