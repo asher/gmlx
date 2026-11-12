@@ -168,13 +168,25 @@ def test_each_row_attends_its_own_keys(qL, dtype):
                                    atol=tol, rtol=tol)
 
 
-def test_a_forward_wider_than_a_verify_block_is_refused():
-    c, _ = _batch([2, 0, 1, 2])
-    nk, nv = _kv(9, 40)
+@pytest.mark.parametrize("qL", [9, 12])
+def test_a_forward_wider_than_a_verify_block_reads_each_rows_keys(qL):
+    """A draft block size raised past 8 verifies wider blocks on the uneven
+    cache: one call per row, as each row's keys alone."""
+    dtype = mx.bfloat16 if mx.metal.is_available() else mx.float32
+    c, rows = _batch([2, 0, 1, 2], dtype=dtype)
+    nk, nv = _kv(qL, 40, dtype=dtype)
     keys, values = c.update_and_fetch(nk, nv)
-    q = mx.zeros((len(PADS), 4 * H, 9, D), mx.float16)
-    with pytest.raises(ValueError, match="end apart"):
-        row_ends.row_ends_attention(q, keys, values, c, 1.0)
+    q = mx.random.normal((len(PADS), 4 * H, qL, D), key=mx.random.key(50)).astype(dtype)
+    scale = D ** -0.5
+    got = row_ends.row_ends_attention(q, keys, values, c, scale)
+    tol = 1e-5 if dtype == mx.float32 else 2e-2
+    for i, (k, v) in enumerate(rows):
+        k = mx.concatenate([k, nk[i:i + 1]], axis=2)
+        v = mx.concatenate([v, nv[i:i + 1]], axis=2)
+        ref = _reference(q[i:i + 1], k, v, scale)
+        np.testing.assert_allclose(np.asarray(got[i:i + 1].astype(mx.float32)),
+                                   np.asarray(ref.astype(mx.float32)),
+                                   atol=tol, rtol=tol)
 
 
 def test_an_even_cache_takes_no_route():

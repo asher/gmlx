@@ -87,27 +87,18 @@ def _kq_route_ok(queries, keys) -> bool:
     )
 
 
-_MAX_QL = 8
-
-
 def row_ends_attention(queries, keys, values, cache, scale):
     """Attention for a cache with uneven row ends, else None.
 
     Row b attends keys ``[left_padding[b], end_b)``, its query block causal
     at its own end. ``keys`` and ``values`` are what the cache's append
     returned, up to the largest end. One kq call reads every row in place
-    at qL 1 to 4; other shapes take one fused causal call per row on the
-    row's own keys (the per-row verify of gmlx/models/qwen35/attn.py)."""
+    at qL 1 to 4; every other shape, any qL (a draft block size the user
+    raised), takes one fused causal call per row on the row's own keys (the
+    per-row verify of gmlx/models/qwen35/attn.py)."""
     ends = getattr(cache, "_row_ends", None)
     if ends is None:
         return None
-    qL = queries.shape[2]
-    if qL > _MAX_QL:
-        # The rounds append at most a verify block to an uneven cache; a
-        # wider forward would read rows the route was not built for.
-        raise ValueError(
-            f"a {qL}-token forward reached a batch whose rows end apart; "
-            f"row ends serve at most {_MAX_QL}")
     if _kq_route_ok(queries, keys):
         import mlx_kquant as kq
 
