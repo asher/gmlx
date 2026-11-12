@@ -143,12 +143,13 @@ def _run_d1(body: dict, path: str, settings) -> dict:
     from gmlx.load.decision import DECISION_STATE_CAP
     from types import SimpleNamespace
 
-    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
     from gmlx.load.loader import load_model
     from gmlx.serve.bridge_vlm import _make_text_processor
     from gmlx.serve.mem_preflight import preflight_decision
     from gmlx.systemone import d1
 
+    too_long = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.server.generation").PromptTooLongError
     if d1.body_media(body):
         raise SystemExit("error: media in a d1 decision need a server: run "
                          "`gmlx serve` with the model and its projector")
@@ -162,7 +163,7 @@ def _run_d1(body: dict, path: str, settings) -> dict:
         passes = d1.build_passes(fmt, questions, body.get("state"), DECISION_STATE_CAP)
         max_rows = preflight_decision(SimpleNamespace(model=model),
                                       [len(p.ids) for p in passes])
-    except (d1.D1RequestError, PromptTooLongError) as e:
+    except (d1.D1RequestError, too_long) as e:
         raise SystemExit(f"error: {e}") from e
     wired: Any = contextlib.nullcontext()
     if mx.default_device() == mx.gpu and mx.metal.is_available():
