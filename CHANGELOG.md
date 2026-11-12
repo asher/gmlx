@@ -58,6 +58,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Running short of memory while a request was cancelled, or shed to free
+  memory, no longer fails every other request decoding beside it.
 - A request held for memory beside others decoding starts once memory frees.
   It could wait again after its hold, and the log said it had started.
 - With a drafter, requests that shared a long prompt prefix decoded slower

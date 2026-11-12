@@ -432,6 +432,111 @@ def test_remove_after_a_refused_filter(engine, monkeypatch):
     assert gaps[0] == {0}
 
 
+def _refuse_removal(monkeypatch, gen, shot, where):
+    """The next filter of the decode batch is refused once: "layer" in the
+    second layer's own filter, after the first layer dropped the row, and
+    "before" before the filter changes the batch."""
+    if where == "before":
+        orig = ar.GenerationBatch.filter
+
+        def filt(self, keep):
+            shot.fire()
+            return orig(self, keep)
+
+        monkeypatch.setattr(ar.GenerationBatch, "filter", filt)
+        return
+    second = gen._generation_batch.prompt_cache[1]
+    orig_layer = type(second).filter
+
+    def layer_filt(self, idx):
+        if self is second:
+            shot.fire()
+        return orig_layer(self, idx)
+
+    monkeypatch.setattr(type(second), "filter", layer_filt)
+
+
+_REMOVAL_LOG = {"layer": "stopped a layer's filter half way",
+                "before": "refused before the batch changed"}
+
+
+@pytest.mark.parametrize("where", ["layer", "before"])
+def test_victim_removal_refused(engine, monkeypatch, caplog, where):
+    """Two refused ticks in a row take the guard's victim out, and the
+    allocator refuses inside that removal. A refusal before the batch
+    changed is retried; one inside a layer's filter drops the batch whole
+    and requeues every row in it. No row fails, and every stream is
+    whole."""
+    shot = Shot(MEM)
+    refused, failed = [], []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    inject = tg._maybe_inject
+
+    def maybe_inject(gen, st):
+        if refused and refused[0]:
+            refused[0] -= 1
+            raise RuntimeError(MEM)
+        return inject(gen, st)
+
+    monkeypatch.setattr(tg, "_maybe_inject", maybe_inject)
+
+    def plan(t, gen, out):
+        if len(out.get(1, [])) == 2 and not shot.armed:
+            shot.armed = True
+            refused.append(2)
+            _refuse_removal(monkeypatch, gen, shot, where)
+
+    with caplog.at_level("WARNING", logger=tg.__name__):
+        check(engine, shot, plan=plan, b_max=6)
+    assert refused == [0] and failed == []
+    assert _REMOVAL_LOG[where] in caplog.text
+
+
+@pytest.mark.parametrize("where", ["layer", "before"])
+def test_cancel_removal_refused(engine, monkeypatch, caplog, where):
+    """The server's cancel branch takes a row out beside one that decodes,
+    and the allocator refuses inside the removal. The row is out, the
+    batch is whole, and the stream beside it is whole."""
+    from gmlx._vendor.mlx_vlm.server import generation as srv
+    from gmlx.serve.row_sampling import live_uids
+
+    def when(out):
+        return len(out.get(1, [])) == 2
+
+    def cancel(shot):
+        done = []
+
+        def plan(t, gen, out):
+            if done or 1 not in gen._generation_batch.uids or not when(out):
+                return
+            if shot is not None:
+                shot.armed = True
+                _refuse_removal(monkeypatch, gen, shot, where)
+            rg = object.__new__(srv.ResponseGenerator)
+            rg._cancel_lock, rg._cancelled = srv.Lock(), {1}
+            active = {u: {"rqueue": srv.Queue(), "request_id": u}
+                      for u in (0, 1)}
+            assert rg._drop_cancelled(gen, active) is gen
+            assert rg._kq_unremoved == set() and set(active) == {0}
+            assert 1 not in live_uids(gen)
+            assert 1 not in tg._state(gen).ledger
+            assert not getattr(gen._generation_batch, "_kq_torn", False)
+            done.append(t)
+        return plan, done
+
+    ref, ref_fin, _ = run(engine, plan=cancel(None)[0], b_max=6)
+    shot = Shot(MEM)
+    plan, done = cancel(shot)
+    with caplog.at_level("WARNING", logger=tg.__name__):
+        got, fin, gaps = run(engine, plan=plan, b_max=6)
+    assert len(done) == 1 and shot.fired == 1
+    assert _REMOVAL_LOG[where] in caplog.text
+    assert _tokens(got) == _tokens(ref) and len(got[1]) == 2
+    assert fin == ref_fin and set(fin) == {0}
+    assert gaps[0] == {0}
+
+
 def test_d_forced_eval(engine, monkeypatch, shot):
     """D: the eval of a forced id throws."""
     monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_force_next_tokens"))

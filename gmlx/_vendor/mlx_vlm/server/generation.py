@@ -1113,12 +1113,13 @@ class ResponseGenerator:
         if unremoved:
             live = live_uids(batch_gen)
             for uid in list(unremoved):
-                if uid not in live or batch_gen.remove(uid):
+                if uid not in live or tick_guard.remove_row(batch_gen, uid):
                     unremoved.discard(uid)
         for uid in cancelled:
             if uid not in active:
                 continue
-            removed = batch_gen.remove(uid)
+            # A refusal inside the removal requeues the rows beside it.
+            removed = tick_guard.remove_row(batch_gen, uid)
             tick_guard.forget(batch_gen, uid)
             info = active.pop(uid)
             logger.info(

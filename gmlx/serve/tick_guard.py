@@ -366,11 +366,75 @@ def _pick_victim(gen, st: _TickState, spare=None, spare_uid=None):
     return rows[0][1]
 
 
+_REMOVE_TRIES = 3
+_STAYS = object()   # a removal refused through every retry
+
+
+def _take_out(gen, uid):
+    """``gen.remove(uid)`` under an allocator refusal at a host read inside
+    it. Returns ``(removed, swept)``: what remove returned, and the other
+    decode rows taken out with the row, which the caller requeues.
+
+    A refusal before the filter changed the batch leaves the row in it, so
+    the pool is reclaimed and the removal tried again, up to
+    ``_REMOVE_TRIES`` times; after that the row stays and ``removed`` is
+    ``_STAYS``. A refusal inside one layer's own filter leaves the layers
+    disagreeing, and no filter can finish that batch: it is dropped whole,
+    and the rows left in it are swept."""
+    from gmlx.eval_guard import drain_for
+
+    for _ in range(_REMOVE_TRIES):
+        try:
+            return gen.remove(uid), []
+        except RuntimeError as e:
+            if not is_allocator_refusal(e):
+                raise
+            gb = gen._generation_batch
+            if getattr(gb, "_kq_torn", False):
+                # A row that finished on a tick whose filter failed has
+                # delivered its finish already.
+                done = getattr(gb, "_kq_pending_drop", None) or ()
+                swept = [u for u in getattr(gb, "uids", ())
+                         if u != uid and u not in done]
+                _log.warning("[tick-guard] removing row %s stopped a layer's "
+                             "filter half way; dropping the batch and "
+                             "requeueing its %d other row(s): %s", uid,
+                             len(swept), str(e).splitlines()[0][:200])
+                gen._kq_empty_generation_batch()
+                mx.clear_cache()
+                return True, swept
+            _log.warning("[tick-guard] removing row %s was refused before "
+                         "the batch changed; reclaiming and retrying: %s",
+                         uid, str(e).splitlines()[0][:200])
+            drain_for("engine-remove")
+            mx.clear_cache()
+    _log.error("[tick-guard] row %s stays in the batch: its removal was "
+               "refused %d times", uid, _REMOVE_TRIES)
+    return _STAYS, []
+
+
+def remove_row(gen, uid) -> bool:
+    """Take ``uid`` out of the engine, for a caller outside the tick (a
+    cancel). A refusal inside the removal never tears the batch or fails
+    the rows beside it: they requeue as themselves. False when the row is
+    not out, so the caller retries it."""
+    st = getattr(gen, "_kq_tick_guard", None)
+    if st is None:
+        return gen.remove(uid)
+    removed, swept = _take_out(gen, uid)
+    _requeue_rows(gen, st, swept)
+    return removed is not _STAYS and bool(removed)
+
+
 def _fail_row_permanently(gen, st: _TickState, uid, err: str, *,
                           remove: bool = True) -> None:
-    row = st.ledger.pop(uid, None)
+    swept = []
     if remove:
-        gen.remove(uid)
+        removed, swept = _take_out(gen, uid)
+        if removed is _STAYS:
+            return  # still decoding; a later strike sheds a row again
+    row = st.ledger.pop(uid, None)
+    _requeue_rows(gen, st, swept)
     # A spoken reply's record closes on every path that ends its row.
     from . import speech_rows
 
@@ -473,19 +537,32 @@ def _replay_kwargs(gen, uid, row):
         lambda ids: embed(ids, settings), getattr(gen, "model", None))
 
 
-def _rebuild_row(gen, st: _TickState, uid) -> None:
-    gen.remove(uid)
+def _requeue_rows(gen, st: _TickState, uids) -> None:
+    """Requeue rows the caller took out of the engine, failing each when
+    the requeue itself throws."""
+    if not uids:
+        return
     try:
-        _requeue(gen, st, [uid])
+        _requeue(gen, st, uids)
     except Exception as e:
-        # The row is out of the engine, and the governor drops whatever
-        # escapes its tick: fail the row here, so its client hears of it.
-        _log.error("[tick-guard] row %s requeue failed", uid, exc_info=True)
+        # The rows are out of the engine, and the governor drops whatever
+        # escapes its tick: fail them here, so their clients hear of it.
+        _log.error("[tick-guard] requeue of %s failed", list(uids),
+                   exc_info=True)
+        gone = set(uids)
         gen._unprocessed_sequences[:] = [
-            q for q in gen._unprocessed_sequences if q[0] != uid]
-        st.rebuilt.discard(uid)
-        _fail_row_permanently(gen, st, uid, f"requeue failed: {e}",
-                              remove=False)
+            q for q in gen._unprocessed_sequences if q[0] not in gone]
+        for uid in uids:
+            st.rebuilt.discard(uid)
+            _fail_row_permanently(gen, st, uid, f"requeue failed: {e}",
+                                  remove=False)
+
+
+def _rebuild_row(gen, st: _TickState, uid) -> None:
+    removed, swept = _take_out(gen, uid)
+    if removed is _STAYS:
+        return  # still decoding; a later strike sheds a row again
+    _requeue_rows(gen, st, [uid] + swept)
 
 
 def _largest(st: _TickState, uids):
@@ -552,6 +629,7 @@ def _rebuild_broken(gen, st: _TickState, e: BaseException) -> bool:
     if not decode and prefill is None:
         return False
     gb = gen._generation_batch
+    swept = []
     if getattr(gb, "_kq_extending", False) or getattr(gb, "_kq_torn", False):
         # extend threw half way, or a layer's filter did: the batch's
         # fields disagree, so no filter can run on it. Every row in it is
@@ -559,10 +637,20 @@ def _rebuild_broken(gen, st: _TickState, e: BaseException) -> bool:
         gen._kq_empty_generation_batch()
     else:
         for uid in decode:
-            gen.remove(uid)
+            removed, out = _take_out(gen, uid)
+            if removed is _STAYS:
+                # Refused through every retry: the row and every marked
+                # row after it leave with the batch.
+                out = _drop_decode_batch(gen)
+            if out:
+                # The batch went whole; the marked rows still in it are
+                # rebuilt with the group, the rest requeue as themselves.
+                swept = [u for u in out if u not in decode]
+                break
     if prefill is not None:
         _drop_prompt_batch(gen, e)
     done = _rebuild_group(gen, st, decode + list(prefill or ()), str(e))
+    _requeue_rows(gen, st, swept)
     _log.warning("[tick-guard] rebuilt %d row(s) whose engine state cannot "
                  "resume", len(done))
     return True

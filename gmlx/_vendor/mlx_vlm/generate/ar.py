@@ -1636,6 +1636,9 @@ class GenerationBatch:
                 self._eval_pending_state()
             except BaseException as e:
                 failed = e
+        # gmlx: the kept indices are allocated before the batch changes, so
+        # a refusal here leaves every row in it.
+        keep_arr = mx.array(keep, mx.int32) if keep else None
 
         self.uids = [self.uids[idx] for idx in keep]
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
@@ -1665,7 +1668,6 @@ class GenerationBatch:
             self.thinking_budget_criteria = []
             self._kq_filter_lazy = False
         else:
-            keep_arr = mx.array(keep, mx.int32)
             for c in self.prompt_cache:
                 try:
                     c.filter(keep_arr)
