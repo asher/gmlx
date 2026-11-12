@@ -2125,10 +2125,10 @@ class BatchKVCache(_BaseCache):
         In-place filter to keep just the given indices in the cache.
         """
         release(self)
+        kept = (batch_indices.tolist() if isinstance(batch_indices, mx.array)
+                else list(batch_indices))
         ends = None
         if self._row_ends is not None:
-            kept = (batch_indices.tolist() if isinstance(batch_indices, mx.array)
-                    else list(batch_indices))
             ends = [self._row_ends[int(i)] for i in kept]
         if self.keys is not None:
             self.keys = self.keys[batch_indices]
@@ -2137,6 +2137,16 @@ class BatchKVCache(_BaseCache):
         self.left_padding = self.left_padding[batch_indices]
         if self._right_padding is not None:
             self._right_padding = self._right_padding[batch_indices]
+        if not kept:
+            # gmlx: a batch that keeps no row (the native head of a batch
+            # that drained whole) goes back to the empty state; the min
+            # below has nothing to reduce.
+            self.keys = self.values = None
+            self._idx = 0
+            self._right_padding = None
+            self._clear_row_ends()
+            _cascade_filter(self, batch_indices)
+            return
 
         # Shift left to reduce padding
         min_left_pad = self.left_padding.min().item()
@@ -2202,12 +2212,14 @@ class BatchKVCache(_BaseCache):
             left_padding = c.left_padding + left
             return k, v, c.offset, left_padding
 
-        # gmlx: every row's end moves with its side's left pad.
+        # gmlx: every row's end moves with its side's left pad. A side with
+        # no buffers has no row ends to keep.
         ends = None
-        o_ends = getattr(other, "_row_ends", None)
-        if self._row_ends is not None or o_ends is not None:
+        s_ends = self._row_ends if self.keys is not None else None
+        o_ends = getattr(other, "_row_ends", None) if other.keys is not None else None
+        if s_ends is not None or o_ends is not None:
             ends = [e + max_idx - c._idx
-                    for c, own in ((self, self._row_ends), (other, o_ends))
+                    for c, own in ((self, s_ends), (other, o_ends))
                     for e in (own or [c._idx] * c.offset.shape[0])]
         self.keys, self.values, self.offset, self.left_padding = map(
             mx.concatenate, zip(*(pad(self), pad(other)))
@@ -2215,6 +2227,8 @@ class BatchKVCache(_BaseCache):
         self._idx = max_idx
         if ends is not None:
             self._set_row_ends(ends)
+        else:
+            self._clear_row_ends()
 
     def extract(self, idx):
         cache = KVCache()

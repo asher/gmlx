@@ -59,6 +59,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   context checked each draft slower than a request decoding alone.
 - With a dense Qwen model's native head, requests decoding together at long
   context slowed each step they kept different numbers of drafted tokens.
+- With a dense Qwen model's native head, a request that joined as every
+  request decoding together finished in the same step failed.
 - Gemma 4 audio input now matches the reference model. The audio encoder
   saw one frame too many, and with a GGUF projector it also scaled its
   attention queries wrongly.

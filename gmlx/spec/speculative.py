@@ -2387,11 +2387,8 @@ def _filter_batch_rows(prompt_cache: list, keep: mx.array) -> None:
 def _filter_batch_rows_empty(prompt_cache: list) -> None:
     """Drop every row from each batch cache entry.
 
-    Both cache origins' BatchKVCache.filter min-reduce left_padding after
-    the take to shift out shared padding; that reduce throws on an empty
-    index set, so the all-rows-finished injection adoption could never
-    empty a batch this way. Mirror filter's take for the empty set and
-    return the entry to its empty state (no buffers, watermark 0). An
+    Each entry goes back to its empty state (no buffers, watermark 0, no
+    row ends), which the all-rows-finished injection adoption needs. An
     emptied batch has nothing left to align against: with the finished
     batch's watermark kept, extend() left-padded the adopted row by that
     watermark, and the qwen3_5 language model resolves a one-row batch's
@@ -2418,6 +2415,8 @@ def _filter_batch_rows_empty(prompt_cache: list) -> None:
         c._idx = 0
         if hasattr(c, "_right_padding"):
             c._right_padding = None
+        if hasattr(c, "_clear_row_ends"):
+            c._clear_row_ends()  # no rows, no row ends
         if hasattr(c, "rotated"):
             # BatchRotatingKVCache: the constructor's empty ring state.
             c.rotated = False

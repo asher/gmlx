@@ -133,6 +133,32 @@ def test_filter_join_and_extract_keep_each_rows_tokens():
         np.testing.assert_array_equal(np.asarray(out.values), np.asarray(v))
 
 
+def test_a_filter_that_keeps_no_row_empties_the_cache():
+    """The native head of a batch that drained whole filters every row out:
+    the cache goes back to empty and the next row joins as itself."""
+    c, _ = _batch([2, 0, 1, 2])
+    c.filter(mx.array([], dtype=mx.int32))
+    assert c.keys is None and c._idx == 0 and c._row_ends is None
+    assert c.offset.shape == (0,) and c.left_padding.shape == (0,)
+    j = owned.BatchKVCache([0])
+    jk, jv = _kv(T - 10, 30, b=1)
+    j.update_and_fetch(jk, jv)
+    c.extend(j)
+    assert c._row_ends is None and c._idx == T - 10
+    np.testing.assert_array_equal(np.asarray(_row_keys(c, 0)[0]), np.asarray(jk))
+
+
+def test_a_join_onto_a_cache_with_no_buffers_ignores_its_ends():
+    c = owned.BatchKVCache([])
+    c._row_ends = [40, 38]          # left behind by a hand reset
+    j = owned.BatchKVCache([0])
+    jk, jv = _kv(30, 30, b=1)
+    j.update_and_fetch(jk, jv)
+    c.extend(j)
+    assert c._row_ends is None and c._idx == 30
+    np.testing.assert_array_equal(np.asarray(_row_keys(c, 0)[0]), np.asarray(jk))
+
+
 def test_justify_rows_gives_the_unarmed_layout():
     armed, _ = _batch([2, 0, 1, 2])
     plain, _ = _batch([2, 0, 1, 2], armed=False)

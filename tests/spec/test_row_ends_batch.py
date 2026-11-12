@@ -190,6 +190,112 @@ def test_each_row_of_an_uneven_native_head_batch_decodes_as_alone(env, keep):
         assert not uneven
 
 
+def test_an_emptied_uneven_batch_adopts_a_row_as_alone(env):
+    """Two rows finish together in a round they leave ending apart (takes 1
+    and 2) while a third row's admission is queued. The emptied batch adopts
+    it: the row's tokens are its greedy continuation and each verify's
+    hidden states equal the same verify on the row alone."""
+    rng = np.random.default_rng(7)
+    rows = [rng.integers(1, 120, n).tolist() for n in (9, 15, 11)]
+    fa_idx = 3
+    with mx.stream(mx.cpu):
+        lm, cfg = _target()
+        fa_idx = cfg.full_attention_interval - 1
+        refs = [_alone(lm, row, 40) for row in rows]
+        singles, bonus = [], []
+        for row in rows[:2]:
+            c = lm.make_cache()
+            lm(mx.array([row]), cache=c)
+            singles.append(c)
+        bonus = [refs[0][0], refs[1][0]]
+        cache = [type(layer[0]).merge(list(layer)) for layer in zip(*singles)]
+        joiner = lm.make_cache()
+        jv = spec._mtp_verify_target(lm, mx.array([rows[2]]), joiner, None)
+        assert int(jv.target_tokens[0, -1].item()) == refs[2][0]
+        head = _head(cfg)
+        draft = head.draft_block
+        live, rnd, verifies, stale = [0, 1], [0], [], []
+
+        def steered(last_bonus, hidden, kv, block_size, *args, **kwargs):
+            out = draft(last_bonus, hidden, kv, block_size, *args, **kwargs)
+            fa = cache[fa_idx]
+            steer = []
+            for j, b in enumerate(np.array(last_bonus).tolist()):
+                i = live[j]
+                k = int(fa.offset[j].item()) - len(rows[i])
+                assert refs[i][k] == b, (i, k)
+                take = (i + rnd[0]) % 3
+                want = refs[i][k + 1:k + 1 + out.shape[1]]
+                steer.append([t if m < take else (t + 1) % _VOCAB
+                              for m, t in enumerate(want)])
+            rnd[0] += 1
+            return mx.array(steer, dtype=out.dtype)
+
+        verify = spec._mtp_verify_target
+
+        def record_verify(lm_, verify_input, prompt_cache, sampler, **kwargs):
+            k = [int(o) for o in prompt_cache[fa_idx].offset.tolist()]
+            out = verify(lm_, verify_input, prompt_cache, sampler, **kwargs)
+            verifies.append((list(live), k, np.array(verify_input).tolist(),
+                             np.array(out.hidden.astype(mx.float32))))
+            return out
+
+        empty_rows = spec._filter_batch_rows_empty
+
+        def spy_empty(prompt_cache):
+            stale.append([getattr(c, "_row_ends", None) for c in prompt_cache])
+            empty_rows(prompt_cache)
+
+        counts, ends_at = {0: 1, 1: 1}, {0: 5, 1: 7}
+
+        def stop(orig, tok):
+            # the first two rows end together with the second draft round,
+            # which leaves them ending 2 apart
+            if orig in counts:
+                counts[orig] += 1
+                return counts[orig] >= ends_at[orig]
+            return False
+
+        head.draft_block = steered
+        model = SimpleNamespace(language_model=lm)
+        got = []
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(spec, "_mtp_verify_target", record_verify)
+            mp.setattr(spec, "_filter_batch_rows_empty", spy_empty)
+            gen = spec._owned_decode_rounds_batch(
+                model, head, lm, cache, hidden=None, b=list(bonus),
+                shared_kv=None, seed_tokens=None, emitted=[1, 1],
+                max_tokens=64, sampler=None, draft_block_size=None,
+                stop_check=stop)
+            for toks, meta in gen:
+                if len(toks) > 2 and toks[2] is not None:
+                    got.append(toks[2])
+                last = meta["round_pos"] == meta["round_len"] - 1
+                if rnd[0] == 2 and not getattr(model, "_generator_injections", None) \
+                        and len(toks) == 2:
+                    model._generator_injections = [{
+                        "uids": [None], "prompt_cache": joiner,
+                        "prompt_tokens": mx.array([rows[2]]),
+                        "hidden": jv.hidden, "first_tokens": jv.target_tokens[:, -1],
+                        "first_tokens_list": [refs[2][0]], "max_tokens": [64]}]
+                    live[:] = [2]
+                if last and rnd[0] >= 7:
+                    gen.close()
+                    break
+        # the batch emptied after an uneven round, then adopted the row
+        assert stale and [e for e in stale[0] if e is not None] == [[19, 21]]
+        adopted = [v for v in verifies if v[0] == [2]]
+        assert len(adopted) >= 3
+        assert [refs[2][0]] + got == refs[2][:len(got) + 1]
+        for _, (k,), x, hidden in adopted:
+            prefix = rows[2] + refs[2][:k - len(rows[2])]
+            c = lm.make_cache()
+            lm(mx.array([prefix]), cache=c)
+            want = verify(lm, mx.array(x), c, None).hidden
+            np.testing.assert_allclose(hidden, np.array(want.astype(mx.float32)),
+                                       atol=1e-4, rtol=1e-4)
+
+
 def test_the_native_head_on_a_dense_target_arms(env):
     lm, cfg = _target()
     head = _head(cfg)
