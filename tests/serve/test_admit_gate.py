@@ -545,6 +545,81 @@ def test_projection_window_caps_rotating_kinds(monkeypatch):
         kv_new + transient + sm.admit_reserve_bytes(0), rel=0.05)
 
 
+class FakeGridKV(FakeKV):
+    """A cache that grows on the capacity grid, as the gmlx KV caches do."""
+
+    _kv_grid = True
+
+
+def test_a_join_on_the_grid_is_priced_at_the_grid_point(monkeypatch):
+    """A row 80000 tokens deep holds the grid point 80384. A join that
+    takes the batch to 83000 tokens grows both rows to the next grid
+    point, 88576, not to 83200, the block past it."""
+    import gmlx.gen.prefill_decay as pd
+    from gmlx.cache.kv_append import grid_capacity
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    monkeypatch.setattr(pd, "score_transient_bytes", lambda *a, **k: 0.0)
+    g = FakeGen(rows=1)
+    kv = FakeGridKV(length=80384, offset=80000)
+    g._generation_batch.prompt_cache = [kv]
+    live = kv.keys.nbytes + kv.values.nbytes
+    assert grid_capacity(83000, 256) == 88576
+
+    projected, _, _ = sm.project_admission(g, [_pending(2, 82000, 1000)])
+
+    kv_new = live / 80384 * 2 * 88576 - live
+    assert projected - 2e9 == pytest.approx(kv_new, rel=1e-3)
+
+
+class _LayerKV:
+    """One attention layer that reports its bytes: ``per_token`` for the
+    whole batch at ``depth``."""
+
+    def __init__(self, per_token, depth):
+        self.per_token, self.depth = per_token, depth
+
+    def admit_bytes(self):
+        return self.per_token, self.depth, 0.0
+
+
+@pytest.mark.parametrize("rows, depth, prompt, gen",
+                         [(1, 80000, 40000, 1000), (3, 40000, 1000, 80000)],
+                         ids=["the-join", "the-final-depth"])
+def test_a_join_reserves_its_own_caches_or_one_layer_at_the_final_depth(
+        monkeypatch, rows, depth, prompt, gen):
+    """16 layers of 16 KiB a row token. Beside a row 80000 deep, a join
+    with a 40000 token prompt holds its own 16 layers at that prompt
+    beside one live layer until the join returns: about 12 GB. Beside
+    three rows 40000 deep, a short join that may write 80000 tokens takes
+    the batch to that depth, where one layer at the joined width is held
+    twice by a regrow: about 5 GB. The reserve held one live layer and
+    one row of it, under 3 GB in both."""
+    import gmlx.gen.prefill_decay as pd
+
+    monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 200e9)
+    monkeypatch.setattr(pd, "score_transient_bytes", lambda *a, **k: 0.0)
+    bpt, layers = 16384.0, 16
+    g = FakeGen(rows=rows)
+    g._generation_batch = FakeBatch(
+        range(rows), [_LayerKV(bpt * rows, depth) for _ in range(layers)])
+    live = layers * bpt * rows * depth
+
+    projected, _, parts = sm.project_admission(
+        g, [_pending(2, prompt, gen)])
+
+    width, final = rows + 1, sm._round_block(max(depth, prompt + gen))
+    kv_new = layers * bpt * width * final - live
+    held_join = layers * bpt * sm._round_block(prompt) + bpt * rows * depth
+    held_later = width * bpt * final
+    want = held_join if rows == 1 else held_later
+    assert want == max(held_join, held_later)
+    assert projected - kv_new == pytest.approx(want, rel=1e-6)
+    assert f"reserve {want / 1e9:.1f}" in parts
+
+
 def test_empty_batch_projection_none():
     g = FakeGen(rows=0)
     g._generation_batch.prompt_cache = []
