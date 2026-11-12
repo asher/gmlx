@@ -112,6 +112,11 @@ memory runs short, its band moves from `green` to `yellow`, `orange` and
 3. In `orange`, it evicts caches such as the prompt cache.
 4. As a last step, it [sheds](#shed) the largest request.
 
+A request that arrives short of memory does not wait for these steps. The
+server evicts what the request is short of from the prompt cache, the
+entries used longest ago first, and admits it. The request waits only when
+the prompt cache cannot give that much.
+
 See [Memory](memory.md) and [Capacity and metrics](capacity.md).
 
 ## Guidance

@@ -27,6 +27,13 @@ batch: the ceiling tick trims the pending list to its head row, and the
 rest re-project next tick, so past-ceiling admission stays serialized
 for as long as the projection keeps failing.
 
+Before it declines, the gate has the governor evict what the join is
+over the governed budget from the prompt cache pool, the coldest blocks
+first (governor.cover_admission_shortfall), and admits on the same tick
+when that covers it. The pool is plain active memory to the budget, so a
+full pool would otherwise defer every join. A pool that cannot cover the
+whole shortfall is left alone and the deferral above stands.
+
 The projection is conservative in one direction by design: a finished
 batch that has not yet released its footprint makes measured headroom
 look smaller than it will be, which biases toward deferring. That is the
@@ -132,11 +139,15 @@ def _should_decline(gen) -> bool:
     from .governor import admission_hold_reason
     from .memory import project_admission
 
+    cands = pending[: len(uids)]
     hold = admission_hold_reason(gen)
     if hold:
         projected, headroom, parts = 0.0, 0.0, hold
+        if _evict_shortfall_held(gen, cands):
+            _log_admit(gen, uids, deferred)
+            return False
     else:
-        verdict = project_admission(gen, pending[: len(uids)])
+        verdict = project_admission(gen, cands)
         if verdict is None:
             # No basis to project (nothing measured yet): admit. The
             # first request on a freshly loaded model cannot be the one
@@ -144,7 +155,10 @@ def _should_decline(gen) -> bool:
             _log_admit(gen, uids, deferred)
             return False
         projected, headroom, parts = verdict
-        if projected <= headroom:
+        # A join over the governed budget takes its shortfall from the
+        # prompt cache pool first, also when it fits the working set: the
+        # governor would hold every join behind it.
+        if _evict_shortfall(gen, cands, projected) or projected <= headroom:
             _log_admit(gen, uids, deferred)
             return False
 
@@ -189,6 +203,35 @@ def _should_decline(gen) -> bool:
             "[admit] deferred uid=%s: %s; waiting=%d, decoding=%d",
             uids, _LAST_DEFER, len(pending), batch_rows(gen))
     return True
+
+
+def _evict_shortfall(gen, cands, projected: float) -> bool:
+    """Have the governor evict what the join is over budget from the
+    prompt cache pool. True when the join then fits."""
+    from .governor import cover_admission_shortfall, shortfall_eviction_due
+    from .memory import admission_slack_bytes
+
+    if not shortfall_eviction_due(gen):
+        return False
+    return cover_admission_shortfall(
+        gen, projected, admission_slack_bytes(gen, len(cands)))
+
+
+def _evict_shortfall_held(gen, cands) -> bool:
+    """The same under a yellow hold, where the gate does not project. A
+    join still held keeps the stamp of its last projection, so the
+    governor's charge for it ages as it does today."""
+    from .governor import shortfall_eviction_due
+    from .memory import project_admission
+
+    if not shortfall_eviction_due(gen):
+        return False
+    stamp = getattr(gen, "_kq_admit_last_projection", None)
+    verdict = project_admission(gen, cands)
+    if verdict is not None and _evict_shortfall(gen, cands, verdict[0]):
+        return True
+    gen._kq_admit_last_projection = stamp
+    return False
 
 
 def _log_admit(gen, uids, deferred) -> None:

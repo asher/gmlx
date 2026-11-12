@@ -1063,6 +1063,21 @@ def ckpt_governor_release(manager, fraction: float) -> int:
     return freed
 
 
+def ckpt_release_coldest(manager) -> int | None:
+    """Release the least recently used ckpt record and return its own
+    bytes, or None when no record is left. The blocks it pinned go to the
+    tail of the free queue for the caller to evict."""
+    idx = _ckpt_records(manager)
+    with manager.lock:
+        if not idx:
+            return None
+        _, rec = idx.popitem(last=False)
+        own = int(getattr(rec, "nbytes", 0) or 0)
+        _release_record(manager, rec)
+    _ckpt_bump(manager, "ckpt_governor_released", 1)
+    return own
+
+
 def _fatchain_victim(idx, bs: int):
     """Key of the eviction victim: the deepest non-anchor record of the
     chain group holding the most blocks, the group's anchor only once

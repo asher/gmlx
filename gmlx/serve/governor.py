@@ -49,6 +49,14 @@ a shallow one growing fast is not.
           the same uid twice in a row and victim repeats are counted
           in /v1/metrics so starvation is visible.
 
+A join over the budget does not wait for the ladder. In green and
+yellow the admission gate asks cover_admission_shortfall to evict what
+the join is short of by yellow's own test (pending shed + projection +
+K_y x rate - headroom, plus the gate's slack) from the prompt cache pool
+by bytes, the coldest first, and admits when that covers it. A pool that
+cannot cover it is not touched. Orange and red keep the pool to their
+rungs.
+
 Anti-thrash: minimum dwell per band and a cap on shed actions per
 minute, or orange fights a decode loop that immediately
 re-allocates. Every shed reports measured recovery (before/after
@@ -150,6 +158,7 @@ _STATS = {
     "kernel_free_page_waiters": None,
     "kernel_floor_reds": 0,
     "kernel_floor": None,
+    "shortfall_evictions": 0,
 }
 
 
@@ -279,6 +288,8 @@ class _GovState:
         self.kernel_prompt_prev = False
         self.prompt_time_seen = None
         self.floor_warned_at = 0.0
+        # last time the pool could not cover a join's shortfall
+        self.shortfall_missed_at = None
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
 
@@ -314,6 +325,76 @@ def make_room_for_admission(gen) -> None:
                  "registered caches before past-ceiling admit",
                  freed / 1e9)
     st.pending_shed_bytes = 0.0
+
+
+# A join the pool could not cover asks again this often, since the answer
+# walks every block of the pool.
+_SHORTFALL_RETRY_S = 1.0
+
+
+def _admission_shortfall(gen, st: "_GovState", projected: float):
+    """Bytes a join of ``projected`` is over the budget by yellow's own
+    test: what the clock needs with the join charged, less the headroom
+    there is. Negative when the join fits. None without a reading."""
+    head, _ = _headroom_and_ws(_env_f("GMLX_GOV_MARGIN", 0.05))
+    if head is None:
+        return None
+    rate, _ = _demand_bytes(gen, st)
+    rate = min(rate, max(8.0 * st.obs_delta_ema, 64e6))
+    ky = _env_f("GMLX_GOV_KY", 16.0)
+    return st.pending_shed_bytes + projected + ky * rate - head
+
+
+def shortfall_eviction_due(gen) -> bool:
+    """Whether ``cover_admission_shortfall`` may evict for a join now:
+    a governed batch with a prompt cache pool, in green or yellow, that
+    has not just found the pool short. Orange and red own the pool with
+    their own rungs."""
+    if not governor_enabled():
+        return False
+    st = getattr(gen, "_kq_governor", None)
+    mgr = getattr(gen, "apc_manager", None)
+    if st is None or st.band > YELLOW or not hasattr(mgr, "evict_bytes"):
+        return False
+    missed = st.shortfall_missed_at
+    return (missed is None
+            or time.perf_counter() - missed >= _SHORTFALL_RETRY_S)
+
+
+def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
+    """Evict what a pending join is over budget from the prompt cache
+    pool, the coldest first, so the gate admits it now and not after the
+    deferral. ``slack`` is the gate's price of what the batch grows by
+    before the join lands. True when the pool gave the shortfall and the
+    join then fits.
+
+    Nothing is evicted when the join fits already or when the pool cannot
+    cover the whole shortfall: the deferral and its handoff stand."""
+    if not shortfall_eviction_due(gen):
+        return False
+    st = gen._kq_governor
+    mgr = gen.apc_manager
+    short = _admission_shortfall(gen, st, projected)
+    if short is None or short < 0:
+        return False
+    now = time.perf_counter()
+    want = short + max(0.0, slack)
+    if mgr.reclaimable_bytes() < want:
+        st.shortfall_missed_at = now
+        return False
+    freed = mgr.evict_bytes(want)
+    mx.clear_cache()
+    _STATS["shortfall_evictions"] += 1
+    _STATS["last_action"] = (
+        f"admission shortfall evict freed {freed / 1e9:.2f} GB")
+    left = _admission_shortfall(gen, st, projected)
+    fits = left is not None and left < 0
+    st.shortfall_missed_at = None if fits else now
+    _log.info("[governor] admission shortfall %.2f GB: evicted %.2f GB of "
+              "the prompt cache pool, coldest first; the join %s",
+              short / 1e9, freed / 1e9,
+              "fits" if fits else "is still over budget")
+    return fits
 
 
 # ---------------------------------------------------------------- sampling

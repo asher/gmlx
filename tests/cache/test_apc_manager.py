@@ -371,6 +371,71 @@ def test_governor_eviction_drops_the_cached_free_ram(monkeypatch):
     assert len(reads) == 2
 
 
+def test_evict_bytes_takes_the_coldest_idle_blocks_then_a_clone(monkeypatch):
+    """An eviction by bytes stops at the figure asked: it takes the blocks
+    released longest ago, one at a time, and leaves a later prompt's
+    blocks, an exact-prefix clone and the blocks a row still leases. Only
+    a figure the idle blocks cannot cover reaches the clone."""
+    import mlx.core as mx
+
+    from gmlx.cache.kv_cache import KVCache
+
+    m, block = _full_manager(monkeypatch)
+    k = mx.zeros((1, 2, 64, 16), mx.float16)
+    m.release(m.store_kv_blocks(list(range(1000, 1064)), [k, k], [k, k]))
+    leased = m.store_kv_blocks(list(range(2000, 2064)), [k, k], [k, k])
+    clone = KVCache()
+    clone.update_and_fetch(k, k)
+    m._exact_cache[1] = apc.APCExactCacheEntry(
+        token_ids=(1,), extra_hash=0, prompt_cache=[clone])
+    clone_bytes = apc._cache_nbytes([clone])
+    assert clone_bytes > 0
+    cold = []
+    b = m._free_head
+    while b is not None:
+        if b.block_hash is not None:
+            cold.append(b.block_hash)
+        b = b.next
+    assert len(cold) == 36 and len(leased) == 4
+    idle = 36 * block
+    assert m.reclaimable_bytes() == idle + clone_bytes
+
+    assert m.evict_bytes(3 * block - 1) == 3 * block
+    assert [h for h in cold if h not in m.hash_table] == cold[:3]
+    assert 1 in m._exact_cache
+
+    assert m.evict_bytes(idle) == idle - 3 * block + clone_bytes
+    assert not m._exact_cache
+    assert {id(b) for b in m.hash_table.values()} == {id(b) for b in leased}
+    assert m.reclaimable_bytes() == 0
+
+
+def test_an_eviction_by_bytes_gives_the_headroom_its_bytes(monkeypatch):
+    """The admission gate reads the headroom again after it evicts. Each
+    block holds its own buffers, so the bytes ``evict_bytes`` reports are
+    bytes the headroom gains at once, before any cache clear."""
+    import mlx.core as mx
+
+    from gmlx.gen.prefill_decay import headroom_bytes
+
+    if os.environ.get("KQUANT_FORCE_CPU") or not mx.metal.is_available():
+        pytest.skip("reads the Metal allocator's active memory")
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 100 * GB)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    k = mx.random.normal((1, 8, 512, 2048)).astype(mx.float16)
+    mx.eval(k)
+    m.release(m.store_kv_blocks(list(range(512)), [k, k], [k, k]))
+    assert len(m.hash_table) == 32
+    block = next(b.resident_bytes() for b in m.pool if b.block_hash is not None)
+    assert block == 4 * k.nbytes // 32
+    mx.synchronize()
+    before = headroom_bytes()
+    freed = m.evict_bytes(16 * block)
+    gained = headroom_bytes() - before
+    assert freed == 16 * block
+    assert 0.9 * freed <= gained <= 1.1 * freed
+
+
 def test_from_env_is_dead_under_the_pin(monkeypatch):
     monkeypatch.setenv("APC_ENABLED", "0")
     assert apc.from_env(model_namespace="/m/a.gguf") is None

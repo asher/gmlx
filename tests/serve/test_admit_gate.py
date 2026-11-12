@@ -613,3 +613,126 @@ def test_fresh_model_projects_from_boot_rates(monkeypatch):
         1000.0 * 512 + pd.score_transient_bytes(g.model, None, 500)
         + sm.admit_reserve_bytes(0), rel=0.05)
     assert "kv" in parts
+
+
+def _pooled_gen(monkeypatch, projected_blocks, band=None, fits_ws=False):
+    """A decoding row, a waiting request, and a prompt cache pool of two
+    finished prompts: 32 idle blocks released first, then 4. The budget
+    has room for 2 blocks, and each evicted block gives its bytes back."""
+    import time
+
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx.cache.apc_manager import GmlxAPCManager
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.governor as gov
+
+    monkeypatch.delenv("GMLX_GOVERNOR", raising=False)
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 100 << 30)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(pd, "streamed_tracked_bytes", lambda: 0.0)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    for start, n in ((0, 512), (1000, 64)):
+        k = mx.zeros((1, 2, n, 16), mx.float16)
+        m.release(m.store_kv_blocks(
+            list(range(start, start + n)), [k, k], [k, k]))
+    assert len(m.hash_table) == 36
+    full = m.resident_bytes()
+    block = full // 36
+
+    def head():
+        return 2 * block + full - m.resident_bytes()
+
+    monkeypatch.setattr(gov, "_headroom_and_ws",
+                        lambda margin: (head(), 100e9))
+    def project(gen, cands):
+        # Stamped for the governor's charge, as the real projection is.
+        gen._kq_admit_last_projection = (
+            time.perf_counter(), projected_blocks * block)
+        return (projected_blocks * block,
+                head() + (1e9 if fits_ws else 0), "kv")
+
+    monkeypatch.setattr(sm, "project_admission", project)
+    monkeypatch.setitem(gov._STATS, "shortfall_evictions", 0)
+    g = FakeGen(rows=1)
+    g.apc_manager = m
+    g._kq_admit_kv_rates = {"k": {"rate": 1.0, "window": None}}
+    if band is not None:
+        gov._state(g).band = band
+    return g, m, block
+
+
+def _cold_first(m):
+    out, b = [], m._free_head
+    while b is not None:
+        if b.block_hash is not None:
+            out.append(b.block_hash)
+        b = b.next
+    return out
+
+
+@pytest.mark.parametrize("band, fits_ws", [(0, False), (0, True), (1, False)],
+                         ids=["would-defer", "fits-the-working-set",
+                              "held-in-yellow"])
+def test_a_join_over_budget_evicts_its_shortfall_and_admits_at_once(
+        gated, monkeypatch, band, fits_ws):
+    """A join 5 blocks over the budget, with a pool that holds 36. The
+    gate takes the shortfall from the pool's coldest blocks and admits on
+    the same tick: no deferral, and the rest of the pool stays. Without
+    the eviction the join defers, or it is admitted over the governed
+    budget and every join after it is held."""
+    import gmlx.serve.governor as gov
+
+    wrapped, _ = gated
+    g, m, block = _pooled_gen(monkeypatch, 7, band=band, fits_ws=fits_ws)
+    cold = _cold_first(m)
+    full = m.resident_bytes()
+
+    wrapped(g)
+
+    assert g.admitted == [1]
+    assert not getattr(g, "_kq_admit_deferred_s", None)
+    gone = [h for h in cold if h not in m.hash_table]
+    assert gone == cold[:6]
+    # The shortfall is 5 blocks and 16 bytes, the slack 512 bytes: one
+    # more block covers both.
+    assert full - m.resident_bytes() == 6 * block
+    assert gov._STATS["shortfall_evictions"] == 1
+
+
+@pytest.mark.parametrize("projected_blocks, band", [(50, 0), (7, 2)],
+                         ids=["pool-short", "orange"])
+def test_a_shortfall_the_pool_cannot_give_leaves_it_whole_and_defers(
+        gated, monkeypatch, projected_blocks, band):
+    """A join the pool cannot cover takes nothing from it, and neither
+    does a join under an orange hold, where the governor's own rung owns
+    the pool. The join defers as before."""
+    wrapped, clock = gated
+    g, m, _ = _pooled_gen(monkeypatch, projected_blocks, band=band)
+    for _ in range(3):
+        clock.advance(0.05)
+        wrapped(g)
+    assert g.admitted == []
+    assert 1 in g._kq_admit_deferred_s
+    assert len(m.hash_table) == 36
+
+
+def test_a_join_still_held_in_yellow_keeps_its_projection_stamp(
+        gated, monkeypatch):
+    """Under a yellow hold the gate projects only to price an eviction. A
+    join the pool cannot cover stays held with the stamp of its last
+    projection, so the governor's charge for it runs out as it did. A join
+    the eviction admits takes the new stamp, as any admitted join does."""
+    wrapped, _ = gated
+    g, _, block = _pooled_gen(monkeypatch, 50, band=1)
+    old = g._kq_admit_last_projection = (1.5, 3.0 * block)
+    wrapped(g)
+    assert g.admitted == []
+    assert g._kq_admit_last_projection is old
+
+    g, _, block = _pooled_gen(monkeypatch, 7, band=1)
+    g._kq_admit_last_projection = (1.5, 3.0 * block)
+    wrapped(g)
+    assert g.admitted == [1]
+    assert g._kq_admit_last_projection[1] == 7 * block

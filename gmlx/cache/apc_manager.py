@@ -486,6 +486,74 @@ class GmlxAPCManager(_apc.APCManager):
             _invalidate_free_ram()
         return freed
 
+    def reclaimable_bytes(self) -> int:
+        """Bytes ``evict_bytes`` can free: idle pool blocks, exact-prefix
+        clones, and ckpt records with the blocks only they pin. A block a
+        row leases is not counted."""
+        total = 0
+        with self.lock:
+            pins: dict = {}
+            idx = getattr(self, "_kq_ckpt_records", None)
+            for rec in (idx or {}).values():
+                total += int(getattr(rec, "nbytes", 0) or 0)
+                for blocks in (rec.main_blocks, rec.bounded_blocks):
+                    for b in blocks or ():
+                        pins[id(b)] = pins.get(id(b), 0) + 1
+            for b in self.pool:
+                if b.ref_cnt == pins.get(id(b), 0):
+                    total += b.resident_bytes()
+            for e in self._exact_cache.values():
+                total += int(_apc._cache_nbytes(e.prompt_cache))
+        return total
+
+    def _evict_idle_blocks(self, want: int) -> int:
+        """Evict idle blocks from the head of the free queue, the least
+        recently released first, until ``want`` bytes are freed."""
+        freed = 0
+        guard = len(self.pool)
+        while freed < want and guard > 0:
+            guard -= 1
+            head = self._free_head
+            if head is None:
+                break
+            nb = head.resident_bytes()
+            b = self._evict_lru()
+            if b is None:
+                break
+            # An emptied block goes back to the tail, as in governor_evict.
+            self._free_push(b)
+            freed += nb
+        return freed
+
+    def evict_bytes(self, want: int) -> int:
+        """Evict at least ``want`` bytes, the coldest first, and return the
+        bytes freed. Idle pool blocks go first, from the head of the free
+        queue, since they come one block at a time and the eviction can
+        stop at the figure asked. Exact-prefix clones follow, oldest first,
+        and ckpt records last, least recently used first, each with the
+        blocks it pinned. A clone or a record is evicted whole, so the last
+        one can free more than what was left to free. Rows in flight never
+        lose blocks."""
+        want = int(want)
+        if want <= 0:
+            return 0
+        from .snapshot import ckpt_release_coldest
+
+        with self.lock:
+            freed = self._evict_idle_blocks(want)
+            while freed < want and self._exact_cache:
+                _, e = self._exact_cache.popitem(last=False)
+                freed += int(_apc._cache_nbytes(e.prompt_cache))
+            while freed < want:
+                own = ckpt_release_coldest(self)
+                if own is None:
+                    break
+                freed += own
+                freed += self._evict_idle_blocks(want - freed)
+        if freed:
+            _invalidate_free_ram()
+        return freed
+
     # Exact-tier entry salt: nonzero only for kvarn boots, where it keys
     # entries to the wire config (scheme/widths/tail/layout version) so a
     # scheme change never warm-adopts a stale-format entry. The disk

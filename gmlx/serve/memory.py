@@ -435,6 +435,20 @@ def project_admission(gen, candidates):
     return projected, head, parts
 
 
+def admission_slack_bytes(gen, n_candidates: int) -> float:
+    """What an eviction for a join takes beyond the join's shortfall: one
+    more block of KV for every row of the joined batch, at the rates the
+    projection prices with. The rows decoding grow by less than that
+    before the join lands."""
+    rates = getattr(gen, "_kq_admit_kv_rates", None)
+    if not rates:
+        from .capacity import boot_kv_rates
+
+        rates = boot_kv_rates(getattr(gen, "model", None))
+    width = batch_rows(gen) + n_candidates
+    return sum(k["rate"] for k in (rates or {}).values()) * width * _STEP_BLOCK
+
+
 def apply_cache_limit(cfg) -> None:
     """Resolve and apply the server's cache limit; called once at startup.
     Working-set source: capacity (the one accounting, U4)."""

@@ -39,6 +39,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [Faster clips with int8](docs/video.md#faster-clips-with-int8).
 - `gmlx serve` video jobs and ComfyUI video steps evaluate a step as
   `gmlx video generate` does, so a small clip's steps take less time.
+- A request that arrives short of memory beside others decoding takes what
+  it is short of from the oldest prompt cache entries and starts at once. It
+  waited up to a minute, and the server then emptied the whole prompt cache.
 - `gmlx init` and `--with-embeddings` set up EmbeddingGemma 2.
   `embeddings: true` still picks `qwen3-embed-0.6b`.
 - `prompt_name` and `dimensions` work on EmbeddingGemma and
