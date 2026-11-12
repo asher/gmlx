@@ -58,6 +58,7 @@ from gmlx.upstream.patching import root  # noqa: E402
 _GEN = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
 _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _OPENAI = importlib.import_module("gmlx._vendor.mlx_vlm.server.openai")
+_ANTHROPIC = importlib.import_module("gmlx._vendor.mlx_vlm.server.anthropic")
 _RS = importlib.import_module("gmlx._vendor.mlx_vlm.server.responses_state")
 _SCHEMAS = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
 _PKG = importlib.import_module("gmlx._vendor.mlx_vlm.server")
@@ -281,7 +282,11 @@ def serve(monkeypatch):
                 (_APP, "_split_thinking_text"), (_RS, "_split_thinking"),
                 (_GEN.ResponseGenerator, "_preprocess_request"),
                 (_GEN.ResponseGenerator, "_make_thinking_budget_criteria"),
-                (_PKG, "_infer_tool_parser_from_processor")])
+                (_PKG, "_infer_tool_parser_from_processor"),
+                (_GEN.GenerationArguments, "to_template_kwargs"),
+                (_APP, "_build_gen_args"), (_OPENAI, "_build_gen_args"),
+                (_ANTHROPIC, "_build_gen_args"),
+                (getattr(_APP, "_protocol_deps", None), "build_gen_args")])
     for obj, attr in seams:
         if hasattr(obj, attr):
             monkeypatch.setattr(obj, attr, getattr(obj, attr))
