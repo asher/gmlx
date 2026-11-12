@@ -205,6 +205,76 @@ def test_gate_outside_pacer_composes(monkeypatch):
     assert [s[0] for s in pending] == [1]  # candidate kept its position
 
 
+def _held_then_green(monkeypatch, bands):
+    """Both wrappers over a stock body whose tick is 0.5 s of decode. The
+    last chunk took 3 s and just ran, so the pacer owes 3 s of decode
+    before the next. ``bands`` gives the governor band tick by tick: a
+    hold while yellow, and a join that fits while green."""
+    import gmlx.serve.governor as gov
+
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "1.0")
+    clock = _Clock()
+
+    def _decode_tick(self, **kw):
+        clock.advance(0.5)
+        return _fake_next(self, **kw)
+
+    monkeypatch.setattr(ar.BatchGenerator, "_next", _decode_tick)
+    monkeypatch.setattr(batch_sched, "time",
+                        SimpleNamespace(perf_counter=clock))
+    monkeypatch.setattr(ag, "time", SimpleNamespace(perf_counter=clock))
+    batch_sched.install_decode_priority_sched()
+    ag.install_admit_headroom_gate()
+    band = iter(bands)
+    monkeypatch.setattr(gov, "admission_hold_reason",
+                        lambda gen: next(band) or None)
+    monkeypatch.setattr(ag, "_evict_shortfall", lambda *a: False)
+    monkeypatch.setattr(ag, "_evict_shortfall_held", lambda *a: False)
+    _always_decline(monkeypatch, projected=1e9, headroom=10e9)
+    g = FakeGen(rows=1)
+    g._kq_last_chunk_time = 3.0
+    g._kq_decode_since_chunk = 0.0
+    return ar.BatchGenerator._next, g
+
+
+def test_a_join_held_past_what_the_pacer_owes_is_taken_when_the_band_clears(
+        monkeypatch, caplog):
+    """The governed rung: a join held 4 s in yellow, then one green tick
+    before the band turns back. The decode the hold ran pays the 3 s the
+    pacer owed, so the green tick takes the join. Without it the pacer
+    held the join that tick, the band turned back and held it again."""
+    yellow = "governor yellow"
+    wrapped, g = _held_then_green(monkeypatch, [yellow] * 8 + [""]
+                                  + [yellow] * 20)
+    with caplog.at_level("INFO", logger=ag._log.name):
+        for _ in range(9):
+            wrapped(g)
+    assert g.admitted == [1]
+    admits = [r.message for r in caplog.records if "admitting" in r.message]
+    assert admits == ["[admit] admitting uid=[1] after 3.0s deferred"]
+
+
+def test_the_admitting_line_is_logged_once_on_the_tick_that_takes_the_join(
+        monkeypatch, caplog):
+    """A join held 1 s, under the 3 s of decode the pacer owes: the pacer
+    holds it for the rest. The admitting line comes once, on the tick the
+    join is taken, not on every tick the gate lets it through."""
+    yellow = "governor yellow"
+    wrapped, g = _held_then_green(monkeypatch, [yellow] * 2 + [""] * 20)
+    taken_at = None
+    with caplog.at_level("INFO", logger=ag._log.name):
+        for tick in range(1, 13):
+            wrapped(g)
+            if g.admitted and taken_at is None:
+                taken_at = tick
+                lines = sum("admitting" in r.message for r in caplog.records)
+    assert g.admitted == [1]
+    # 1 s of held decode and 4 paced ticks of 0.5 s pay the 3 s.
+    assert taken_at == 7
+    assert lines == 1
+    assert sum("admitting" in r.message for r in caplog.records) == 1
+
+
 def test_update_kv_rates_and_projection(monkeypatch):
     import gmlx.gen.prefill_decay as pd
 

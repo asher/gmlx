@@ -47,7 +47,11 @@ tick.
 
 Install after the pacer (install_decode_priority_sched) so this wrapper
 runs outside it: on a declined tick the pacer sees no prefill work and
-passes straight through, decode runs unpaced while admission waits. Both
+passes straight through, decode runs unpaced while admission waits, and
+``_kq_admit_holding`` has the pacer count that decode toward the next
+chunk, so the join is not paced again once the gate lets it through. The
+pacer may still hold a join for the rest of what it owes, so the
+admitting line is logged only once the tick has taken the join. Both
 wrappers merge-never-clobber the pending list on restore, so an insert
 from a handler thread mid-call survives one stash nested in the other.
 
@@ -235,10 +239,19 @@ def _evict_shortfall_held(gen, cands) -> bool:
 
 
 def _log_admit(gen, uids, deferred) -> None:
-    waited = [deferred.get(u, 0.0) for u in uids if u in deferred]
-    if waited:
+    """Mark deferred candidates for the admitting line, which the wrapper
+    logs once the tick has taken them (_log_taken). The pacer inside the
+    gate can still hold a join the gate lets through."""
+    waited = {u: deferred[u] for u in uids if u in deferred}
+    gen._kq_admit_announce = waited or None
+
+
+def _log_taken(gen, waited) -> None:
+    pending = {s[0] for s in gen._unprocessed_sequences}
+    taken = [u for u in waited if u not in pending]
+    if taken:
         _log.info("[admit] admitting uid=%s after %.1fs deferred",
-                  uids, max(waited))
+                  taken, max(waited[u] for u in taken))
 
 
 def _one_row_next(gen, orig_next, kwargs):
@@ -282,6 +295,7 @@ def install_admit_headroom_gate() -> None:
     _orig_next = _ar.BatchGenerator._next
 
     def _gated_next(self, **kwargs):
+        self._kq_admit_announce = None
         try:
             decline = _should_decline(self)
         except Exception:
@@ -294,12 +308,18 @@ def install_admit_headroom_gate() -> None:
         if not decline:
             if ceiling and len(self._unprocessed_sequences) > 1:
                 return _one_row_next(self, _orig_next, kwargs)
-            return _orig_next(self, **kwargs)
+            out = _orig_next(self, **kwargs)
+            if self._kq_admit_announce:
+                _log_taken(self, self._kq_admit_announce)
+            return out
         stash_pending = self._unprocessed_sequences
         self._unprocessed_sequences = []
+        # The pacer inside counts this tick's decode toward the next chunk.
+        self._kq_admit_holding = True
         try:
             return _orig_next(self, **kwargs)
         finally:
+            self._kq_admit_holding = False
             # insert() may have appended to (or rebound) the temp list
             # from a handler thread mid-call; merge, never clobber.
             arrived = self._unprocessed_sequences

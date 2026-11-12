@@ -58,6 +58,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A request held for memory beside others decoding starts once memory frees.
+  It could wait again after its hold, and the log said it had started.
 - With a drafter, requests that shared a long prompt prefix decoded slower
   once one of them had restored its prefix from the prompt cache.
 - With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long
