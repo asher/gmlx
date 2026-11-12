@@ -62,8 +62,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With a dense Qwen model's native head, a request that joined as every
   request decoding together finished in the same step failed.
 - Gemma 4 audio input now matches the reference model. The audio encoder
-  saw one frame too many, and with a GGUF projector it also scaled its
-  attention queries wrongly.
+  saw one frame too many, the prompt held one audio token more than the
+  encoder made, and with a GGUF projector the encoder scaled its attention
+  queries wrongly.
 - A video request to a server with neither ffmpeg nor OpenCV gets a 400
   that names both installs, not a 500.
 - A damaged WAV, FLAC or MP3 file in a request gets a 400, not a 500.

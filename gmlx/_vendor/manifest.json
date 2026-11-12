@@ -507,7 +507,7 @@
   "mlx_vlm/models/gemma4/config.py": {"status": "verbatim", "upstream": "f4d1194e9f8329a37a686c273e06d13a79f4e69efd0b5474197bdf9cc2c0b954"},
   "mlx_vlm/models/gemma4/gemma4.py": {"status": "verbatim", "upstream": "c841c07f2b236454b26d418a6e8d152fd4060c81f5df175f1a1c5d8213c76d62"},
   "mlx_vlm/models/gemma4/language.py": {"sha256": "68f1a849a75e998f7cdb028e6c308bcfd08b9f66382688720583c80813ea561c", "status": "alias", "upstream": "1f6d82773bda18dcdeb233d509650b3e3c729e34409ebe1cadc689f6b16da54b"},
-  "mlx_vlm/models/gemma4/processing_gemma4.py": {"status": "verbatim", "upstream": "40293dd1188ead5c7a966b387791259bbc9936a146fd87e132f0770f8036ddf0"},
+  "mlx_vlm/models/gemma4/processing_gemma4.py": {"sha256": "ee6bc5200ec4edc92910b01afcc9132c3c8fecceac2fb72985b146948195b9fd", "status": "edited", "upstream": "40293dd1188ead5c7a966b387791259bbc9936a146fd87e132f0770f8036ddf0"},
   "mlx_vlm/models/gemma4/speculative_verifier.py": {"status": "verbatim", "upstream": "48beb8f06cc9ae32bd0b7bdd75222ff8ebecb89b90afa2c52a68a324df051c73"},
   "mlx_vlm/models/gemma4/vision.py": {"sha256": "a888f8a046e5d3d48dccae022b95ce6e2d3b29b6341cf80e02bd9b48e892b61b", "status": "edited", "upstream": "0ec4a7e464736ead8b92fee5eb28aa0eaf7e562909b146b63fe54cd05c60b2d4"},
   "mlx_vlm/models/gemma4_text/__init__.py": {"status": "verbatim", "upstream": "0b1021bd1b31dd131802024d291019094ea7bd18963a4dfca0730dcda477fdd4"},
