@@ -3424,8 +3424,14 @@ class BatchGenerator:
 
     def remove(self, uid) -> bool:
         """Remove a sequence from the batch by uid."""
+        out = self._kq_remove(uid)
         # gmlx: a speaking row never requeues, so its record closes here.
+        # A removal that raised can leave the row decoding, and a closed
+        # record would decode it as text.
         _speech_rows.close_row(self, uid)
+        return out
+
+    def _kq_remove(self, uid) -> bool:
         with mx.stream(self._stream):
             # Waiting in the queue.
             for i, (seq_uid, _, _, _, _, _) in enumerate(self._unprocessed_sequences):

@@ -286,6 +286,41 @@ def test_a_cancelled_row_closes_its_record(model, monkeypatch):
     assert gen.next()[1] == []
 
 
+def test_a_row_whose_removal_stays_refused_keeps_speaking(model, monkeypatch):
+    """The allocator refuses a speaking row's removal at every try, so the
+    row stays in the batch beside a text row. Its record stays open, and
+    the row goes on speaking instead of writing text."""
+    import gmlx.eval_guard as eg
+    import gmlx.serve.tick_guard as tg
+
+    _never_ends(model, monkeypatch)
+    monkeypatch.setattr(eg, "drain_for", lambda site: None)
+    gen = _engine(model)
+    uid, record = _speak(gen, model, PROMPT, "audio", 50)
+    (other,) = gen.insert([OTHER], max_tokens=50,
+                          prompt_kwargs=[_kw(model, OTHER)])
+    for _ in range(20):
+        if {uid, other} <= set(gen._generation_batch.uids):
+            break
+        gen.next()
+    gen.next()
+    assert {uid, other} <= set(gen._generation_batch.uids)
+    stream = record.state.stream
+    orig = ar.GenerationBatch.filter
+
+    def refused(self, keep):
+        raise RuntimeError("[metal::malloc] Attempting to allocate 1 bytes")
+
+    monkeypatch.setattr(ar.GenerationBatch, "filter", refused)
+    assert tg._take_out(gen, uid) == (tg._STAYS, [])
+    monkeypatch.setattr(ar.GenerationBatch, "filter", orig)
+    assert uid in gen._generation_batch.uids
+    assert not record.closed and record.state.stream is stream
+    mine = [r for r in gen.next()[1] if r.uid == uid]
+    assert mine and all(r.speech is not None and r.speech.kind == "frame"
+                        for r in mine)
+
+
 # -- rows side by side --------------------------------------------------------
 
 

@@ -432,109 +432,187 @@ def test_remove_after_a_refused_filter(engine, monkeypatch):
     assert gaps[0] == {0}
 
 
-def _refuse_removal(monkeypatch, gen, shot, where):
-    """The next filter of the decode batch is refused once: "layer" in the
-    second layer's own filter, after the first layer dropped the row, and
-    "before" before the filter changes the batch."""
-    if where == "before":
-        orig = ar.GenerationBatch.filter
+class _ArrayCall(type):
+    """``mx.array`` for ar, whose call from a filter goes through
+    ``fire`` first. It stays the array type for isinstance."""
 
-        def filt(self, keep):
-            shot.fire()
-            return orig(self, keep)
+    def __instancecheck__(cls, obj):
+        return isinstance(obj, cls.real)
 
-        monkeypatch.setattr(ar.GenerationBatch, "filter", filt)
-        return
-    second = gen._generation_batch.prompt_cache[1]
-    orig_layer = type(second).filter
+    def __subclasscheck__(cls, sub):
+        return issubclass(sub, cls.real)
 
-    def layer_filt(self, idx):
-        if self is second:
-            shot.fire()
-        return orig_layer(self, idx)
-
-    monkeypatch.setattr(type(second), "filter", layer_filt)
+    def __call__(cls, *a, **k):
+        if sys._getframe(1).f_code.co_name == "filter":
+            cls.fire()
+        return cls.real(*a, **k)
 
 
-_REMOVAL_LOG = {"layer": "stopped a layer's filter half way",
-                "before": "refused before the batch changed"}
+class _MxArray:
+    def __init__(self, real, fire):
+        self._real = real
+        self.array = _ArrayCall("array", (), {"real": real.array,
+                                              "fire": staticmethod(fire)})
+
+    def __getattr__(self, n):
+        return getattr(self._real, n)
 
 
-@pytest.mark.parametrize("where", ["layer", "before"])
+class _Removal:
+    """Errors inside the next removal from the decode batch, once armed.
+    ``where`` is "layer", the second layer's own filter after the first
+    dropped the row; "before", the filter's entry, before it changes the
+    batch; "array", the filter's allocation of the kept rows; "stays",
+    the filter's entry at each try while the armed batch is the engine's
+    (or ``times`` tries); and "cbfail", a command buffer failure at the
+    eval the filter makes before it changes the batch."""
+
+    LOG = {"layer": "stopped a layer's filter half way",
+           "before": "refused before the batch changed",
+           "array": "refused before the batch changed",
+           "stays": "stays in the batch",
+           "cbfail": "hit a command buffer failure"}
+
+    def __init__(self, monkeypatch, where, times=1):
+        self.mp, self.where, self.times = monkeypatch, where, times
+        self.fired = 0
+        self.batch = None
+
+    def fire(self, batch=None):
+        if self.batch is None:
+            return
+        if self.where == "stays" and self.times is None:
+            if batch is self.batch:
+                self.fired += 1
+                raise RuntimeError(MEM)
+            return
+        if self.fired < self.times:
+            self.fired += 1
+            raise RuntimeError(OOM if self.where == "cbfail" else MEM)
+
+    def arm(self, gen):
+        gb = self.batch = gen._generation_batch
+        if self.where in ("before", "stays"):
+            orig = ar.GenerationBatch.filter
+
+            def filt(b, keep):
+                self.fire(b)
+                return orig(b, keep)
+
+            self.mp.setattr(ar.GenerationBatch, "filter", filt)
+        elif self.where == "array":
+            self.mp.setattr(ar, "mx", _MxArray(ar.mx, self.fire))
+        elif self.where == "cbfail":
+            self.mp.setattr(ar, "mx", _Mx(ar.mx, self, "_eval_pending_state",
+                                          name="eval"))
+        else:
+            second = gb.prompt_cache[1]
+            orig_layer = type(second).filter
+
+            def layer_filt(c, idx):
+                if c is second:
+                    self.fire()
+                return orig_layer(c, idx)
+
+            self.mp.setattr(type(second), "filter", layer_filt)
+
+
+_WHERE = ["layer", "before", "array", "stays", "cbfail"]
+
+
+@pytest.mark.parametrize("where", _WHERE)
 def test_victim_removal_refused(engine, monkeypatch, caplog, where):
-    """Two refused ticks in a row take the guard's victim out, and the
-    allocator refuses inside that removal. A refusal before the batch
-    changed is retried; one inside a layer's filter drops the batch whole
-    and requeues every row in it. No row fails, and every stream is
-    whole."""
-    shot = Shot(MEM)
-    refused, failed = [], []
+    """Refused ticks in a row take the guard's victim out, and its removal
+    fails. A refusal before the batch changed is retried; one inside a
+    layer's filter drops the batch whole and requeues every row in it; a
+    removal refused at every try drops the batch without a filter while
+    the ticks keep failing; and a command buffer failure drops the engine
+    and requeues every row. No row fails, and every stream is whole."""
+    removal = _Removal(monkeypatch, where,
+                       times=None if where == "stays" else 1)
+    failed = []
     monkeypatch.setattr(tg, "_row_failed_callbacks",
                         [lambda uid, info: failed.append(uid)])
     inject = tg._maybe_inject
+    refused = []
 
     def maybe_inject(gen, st):
-        if refused and refused[0]:
-            refused[0] -= 1
+        if where == "stays":
+            if gen._generation_batch is removal.batch:
+                refused.append(st.ticks)
+                raise RuntimeError(MEM)
+        elif removal.batch is not None and len(refused) < 2:
+            refused.append(st.ticks)
             raise RuntimeError(MEM)
         return inject(gen, st)
 
     monkeypatch.setattr(tg, "_maybe_inject", maybe_inject)
 
     def plan(t, gen, out):
-        if len(out.get(1, [])) == 2 and not shot.armed:
-            shot.armed = True
-            refused.append(2)
-            _refuse_removal(monkeypatch, gen, shot, where)
+        if len(out.get(1, [])) == 2 and removal.batch is None:
+            removal.arm(gen)
 
     with caplog.at_level("WARNING", logger=tg.__name__):
-        check(engine, shot, plan=plan, b_max=6)
-    assert refused == [0] and failed == []
-    assert _REMOVAL_LOG[where] in caplog.text
+        check(engine, types.SimpleNamespace(fired=1), plan=plan, b_max=6)
+    assert len(refused) == 2 and failed == []
+    assert removal.fired == (tg._REMOVE_TRIES if where == "stays" else 1)
+    assert _Removal.LOG[where] in caplog.text
 
 
-@pytest.mark.parametrize("where", ["layer", "before"])
+@pytest.mark.parametrize("where", _WHERE)
 def test_cancel_removal_refused(engine, monkeypatch, caplog, where):
     """The server's cancel branch takes a row out beside one that decodes,
-    and the allocator refuses inside the removal. The row is out, the
-    batch is whole, and the stream beside it is whole."""
+    and its removal fails. The row is out, the batch is whole, and the
+    stream beside it is whole. A removal refused at every try leaves the
+    row decoding for the next cancel branch to take out."""
     from gmlx._vendor.mlx_vlm.server import generation as srv
     from gmlx.serve.row_sampling import live_uids
 
-    def when(out):
-        return len(out.get(1, [])) == 2
+    stays = where == "stays"
 
-    def cancel(shot):
-        done = []
+    def cancel(removal):
+        done, tries = [], []
+        rg = object.__new__(srv.ResponseGenerator)
+        rg._cancel_lock, rg._cancelled = srv.Lock(), {1}
+        active = {u: {"rqueue": srv.Queue(), "request_id": u} for u in (0, 1)}
 
         def plan(t, gen, out):
-            if done or 1 not in gen._generation_batch.uids or not when(out):
+            if done:
                 return
-            if shot is not None:
-                shot.armed = True
-                _refuse_removal(monkeypatch, gen, shot, where)
-            rg = object.__new__(srv.ResponseGenerator)
-            rg._cancel_lock, rg._cancelled = srv.Lock(), {1}
-            active = {u: {"rqueue": srv.Queue(), "request_id": u}
-                      for u in (0, 1)}
+            if not tries:
+                if 1 not in gen._generation_batch.uids \
+                        or len(out.get(1, [])) != 2:
+                    return
+                if removal is not None:
+                    removal.arm(gen)
             assert rg._drop_cancelled(gen, active) is gen
-            assert rg._kq_unremoved == set() and set(active) == {0}
-            assert 1 not in live_uids(gen)
+            tries.append(t)
+            assert set(active) == {0}
             assert 1 not in tg._state(gen).ledger
             assert not getattr(gen._generation_batch, "_kq_torn", False)
+            if rg._kq_unremoved:
+                assert removal is not None and stays and len(tries) == 1
+                assert rg._kq_unremoved == {1} and 1 in live_uids(gen)
+                return
+            assert 1 not in live_uids(gen)
             done.append(t)
-        return plan, done
+        return plan, done, tries
 
     ref, ref_fin, _ = run(engine, plan=cancel(None)[0], b_max=6)
-    shot = Shot(MEM)
-    plan, done = cancel(shot)
+    removal = _Removal(monkeypatch, where,
+                       times=tg._REMOVE_TRIES if stays else 1)
+    plan, done, tries = cancel(removal)
     with caplog.at_level("WARNING", logger=tg.__name__):
         got, fin, gaps = run(engine, plan=plan, b_max=6)
-    assert len(done) == 1 and shot.fired == 1
-    assert _REMOVAL_LOG[where] in caplog.text
-    assert _tokens(got) == _tokens(ref) and len(got[1]) == 2
+    assert len(done) == 1 and len(tries) == (2 if stays else 1)
+    assert removal.fired == removal.times
+    assert _Removal.LOG[where] in caplog.text
+    want, have = _tokens(ref), _tokens(got)
+    assert have[0] == want[0] and gaps[0] == {0}
+    # The row decodes one more step while its removal stays refused; the
+    # server drops what it writes after the cancel.
+    assert have[1][:2] == want[1] and len(have[1]) == (3 if stays else 2)
     assert fin == ref_fin and set(fin) == {0}
-    assert gaps[0] == {0}
 
 
 def test_d_forced_eval(engine, monkeypatch, shot):
