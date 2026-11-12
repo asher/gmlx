@@ -667,7 +667,7 @@ def test_governor_retire_whose_removal_stays_refused(engine, monkeypatch):
         removal.arm(gen)
         rows = list(gen._generation_batch.uids)
         assert rows == [0, 1]
-        assert gov._retire_largest(gen, gov._GovState()) == "refused"
+        assert gov._retire_largest(gen, gov._GovState()) is gov.RetireOutcome.REFUSED
         assert gen._generation_batch is removal.batch
         assert gen._generation_batch.uids == rows
         assert not gen._unprocessed_sequences

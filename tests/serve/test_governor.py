@@ -377,31 +377,54 @@ def _refusing(gen, monkeypatch):
     return tries
 
 
-def test_an_orange_retire_refused_at_every_try_books_nothing(rig,
-                                                             monkeypatch):
+class _Clock:
+    """``time`` for the governor, with the clock moved on by ``skip``."""
+
+    def __init__(self):
+        self.skip = 0.0
+
+    def perf_counter(self):
+        return time.perf_counter() + self.skip
+
+    def __getattr__(self, n):
+        return getattr(time, n)
+
+
+def test_an_orange_retire_refused_at_every_try_backs_off(rig, monkeypatch):
     """The allocator refuses the retire's removal at every try, so the
     row still decodes. The retire counts nothing, spends no shed, is not
-    measured as a failed recovery, and is not taken for a forced close:
-    orange samples again each tick, red never fires off it, and the
-    retire runs once the removal goes through."""
+    measured as a failed recovery and is not taken for a forced close.
+    Orange then waits out the refusal back-off with no evict and no
+    retry, red never fires off it, and after the back-off the retire is
+    tried again and runs once the removal goes through."""
     failed = []
     monkeypatch.setattr(tg, "_row_failed_callbacks",
                         [lambda uid, info: failed.append(uid)])
+    clock = _Clock()
+    monkeypatch.setattr(gov, "time", clock)
     gen, st = _dry_orange(rig, monkeypatch, None, None)
     remove = gen.remove
     tries = _refusing(gen, monkeypatch)
-    for n in range(1, 4):
+    for _ in range(4):
         gov._governor_tick(gen)
         assert st.band == gov.ORANGE
-        assert tries == [0] * (tg._REMOVE_TRIES * n)
+        assert tries == [0] * tg._REMOVE_TRIES
+        assert gov._STATS["orange_evictions"] == 1
         assert gen._generation_batch.uids == [0, 1]
         assert gen._unprocessed_sequences == []
         assert st.shed_times == [] and st.shed_measure_from is None
         assert not st.orange_failed and st.last_victim_uid is None
-        assert gov._STATS["last_action"].startswith("evict")
+        assert gov._STATS["removals_refused"] == 1
+        assert gov._STATS["last_action"] == "retire uid=0 refused"
     assert gov._STATS["orange_retires"] == 0
     assert gov._STATS["retires_deferred"] == 0
     assert gov._STATS["red_failures"] == 0 and failed == []
+    clock.skip = 6.0
+    gov._governor_tick(gen)
+    assert tries == [0] * (2 * tg._REMOVE_TRIES)
+    assert gov._STATS["orange_evictions"] == 2
+    assert gov._STATS["removals_refused"] == 2
+    clock.skip = 12.0
     gen.remove = remove
     gov._governor_tick(gen)
     assert gen.removed == [0]
@@ -409,22 +432,36 @@ def test_an_orange_retire_refused_at_every_try_books_nothing(rig,
     assert gov._STATS["last_action"] == "retire uid=0"
 
 
-def test_a_red_failure_refused_at_every_try_books_nothing(rig, monkeypatch):
+def test_a_red_failure_refused_at_every_try_backs_off(rig, monkeypatch):
     """Red's removal is refused at every try: the row still decodes, no
-    row fails, and nothing is booked."""
+    row fails and no shed is booked. Red waits out the refusal back-off
+    before it tries again."""
     failed = []
     monkeypatch.setattr(tg, "_row_failed_callbacks",
                         [lambda uid, info: failed.append(uid)])
+    clock = _Clock()
+    monkeypatch.setattr(gov, "time", clock)
     gen, st = _dry_orange(rig, monkeypatch, None, None)
     tries = _refusing(gen, monkeypatch)
-    gov._STATS["last_action"] = "before"
     assert not gov._fail_largest(gen, st, "test")
     assert tries == [0] * tg._REMOVE_TRIES
     assert gen._generation_batch.uids == [0, 1] and failed == []
     assert 0 in tg._state(gen).ledger
     assert st.shed_times == [] and st.shed_measure_from is None
     assert gov._STATS["red_failures"] == 0
-    assert gov._STATS["last_action"] == "before"
+    assert gov._STATS["removals_refused"] == 1
+    assert gov._STATS["last_action"] == "red fail uid=0 refused"
+    for _ in range(3):
+        st.orange_failed = True             # red holds
+        gov._governor_tick(gen)
+        assert st.band == gov.RED
+    assert tries == [0] * tg._REMOVE_TRIES
+    clock.skip = 6.0
+    st.orange_failed = True
+    gov._governor_tick(gen)
+    assert tries == [0] * (2 * tg._REMOVE_TRIES)
+    assert gov._STATS["removals_refused"] == 2
+    assert gov._STATS["red_failures"] == 0 and failed == []
 
 
 def test_red_and_the_tick_guard_take_a_row_in_a_close(rig, monkeypatch):

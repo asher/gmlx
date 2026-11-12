@@ -112,12 +112,17 @@ Knobs (all calib values are U5's to tighten):
     GMLX_GOV_RUNG_TICKS      measured-miss window per demand rung
                              (default 4)
     GMLX_GOV_SHEDS_PER_MIN   shed rate cap (default 4)
+    GMLX_GOV_REFUSAL_BACKOFF_S
+                             seconds orange and red wait to try a shed
+                             again after the allocator refused its
+                             removal at every try (default 5)
     GMLX_GOV_MIN_DWELL_S     min seconds in a band before
                              de-escalating (default 2.0)
 """
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import time
@@ -149,6 +154,7 @@ _STATS = {
     "orange_evictions": 0,
     "orange_retires": 0,
     "retires_deferred": 0,
+    "removals_refused": 0,
     "red_failures": 0,
     "victim_repeats": 0,
     "sheds_suppressed": 0,
@@ -279,6 +285,8 @@ class _GovState:
         self.reg_bytes = 0.0
         self.reg_sampled_tick = -999
         self.last_victim_uid = None
+        # a shed whose removal the allocator refused: no retry before
+        self.refused_until = 0.0
         # kernel-floor trend: last sub-floor sample of the memory not
         # wired, and the last wall time a stable (non-collapsing) breach
         # was logged
@@ -615,6 +623,26 @@ def _restore_demand_rungs(gen, st: _GovState) -> None:
     st.rung_rate_before = None
 
 
+def _refusal_backoff(st: _GovState) -> bool:
+    """Whether a refused removal's back-off holds. Orange and red skip
+    their whole shed step until it ends: the evict, the reclaim and the
+    removal would each repeat at tick rate against the same refusal."""
+    return time.perf_counter() < st.refused_until
+
+
+def _refused(st: _GovState, what: str, victim) -> None:
+    """Book a shed whose removal the allocator refused at every try: the
+    row still decodes, so nothing is shed, and the next try waits out
+    the back-off. Logged once per back-off window."""
+    backoff = _env_f("GMLX_GOV_REFUSAL_BACKOFF_S", 5.0)
+    st.refused_until = time.perf_counter() + backoff
+    _STATS["removals_refused"] += 1
+    _STATS["last_action"] = f"{what} uid={victim} refused"
+    _log.warning("[governor] %s of row %s refused at every try; the row "
+                 "still decodes, trying again in %.0f s", what, victim,
+                 backoff)
+
+
 def _shed_allowed(st: _GovState) -> bool:
     now = time.perf_counter()
     cap = int(_env_f("GMLX_GOV_SHEDS_PER_MIN", 4))
@@ -668,28 +696,39 @@ def _apc_disk_armed(gen) -> bool:
     return mgr is not None and getattr(mgr, "disk", None) is not None
 
 
-def _retire_largest(gen, st: _GovState) -> str:
+class RetireOutcome(enum.Enum):
+    """What ``_retire_largest`` did. Compare by identity: an outcome has
+    no truth value."""
+
+    RETIRED = "retired"
+    NONE = "none"          # every row was passed over
+    REFUSED = "refused"    # the allocator refused the removal
+
+    def __bool__(self):
+        raise TypeError("compare a RetireOutcome by identity")
+
+
+def _retire_largest(gen, st: _GovState) -> RetireOutcome:
     """Orange's width lever: remove the largest decode row and requeue
     it as itself through the tick guard's ledger (replay = prompt +
     delivered; APC makes the re-prefill warm). A row in the middle of a
     forced close is passed over: the retire can wait, and a close is a
     few tokens long. A speaking row is passed over too: it cannot
-    replay, so a retire would end its reply. Returns "retired", "none"
-    when every row was passed over, or "refused" when the allocator
-    refused the removal at every try and the row still decodes."""
+    replay, so a retire would end its reply. Returns REFUSED when the
+    allocator refused the removal at every try and the row still
+    decodes."""
     from . import tick_guard as tg
 
     tg_st = tg._state(gen)
     victim = tg._pick_victim(gen, tg_st, spare=tg.mid_close,
                              spare_uid=lambda uid: tg.speaks(gen, uid))
     if victim is None:
-        return "none"
+        return RetireOutcome.NONE
     before = mx.get_active_memory()
     pending = _shed_transient_bytes(gen, st)
     if not tg._rebuild_row(gen, tg_st, victim):
-        _log.warning("[governor] retire of row %s refused at every try; "
-                     "re-sampling next tick", victim)
-        return "refused"
+        _refused(st, "retire", victim)
+        return RetireOutcome.REFUSED
     if victim == st.last_victim_uid:
         _STATS["victim_repeats"] += 1
     st.last_victim_uid = victim
@@ -699,7 +738,7 @@ def _retire_largest(gen, st: _GovState) -> str:
     st.shed_measure_from = float(before)
     _STATS["orange_retires"] += 1
     _STATS["last_action"] = f"retire uid={victim}"
-    return "retired"
+    return RetireOutcome.RETIRED
 
 
 def _live_rows(gen) -> bool:
@@ -720,8 +759,7 @@ def _fail_largest(gen, st: _GovState, why: str) -> bool:
         return False
     before = mx.get_active_memory()
     if not tg._fail_row_permanently(gen, tg_st, victim, why):
-        _log.warning("[governor] red failure of row %s refused at every "
-                     "try; the row still decodes", victim)
+        _refused(st, "red fail", victim)
         return False
     if victim == st.last_victim_uid:
         _STATS["victim_repeats"] += 1
@@ -970,7 +1008,8 @@ def _governor_tick(gen) -> None:
                      "< %.2f GB and collapsing (prev %.2f GB); evicted "
                      "%.2f GB", cur / 1e9, floor / 1e9,
                      (prev or 0) / 1e9, freed / 1e9)
-        if batch_rows(gen) > 0 and _shed_allowed(st):
+        if (batch_rows(gen) > 0 and not _refusal_backoff(st)
+                and _shed_allowed(st)):
             _fail_largest(gen, st, (
                 f"governor red: memory not wired "
                 f"{cur / 1e9:.2f} GB below floor "
@@ -981,7 +1020,7 @@ def _governor_tick(gen) -> None:
 
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)
-        if _shed_allowed(st):
+        if not _refusal_backoff(st) and _shed_allowed(st):
             static_red = head - demand < 0.0
             if static_red and not st.orange_failed:
                 # Reclaim before destroying work: registered caches and
@@ -1027,7 +1066,7 @@ def _governor_tick(gen) -> None:
         return
     if orange_now and batch_rows(gen) > 0:
         _enter(gen, st, ORANGE, ws, margin)
-        if _shed_allowed(st):
+        if not _refusal_backoff(st) and _shed_allowed(st):
             before = mx.get_active_memory()
             freed = _evict_registered(st.evict_fraction)
             mx.clear_cache()
@@ -1044,13 +1083,13 @@ def _governor_tick(gen) -> None:
                 # registered caches are dry; the width lever is next
                 if _apc_disk_armed(gen):
                     outcome = _retire_largest(gen, st)
-                    if outcome == "refused":
+                    if outcome is RetireOutcome.REFUSED:
                         # The removal never ran, so the dry evict before
                         # it is no shed either: nothing is measured, and
-                        # orange samples again next tick.
+                        # orange samples again after the back-off.
                         st.shed_times.pop()
                         st.shed_measure_from = None
-                    elif outcome == "none" and _live_rows(gen):
+                    elif outcome is RetireOutcome.NONE and _live_rows(gen):
                         # Every row is in a forced close. A dry evict while
                         # they finish is not a shed, so it neither counts
                         # against the cap nor is measured as a failed
