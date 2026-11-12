@@ -133,17 +133,57 @@ def _run_letters(model, processor, parsed, path: str, name: str = "") -> dict:
     return jev_response(schema, result, 0, os.path.basename(path))
 
 
+def _run_d1(body: dict, path: str, settings) -> dict:
+    """A d1 decision model, to completion on this thread."""
+    import contextlib
+    from typing import Any
+
+    import mlx.core as mx
+
+    from gmlx.load.decision import DECISION_STATE_CAP
+    from gmlx.load.loader import load_model
+    from gmlx.serve.bridge_vlm import _make_text_processor
+    from gmlx.systemone import d1
+
+    if d1.body_media(body):
+        raise SystemExit("error: media in a d1 decision need a server: run "
+                         "`gmlx serve` with the model and its projector")
+    try:
+        questions = d1.parse_questions(body, omni=True,
+                                       max_questions=settings.max_questions)
+        model, _config, tokenizer = load_model(path, verbose=False, decision=True)
+        fmt = d1.setup(_make_text_processor(tokenizer))
+        if fmt is None:
+            raise SystemExit(f"error: {path} names no d1 decision type")
+        passes = d1.build_passes(fmt, questions, body.get("state"), DECISION_STATE_CAP)
+    except d1.D1RequestError as e:
+        raise SystemExit(f"error: {e}") from e
+    wired: Any = contextlib.nullcontext()
+    if mx.default_device() == mx.gpu and mx.metal.is_available():
+        wired = importlib.import_module("gmlx._vendor.mlx_lm.generate").wired_limit(model)
+    started = time.perf_counter()
+    with wired:
+        result = d1.run_to_end(d1.decide_d1(
+            d1.text_of(model), fmt, passes, has_media=False, budget=DECISION_STATE_CAP))
+    print(f"[systemone] {result['diagnostics']['forwards']} forwards in "
+          f"{(time.perf_counter() - started) * 1e3:.0f} ms", file=sys.stderr)
+    return d1.response(result, os.path.basename(path))
+
+
 def _run_offline(a, body: dict) -> dict:
+    from gmlx.load.discovery import header_meta
     from gmlx.systemone import Limits, TemplateResolver, decide, jev_response
     from gmlx.systemone.backends import ParsedRequest
 
     cfg, settings = _offline_settings(a.config)
+    path = _model_path(a.model, cfg)
+    if (header_meta(path) or {}).get("decision"):
+        return _run_d1(body, path, settings)
     limits = Limits(max_questions=settings.max_questions,
                     max_samples=settings.max_samples)
     parsed = ParsedRequest(body, limits, settings.request_defaults())
     if parsed.error is not None:
         raise parsed.error
-    path = _model_path(a.model, cfg)
 
     from gmlx.gen.diffusion import is_diffusion_model
     from gmlx.load.loader import load_model
@@ -203,7 +243,8 @@ def cmd_systemone(argv: list | None = None, prog: str = "gmlx systemone") -> int
     ap.add_argument("--model", default=None, metavar="GGUF",
                     help="Run offline on this GGUF path or configured model id "
                          "instead of posting to a server. DiffusionGemma reads "
-                         "answer slots, and any other text model answers with "
+                         "answer slots, a d1 model answers in one pass per "
+                         "question, and any other text model answers with "
                          "the letter readout.")
     ap.add_argument("--config", default=None, metavar="FILE",
                     help="Server config whose server.systemone settings and "

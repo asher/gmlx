@@ -293,27 +293,15 @@ def _d1_for(rg) -> d1.D1Format:
 
 
 def _d1_passes(rg, fmt, questions, state) -> list:
-    """Each question's prompt and label groups. A prompt over the state cap
-    is a 400; the longest is checked against the memory budget."""
+    """Each question's pass, with the longest prompt checked against the
+    memory budget."""
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     from gmlx.load.decision import DECISION_STATE_CAP
     from gmlx.serve.mem_preflight import preflight_prompt_memory
 
-    passes, longest = [], ("", 0)
-    for q in questions:
-        if d1.is_spoken(q.instructions) and not fmt.omni:
-            raise d1.D1RequestError(
-                f"questions.{q.id}: spoken instructions need a model with audio input")
-        text = fmt.prompt(state, q)
-        ids = fmt.encode(text)
-        if len(ids) > DECISION_STATE_CAP:
-            raise d1.D1RequestError(
-                f"questions.{q.id}: the prompt has {len(ids):,} tokens; a d1 "
-                f"prompt holds at most {DECISION_STATE_CAP:,}")
-        passes.append(d1.Pass(q, ids, fmt.labels(q)[1]))
-        if len(ids) > longest[1]:
-            longest = (text, len(ids))
-    preflight_prompt_memory(rg, longest[0],
+    passes = d1.build_passes(fmt, questions, state, DECISION_STATE_CAP)
+    longest = max(passes, key=lambda p: len(p.ids))
+    preflight_prompt_memory(rg, fmt.prompt(state, longest.question),
                             args=gen.GenerationArguments(max_tokens=1))
     return passes
 

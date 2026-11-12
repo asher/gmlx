@@ -376,6 +376,24 @@ class Pass:
     embeddings: Any = None       # [len(ids), hidden] when the prompt has media
 
 
+def build_passes(fmt: D1Format, questions: list[Question], state, cap: int) -> list[Pass]:
+    """Each question's prompt ids and label groups. A prompt over ``cap``
+    tokens, or a spoken question on a model without audio, is a
+    :class:`D1RequestError`."""
+    passes = []
+    for q in questions:
+        if is_spoken(q.instructions) and not fmt.omni:
+            raise D1RequestError(
+                f"questions.{q.id}: spoken instructions need a model with audio input")
+        ids = fmt.encode(fmt.prompt(state, q))
+        if len(ids) > cap:
+            raise D1RequestError(
+                f"questions.{q.id}: the prompt has {len(ids):,} tokens; a d1 "
+                f"prompt holds at most {cap:,}")
+        passes.append(Pass(q, ids, fmt.labels(q)[1]))
+    return passes
+
+
 def batches(lengths: Sequence[int], budget: int) -> list[list[int]]:
     """Question indexes in batches of rows, longest first, so that rows x
     the longest row stays within ``budget`` tokens."""
