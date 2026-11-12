@@ -182,6 +182,10 @@ def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
             warm, _ = _apc.make_warm_batch_exact_cache_multi(
                 [warm], prefix_lens=[prefix_len], kv_quant_config=cfg)
         if warm and 0 < prefix_len < len(ids_list):
+            # The formation stamp sits on the caches this restore replaces;
+            # a plain batch restores before it is stamped, this one after.
+            from gmlx.upstream.cascade_sdpa import stamp_restored
+            stamp_restored(batch.prompt_cache, warm, ids_list)
             batch.prompt_cache = warm
             # Matched blocks stay acquired until the stock post-prefill
             # harvest releases them (the warm-cache concatenation is

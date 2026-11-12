@@ -53,6 +53,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- With a drafter, requests that shared a long prompt prefix decoded slower
+  once one of them had restored its prefix from the prompt cache.
 - Gemma 4 audio input now matches the reference model. The audio encoder
   saw one frame too many, and with a GGUF projector it also scaled its
   attention queries wrongly.

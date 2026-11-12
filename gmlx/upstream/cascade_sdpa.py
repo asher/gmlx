@@ -356,6 +356,21 @@ def carry_stamp(src, dst):
     dst._gmlx_cascade = st
 
 
+def stamp_restored(old, new, ids) -> bool:
+    """Stamp the caches a prefix restore put in place of a row's formation
+    caches, as the formation stamp would: from the row's full prompt
+    tokens, which the restored prefix and the suffix prefill hold together.
+    Only when the formation caches were stamped with this same row; any
+    other stamp leaves the new caches unstamped, so the route declines."""
+    st = old[0].__dict__.get("_gmlx_cascade") if old else None
+    if st is None or not new:
+        return False
+    row = _row_bytes(ids)
+    if tuple(st.get("tok") or ()) != (row,):
+        return False
+    return _stamp_caches(new, [row])
+
+
 _KVARN_STAMP_NOTED = [False]
 
 
