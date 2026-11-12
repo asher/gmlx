@@ -56,7 +56,8 @@ _RUNTIME_ATTR = "_kq_systemone_runtime"
 _LETTERS_ATTR = "_kq_systemone_letters"
 _D1_ATTR = "_kq_systemone_d1"
 # The top-level fields a d1 decision reads.
-_D1_FIELDS = frozenset({"model", "profile", "state", "questions"})
+_D1_FIELDS = frozenset({"model", "profile", "state", "questions", "images",
+                        "files"})
 _NO_IMAGES = "images are not supported: the served model is text-only"
 
 _log = logging.getLogger(__name__)
@@ -292,18 +293,29 @@ def _d1_for(rg) -> d1.D1Format:
     return fmt
 
 
-def _d1_passes(rg, fmt, questions, state) -> list:
-    """Each question's pass, with the longest prompt checked against the
+def _d1_passes(rg, fmt, questions, body):
+    """``(passes, media)``: each question's pass, and the request's
+    decoded media or None. The longest prompt is checked against the
     memory budget."""
     gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
     from gmlx.load.decision import DECISION_STATE_CAP
+    from gmlx.serve import d1_media
     from gmlx.serve.mem_preflight import preflight_prompt_memory
 
-    passes = d1.build_passes(fmt, questions, state, DECISION_STATE_CAP)
+    media = None
+    d1.check_spoken(fmt, questions)
+    if d1.body_media(body):
+        if d1_media.media_model(rg.model) is None:
+            raise d1.D1RequestError(
+                "media need the model's projector: serve it with its mmproj file")
+        media = d1_media.prepare(body, rg.processor)
+        passes = d1_media.build_passes(fmt, questions, media, DECISION_STATE_CAP)
+    else:
+        passes = d1.build_passes(fmt, questions, body.get("state"), DECISION_STATE_CAP)
     longest = max(passes, key=lambda p: len(p.ids))
-    preflight_prompt_memory(rg, fmt.prompt(state, longest.question),
+    preflight_prompt_memory(rg, longest.ids,
                             args=gen.GenerationArguments(max_tokens=1))
-    return passes
+    return passes, media
 
 
 def _record_failure(runtime, model, error: str) -> None:
@@ -347,9 +359,6 @@ def make_systemone_endpoint(installed):
             if body.get("adapters") or body.get("lora"):
                 return fail(400, "invalid_request_error",
                             "a d1 decision runs no adapters")
-            if d1.body_media(body):
-                return fail(400, "invalid_request_error",
-                            "media in a d1 decision are not supported yet")
             try:
                 d1_questions = d1.parse_questions(
                     body, omni=True, max_questions=limits.max_questions)
@@ -439,14 +448,19 @@ def make_systemone_endpoint(installed):
             gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
             fmt = _d1_for(rg)
             try:
-                passes = _d1_passes(rg, fmt, d1_questions, body.get("state"))
+                passes, media = _d1_passes(rg, fmt, d1_questions, body)
             except d1.D1RequestError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
 
             def job(engine_rg, should_stop):
+                from gmlx.serve import d1_media
+
+                vlm = d1_media.media_model(engine_rg.model)
                 return d1.decide_d1(
-                    d1.text_of(engine_rg.model), fmt, passes, has_media=False,
-                    budget=DECISION_STATE_CAP, should_stop=should_stop)
+                    d1.text_of(engine_rg.model), fmt, passes,
+                    has_media=bool(media and media.items),
+                    budget=DECISION_STATE_CAP, should_stop=should_stop,
+                    embed=d1_media.embedder(vlm) if media is not None else None)
 
             return run_on_engine(
                 rg, job, request_id=request_id,

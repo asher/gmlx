@@ -373,18 +373,25 @@ class Pass:
     question: Question
     ids: list
     groups: list
-    embeddings: Any = None       # [len(ids), hidden] when the prompt has media
+    items: list = field(default_factory=list)    # the media its prompt holds
+
+
+def check_spoken(fmt: D1Format, questions: list[Question]) -> None:
+    """A spoken question on a model without audio input is a
+    :class:`D1RequestError`."""
+    for q in questions:
+        if is_spoken(q.instructions) and not fmt.omni:
+            raise D1RequestError(
+                f"questions.{q.id}: spoken instructions need a model with audio input")
 
 
 def build_passes(fmt: D1Format, questions: list[Question], state, cap: int) -> list[Pass]:
     """Each question's prompt ids and label groups. A prompt over ``cap``
     tokens, or a spoken question on a model without audio, is a
     :class:`D1RequestError`."""
+    check_spoken(fmt, questions)
     passes = []
     for q in questions:
-        if is_spoken(q.instructions) and not fmt.omni:
-            raise D1RequestError(
-                f"questions.{q.id}: spoken instructions need a model with audio input")
         ids = fmt.encode(fmt.prompt(state, q))
         if len(ids) > cap:
             raise D1RequestError(
@@ -409,10 +416,12 @@ def batches(lengths: Sequence[int], budget: int) -> list[list[int]]:
 
 def decide_d1(text, fmt: D1Format, passes: list[Pass], *, has_media: bool,
               budget: int, should_stop: Optional[Callable[[], bool]] = None,
+              embed: Optional[Callable[[Pass], Any]] = None,
               ) -> Generator[None, None, dict]:
-    """Answer every pass, a batch of rows per forward. A generator that
-    yields after each block of each forward; returns the answers and
-    diagnostics."""
+    """Answer every pass, a batch of rows per forward. ``embed`` gives a
+    pass with media its input embeddings, built when its batch runs. A
+    generator that yields after each block of each forward; returns the
+    answers and diagnostics."""
     import time
 
     import mlx.core as mx
@@ -430,14 +439,14 @@ def decide_d1(text, fmt: D1Format, passes: list[Pass], *, has_media: bool,
 
             raise Cancelled("decision cancelled")
         n = max(lengths[i] for i in rows)
-        if any(passes[i].embeddings is not None for i in rows):
+        if embed is not None and any(passes[i].items for i in rows):
             parts = []
             for i in rows:
-                e = passes[i].embeddings
-                if e is None:
-                    e = text.model.embed_tokens(mx.array(passes[i].ids))
+                p = passes[i]
+                e = embed(p) if p.items else text.model.embed_tokens(mx.array(p.ids))
                 parts.append(mx.pad(e, [(0, n - e.shape[0]), (0, 0)]))
             inputs = mx.stack(parts)
+            del parts
         else:
             inputs = mx.array([passes[i].ids + [0] * (n - lengths[i]) for i in rows])
         logits = yield from decision_forward(text, inputs, [lengths[i] for i in rows])
@@ -483,7 +492,7 @@ def response(result: dict, model: str) -> dict:
 def body_media(body: dict) -> bool:
     """Whether a request carries media: top-level ``images`` or ``files``,
     media parts in a message-shaped state, or a spoken question."""
-    if body.get("images") or body.get("files"):
+    if body.get("images") or body.get("files") or body.get("videos"):
         return True
     state = body.get("state")
     messages = state.get("messages") if isinstance(state, dict) else state
