@@ -1977,7 +1977,68 @@ class BatchKVCache(_BaseCache):
 
         self._right_padding = None
 
+    # gmlx: row ends (gmlx/cache/row_ends.py). An armed cache's rollback
+    # lowers each row's end instead of rolling the row right; None means
+    # every row ends at _idx. _idx stays the largest end.
+    _row_ends = None
+    _row_ends_armed = False
+
+    def _set_row_ends(self, ends):
+        """Record per-row ends; equal ends drop back to right-justified rows
+        and the write index follows the largest end."""
+        if ends:
+            self._idx = max(ends)
+        if not ends or min(ends) == self._idx:
+            self._clear_row_ends()
+        else:
+            self._row_ends = list(ends)
+
+    def _clear_row_ends(self):
+        # The class default reads None; an even cache keeps the instance
+        # attributes stock has.
+        self.__dict__.pop("_row_ends", None)
+
+    def _append_at_row_ends(self, keys, values):
+        """Write each row's ``L`` new rows at its own end."""
+        L = keys.shape[2]
+        prev = self._idx
+        new = [e + L for e in self._row_ends]
+        end = max(new)
+        if end > self.keys.shape[2]:
+            grow(self, keys, values, prev, end, _zeros_rows,
+                 grid=self._kv_grid, routed=self._kv_routed)
+        # The next even append takes a slice write: these arrays are not the
+        # ones the in-place append recorded.
+        release(self)
+        if keys.dtype != self.keys.dtype:
+            keys = keys.astype(self.keys.dtype)
+        if values.dtype != self.values.dtype:
+            values = values.astype(self.values.dtype)
+        idx = (mx.array(self._row_ends, dtype=mx.int32)[:, None]
+               + mx.arange(L, dtype=mx.int32)[None, :])[:, None, :, None]
+        self.keys = mx.put_along_axis(self.keys, idx, keys, axis=2)
+        self.values = mx.put_along_axis(self.values, idx, values, axis=2)
+        self.offset += L
+        self._set_row_ends(new)
+        return self.keys[..., :end, :], self.values[..., :end, :]
+
+    def justify_rows(self):
+        """Right-justify an uneven cache, the roll finalize does unarmed, and
+        drop its row ends."""
+        ends = self._row_ends
+        if ends is None:
+            return
+        release(self)
+        shift = mx.array([self._idx - e for e in ends], dtype=mx.int32)
+        if self.keys is not None:
+            self.keys = dynamic_roll(self.keys, shift[:, None], axis=2)
+            self.values = dynamic_roll(self.values, shift[:, None], axis=2)
+        self.left_padding = self.left_padding + shift
+        self._clear_row_ends()
+
     def update_and_fetch(self, keys, values):
+        if self._row_ends is not None:
+            return self._append_at_row_ends(keys, values)
         # gmlx: grid regrow and in-place append (gmlx/cache/kv_append.py).
         prev = self._idx
         end = prev + keys.shape[2]
@@ -2013,6 +2074,14 @@ class BatchKVCache(_BaseCache):
                 self._right_padding = None
                 return
             padding = self._right_padding
+            if self._row_ends_armed:
+                # gmlx: each row keeps its own end; nothing moves.
+                ends = self._row_ends or [self._idx] * padding.shape[0]
+                self.offset -= padding
+                self._right_padding = None
+                self._set_row_ends(
+                    [e - p for e, p in zip(ends, padding.tolist())])
+                return
             self.keys = dynamic_roll(self.keys, padding[:, None], axis=2)
             self.values = dynamic_roll(self.values, padding[:, None], axis=2)
             self.offset -= padding
@@ -2033,6 +2102,7 @@ class BatchKVCache(_BaseCache):
     def state(self, v):
         self.keys, self.values, self.offset, self.left_padding = v
         self._idx = 0 if self.keys is None else self.keys.shape[2]
+        self._clear_row_ends()
 
     def is_trimmable(self):
         return True
@@ -2041,6 +2111,8 @@ class BatchKVCache(_BaseCache):
         n = min(self._idx, n)
         self._idx -= n
         self.offset -= n
+        if self._row_ends is not None:
+            self._set_row_ends([e - n for e in self._row_ends])
         return n
 
     def make_mask(self, N: int, return_array: bool = False, **kwargs):
@@ -2053,6 +2125,11 @@ class BatchKVCache(_BaseCache):
         In-place filter to keep just the given indices in the cache.
         """
         release(self)
+        ends = None
+        if self._row_ends is not None:
+            kept = (batch_indices.tolist() if isinstance(batch_indices, mx.array)
+                    else list(batch_indices))
+            ends = [self._row_ends[int(i)] for i in kept]
         if self.keys is not None:
             self.keys = self.keys[batch_indices]
             self.values = self.values[batch_indices]
@@ -2069,6 +2146,10 @@ class BatchKVCache(_BaseCache):
                 self.values = self.values[..., min_left_pad:, :]
             self._idx -= min_left_pad
             self.left_padding -= min_left_pad
+            if ends is not None:
+                ends = [e - min_left_pad for e in ends]
+        if ends is not None:
+            self._set_row_ends(ends)
         # gmlx: the cascade stamp keeps the surviving rows.
         _cascade_filter(self, batch_indices)
 
@@ -2121,16 +2202,26 @@ class BatchKVCache(_BaseCache):
             left_padding = c.left_padding + left
             return k, v, c.offset, left_padding
 
+        # gmlx: every row's end moves with its side's left pad.
+        ends = None
+        o_ends = getattr(other, "_row_ends", None)
+        if self._row_ends is not None or o_ends is not None:
+            ends = [e + max_idx - c._idx
+                    for c, own in ((self, self._row_ends), (other, o_ends))
+                    for e in (own or [c._idx] * c.offset.shape[0])]
         self.keys, self.values, self.offset, self.left_padding = map(
             mx.concatenate, zip(*(pad(self), pad(other)))
         )
         self._idx = max_idx
+        if ends is not None:
+            self._set_row_ends(ends)
 
     def extract(self, idx):
         cache = KVCache()
         padding = self.left_padding[idx].item()
-        cache.keys = mx.contiguous(self.keys[idx : idx + 1, :, padding : self._idx])
-        cache.values = mx.contiguous(self.values[idx : idx + 1, :, padding : self._idx])
+        end = self._idx if self._row_ends is None else self._row_ends[idx]
+        cache.keys = mx.contiguous(self.keys[idx : idx + 1, :, padding : end])
+        cache.values = mx.contiguous(self.values[idx : idx + 1, :, padding : end])
         cache.offset = cache.keys.shape[2]
         return cache
 
