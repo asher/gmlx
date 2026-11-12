@@ -111,14 +111,13 @@ before its token limit.
 
 | Drafter | Default cap |
 |---------|-------------|
-| A native head on a dense Qwen model | 3 |
-| The gemma-4 assistant drafter, and any family without a default of its own | 2 |
+| A native head on a dense Qwen model, the gemma-4 assistant drafter, and any family without a default of its own | 2 |
 | Any mixture-of-experts model | 1 |
 | The heads of Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and GLM-5.3-Flash, and every DFlash drafter | 1, which no setting raises |
 
 A DFlash drafter therefore drafts only for a request that decodes alone,
 and two or more requests decode without speculation. The native head of a
-dense Qwen model drafts for up to 3 requests, and 4 or more decode without
+dense Qwen model drafts for up to 2 requests, and 3 or more decode without
 speculation.
 
 [`speculative_width_cap`](config.md#modelsspeculative_width_cap) sets the

@@ -64,8 +64,8 @@ from gmlx.load.transforms import coalesce_split_experts
 
 
 # The widest batch the native head of a dense Qwen target drafts for; a
-# wider batch decodes plain. At 4 rows plain decode is the faster of the two.
-_NATIVE_HEAD_WIDTH_CAP = 3
+# wider batch decodes plain, the faster of the two from 3 rows.
+_NATIVE_HEAD_WIDTH_CAP = 2
 
 # Per-family MTP batch-width caps, keyed on model_type (NEVER isinstance:
 # HyV3MTPDrafter subclasses QwenMTPDrafter, so a class check would hand hy_v3

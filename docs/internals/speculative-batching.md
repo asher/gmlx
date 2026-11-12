@@ -25,9 +25,8 @@ point the next round starts from. Drafting is greedy, since coupled RNG does
 not extend across rows. Under kvarn KV, each row keeps its own start and
 end, so a rollback trims each row by its own rejected count.
 
-Each round checks the per-model width cap, the number of rows that can
-speculate before verification widens each row's weight reads past the
-point where drafting pays. A batch wider than the cap decodes plain, or
+Each round checks the per-model width cap, the widest batch that
+speculates. A batch wider than the cap decodes plain, or
 becomes a mixed batch, described below, when `GMLX_MTP_MIXED` turns that
 on.
 
@@ -52,8 +51,7 @@ stateDiagram-v2
 
 ## Mixed batches
 
-Mixed batches are off by default, since a mixed batch decodes slower than
-the same rows plain. `GMLX_MTP_MIXED=1` turns them on.
+Mixed batches are off by default. `GMLX_MTP_MIXED=1` turns them on.
 
 A mixed batch speculates on its oldest rows, as many as the cap allows,
 and decodes the other rows plain in the same verify forward. Each plain

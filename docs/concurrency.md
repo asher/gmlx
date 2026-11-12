@@ -21,7 +21,7 @@ the contexts grow, because each request does its own attention work.
 A model with speculative decoding speculates only while the batch is
 within its drafter's width cap, and a wider batch decodes without
 speculation. A DFlash drafter drafts for one request, and the native head
-of a dense Qwen model for up to 3.
+of a dense Qwen model for up to 2.
 [Several requests at once](speculative-decoding.md#several-requests-at-once)
 lists the cap of each drafter.
 
