@@ -244,6 +244,8 @@ def _batched_padded_prefill(self, inputs, h, cache, position_ids):
     the row loop (stock reads it up to three times).
     """
     fa_cache = cache[self.fa_idx]
+    if getattr(fa_cache, "_row_ends", None) is not None:
+        return None  # rows that end apart are not left-padded
     query_left_padding = mx.minimum(mx.maximum(-fa_cache.offset, 0), h.shape[1])
     pads = [int(p) for p in query_left_padding.tolist()]
     if max(pads) <= 0:
@@ -461,6 +463,9 @@ class OwnedQwen3_5LanguageModel(GdnReplayRollback, DFlashCaptureHooks, _L.Langua
     class changes. __init__ mirrors the stock body instead of calling it so
     the stock Qwen3_5Model is never built and thrown away.
     """
+
+    # The native head batch keeps row ends (gmlx/cache/row_ends.py).
+    row_ends_rollback = True
 
     def __init__(self, args: _Q35TextConfig, config: _Q35ModelConfig = None):
         nn.Module.__init__(self)

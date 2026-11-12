@@ -41,6 +41,7 @@ from gmlx.device import metal_info
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.cache.kvarn_cache import KVarNView
+from gmlx.cache.row_ends import row_ends_attention
 from gmlx.load.hadamard_modules import fold_of, glu_rotate
 from . import language as _L
 from .gdn import owned_gdn_active as owned_attn_active  # one switch
@@ -966,6 +967,9 @@ class OwnedQwen3_5Attention(_L.Qwen3_5Attention):
 
         if isinstance(keys, KVarNView):
             output = _kvarn_attention(queries, cache=cache, scale=self.scale, mask=mask)
+        elif getattr(cache, "_row_ends", None) is not None:
+            # Rows of an uneven native head batch end apart (gmlx/cache/row_ends.py).
+            output = row_ends_attention(queries, keys, values, cache, self.scale)
         elif (target_verify and L > 1) or left_padded_decode:
             output = _verify_attention(
                 queries, keys, values, cache=cache, scale=self.scale, mask=mask
