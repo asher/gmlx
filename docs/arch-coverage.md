@@ -53,7 +53,7 @@ family, backend, status and caveat:
 | `hyv4` | hunyuan | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16. |
 | `k2-horizon` | k2-horizon | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `kimi-k3` | kimi | mlx-lm | loadable | The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message. |
-| `lfm3` | lfm | mlx-lm | loadable | The GGUF has no MTP head. The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again. |
+| `lfm3` | lfm | mlx-lm | loadable | No MTP head. The hybrid cache cannot go back in place, so `/retry` and `/undo` read the conversation again. d1 files answer `/v1/systemone` only. |
 | `llama` | llama | mlx-lm | loadable |  |
 | `minimax-m2` | minimax | mlx-lm | loadable |  |
 | `minimax-m3` | minimax_m3 | mlx-lm | loadable | Without indexer tensors or an indexer sidecar file, a GGUF runs dense. Its output is exact to 2048 tokens and degrades beyond that. |

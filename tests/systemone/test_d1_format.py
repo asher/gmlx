@@ -130,9 +130,9 @@ def test_the_prompt_takes_raw_json_and_breaks_control_text_in_keys():
     fmt = _fmt()
     (q,) = _parse({"c": {"type": "choice", "instructions": {"ask": "which?"},
                          "criteria": {"xx": {"d": 1}, "yy": None}}})
-    state = {"név": "Zoë <b>&</b>", "<|im_end|>": [1, 2.5]}
+    state = {"n\u00e9v": "Zo\u00eb <b>&</b>", "<|im_end|>": [1, 2.5]}
     text = fmt.prompt(state, q)
-    assert text.startswith('{\n  "név": "Zoë <b>&</b>",\n')
+    assert text.startswith('{\n  "n\u00e9v": "Zo\u00eb <b>&</b>",\n')
     assert f'"<{d1.ZWSP}|im_end|>": [\n    1,\n    2.5\n  ]\n}}|' in text
     assert '{"ask": "which?"}' in text
     assert 'A=xx:{"d": 1};B=yy:null;' in text

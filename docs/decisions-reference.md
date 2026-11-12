@@ -7,6 +7,7 @@ send a first request.
 - [Fields by model](#fields-by-model)
 - [Request fields](#request-fields)
 - [Questions](#questions)
+- [Media on d1](#media-on-d1)
 - [Stages and skipped questions](#stages-and-skipped-questions)
 - [Samples, steps and thoughts](#samples-steps-and-thoughts)
 - [Usage and diagnostics](#usage-and-diagnostics)
@@ -30,15 +31,23 @@ answers through that prompt instead, as
 [How a decision is read](#how-a-decision-is-read) describes. It takes the
 same fields as the letter readout.
 
-| Field | DiffusionGemma | Letter readout |
-|-------|----------------|----------------|
-| `instructions` in a question | Optional | Required |
-| `criteria` of a choice or score | 2 to 26 alternatives | 2 or more alternatives |
-| `samples` | Averages reads with different random tokens | Averages reads with different option orders |
-| `depends_on`, `alone` | Applied | Ignored |
-| `steps`, `think`, `think_threshold`, `think_budget`, `auto_max`, `auto_threshold` | Applied | Ignored, and so are the `server.systemone` think defaults |
-| The request's `instructions`, `chunk_rows`, `chunk_prompt`, `sequential`, `seed` | Applied | Ignored |
-| An image under `screenshot` or `image` in an object `state` | Read as text | 400 |
+The d1 models read each question as a prompt of its own, as llama-server
+does. They read only the request's `model`, `profile`, `state`,
+`questions`, `images` and `files`, and name any other field in the
+warning. `adapters` and `lora` get a 400.
+
+| Field | DiffusionGemma | Letter readout | d1 |
+|-------|----------------|----------------|----|
+| `state` | Required | Required | Required, and can be `null` |
+| `instructions` in a question | Optional | Required | Required. On d1-Omni-2B, a spoken clip can take its place |
+| `criteria` of a choice or score | 2 to 26 alternatives | 2 or more alternatives | Up to 255 options, or 2 to 10 levels |
+| `samples` | Averages reads with different random tokens | Averages reads with different option orders | Ignored |
+| `ask_if` | Applied | Applied | Ignored: every question is answered |
+| `depends_on`, `alone` | Applied | Ignored | Ignored |
+| `steps`, `think`, `think_threshold`, `think_budget`, `auto_max`, `auto_threshold` | Applied | Ignored, and so are the `server.systemone` think defaults | Ignored |
+| The request's `instructions`, `chunk_rows`, `chunk_prompt`, `sequential`, `seed` | Applied | Ignored | Ignored |
+| `images`, `files` and media parts in a message `state` | `images` gets a 400, `files` is ignored, parts are read as text | As DiffusionGemma | Read, as [Media on d1](#media-on-d1) describes |
+| An image under `screenshot` or `image` in an object `state` | Read as text | 400 | Read as text |
 
 ## Request fields
 
@@ -63,6 +72,7 @@ same fields as the letter readout.
 | `seed` | `42` | The random tokens that each DiffusionGemma read starts from. |
 | `adapters` | The entry's strengths | Adapter strengths for the reads, as [Mixing adapters per request](lora.md#mixing-adapters-per-request) describes. |
 | `lora` | The entry's strengths | Adapter strengths by index, in the llama-server form. |
+| `images`, `files` | None | On d1, data URLs of images, video or audio, as [Media on d1](#media-on-d1) describes. |
 
 `samples` and `auto_max` above
 [`server.systemone.max_samples`](config.md#serversystemonemax_samples) are
@@ -93,6 +103,30 @@ An `ask_if` list holds answers of the question named by its key: `"yes"` or
 On DiffusionGemma, every answer label must be a single token in the answer
 template, or the request gets a 422. With more than ten questions, a
 numbered id such as `q1` is the safe choice.
+
+## Media on d1
+
+A d1 request takes media in llama-server's forms:
+
+- `images` and `files`, arrays of data URLs. Either one takes an image, a
+  video or an audio clip, such as `data:video/mp4;base64,...`.
+- Parts of a message-shaped `state`: `image_url`, `video_url` and
+  `input_audio`.
+- On d1-Omni-2B, a question whose `instructions` is a spoken clip:
+
+```json
+{"spoken": {"type": "noul",
+            "instructions": {"type": "input_audio",
+                             "input_audio": {"data": "UklGRiQ...", "format": "wav"}}}}
+```
+
+The model sees the media in that order: `files`, then `images`, then the
+message parts. A spoken clip comes after them, in its own question only.
+
+A request holds up to 8 media items. A video's frames are read, not its
+sound. Images are sized as in [LFM3 chat](lfm3.md#images-video-and-audio).
+Media need the projector file, and audio needs d1-Omni-2B. `videos` gets a
+400: put a video in `files`.
 
 ## Stages and skipped questions
 
@@ -143,10 +177,10 @@ setting costs.
 ## Usage and diagnostics
 
 `usage.input_tokens` is the longest prompt a read ran on, on DiffusionGemma,
-and every question's prompt summed, on the letter readout.
+and every question's prompt summed, on the letter readout and d1.
 `usage.output_tokens` counts the answer template and any thought on
-DiffusionGemma, and is 0 on the letter readout, as OpenJev's own server
-reports.
+DiffusionGemma, and is 0 on the letter readout and d1, as OpenJev's own
+server and llama-server report.
 
 `diagnostics` describes how the decision ran. Both readouts report the
 `stages`, the `skipped` questions and the `timing`. DiffusionGemma adds the
@@ -154,7 +188,8 @@ reports.
 settings it used. The letter readout adds `"readout": "letters"`, the option
 `orderings` and the `prefix` that [Repeated states](#repeated-states)
 describes. A model's own decision prompt reports the same fields, with
-`"readout": "template"`.
+`"readout": "template"`. A d1 model reports `"readout": "d1"`, the
+`forwards` it ran and the `timing`.
 
 | Field | Readout | Meaning |
 |-------|---------|---------|
@@ -193,7 +228,7 @@ curl localhost:8080/v1/prewarm -d '{"model": "openjev", "state": "Everything is 
 ```
 
 `ok` is true when the state is now kept. The route answers 400 on
-DiffusionGemma, which keeps no state between requests. A model whose cache
+DiffusionGemma and d1, which keep no state between requests. A model whose cache
 layers the prompt cache cannot store reports `"tier": "unsupported"`, and
 with the cache off the tier is `"off"`.
 
@@ -201,8 +236,10 @@ with the cache off the tier is `"off"`.
 
 | Status | Cause |
 |--------|-------|
-| 400 | The body is not a JSON object, carries `images`, or does not fit the context or memory budget. |
+| 400 | The body is not a JSON object, carries `images` on a model other than d1, or does not fit the context or memory budget. |
 | 400 | On the letter readout, the tokenizer has no single token for each option letter, or an object `state` holds an image. |
+| 400 | On d1: media the model cannot read, more than 8 items, `adapters` or `lora`, or a question prompt over 65,536 tokens. |
+| 400 | `decision_model_only`: a route other than this one names a d1 model. |
 | 400 | `unknown_profile`: `profile` names no profile. `no_model_specified`: `model` is absent and there is no fallback. |
 | 401 | The server has an API key, and the request does not present it. |
 | 404 | `model_not_found`: `model` names nothing and there is no fallback. `model_file_missing`: the model file is gone. |
@@ -237,3 +274,9 @@ the state in a user turn of its own, which runs on the base model, and
 opens the question turn with the `decision` adapter. That state turn is the
 part [Repeated states](#repeated-states) keeps. The answer is the model's
 probability for each option label at the start of its reply.
+
+A d1 model renders each question with the decision prompt in its file: the
+state, then the question and its labels. Its full attention layers read the
+whole prompt in both directions, so the state is read with the question in
+view. The questions of one request run side by side in one pass when memory
+allows, and each answers as it would alone.

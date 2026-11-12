@@ -1,7 +1,8 @@
 # Structured decisions
 
 `POST /v1/systemone` asks a model a fixed set of questions about a piece of
-text and returns a probability for every allowed answer. A support tool can
+text, an image, a video or a sound, and returns a probability for every
+allowed answer. A support tool can
 use it to route a ticket, and an agent can use it to pick its next tool.
 Your code branches on a number, so there is no reply text to parse.
 
@@ -20,6 +21,7 @@ served at `/systemone`. Every field is in the
 - [Serving a decision model](#serving-a-decision-model)
 - [A first decision](#a-first-decision)
 - [Reading the answers](#reading-the-answers)
+- [Images, video and sound](#images-video-and-sound)
 - [Examples](#examples)
 - [When answers go wrong](#when-answers-go-wrong)
 - [Thinking on uncertain answers](#thinking-on-uncertain-answers)
@@ -27,13 +29,18 @@ served at `/systemone`. Every field is in the
 
 ## Serving a decision model
 
-Two models are recommended, and any other text chat model also works:
+Four models are recommended, and any other text chat model also works:
 
 | Model | Repository | Choose it when |
 |-------|------------|----------------|
 | DiffusionGemma | `unsloth/diffusiongemma-26B-A4B-it-GGUF` | Speed matters. Three to five times as fast as OpenJev, but misses about one question in eight. |
 | OpenJev | `openjev/openjev-GGUF` | Accuracy matters, or a question has more than 26 options. Licensed CC BY-NC 4.0, non-commercial only. |
+| d1-2B | `LiquidAI/d1-2B-GGUF` | The state holds images or video, or memory is short. A 2B model that answers decisions only. |
+| d1-Omni-2B | `LiquidAI/d1-Omni-2B-GGUF` | The state holds audio, or a question is spoken. Reads images and video too. |
 | Any other text chat model | Your own | You already serve it. The answers are usable, the confidence is not calibrated. |
+
+The d1 models are in `gmlx pull` as `d1-2b` and `d1-omni-2b`, as
+[Images, video and sound](#images-video-and-sound) shows.
 
 Name a decision model in your config and start the server. This file,
 saved as `decisions.yaml`, serves both recommended models:
@@ -137,10 +144,62 @@ numbers rounded. The numbers depend on the model file.
 answer has all of it. The same request gives the same numbers on the same
 model file and server settings.
 
+A d1 model reads `score` and `confidence` as llama-server does. `score` is
+the median level, a whole index, and `confidence` is the largest
+probability.
+
 A question with `ask_if` is asked only when an earlier answer fits. Here
 `refund` is asked because `team` is `billing`. A skipped question's answer is
 `null`, as [Stages and skipped questions](decisions-reference.md#stages-and-skipped-questions)
 shows.
+
+## Images, video and sound
+
+Liquid AI's d1 models answer questions about images and video frames, and
+d1-Omni-2B about sound too. They answer decisions only and refuse chat.
+Pull one and start the server:
+
+```sh
+gmlx pull d1-2b
+gmlx serve
+```
+
+Put each picture, clip or video in `images` or `files` as a data URL. The
+`state` can be `null` when the media are the whole state. This builds a
+request about a photo and posts it:
+
+```sh
+printf '{"model": "d1-2b", "state": null, "images": ["data:image/jpeg;base64,%s"],
+  "questions": {"cat": {"type": "noul", "instructions": "Is there a cat in the picture?"},
+    "count": {"type": "choice", "instructions": "How many animals are there?",
+              "criteria": {"one": null, "two": null, "more": null}}}}' \
+  "$(base64 -i cats.jpg)" > cats.json
+curl localhost:8080/v1/systemone -d @cats.json
+```
+
+On a photo of two cats, d1-2B answers like this, with `diagnostics` left
+out and the numbers rounded:
+
+```json
+{"model": "d1-2b",
+ "answers": {"cat": {"type": "noul", "noul": 0.996},
+             "count": {"type": "choice", "choice": "two",
+                       "probabilities": {"one": 0.001, "two": 0.987, "more": 0.012},
+                       "confidence": 0.987}},
+ "usage": {"input_tokens": 665, "output_tokens": 0}}
+```
+
+On d1-Omni-2B, a question can be a spoken clip, as
+[Media on d1](decisions-reference.md#media-on-d1) shows. A request holds
+up to 8 media items. A video's frames are read, not its sound.
+
+The pull fetches the projector file that reads media. Without it, a d1
+model answers text states only. `gmlx systemone --model` also reads text
+states only, so send media through the server.
+
+Each question's prompt, the state and its media included, holds at most
+65,536 tokens. d1 answers every question of a request, and ignores
+`ask_if`.
 
 ## Examples
 

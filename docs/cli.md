@@ -735,6 +735,8 @@ The recommended models:
 | `lfm3-vl-2b` | 2B | LFM Open License v1.0 | images and video on a small Mac |
 | `lfm3-audio-2b` | 2B | LFM Open License v1.0 | voice chat and transcription |
 | `lfm3-omni-2b` | 2B | LFM Open License v1.0 | voice chat, images and video |
+| `d1-2b` | 2B | LFM Open License v1.0 | decisions: text, images |
+| `d1-omni-2b` | 2B | LFM Open License v1.0 | decisions: text, images, audio |
 | `qwen3.5-4b` | 4B | Apache 2.0 | chat and questions about images |
 | `ternary-bonsai-2-9b` | 9B | Apache 2.0 | chat on a small Mac |
 | `nemotron-3.5-bolt-e4b` | E4B | NVIDIA Open Model License | tool calls and voice assistants |

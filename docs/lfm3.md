@@ -27,6 +27,9 @@ with `--no-vision` leaves a text model.
 The models are under the LFM Open License v1.0. It licenses commercial
 use only to organizations with less than $10 million in annual revenue.
 
+`d1-2b` and `d1-omni-2b` are LFM3 models that answer
+[structured decisions](decisions.md#images-video-and-sound) only, not chat.
+
 - [A voice conversation](#a-voice-conversation)
 - [Spoken replies in chat](#spoken-replies-in-chat)
 - [Speech from the command line](#speech-from-the-command-line)
