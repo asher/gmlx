@@ -115,7 +115,8 @@ Knobs (all calib values are U5's to tighten):
     GMLX_GOV_REFUSAL_BACKOFF_S
                              seconds orange and red wait to try a shed
                              again after the allocator refused its
-                             removal at every try (default 5)
+                             removal at every try (default 5, at most
+                             60; 0 turns it off)
     GMLX_GOV_MIN_DWELL_S     min seconds in a band before
                              de-escalating (default 2.0)
 """
@@ -634,13 +635,25 @@ def _refused(st: _GovState, what: str, victim) -> None:
     """Book a shed whose removal the allocator refused at every try: the
     row still decodes, so nothing is shed, and the next try waits out
     the back-off. Logged once per back-off window."""
-    backoff = _env_f("GMLX_GOV_REFUSAL_BACKOFF_S", 5.0)
+    backoff = _refusal_backoff_s()
     st.refused_until = time.perf_counter() + backoff
     _STATS["removals_refused"] += 1
     _STATS["last_action"] = f"{what} uid={victim} refused"
     _log.warning("[governor] %s of row %s refused at every try; the row "
-                 "still decodes, trying again in %.0f s", what, victim,
+                 "still decodes, trying again in %.3g s", what, victim,
                  backoff)
+
+
+_REFUSAL_BACKOFF_MAX_S = 60.0
+
+
+def _refusal_backoff_s() -> float:
+    """GMLX_GOV_REFUSAL_BACKOFF_S, at most a minute so no value blocks
+    every shed; 0, a negative value or NaN turns the back-off off."""
+    v = _env_f("GMLX_GOV_REFUSAL_BACKOFF_S", 5.0)
+    if not v > 0.0:
+        return 0.0
+    return min(v, _REFUSAL_BACKOFF_MAX_S)
 
 
 def _shed_allowed(st: _GovState) -> bool:
@@ -803,6 +816,8 @@ def _enter(gen, st: _GovState, band: int, ws: float, margin: float) -> None:
         _restore_demand_rungs(gen, st)
         st.evict_fraction = 0.5
         st.orange_failed = False
+        # a refusal before the pressure passed says nothing of the next
+        st.refused_until = 0.0
 
 
 def _measure_rung(gen, st: _GovState) -> None:

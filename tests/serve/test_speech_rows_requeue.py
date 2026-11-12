@@ -133,13 +133,15 @@ def test_the_orange_retire_passes_over_a_speaking_row(rows, monkeypatch):
     monkeypatch.setattr(tg, "_rebuild_row",
                         lambda g, st, uid: retired.append(uid) or True)
     monkeypatch.setattr(governor, "_shed_transient_bytes", lambda g, st: 0.0)
-    assert governor._retire_largest(gen, governor._state(gen)) is governor.RetireOutcome.RETIRED
+    outcome = governor._retire_largest(gen, governor._state(gen))
+    assert outcome is governor.RetireOutcome.RETIRED
     assert retired == [WRITES]
     assert not failed and not record.closed
 
     # With only a speaking row live there is no row to retire.
     gen._generation_batch = FakeGB([SPEAKS], [1])
-    assert governor._retire_largest(gen, governor._state(gen)) is governor.RetireOutcome.NONE
+    outcome = governor._retire_largest(gen, governor._state(gen))
+    assert outcome is governor.RetireOutcome.NONE
     assert retired == [WRITES]
 
 
