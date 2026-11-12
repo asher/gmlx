@@ -61,6 +61,9 @@ from gmlx.cache.kv_append import eval_cache as _eval_cache
 # gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
 from gmlx.gen.logprobs import raw_logprobs, top_logprobs
 from gmlx.serve.tick_guard import is_allocator_refusal as _is_allocator_refusal
+from gmlx.serve.tick_guard import (
+    is_command_buffer_failure as _is_command_buffer_failure,
+)
 from gmlx.serve.tick_guard import mark_broken as _mark_broken
 from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
@@ -1636,6 +1639,10 @@ class GenerationBatch:
                 self._eval_pending_state()
             except BaseException as e:
                 failed = e
+        if failed is not None and _is_command_buffer_failure(failed):
+            # gmlx: nothing the batch holds is valid; the caller drops it,
+            # so the failure goes out before a refusal below can hide it.
+            raise failed
         # gmlx: the kept indices are allocated before the batch changes, so
         # a refusal here leaves every row in it.
         keep_arr = mx.array(keep, mx.int32) if keep else None

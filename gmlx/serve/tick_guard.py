@@ -27,6 +27,9 @@ was wrong, not that the box is full. Those get one contained retry
 so a driver hiccup cannot take the server down, and then propagate
 with the Metal error in the log, because no amount of reclaim fixes
 them and shedding a row would file a kernel bug under capacity.
+A command buffer failure of either kind inside a row's removal (the
+guard's victim, the governor's retire, a cancel) drops the engine and
+requeues every row, and a fault there counts toward the same one retry.
 Every other exception propagates unchanged. GMLX_TICK_GUARD=0
 disables.
 """
@@ -428,7 +431,9 @@ def _take_out_or_drop(gen, st: _TickState, uid, *, keep_out: bool,
     to the command buffer recovery: nothing the engine holds is valid, so
     it is dropped and every row requeues, except ``uid`` when ``keep_out``.
     ``carry`` is the error being contained, whose prefill rows go too,
-    and ``also`` rows the caller took out already. Returns ``(_DROPPED, [])`` then."""
+    and ``also`` rows the caller took out already. A fault that is not a
+    memory error counts toward the guard's one contained fault. Returns
+    ``(_DROPPED, [])`` then."""
     from gmlx.eval_guard import drain_for
 
     try:
@@ -436,6 +441,8 @@ def _take_out_or_drop(gen, st: _TickState, uid, *, keep_out: bool,
     except RuntimeError as err:
         if not is_command_buffer_failure(err):
             raise
+        if is_gpu_fault(err):
+            st.fault_streak += 1
         _log.error("[tick-guard] removing row %s hit a command buffer "
                    "failure; dropping the engine: %s", uid,
                    str(err).splitlines()[0][:200])
@@ -471,11 +478,16 @@ def remove_row(gen, uid) -> bool:
 
 
 def _fail_row_permanently(gen, st: _TickState, uid, err: str, *,
-                          remove: bool = True) -> None:
+                          remove: bool = True, strike: bool = False) -> None:
+    """Fail ``uid`` for good. ``strike`` is the guard's own repeat
+    failure, which sheds the row even when its removal stays refused; any
+    other caller (the governor) leaves the row decoding then."""
     swept = []
     if remove:
         removed, swept = _take_out_or_drop(gen, st, uid, keep_out=True)
         if removed is _STAYS:
+            if not strike:
+                return
             # The pool refuses even the filter: the batch goes without
             # one, so the strike still sheds this row.
             swept = [u for u in _drop_decode_batch(gen) if u != uid]
@@ -604,10 +616,18 @@ def _requeue_rows(gen, st: _TickState, uids) -> None:
                                   remove=False)
 
 
-def _rebuild_row(gen, st: _TickState, uid, err: str = "") -> None:
+def _rebuild_row(gen, st: _TickState, uid, err: str = "", *,
+                 strike: bool = False) -> None:
+    """Take ``uid`` out and requeue it as itself. ``strike`` is the
+    guard's own repeat failure: a removal that stays refused then drops
+    the batch and rebuilds its rows together. Any other caller (the
+    governor's retire, which passes over rows that cannot replay) leaves
+    every row decoding then, and samples again."""
     removed, swept = _take_out_or_drop(gen, st, uid, keep_out=False)
     if removed is _DROPPED:
         return  # every row, this one too, requeued with the engine
+    if removed is _STAYS and not strike:
+        return
     if removed is _STAYS:
         # The pool refuses even the filter: the batch goes without one,
         # and its rows are rebuilt together, so a repeat sheds a row.
@@ -820,9 +840,9 @@ def _contain(gen, st: _TickState, e: RuntimeError) -> None:
         return
     st.last_victim = victim
     if victim in st.rebuilt:
-        _fail_row_permanently(gen, st, victim, str(e))
+        _fail_row_permanently(gen, st, victim, str(e), strike=True)
     else:
-        _rebuild_row(gen, st, victim, str(e))
+        _rebuild_row(gen, st, victim, str(e), strike=True)
 
 
 def _harvest_responses(st: _TickState, generation_responses) -> None:

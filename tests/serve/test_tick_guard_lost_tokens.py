@@ -25,6 +25,8 @@ from gmlx.upstream.patching import root
 MEM = "[metal::malloc] Attempting to allocate 1 bytes (test)"
 OOM = ("[METAL] Command buffer execution failed: Insufficient Memory "
        "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory).")
+FAULT = ("[METAL] Command buffer execution failed: Caused GPU Timeout Error "
+         "(00000002:kIOGPUCommandBufferCallbackErrorTimeout).")
 
 A_PROMPT, B_PROMPT, C_PROMPT = [3, 9, 4, 7], [5, 6, 2], [40, 41]
 FORCED = 300
@@ -155,15 +157,16 @@ def _offsets(gen):
 
 
 def run(make, *, plan=None, b_max=6, c_at=None, c_max=2, forcing=False,
-        chunked=False, eval_every=0, processors=None):
+        chunked=False, eval_every=0, processors=None, prompts=None):
     """Drive two or three rows to the end. ``plan(tick, gen, out)`` arms
-    an injection. Returns the streams, the finishes and the gaps."""
+    an injection. ``prompts`` takes the prompt of a row a plan inserts.
+    Returns the streams, the finishes and the gaps."""
     from gmlx.serve.row_sampling import RowSettings
 
     gen, lm = make(prefill_step_size=2 if chunked else None)
     if eval_every:
         gen._cache_eval_interval = eval_every
-    prompts = {}
+    prompts = {} if prompts is None else prompts
     crit = [_Forcing()] if forcing else None
     (ua,) = gen.insert([A_PROMPT], 12, prompt_kwargs=[_kw(lm, A_PROMPT)],
                        thinking_budget_criteria=crit,
@@ -464,17 +467,23 @@ class _Removal:
     dropped the row; "before", the filter's entry, before it changes the
     batch; "array", the filter's allocation of the kept rows; "stays",
     the filter's entry at each try while the armed batch is the engine's
-    (or ``times`` tries); and "cbfail", a command buffer failure at the
-    eval the filter makes before it changes the batch."""
+    (or ``times`` tries); "cbfail", a command buffer failure at the eval
+    the filter makes before it changes the batch; and "gpufault", a
+    command buffer fault that is not a memory error at that eval; and
+    "cbheld", a command buffer failure at that eval and then a refusal of
+    the kept rows' allocation, which must not hide it. ``skip`` lets that many errors' sites pass first."""
 
     LOG = {"layer": "stopped a layer's filter half way",
            "before": "refused before the batch changed",
            "array": "refused before the batch changed",
            "stays": "stays in the batch",
-           "cbfail": "hit a command buffer failure"}
+           "cbfail": "hit a command buffer failure",
+           "gpufault": "hit a command buffer failure",
+           "cbheld": "hit a command buffer failure"}
 
-    def __init__(self, monkeypatch, where, times=1):
+    def __init__(self, monkeypatch, where, times=1, skip=0):
         self.mp, self.where, self.times = monkeypatch, where, times
+        self.skip = skip
         self.fired = 0
         self.batch = None
 
@@ -486,9 +495,13 @@ class _Removal:
                 self.fired += 1
                 raise RuntimeError(MEM)
             return
+        if self.skip:
+            self.skip -= 1
+            return
         if self.fired < self.times:
             self.fired += 1
-            raise RuntimeError(OOM if self.where == "cbfail" else MEM)
+            raise RuntimeError({"cbfail": OOM, "cbheld": OOM,
+                                "gpufault": FAULT}.get(self.where, MEM))
 
     def arm(self, gen):
         gb = self.batch = gen._generation_batch
@@ -502,7 +515,18 @@ class _Removal:
             self.mp.setattr(ar.GenerationBatch, "filter", filt)
         elif self.where == "array":
             self.mp.setattr(ar, "mx", _MxArray(ar.mx, self.fire))
-        elif self.where == "cbfail":
+        elif self.where == "cbheld":
+            self.refusal = Shot(MEM)
+            self.refusal.armed = True
+
+            def refuse():
+                if self.fired:
+                    self.refusal.fire()
+
+            self.mp.setattr(ar, "mx", _MxArray(
+                _Mx(ar.mx, self, "_eval_pending_state", name="eval"),
+                refuse))
+        elif self.where in ("cbfail", "gpufault"):
             self.mp.setattr(ar, "mx", _Mx(ar.mx, self, "_eval_pending_state",
                                           name="eval"))
         else:
@@ -517,7 +541,7 @@ class _Removal:
             self.mp.setattr(type(second), "filter", layer_filt)
 
 
-_WHERE = ["layer", "before", "array", "stays", "cbfail"]
+_WHERE = ["layer", "before", "array", "stays", "cbfail", "gpufault"]
 
 
 @pytest.mark.parametrize("where", _WHERE)
@@ -534,9 +558,10 @@ def test_victim_removal_refused(engine, monkeypatch, caplog, where):
     monkeypatch.setattr(tg, "_row_failed_callbacks",
                         [lambda uid, info: failed.append(uid)])
     inject = tg._maybe_inject
-    refused = []
+    refused, streaks = [], []
 
     def maybe_inject(gen, st):
+        streaks.append(st.fault_streak)
         if where == "stays":
             if gen._generation_batch is removal.batch:
                 refused.append(st.ticks)
@@ -557,9 +582,11 @@ def test_victim_removal_refused(engine, monkeypatch, caplog, where):
     assert len(refused) == 2 and failed == []
     assert removal.fired == (tg._REMOVE_TRIES if where == "stays" else 1)
     assert _Removal.LOG[where] in caplog.text
+    # A fault in the removal counts toward the guard's one contained fault.
+    assert max(streaks) == (1 if where == "gpufault" else 0)
 
 
-@pytest.mark.parametrize("where", _WHERE)
+@pytest.mark.parametrize("where", [*_WHERE, "cbheld"])
 def test_cancel_removal_refused(engine, monkeypatch, caplog, where):
     """The server's cancel branch takes a row out beside one that decodes,
     and its removal fails. The row is out, the batch is whole, and the
@@ -590,6 +617,8 @@ def test_cancel_removal_refused(engine, monkeypatch, caplog, where):
             assert set(active) == {0}
             assert 1 not in tg._state(gen).ledger
             assert not getattr(gen._generation_batch, "_kq_torn", False)
+            assert tg._state(gen).fault_streak == (
+                1 if where == "gpufault" and removal is not None else 0)
             if rg._kq_unremoved:
                 assert removal is not None and stays and len(tries) == 1
                 assert rg._kq_unremoved == {1} and 1 in live_uids(gen)
@@ -607,12 +636,152 @@ def test_cancel_removal_refused(engine, monkeypatch, caplog, where):
     assert len(done) == 1 and len(tries) == (2 if stays else 1)
     assert removal.fired == removal.times
     assert _Removal.LOG[where] in caplog.text
+    if where == "cbheld":
+        assert removal.refusal.fired == 0
     want, have = _tokens(ref), _tokens(got)
     assert have[0] == want[0] and gaps[0] == {0}
     # The row decodes one more step while its removal stays refused; the
     # server drops what it writes after the cancel.
     assert have[1][:2] == want[1] and len(have[1]) == (3 if stays else 2)
     assert fin == ref_fin and set(fin) == {0}
+
+
+def test_governor_retire_whose_removal_stays_refused(engine, monkeypatch):
+    """The governor's orange retire picks the largest row, passing over a
+    speaking one, and the allocator refuses the removal at every try. The
+    retire gives up: every row goes on decoding in the same batch, none
+    fails, and the speaking row is not requeued."""
+    from gmlx.serve import governor as gov
+
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    monkeypatch.setattr(tg, "speaks", lambda gen, uid: uid == 1)
+    removal = _Removal(monkeypatch, "stays", times=tg._REMOVE_TRIES)
+    done = []
+
+    def plan(t, gen, out):
+        if done or len(out.get(1, [])) != 2:
+            return
+        removal.arm(gen)
+        rows = list(gen._generation_batch.uids)
+        assert rows == [0, 1]
+        assert gov._retire_largest(gen, gov._GovState())
+        assert gen._generation_batch is removal.batch
+        assert gen._generation_batch.uids == rows
+        assert not gen._unprocessed_sequences
+        done.append(t)
+
+    check(engine, types.SimpleNamespace(fired=1), plan=plan, b_max=6)
+    assert done and failed == []
+    assert removal.fired == tg._REMOVE_TRIES
+
+
+@pytest.mark.parametrize("where", ["stays", "cbfail"])
+def test_strike_fails_a_rebuilt_victim_whose_removal_fails(
+        engine, monkeypatch, where):
+    """The guard's repeat failure picks a victim it rebuilt before, so the
+    victim fails for good, and its removal fails: refused at every try
+    while the ticks keep failing, or hit by a command buffer failure. The
+    victim fails with the strike's error, and the row beside it requeues
+    and writes its whole stream."""
+    removal = _Removal(monkeypatch, where,
+                       times=None if where == "stays" else 1)
+    failed = {}
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.setdefault(uid, info)])
+    inject = tg._maybe_inject
+    refused = []
+
+    def maybe_inject(gen, st):
+        if removal.batch is not None and (
+                gen._generation_batch is removal.batch if where == "stays"
+                else len(refused) < 2):
+            refused.append(st.ticks)
+            raise RuntimeError(MEM)
+        return inject(gen, st)
+
+    def plan(t, gen, out):
+        if len(out.get(1, [])) == 2 and removal.batch is None:
+            removal.arm(gen)
+            tg._state(gen).rebuilt.add(0)
+
+    ref, ref_fin, _ = run(engine, b_max=6)
+    monkeypatch.setattr(tg, "_maybe_inject", maybe_inject)
+    got, fin, gaps = run(engine, plan=plan, b_max=6)
+    assert len(refused) == 2 and list(failed) == [0]
+    assert "Attempting to allocate" in failed[0]["error"]
+    assert removal.fired == (tg._REMOVE_TRIES if where == "stays" else 1)
+    want, have = _tokens(ref), _tokens(got)
+    assert have[1] == want[1] and fin == {1: ref_fin[1]}
+    assert have[0] == want[0][:len(have[0])]
+    assert gaps[1] == {0}
+
+
+D_PROMPT = [60, 61, 62]
+
+
+def test_rebuild_broken_removal_hits_a_command_buffer_failure(
+        engine, monkeypatch):
+    """A tick fails with two decode rows and a prefill row marked broken,
+    and a third decode row unmarked. The first marked row leaves; the
+    second's removal hits a command buffer failure, so the engine drops.
+    Every row comes back once, the prefill row's prefix blocks go back,
+    and every stream is whole."""
+    released, queued = [], []
+    state = {}
+
+    def arm_d(gen, lm, prompts):
+        (ud,) = gen.insert([D_PROMPT], 4, prompt_kwargs=[_kw(lm, D_PROMPT)])
+        prompts[ud] = D_PROMPT
+        return ud
+
+    def make_plan(prompts, removal=None):
+        def plan(t, gen, out):
+            if "d" in state and removal is not None and "seen" not in state:
+                state["seen"] = True
+                queued.extend(q[0] for q in gen._unprocessed_sequences)
+                gen.apc_manager = state.pop("apc")
+            if "d" not in state and len(out.get(2, [])) == 1:
+                assert gen._generation_batch.uids == [0, 1, 2]
+                state["d"] = arm_d(gen, gen.model, prompts)
+                if removal is not None:
+                    removal.arm(gen)
+        return plan
+
+    ref_prompts = {}
+    ref, ref_fin, _ = run(engine, plan=make_plan(ref_prompts), b_max=6,
+                          c_at=1, c_max=6, prompts=ref_prompts)
+    state.clear()
+    inject = tg._maybe_inject
+
+    def maybe_inject(gen, st):
+        ud = state.get("d")
+        if ud is not None and "apc" not in state and "seen" not in state:
+            gen._unprocessed_sequences[:] = [
+                q for q in gen._unprocessed_sequences if q[0] != ud]
+            state["apc"] = gen.apc_manager
+            gen.apc_manager = types.SimpleNamespace(release=released.extend)
+            e = RuntimeError(MEM)
+            tg.mark_broken(e, [0, 1])
+            tg.mark_prefill_broken(e, [ud], [{"apc_blocks": [7, 8]}])
+            raise e
+        return inject(gen, st)
+
+    monkeypatch.setattr(tg, "_maybe_inject", maybe_inject)
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    removal = _Removal(monkeypatch, "cbfail", skip=1)
+    prompts = {}
+    got, fin, gaps = run(engine, plan=make_plan(prompts, removal), b_max=6,
+                         c_at=1, c_max=6, prompts=prompts)
+    assert removal.fired == 1 and failed == []
+    assert sorted(queued) == [0, 1, 2, state["d"]]
+    assert released == [7, 8]
+    assert _tokens(got) == _tokens(ref) and fin == ref_fin
+    for uid, g in gaps.items():
+        assert g == {0}, (uid, g)
 
 
 def test_d_forced_eval(engine, monkeypatch, shot):

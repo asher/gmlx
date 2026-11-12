@@ -688,7 +688,7 @@ def _retire_largest(gen, st: _GovState) -> bool:
     tg_st.last_victim = victim
     before = mx.get_active_memory()
     st.pending_shed_bytes = _shed_transient_bytes(gen, st)
-    tg._rebuild_row(gen, tg_st, victim)
+    tg._rebuild_row(gen, tg_st, victim, "orange retire: memory pressure")
     st.shed_times.append(time.perf_counter())
     st.shed_measure_from = float(before)
     _STATS["orange_retires"] += 1
