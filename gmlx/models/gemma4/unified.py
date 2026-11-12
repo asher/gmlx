@@ -8,7 +8,8 @@
 All of ``mlx_vlm/models/gemma4_unified/gemma4_unified.py``, whose path in
 the copy is an alias of this module. Edits to the upstream file: imports
 are absolute; the language model is the owned one, and the multimodal
-embedder is the copied gemma4 container's. The copied package's configs
+embedder is the copied gemma4 container's, as is ``_compact_prefix_rows``,
+which moved there for the gemma4 audio path. The copied package's configs
 are named in annotations only, so this module imports nothing from that
 package when it runs and either one can be imported first.
 """
@@ -21,23 +22,16 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx._vendor.mlx_vlm.models.base import InputEmbeddingsFeatures
-from gmlx._vendor.mlx_vlm.models.gemma4.gemma4 import MultimodalEmbedder, masked_scatter
+from gmlx._vendor.mlx_vlm.models.gemma4.gemma4 import (
+    MultimodalEmbedder,
+    _compact_prefix_rows,
+    masked_scatter,
+)
 
 from .language import LanguageModel
 
 if TYPE_CHECKING:
     from gmlx._vendor.mlx_vlm.models.gemma4_unified.config import ModelConfig, VisionConfig
-
-
-def _compact_prefix_rows(features: mx.array, valid_mask: mx.array) -> mx.array:
-    rows = []
-    for batch_idx, row in enumerate(valid_mask.tolist()):
-        length = sum(bool(v) for v in row)
-        if length:
-            rows.append(features[batch_idx, :length])
-    if not rows:
-        return features.reshape(-1, features.shape[-1])[:0]
-    return mx.concatenate(rows, axis=0)
 
 
 class VisionEmbedder(nn.Module):
