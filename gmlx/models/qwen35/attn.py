@@ -8,9 +8,8 @@ The owned ``__call__`` composes three formerly patch-installed routes:
 - ragged left-padded S=1 decode through the in-tree ragged SDPA
   kernels, with the unified-plan fallback for rows straddling plan
   buckets;
-- MTP verify: single masked-SDPA call for left-padded batches, one
-  "causal" call for B=1 and unpadded batches (quantized KV included),
-  per-row "causal" fold for deep batched verify widths;
+- MTP verify: one "causal" call for B=1 (quantized KV included), one
+  "causal" call per row, on the row's own keys, for batches;
 - the stock per-pad-group loop as the fallback.
 
 Kvarn KV bypasses all three: a single claim after the cache update
@@ -590,21 +589,57 @@ def _sdpa(queries, keys, values, *, cache, scale, mask, sinks=None):
             # An array mask on a batch cache is left-pad + causal by
             # construction (BatchKVCache.make_mask); per-row slices past
             # the pad make each row a plain bottom-right-causal verify.
-            rows = [
-                _sdpa_dispatch(
-                    queries[r : r + 1],
-                    keys[r : r + 1, :, p:, :],
-                    values[r : r + 1, :, p:, :],
-                    cache=cache,
-                    scale=scale,
-                    mask="causal",
-                )
-                for r, p in enumerate(pads)
-            ]
-            return mx.concatenate(rows, axis=0)
+            T = keys.shape[2]
+            return _per_row_verify(
+                queries, keys, values, [(p, T) for p in pads],
+                cache=cache, scale=scale,
+            )
     return _sdpa_dispatch(
         queries, keys, values, cache=cache, scale=scale, mask=mask, sinks=sinks
     )
+
+
+def _per_row_verify(queries, keys, values, spans, *, cache, scale):
+    """One "causal" call per row on that row's own keys, the call a
+    single-stream verify makes, which the fused verify kernels claim.
+    ``spans`` holds each row's (start, end) on the key axis; the row's
+    queries are the last positions of its span, so a row that ends
+    before the batch width passes its own end."""
+    rows = [
+        _sdpa_dispatch(
+            queries[r : r + 1],
+            keys[r : r + 1, :, s:e, :],
+            values[r : r + 1, :, s:e, :],
+            cache=cache,
+            scale=scale,
+            mask="causal",
+        )
+        for r, (s, e) in enumerate(spans)
+    ]
+    return mx.concatenate(rows, axis=0)
+
+
+def _verify_spans(queries, keys, cache, mask):
+    """Each row's key span for the per-row verify of a batch, or None
+    where the cache cannot tell the rows apart: a window, right padding,
+    or a mask the cache did not make. A row starts past its left pad and
+    ends at the batch width."""
+    if (
+        not env_bool("GMLX_QWEN35_VERIFY_FOLD", True)
+        or hasattr(cache, "max_size")
+        or getattr(cache, "_right_padding", None) is not None
+    ):
+        return None
+    B, L, T = queries.shape[0], queries.shape[2], keys.shape[2]
+    causal = mask is None or (isinstance(mask, str) and mask == "causal")
+    if not causal and not (isinstance(mask, mx.array) and mask.shape[-1] == T):
+        return None
+    pads = _pads_list(cache)
+    if pads is None and causal:
+        pads = [0] * B
+    if pads is None or len(pads) != B or T - max(pads) < L:
+        return None
+    return [(p, T) for p in pads]
 
 
 def _left_padded_attention(queries, keys, values, *, cache, scale, mask):
@@ -682,18 +717,17 @@ def _left_padded_attention(queries, keys, values, *, cache, scale, mask):
     return mx.concatenate([row_outputs[i] for i in range(queries.shape[0])], axis=0)
 
 
-_ragged_noted = set()
+_stock_noted = set()
 
 
-def _note_ragged(route, B, L, T, pads):
-    key = (route, B, L)
-    if key in _ragged_noted:
+def _note_stock(route, B, L, T):
+    if route in _stock_noted:
         return
-    _ragged_noted.add(key)
-    # warn, not verbose_print: live verify traffic should never reach
-    # this route, so the one-shot must survive quiet serve logs.
-    loadlog.warn(f"[verify] ragged-pads route: {route} B={B} S={L} T={T} "
-                 f"max_pad={max(pads)}")
+    _stock_noted.add(route)
+    # warn, not verbose_print: a batched verify should take one fused
+    # call per row, so the one-shot must survive quiet serve logs.
+    loadlog.warn(f"[verify] batched verify fell to stock attention: {route} "
+                 f"B={B} S={L} T={T}")
 
 
 def _folded_or_group_attention(queries, keys, values, *, cache, scale, mask):
@@ -773,23 +807,32 @@ def _lone_row_is_causal(queries, keys, cache, mask):
 def _verify_attention(queries, keys, values, *, cache, scale, mask):
     """Composed verify/left-padded-decode attention resolver.
 
-    Route order: the batched masked-SDPA claim first (padded L>1 single
-    call, unpadded L>1 "causal" call), then the B=1 fold, then the group
-    loop. Returns None for unpadded S=1 decode so the caller's general
-    path takes it, as upstream's helper does.
+    Route order at verify width with two or more rows: one fused call per
+    row on the row's own keys, then the shared prefix claim (which keeps
+    the one-token case in _left_padded_attention), then stock, warned
+    once. One row takes the "causal" call or the B=1 fold, padded decode
+    the group loop. Returns None for unpadded S=1 decode so the caller's
+    general path takes it, as upstream's helper does.
     """
+    B, L = queries.shape[0], queries.shape[-2]
+    batched = B > 1 and L > 1
     if hasattr(cache, "bits") or queries.ndim != 4 or keys.ndim != 4:
+        if batched:
+            k0 = keys[0] if isinstance(keys, (tuple, list)) else keys
+            _note_stock("quantized-kv", B, L, k0.shape[-2])
         return _folded_or_group_attention(
             queries, keys, values, cache=cache, scale=scale, mask=mask
         )
+    T = keys.shape[-2]
+    if batched:
+        spans = _verify_spans(queries, keys, cache, mask)
+        if spans is not None:
+            return _per_row_verify(
+                queries, keys, values, spans, cache=cache, scale=scale
+            )
     pads = getattr(cache, "_qwen3_5_decode_left_padding", None)
     padded = pads is not None and len(pads) > 0 and max(pads) > 0
-    L = queries.shape[-2]
-    if (
-        L > 1
-        and queries.shape[0] > 1
-        and env_bool("GMLX_CASCADE_SDPA", True)
-    ):
+    if batched and env_bool("GMLX_CASCADE_SDPA", True):
         # Layer masks on this tree are always cache-derived (the owned
         # model call drops any caller mask), so at verify width they
         # encode pad visibility + end-aligned causal -- exactly what
@@ -806,22 +849,18 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
             return output
     if padded and (
         L <= 1
-        or len(pads) != queries.shape[0]
+        or len(pads) != B
         or isinstance(mask, mx.array)
         or not env_bool("GMLX_VERIFY_RAGGED_MASK", True)
     ):
-        if L > 1:
-            _note_ragged("group-loop", queries.shape[0], L,
-                         keys.shape[-2], pads)
+        if batched:
+            _note_stock("group-loop", B, L, T)
         return _folded_or_group_attention(
             queries, keys, values, cache=cache, scale=scale, mask=mask
         )
     if L <= 1:
         return None
     if padded:
-        _note_ragged("masked-sdpa", queries.shape[0], L,
-                     keys.shape[-2], pads)
-        T = keys.shape[-2]
         t = mx.arange(T)[None, None, :]
         end = (T - L) + mx.arange(L)[None, :, None]
         pad_arr = mx.array(pads, dtype=mx.int32)[:, None, None]
@@ -832,6 +871,8 @@ def _verify_attention(queries, keys, values, *, cache, scale, mask):
         sdpa_mask = mask
     else:
         sdpa_mask = "causal"
+    if B > 1:
+        _note_stock("masked-sdpa" if padded else "batch-sdpa", B, L, T)
     return mx.fast.scaled_dot_product_attention(
         queries, keys, values, scale=scale, mask=sdpa_mask
     )

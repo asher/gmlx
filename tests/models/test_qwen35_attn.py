@@ -444,3 +444,164 @@ def test_a_lone_unpadded_batch_row_verifies_on_the_causal_call(monkeypatch):
     got, out, ref = _lone_row_verify(windowed, seen, sdpa)
     assert isinstance(got, mx.array)
     assert _close(out, ref, 1e-3)
+
+
+# ---------------------------------------------------------------------------
+# batched verify: one fused call per row
+# ---------------------------------------------------------------------------
+
+
+def _fa_ready():
+    from gmlx.upstream import attn_hd512
+
+    return attn_hd512._HAS_FA_VERIFY and mx.default_device() == mx.Device(mx.gpu)
+
+
+_NEEDS_FA = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")) or not _fa_ready(),
+    reason="the fused verify kernel needs mlx_kquant on the GPU")
+
+# Qwen3.x full-attention geometry: 24 query heads on 4 KV heads, head_dim
+# 256. Rows of 4400 and 4150 keys before the block, block 8.
+_HQ, _HKV, _HD, _BLOCK = 24, 4, 256, 8
+_LENS = (4400, 4150)
+
+
+def _rows(seed=31):
+    mx.random.seed(seed)
+    rows = []
+    for n in _LENS:
+        k = mx.random.normal((1, _HKV, n + _BLOCK, _HD)).astype(mx.bfloat16)
+        v = mx.random.normal((1, _HKV, n + _BLOCK, _HD)).astype(mx.bfloat16)
+        q = mx.random.normal((1, _HQ, _BLOCK, _HD)).astype(mx.bfloat16)
+        rows.append((q, k, v))
+    mx.eval(rows)
+    return rows
+
+
+def _batched_verify(rows, scale):
+    """The rows left-padded on a batch cache, the pads holding large junk
+    a row must never see, then one verify call. Returns the output, the
+    keys and values the call saw, and the pads."""
+    from gmlx.cache.attention import create_attention_mask
+
+    T0 = max(_LENS)
+    pads = [T0 - n for n in _LENS]
+    cache = owned_cache.BatchKVCache(pads)
+    junk = mx.full((1, _HKV, T0, _HD), 30.0, dtype=mx.bfloat16)
+    pk = mx.concatenate(
+        [mx.concatenate([junk[:, :, :p], k[:, :, :n]], axis=2)
+         for (_, k, _), p, n in zip(rows, pads, _LENS)], axis=0)
+    pv = mx.concatenate(
+        [mx.concatenate([junk[:, :, :p], v[:, :, :n]], axis=2)
+         for (_, _, v), p, n in zip(rows, pads, _LENS)], axis=0)
+    cache.update_and_fetch(pk, pv)
+    mask = create_attention_mask(mx.zeros((2, _BLOCK, 1)), cache)
+    keys, values = cache.update_and_fetch(
+        mx.concatenate([k[:, :, n:] for (_, k, _), n in zip(rows, _LENS)]),
+        mx.concatenate([v[:, :, n:] for (_, _, v), n in zip(rows, _LENS)]))
+    q = mx.concatenate([q for q, _, _ in rows])
+    out = qwen35_attn._verify_attention(
+        q, keys, values, cache=cache, scale=scale, mask=mask)
+    mx.eval(out)
+    return out, keys, values, pads
+
+
+def _reference(q, k, v, spans, scale):
+    """float32 attention of each row on keys [start, end), the block's
+    queries on the last positions of the span, causal within it."""
+    L, T = q.shape[2], k.shape[2]
+    kr = mx.repeat(k, _HQ // _HKV, axis=1).astype(mx.float32)
+    vr = mx.repeat(v, _HQ // _HKV, axis=1).astype(mx.float32)
+    s = (q.astype(mx.float32) * scale) @ kr.swapaxes(-1, -2)
+    pos = mx.arange(T)[None, None, None, :]
+    start = mx.array([a for a, _ in spans])[:, None, None, None]
+    end = mx.array([b for _, b in spans])[:, None, None, None]
+    last = end - L + mx.arange(L)[None, None, :, None]
+    keep = (pos >= start) & (pos <= last)
+    return mx.softmax(mx.where(keep, s, mx.array(-mx.inf)), axis=-1) @ vr
+
+
+def _fa_calls():
+    from gmlx.upstream import attn_hd512
+
+    return sum(n for (name, hd, qL, _), n in attn_hd512.route_counts().items()
+               if name.startswith("fa_verify") and hd == _HD and qL == _BLOCK)
+
+
+@_NEEDS_FA
+def test_each_folded_row_matches_the_row_verified_alone():
+    """Control: a batched verify's row is the call the single-stream
+    verify of that row makes, on the same keys, so the two agree."""
+    from gmlx.cache.attention import create_attention_mask
+    from gmlx.upstream import attn_hd512
+
+    assert attn_hd512.install_hd512_sdpa()
+    scale = _HD**-0.5
+    rows = _rows()
+    out, _, _, _ = _batched_verify(rows, scale)
+    for r, ((q, k, v), n) in enumerate(zip(rows, _LENS)):
+        cache = owned_cache.KVCache()
+        cache.update_and_fetch(k[:, :, :n], v[:, :, :n])
+        mask = create_attention_mask(mx.zeros((1, _BLOCK, 1)), cache)
+        keys, values = cache.update_and_fetch(k[:, :, n:], v[:, :, n:])
+        alone = qwen35_attn._verify_attention(
+            q, keys, values, cache=cache, scale=scale, mask=mask)
+        mx.eval(alone)
+        assert mx.array_equal(out[r : r + 1], alone).item(), f"row {r}"
+
+
+@_NEEDS_FA
+def test_a_batched_verify_takes_the_fused_route_per_row():
+    """Two rows of different lengths, block 8, past 4096 keys: each row
+    makes one fused verify call on its own keys and the batch matches
+    reference attention. A row that ends before the batch width passes
+    its own end and sees nothing past it."""
+    from gmlx.upstream import attn_hd512
+
+    assert attn_hd512.install_hd512_sdpa()
+    scale = _HD**-0.5
+    rows = _rows()
+    n0 = _fa_calls()
+    out, keys, values, pads = _batched_verify(rows, scale)
+    assert _fa_calls() == n0 + 2
+    T = keys.shape[2]
+    q = mx.concatenate([q for q, _, _ in rows])
+    spans = [(p, T) for p in pads]
+    ref = _reference(q, keys, values, spans, scale)
+    assert _close(out, ref, ATOL)
+
+    # Row 1 ends 3 keys short of the batch width; its last 3 keys are junk.
+    short_k = mx.concatenate(
+        [keys[:1], mx.concatenate(
+            [keys[1:, :, 3:], mx.full((1, _HKV, 3, _HD), 30.0, keys.dtype)],
+            axis=2)])
+    short_v = mx.concatenate(
+        [values[:1], mx.concatenate(
+            [values[1:, :, 3:], mx.full((1, _HKV, 3, _HD), 30.0, values.dtype)],
+            axis=2)])
+    spans = [(pads[0], T), (pads[1] - 3, T - 3)]
+    got = qwen35_attn._per_row_verify(
+        q, short_k, short_v, spans, cache=None, scale=scale)
+    mx.eval(got)
+    assert _fa_calls() == n0 + 4
+    assert _close(got, ref, ATOL)
+
+
+def test_a_batched_verify_off_the_per_row_route_warns_once(monkeypatch):
+    """With the per-row route off, a batched verify of equal lengths runs
+    on stock attention and says so once."""
+    monkeypatch.setenv("GMLX_QWEN35_VERIFY_FOLD", "0")
+    monkeypatch.setattr(qwen35_attn, "_stock_noted", set(), raising=False)
+    warned = []
+    monkeypatch.setattr(qwen35_attn.loadlog, "warn", warned.append)
+    mx.random.seed(3)
+    q = mx.random.normal((2, 4, 3, 64))
+    k = mx.random.normal((2, 2, 40, 64))
+    v = mx.random.normal((2, 2, 40, 64))
+    cache = owned_cache.BatchKVCache([0, 0])
+    for _ in range(2):
+        out = qwen35_attn._verify_attention(
+            q, k, v, cache=cache, scale=0.125, mask="causal")
+        mx.eval(out)
+    assert len(warned) == 1 and "batched verify fell to stock" in warned[0]

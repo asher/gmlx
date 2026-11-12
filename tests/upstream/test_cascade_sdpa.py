@@ -242,8 +242,9 @@ def test_qwen_owned_path_claims(monkeypatch):
 
 @pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
 def test_qwen_owned_verify_width_claims(monkeypatch):
-    """The owned qwen verify resolver routes stamped B>1 qL>1 calls
-    through the cascade claim ahead of the padded masked-sdpa branch."""
+    """The owned qwen verify resolver gives stamped B>1 qL>1 calls one
+    fused call per row ahead of the cascade claim; with the per-row route
+    off, the claim takes them ahead of the padded masked-sdpa branch."""
     import gmlx.models.qwen35.attn as qa
 
     monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
@@ -262,6 +263,10 @@ def test_qwen_owned_verify_width_claims(monkeypatch):
         return c
 
     n0 = cs.claims()
+    per_row = qa._verify_attention(q, k, v, cache=_cache(), scale=0.088,
+                                   mask=None)
+    assert cs.claims() == n0
+    monkeypatch.setenv("GMLX_QWEN35_VERIFY_FOLD", "0")
     got = qa._verify_attention(q, k, v, cache=_cache(), scale=0.088,
                                mask=None)
     assert cs.claims() == n0 + 1
@@ -278,6 +283,8 @@ def test_qwen_owned_verify_width_claims(monkeypatch):
         mx.where(keep, sc, mx.array(-mx.inf)), axis=-1) @ vr
     err = mx.abs(got.astype(mx.float32) - ref).max().item()
     assert err < 2e-2, f"qwen verify-width cascade err={err}"
+    err0 = mx.abs(per_row.astype(mx.float32) - ref).max().item()
+    assert err0 < 2e-2, f"qwen verify-width per-row err={err0}"
 
     # kill switch: masked-sdpa branch answers instead, no claim
     monkeypatch.setenv("GMLX_CASCADE_SDPA", "0")
