@@ -173,11 +173,14 @@ def _run(encoder, projector, mel: np.ndarray) -> np.ndarray:
 
 
 # M5 GPUs run float32 matmuls at TF32 precision. Over 10 weight seeds a
-# clip and the passes over a long one differed from the float64 reference
-# by up to 0.0072, at an output scale near 4.5 (under 2e-6 on the CPU
-# device). An attention window one frame short moves the output by at
-# least 0.068, three times this bound.
+# clip of 21 or 40 frames and the passes over a long one differed from the
+# float64 reference by up to 0.0072, at an output scale near 4.5 (under
+# 2e-6 on the CPU device). Clips of 1 and 8 frames show no such drift
+# (about 1e-6) and keep the tight bound. From 40 frames up, an attention
+# window one frame short moves the output by at least 0.068, three times
+# this bound.
 _TF32_ATOL = 2.2e-2
+_TIGHT = {"rtol": 2e-4, "atol": 2e-5}
 
 
 @pytest.mark.parametrize("frames", [8, 21, 1, 40])
@@ -187,8 +190,8 @@ def test_a_clip_matches_the_reference(frames):
     mel = np.random.default_rng(frames).standard_normal((16, frames))
     got = _run(encoder, projector, mel)
     assert got.shape == (-(frames // -8), 24)
-    np.testing.assert_allclose(got, _reference(cfg, w, mel), rtol=0,
-                               atol=_TF32_ATOL)
+    tol = _TIGHT if frames <= 8 else {"rtol": 0, "atol": _TF32_ATOL}
+    np.testing.assert_allclose(got, _reference(cfg, w, mel), **tol)
 
 
 def test_a_position_reads_only_its_window():
