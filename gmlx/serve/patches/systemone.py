@@ -28,7 +28,7 @@ from gmlx import lora_rows
 from gmlx.serve import job_route
 from gmlx.serve.job_route import request_lora as _request_lora
 from gmlx.serve.job_route import salted as _salted
-from gmlx.systemone import ar_reader, letters, model_template
+from gmlx.systemone import ar_reader, d1, letters, model_template
 from gmlx.systemone import (
     Limits,
     SchemaError,
@@ -54,6 +54,9 @@ _ENDPOINT = "/v1/systemone"
 _PREWARM = "/v1/prewarm"
 _RUNTIME_ATTR = "_kq_systemone_runtime"
 _LETTERS_ATTR = "_kq_systemone_letters"
+_D1_ATTR = "_kq_systemone_d1"
+# The top-level fields a d1 decision reads.
+_D1_FIELDS = frozenset({"model", "profile", "state", "questions"})
 _NO_IMAGES = "images are not supported: the served model is text-only"
 
 _log = logging.getLogger(__name__)
@@ -253,11 +256,66 @@ def _admit_letters(rg, tokens, texts: list[str], extra: int) -> int:
     return n
 
 
-def _resolve_engine(field, profile, cfg, runtime):
+def _resolve_engine(field, profile, cfg, runtime, decisions=False):
     """Load the model a request names and return ``(rg, hold, spec,
-    model_str)``. The caller releases ``hold``."""
+    model_str)``. The caller releases ``hold``. ``decisions`` lets the
+    load take a d1 decision model."""
     return job_route.resolve_engine(
-        lambda: _pick_model(field, profile, cfg), profile, runtime)
+        lambda: _pick_model(field, profile, cfg), profile, runtime,
+        decisions=decisions)
+
+
+def _d1_target(field, profile, cfg) -> bool:
+    """Whether the request names a d1 decision model, read from its header
+    with no load. A name that does not resolve takes the usual path, and
+    gets its usual error."""
+    from gmlx.load.discovery import header_meta
+
+    try:
+        raw = _pick_model(field, profile, cfg)
+        path, _ = serving.resolve_request_model(raw or None, profile_field=profile)
+    except Exception:  # noqa: BLE001 - the usual path reports it
+        return False
+    return isinstance(path, str) and bool((header_meta(path) or {}).get("decision"))
+
+
+def _d1_for(rg) -> d1.D1Format:
+    """The model's d1 format, built once and kept on its ResponseGenerator."""
+    with _runtime_lock:
+        fmt = getattr(rg, _D1_ATTR, None)
+        if fmt is None:
+            fmt = d1.setup(rg.processor, lock=rg._tokenizer_lock)
+            if fmt is None:
+                raise HTTPException(status_code=400, detail=(
+                    "this decision model names no d1 decision type in its GGUF"))
+            setattr(rg, _D1_ATTR, fmt)
+    return fmt
+
+
+def _d1_passes(rg, fmt, questions, state) -> list:
+    """Each question's prompt and label groups. A prompt over the state cap
+    is a 400; the longest is checked against the memory budget."""
+    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    from gmlx.load.decision import DECISION_STATE_CAP
+    from gmlx.serve.mem_preflight import preflight_prompt_memory
+
+    passes, longest = [], ("", 0)
+    for q in questions:
+        if d1.is_spoken(q.instructions) and not fmt.omni:
+            raise d1.D1RequestError(
+                f"questions.{q.id}: spoken instructions need a model with audio input")
+        text = fmt.prompt(state, q)
+        ids = fmt.encode(text)
+        if len(ids) > DECISION_STATE_CAP:
+            raise d1.D1RequestError(
+                f"questions.{q.id}: the prompt has {len(ids):,} tokens; a d1 "
+                f"prompt holds at most {DECISION_STATE_CAP:,}")
+        passes.append(d1.Pass(q, ids, fmt.labels(q)[1]))
+        if len(ids) > longest[1]:
+            longest = (text, len(ids))
+    preflight_prompt_memory(rg, longest[0],
+                            args=gen.GenerationArguments(max_tokens=1))
+    return passes
 
 
 def _record_failure(runtime, model, error: str) -> None:
@@ -294,20 +352,38 @@ def make_systemone_endpoint(installed):
                         "invalid body: expected a JSON object")
         requested = body.get("model")
         shown["model"] = requested if isinstance(requested, str) else ""
-        if body.get("images"):
-            return fail(400, "invalid_request_error", _NO_IMAGES)
-        unread = set(body) - SYSTEMONE_CONSUMED
-        parsed = ParsedRequest(body, limits, cfg.request_defaults())
-        if parsed.error is not None:
-            warn_ignored_fields(_ENDPOINT, unread)
-            return fail(422, "validation_error", str(parsed.error))
         profile = body.get("profile") if isinstance(body.get("profile"), str) else None
+        is_d1 = _d1_target(body.get("model"), profile, cfg)
+        d1_questions: list = []
+        if is_d1:
+            if body.get("adapters") or body.get("lora"):
+                return fail(400, "invalid_request_error",
+                            "a d1 decision runs no adapters")
+            if d1.body_media(body):
+                return fail(400, "invalid_request_error",
+                            "media in a d1 decision are not supported yet")
+            try:
+                d1_questions = d1.parse_questions(
+                    body, omni=True, max_questions=limits.max_questions)
+            except d1.D1RequestError as e:
+                return fail(400, "invalid_request_error", str(e))
+            warn_ignored_fields(_ENDPOINT, set(body) - _D1_FIELDS)
+            unread, parsed = set(), None
+        else:
+            if body.get("images"):
+                return fail(400, "invalid_request_error", _NO_IMAGES)
+            unread = set(body) - SYSTEMONE_CONSUMED
+            parsed = ParsedRequest(body, limits, cfg.request_defaults())
+            if parsed.error is not None:
+                warn_ignored_fields(_ENDPOINT, unread)
+                return fail(422, "validation_error", str(parsed.error))
         tenant = _tenant(http_request)
 
         stop = threading.Event()
         request_id = f"so-{uuid.uuid4().hex[:12]}"
 
         def _backend(kind: str):
+            assert parsed is not None
             try:
                 got = parsed.get(kind)
             except SchemaError:
@@ -368,16 +444,39 @@ def make_systemone_endpoint(installed):
 
             return schema, job, admitted
 
+        def _d1_run(rg, resolved):
+            from gmlx.load.decision import DECISION_STATE_CAP
+            from gmlx.serve.engine_jobs import run_on_engine
+
+            gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+            fmt = _d1_for(rg)
+            try:
+                passes = _d1_passes(rg, fmt, d1_questions, body.get("state"))
+            except d1.D1RequestError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+
+            def job(engine_rg, should_stop):
+                return d1.decide_d1(
+                    d1.text_of(engine_rg.model), fmt, passes, has_media=False,
+                    budget=DECISION_STATE_CAP, should_stop=should_stop)
+
+            return run_on_engine(
+                rg, job, request_id=request_id,
+                prompt_tokens=sum(len(p.ids) for p in passes), stop=stop,
+                timeout_s=gen.get_token_queue_timeout(), stepwise=True)
+
         def _run():
             from gmlx.gen.diffusion import is_diffusion_model
             from gmlx.serve.engine_jobs import run_on_engine
 
             gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
             rg, hold, spec, model_str = _resolve_engine(
-                body.get("model"), profile, cfg, runtime)
+                body.get("model"), profile, cfg, runtime, decisions=is_d1)
             try:
                 resolved = spec.id if spec is not None else (model_str or shown["model"])
                 shown["model"] = resolved
+                if is_d1:
+                    return "d1", None, resolved, _d1_run(rg, resolved), 0
                 lora = _request_lora(spec, body)
                 if is_diffusion_model(getattr(rg, "model", None)):
                     schema, job, admitted = _diffusion_job(rg)
@@ -424,7 +523,10 @@ def make_systemone_endpoint(installed):
             watcher.cancel()
 
         try:
-            content = jev_response(schema, result, completion_tokens, resolved)
+            if backend == "d1":
+                content = d1.response(result, resolved)
+            else:
+                content = jev_response(schema, result, completion_tokens, resolved)
         except Exception as e:  # noqa: BLE001 - a 500 like any engine failure
             _log.exception("systemone: response assembly failed")
             _record_failure(runtime, resolved, str(e))
@@ -432,10 +534,15 @@ def make_systemone_endpoint(installed):
                           f"decision failed ({type(e).__name__}); see the server log")
         diagnostics = result["diagnostics"]
         input_tokens = content["usage"]["input_tokens"]
-        auto = diagnostics.get("think_auto") or {}
-        _log.info("systemone: %s reads=%d %.0fms%s", log_labels(result["answers"]),
-                  diagnostics["timing"]["reads"], diagnostics["timing"]["total_ms"],
-                  " thought=auto" if auto.get("thought") else "")
+        if backend == "d1":
+            _log.info("systemone: d1 questions=%d forwards=%d %.0fms",
+                      len(result["answers"]), diagnostics["forwards"],
+                      diagnostics["timing"]["total_ms"])
+        else:
+            auto = diagnostics.get("think_auto") or {}
+            _log.info("systemone: %s reads=%d %.0fms%s", log_labels(result["answers"]),
+                      diagnostics["timing"]["reads"], diagnostics["timing"]["total_ms"],
+                      " thought=auto" if auto.get("thought") else "")
         gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
         try:
             runtime.metrics.record_success(gen._build_metrics_envelope(
