@@ -34,6 +34,7 @@ import gmlx.lora_rows as lora_rows
 from gmlx import mlx_guards
 from gmlx.cache.kv_append import eval_cache as _eval_cache
 from gmlx.cache.kv_append import release as _release_kv
+from gmlx.cache import row_ends as _row_ends
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
 from gmlx.gen.logprobs import RoundLogprobs
@@ -3047,6 +3048,9 @@ def _owned_decode_rounds_batch(
               if _packed_batch_cache(c)]
     packed_gate = bool(packed) and len(b) > 1
     mixed = not packed_gate and _mixed_policy(drafter, lm, cap)
+    # The native head batch keeps each row's end through an uneven rollback
+    # instead of rolling the rows right (gmlx/cache/row_ends.py).
+    row_ends_on = _row_ends.row_ends_active(drafter, lm, mixed)
     gated = bool(cap) and len(b) > cap and not mixed
     if gated:
         _log_width_cap_once(
@@ -3393,6 +3397,10 @@ def _owned_decode_rounds_batch(
         """Latch the batch into plain decode until it drains under the cap."""
         nonlocal gated
         gated = True
+        if row_ends_on:
+            # Plain decode reads right-justified rows.
+            _row_ends.disarm(prompt_cache)
+            _row_ends.disarm(getattr(drafter, "_cache", None))
         _log_width_cap_once(
             f"trip: B={width} > cap={cap}; batch converts to plain decode "
             f"until drained")
@@ -3644,6 +3652,9 @@ def _owned_decode_rounds_batch(
                 dispatch_next = False
         n_active = len(active_idx)
         mixed_round = None
+        if row_ends_on and not gated:
+            _row_ends.arm(prompt_cache)
+            _row_ends.arm(getattr(drafter, "_cache", None))
         # Every round reads the active rows' own settings.
         eff, greedy, want, round_k = _round_rows()
         _walk_sampler = eff

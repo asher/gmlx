@@ -177,6 +177,11 @@ class QwenMTPDrafter(nn.Module):
         )
         return self
 
+    @property
+    def row_ends_rollback(self) -> bool:
+        """A dense head's batch keeps row ends (gmlx/cache/row_ends.py)."""
+        return all(type(layer) is Qwen3_5DecoderLayer for layer in self.layers)
+
     def make_cache(self, left_padding: list[int] | None = None) -> list[Any]:
         if left_padding is not None:
             return [BatchKVCache(left_padding) for _ in self.layers]
