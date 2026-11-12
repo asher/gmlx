@@ -362,7 +362,8 @@ def _ensure_text_embedding_probe(model, raw_model) -> None:
 
 
 def _load_serveable_vlm(
-    gguf_path: str, mmproj_path: str, *, hf_source: str | None = None
+    gguf_path: str, mmproj_path: str, *, hf_source: str | None = None,
+    decision: bool = False,
 ) -> tuple[object, object, object]:
     """Load a two-GGUF VLM (K-quant LLM + float mmproj) for the batched engine.
 
@@ -380,7 +381,8 @@ def _load_serveable_vlm(
     from gmlx.load.vlm import load_vlm_model
 
     loaded = load_vlm_model(
-        gguf_path, mmproj_path, hf_source=hf_source, verbose=False
+        gguf_path, mmproj_path, hf_source=hf_source, verbose=False,
+        decision=decision,
     )
     model, processor = loaded[0], loaded[2]
     # Return the model's own dataclass config (what stock load_model_resources
@@ -664,6 +666,7 @@ def load_serveable_model(
     feeder_decode: bool | None = None,
     fast_disk: str | None = None,
     rope_override=None,
+    decision: bool = False,
 ) -> tuple[object, object, object]:
     """Load a GGUF model into the form mlx-vlm's server expects.
 
@@ -706,6 +709,10 @@ def load_serveable_model(
     experts to filter). ``moe_prestage: keepers`` retargets the lookahead
     prestage through the miss-shed policy and additionally needs
     ``moe_miss_shed`` (announced as ignored without it).
+
+    ``decision=True`` lets a decision model load (``gmlx.load.decision``):
+    the server passes it for a registered model, whose generating routes
+    refuse one. Every other caller gets ``DecisionModelOnly`` for one.
     """
     def _reject_unwired(base_kind: str, *, streamable: bool = False,
                         adapter_ok: bool = False) -> None:
@@ -754,7 +761,7 @@ def load_serveable_model(
     if mmproj_path is not None:
         _reject_unwired("VLM", streamable=True)
         model, processor, config = _load_serveable_vlm(
-            gguf_path, mmproj_path, hf_source=hf_source)
+            gguf_path, mmproj_path, hf_source=hf_source, decision=decision)
         _install_stream_placement(
             getattr(model, "language_model", model), gguf_path=gguf_path,
             stream=stream, feeder_prefill=feeder_prefill,
@@ -768,7 +775,8 @@ def load_serveable_model(
             chat_template=chat_template, adapter_gguf=adapter_gguf)
 
     raw_model, config, tokenizer = load_model(
-        gguf_path, chat_template=chat_template, verbose=False)
+        gguf_path, chat_template=chat_template, verbose=False,
+        decision=decision)
 
     from gmlx.gen.diffusion import is_diffusion_model
 
@@ -1015,8 +1023,14 @@ def install_gguf_server_bridge() -> None:
         # wired in by residency after the load returns. Applies to GGUF and
         # fall-through loads alike - any pooled model can enable the cache.
         from gmlx.cache.apc_manager import build_apc_manager
+        from gmlx.load.discovery import header_meta
+
+        # A decision model serves no chat route, so it gets no chat prefix
+        # cache. The header says so before the load.
+        decision = bool(_is_gguf(model_path)
+                        and (header_meta(model_path) or {}).get("decision"))
         rope = getattr(get_build_spec(), "rope_scaling", None)
-        manager = build_apc_manager(
+        manager = None if decision else build_apc_manager(
             model_namespace=model_path,
             **({"rope_override": rope} if rope is not None else {}))
         if manager is not None:
@@ -1082,6 +1096,14 @@ def install_gguf_server_bridge() -> None:
             # MTP-registered GGUF (the lossless-oracle case) resolves to None here.
             vlm = _resolve_vlm_spec(model_path)
             mtp = _resolve_mtp_spec(model_path)
+            if decision and mtp is not None:
+                raise NotImplementedError(
+                    f"{os.path.basename(model_path)} is a decision model and "
+                    "takes no drafter; drop speculative decoding from its "
+                    "config")
+            # This is a registered model's load, so a decision model may
+            # load: the generating routes refuse it before they get here.
+            feeders["decision"] = True
             if vlm is None and adapter_gguf:
                 # Refused from the headers before any build, so an MTP entry
                 # is never built, degraded and rebuilt only to fail again. A

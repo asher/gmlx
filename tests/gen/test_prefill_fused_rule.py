@@ -90,3 +90,43 @@ def test_head_dim_256_without_a_mask_materializes():
     # for an arch whose prefill passes no mask.
     q_len, k_len = 1024, 8192
     assert _score_bytes(256, q_len, k_len, None) > 0.5 * _dense(q_len, k_len)
+
+
+def _key_mask_score_bytes(rows, q_len, k_len, dim=128, heads=16, kv_heads=4):
+    """Peak bytes beyond inputs for ``rows`` right-padded rows under a bool
+    key mask ``[rows, 1, 1, k_len]``, the d1 decision forward's form."""
+    mx.random.seed(0)
+    q = mx.random.normal((rows, heads, q_len, dim)).astype(mx.bfloat16)
+    k = mx.random.normal((rows, kv_heads, k_len, dim)).astype(mx.bfloat16)
+    v = mx.random.normal((rows, kv_heads, k_len, dim)).astype(mx.bfloat16)
+    lengths = mx.array([k_len - 1000 * r for r in range(rows)])
+    mask = (mx.arange(k_len)[None] < lengths[:, None])[:, None, None, :]
+    mx.eval(q, k, v, mask)
+    mx.synchronize()
+    mx.clear_cache()
+    mx.reset_peak_memory()
+    base = mx.get_active_memory()
+    out = mx.fast.scaled_dot_product_attention(
+        q, k, v, scale=dim ** -0.5, mask=mask)
+    mx.eval(out)
+    extra = mx.get_peak_memory() - base - out.nbytes
+    del q, k, v, out
+    mx.clear_cache()
+    return extra
+
+
+def test_head_dim_128_without_a_mask_allocates_no_scores():
+    # The d1 decision forward reads every key from 2,048-row query blocks
+    # with no mask. Unfused, one block at 65,536 keys holds 4.3 GB of
+    # scores.
+    q_len, k_len = 2048, 16384
+    assert _score_bytes(128, q_len, k_len, None) < 0.05 * _dense(q_len, k_len)
+
+
+@pytest.mark.parametrize("rows", [1, 4])
+def test_head_dim_128_under_a_broadcast_key_mask_allocates_no_scores(rows):
+    # Batched d1 rows mask padded keys with [rows, 1, 1, N], broadcast over
+    # heads and queries.
+    q_len, k_len = 2048, 16384
+    dense = rows * 16 * q_len * k_len * 2
+    assert _key_mask_score_bytes(rows, q_len, k_len) < 0.05 * dense

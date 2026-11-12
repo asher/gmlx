@@ -109,7 +109,8 @@ def test_the_mtp_target_install_gets_the_skipped_tables(mtp_table_gguf,
     import gmlx.spec.mtp_load as ml
 
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
-    pf = SimpleNamespace(arch="deepseek41", shards=[mtp_table_gguf])
+    pf = SimpleNamespace(arch="deepseek41", shards=[mtp_table_gguf],
+                         refuse_decision=lambda allowed=False: None)
     got = {}
 
     class Installed(Exception):

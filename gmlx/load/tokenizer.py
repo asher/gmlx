@@ -542,6 +542,10 @@ def load_tokenizer_from_gguf(
         meta, "tokenizer.ggml.suppress_tokens") or []
     fast.gguf_named_templates = _named_templates(meta)
     fast.gguf_decision = _decision_meta(meta, arch)
+    # A d1 prompt breaks these texts where user text spells them.
+    fast.gguf_control_texts = (
+        [t for t, ty in zip(tokens, token_types) if ty == 3]
+        if fast.gguf_decision and token_types is not None else [])
     _attach_vlm_token_attrs(fast, tokens)
 
     template_eos = _infer_turn_end_eos(fast, eos_id, tokens, token_types)

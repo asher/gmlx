@@ -202,6 +202,17 @@ def refusal_text(est: dict) -> str:
             "disk; GMLX_TOOL_PREFLIGHT=0 overrides.")
 
 
+def refuse_decision_or_exit(gguf_path: str) -> None:
+    """Exit 2 with the decision-model message when ``gguf_path`` is a
+    decision model, which no one-shot tool runs. Header only."""
+    from gmlx.load.decision import DecisionModelOnly
+    from gmlx.load.discovery import header_meta
+
+    if (header_meta(gguf_path) or {}).get("decision"):
+        print(f"error: {DecisionModelOnly('this GGUF')}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def check_or_exit(gguf_path: str, ctx_tokens: int | None = None,
                   streaming: bool = False, *, kv_fp16: bool = False,
                   rows: int = 0):
@@ -212,6 +223,7 @@ def check_or_exit(gguf_path: str, ctx_tokens: int | None = None,
     not."""
     from gmlx.stream.budget import overcommit, ram_bytes
 
+    refuse_decision_or_exit(gguf_path)
     if not _enabled() or streaming:
         return None
     limit = None

@@ -155,8 +155,10 @@ def probe_capabilities(base_url: str, api_key: str | None = None,
         chat_ids = [e["id"] for e in entries
                     if e.get("id") and not any(e.get(k) for k in
                                                ("stt", "tts", "embeddings",
-                                                "rerank"))]
-        default = next((e["id"] for e in entries if e.get("default")), None)
+                                                "rerank", "decision"))]
+        # A default that does not chat (a decision model) is no pick.
+        default = next((e["id"] for e in entries if e.get("default")
+                        and e.get("id") in chat_ids), None)
         return {
             "stt": any(e.get("stt") for e in entries),
             "tts": any(e.get("tts") for e in entries),

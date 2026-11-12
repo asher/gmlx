@@ -5589,6 +5589,7 @@ def load_vlm_model(
     return_tokenizer: bool = False,
     spec_target: bool = False,
     rope_override: rope_scaling.RopeOverride | None = None,
+    decision: bool = False,
 ):
     """Load a K-quant LLM GGUF + an mmproj GGUF into an mlx-vlm ``Model``.
 
@@ -5609,6 +5610,10 @@ def load_vlm_model(
     builds (``_vlm_spec_language_model``), constructed from the VLM's real
     config so mrope on image turns stays correct. Plain loads are
     byte-identical to before the seam existed.
+
+    ``decision=True``: the caller runs the decision forward, so a decision
+    model loads (``gmlx.load.decision``); every other caller gets
+    ``DecisionModelOnly`` for one.
     """
     _log = loadlog.verbose_print
 
@@ -5619,6 +5624,7 @@ def load_vlm_model(
     # 1. LLM GGUF - preflight gates the text arch (llama/gemma4/...) as usual.
     loadlog.stage("reading gguf metadata")
     pf = preflight(gguf_path, arch=arch)
+    pf.refuse_decision(decision)
     llm_arch = pf.arch
     loadlog.fact("arch", llm_arch)
     loadlog.fact_file_size(pf.shards)

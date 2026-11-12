@@ -158,6 +158,15 @@ class Preflight:
     codec_histogram: dict[str, int]   # GGML type name -> tensor count
     n_tensors: int
     n_params: int = 0                 # logical elements across all tensors
+    decision: bool = False            # a decision model (gmlx.load.decision)
+
+    def refuse_decision(self, allowed: bool = False) -> None:
+        """Raise ``DecisionModelOnly`` for a decision model, unless the
+        caller runs the decision forward (``allowed``)."""
+        if self.decision and not allowed:
+            from .decision import DecisionModelOnly
+
+            raise DecisionModelOnly("this GGUF")
 
 
 def preflight(gguf_path: str, *, arch: str | None = None,
@@ -207,6 +216,8 @@ def preflight(gguf_path: str, *, arch: str | None = None,
         raise HadamardFoldError(fold_err)
 
     entry = _gate_arch(detected, hf_source=hf_source)
+    from .decision import decision_header
+
     return Preflight(arch=detected, entry=entry, shards=shards,
                      codec_histogram=hist, n_tensors=sum(hist.values()),
-                     n_params=n_params)
+                     n_params=n_params, decision=decision_header(scan0.kv))

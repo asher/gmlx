@@ -87,6 +87,9 @@ class ModelArgs(BaseModelArgs):
     max_position_embeddings: int = 128000
     use_sandwich_norm: bool = True
     tie_word_embeddings: bool = True
+    # A d1 decision model: its full layers read both ways, and only the
+    # decision forward runs it.
+    decision: bool = False
 
     def __post_init__(self):
         if len(self.layer_types) != self.num_hidden_layers:
@@ -340,6 +343,11 @@ class Lfm3Model(nn.Module):
         capture_layer_ids=None,
         hidden_sink: Optional[list] = None,
     ):
+        if self.args.decision:
+            # A causal pass would answer wrongly with no error.
+            from gmlx.load.decision import DecisionModelOnly
+
+            raise DecisionModelOnly()
         h = self.embed_tokens(inputs) if input_embeddings is None \
             else input_embeddings
         per_layer = cache is not None and h.shape[1] >= PREFILL_EVAL_ROWS

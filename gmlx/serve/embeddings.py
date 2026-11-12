@@ -375,6 +375,10 @@ def _gguf_refusal(path: str, kv: dict | None = None) -> str | None:
         return ("this GGUF sets no general.architecture, so it is not an "
                 f"embeddings model. {_GGUF_SUPPORTED}")
     arch = str(arch)
+    from gmlx.load.decision import DecisionModelOnly, decision_header
+
+    if decision_header(kv):
+        return f"{DecisionModelOnly('this GGUF')}. {_GGUF_SUPPORTED}"
     kind = embedding_kind(kv, os.path.basename(path), arch)
     if kind == "reranker":
         return (f"this {arch} GGUF is a reranker, not an embeddings model. "

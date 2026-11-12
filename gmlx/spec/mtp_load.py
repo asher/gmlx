@@ -2105,6 +2105,7 @@ def load_mtp_model(
 
     loadlog.stage("reading gguf metadata")
     pf = preflight(gguf_path, arch=arch)
+    pf.refuse_decision()
     arch = pf.arch
     loadlog.fact("arch", arch)
     loadlog.fact_file_size(pf.shards)
@@ -2406,6 +2407,7 @@ def load_vlm_mtp_model(
         from gmlx.load.config_synth import synthesize_config
 
         pf = preflight(gguf_path, arch=arch)
+        pf.refuse_decision()
         arch_r = pf.arch
         arrays, kquant_meta, _arch_meta, meta, tensor_shapes = load_gguf_wire_bytes(
             gguf_path, zero_copy=zero_copy, shards=pf.shards

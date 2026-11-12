@@ -1520,7 +1520,7 @@ def test_header_meta_reads_and_memoizes(_hm, tmp_path):
     assert meta == {"arch": "gemma4", "name": "Gemma 4 12B It",
                     "kind": "model", "mtp": False, "sampling": {},
                     "drafter_kind": None, "declared": [],
-                    "speech_checkpoint": None}
+                    "speech_checkpoint": None, "decision": False}
     disc.header_meta(str(f))
     assert _hm["n"] == 1                         # second hit is the memo
 

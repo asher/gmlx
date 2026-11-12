@@ -512,7 +512,8 @@ def _pick_default(models: list, requested: str | None,
 
 # /v1/models entries that answer a route of their own and not chat: the
 # audio, embedding and rerank services, and the image models.
-_SERVICE_MARKERS = ("stt", "tts", "embeddings", "rerank", "image")
+_SERVICE_MARKERS = ("stt", "tts", "embeddings", "rerank", "image",
+                    "decision")
 
 
 def image_models(models: list) -> list:

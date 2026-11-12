@@ -264,6 +264,7 @@ include = [
     "gmlx/serve/bridge_lm.py",
     "gmlx/serve/bridge_vlm.py",
     "gmlx/serve/cb_phase.py",
+    "gmlx/serve/d1_media.py",
     "gmlx/serve/embeddings_media.py",
     "gmlx/serve/engine_jobs.py",
     "gmlx/serve/estimate.py",

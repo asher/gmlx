@@ -28,6 +28,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [One model for the whole turn](docs/talk.md#one-model-for-the-whole-turn).
 - `/v1/models` lists each chat model's `modalities`, and the `voices` of a
   model that speaks.
+- Liquid AI's d1-2B and d1-Omni-2B answer structured decisions about text,
+  images, video and sound on `/v1/systemone` and `gmlx systemone`, and
+  `gmlx pull` has them as `d1-2b` and `d1-omni-2b`. See
+  [Images, video and sound](docs/decisions.md#images-video-and-sound).
 
 ### Changed
 

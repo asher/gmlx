@@ -1632,6 +1632,7 @@ def load_model(
     zero_copy: bool = True,
     verbose: bool = False,
     rope_override: rope_scaling.RopeOverride | None = None,
+    decision: bool = False,
 ):
     """Load a text-only GGUF K-quant file into an mlx-lm model.
 
@@ -1658,6 +1659,9 @@ def load_model(
             its own spinner/summary session instead).
         rope_override: rope scaling options (``--rope-scaling`` and the
             other llama.cpp rope flags) over the GGUF header keys.
+        decision: the caller runs the decision forward, so a decision
+            model loads (``gmlx.load.decision``). Every other caller
+            gets ``DecisionModelOnly`` for one.
     """
 
     _log = loadlog.verbose_print
@@ -1674,6 +1678,7 @@ def load_model(
     #    GGUF header via gguf-py, so it stays cheap on multi-GB files.
     loadlog.stage("reading gguf metadata")
     pf = preflight(gguf_path, arch=arch, hf_source=hf_source)
+    pf.refuse_decision(decision)
     arch = pf.arch
     loadlog.fact("arch", arch)
     loadlog.fact_file_size(pf.shards)

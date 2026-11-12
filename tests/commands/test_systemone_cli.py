@@ -255,3 +255,34 @@ def test_offline_letter_errors_name_the_request(offline, capsys):
     assert "instructions is required" in capsys.readouterr().err
     with pytest.raises(SystemExit, match="text-only"):
         offline(dict(_LETTER_BODY, state={"image": "data:image/png;base64,AA"}))
+
+
+def test_offline_a_d1_file_takes_the_d1_path(monkeypatch, tmp_path, capsys):
+    from gmlx.config import SystemoneCfg
+    from tests.lfm3_header import write_lfm3_header
+
+    gguf = write_lfm3_header(tmp_path / "d1.gguf", templates=("systemone",),
+                             causal=False, decision="lfm3-d1")
+    monkeypatch.setattr(so, "_offline_settings", lambda path: (None, SystemoneCfg()))
+    seen = []
+
+    def run_d1(body, path, settings):
+        seen.append(path)
+        return {"model": "d1.gguf", "answers": {"q": {"type": "noul", "noul": 0.5}}}
+
+    monkeypatch.setattr(so, "_run_d1", run_d1)
+    req = tmp_path / "d1.json"
+    req.write_text(json.dumps({"state": None, "questions": {
+        "q": {"type": "noul", "instructions": {"spoken": False}}}}))
+    assert so.cmd_systemone([str(req), "--model", gguf]) == 0
+    assert seen == [gguf]
+    assert "q: 0.500" in capsys.readouterr().out
+
+
+def test_offline_d1_media_need_a_server(tmp_path):
+    from gmlx.config import SystemoneCfg
+
+    body = {"state": None, "images": ["data:image/png;base64,AA=="],
+            "questions": {"q": {"type": "noul", "instructions": "?"}}}
+    with pytest.raises(SystemExit, match="need a server"):
+        so._run_d1(body, str(tmp_path / "d1.gguf"), SystemoneCfg())
