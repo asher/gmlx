@@ -114,9 +114,10 @@ Knobs (all calib values are U5's to tighten):
     GMLX_GOV_SHEDS_PER_MIN   shed rate cap (default 4)
     GMLX_GOV_REFUSAL_BACKOFF_S
                              seconds orange and red wait to try a shed
-                             again after the allocator refused its
-                             removal at every try (default 5, at most
-                             60; 0 turns it off)
+                             again, and the kernel floor collapse to
+                             try its failure again, after the
+                             allocator refused a removal at every try
+                             (default 5, at most 60; 0 turns it off)
     GMLX_GOV_MIN_DWELL_S     min seconds in a band before
                              de-escalating (default 2.0)
 """
@@ -627,14 +628,17 @@ def _restore_demand_rungs(gen, st: _GovState) -> None:
 def _refusal_backoff(st: _GovState) -> bool:
     """Whether a refused removal's back-off holds. Orange and red skip
     their whole shed step until it ends: the evict, the reclaim and the
-    removal would each repeat at tick rate against the same refusal."""
+    removal would each repeat at tick rate against the same refusal.
+    The kernel floor collapse skips only its failure; its evict and
+    cache clear still run."""
     return time.perf_counter() < st.refused_until
 
 
 def _refused(st: _GovState, what: str, victim) -> None:
     """Book a shed whose removal the allocator refused at every try: the
     row still decodes, so nothing is shed, and the next try waits out
-    the back-off. Logged once per back-off window."""
+    the back-off. Logged once per back-off window; with the back-off
+    off, a refusal that persists logs at every tick."""
     backoff = _refusal_backoff_s()
     st.refused_until = time.perf_counter() + backoff
     _STATS["removals_refused"] += 1
