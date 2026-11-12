@@ -28,6 +28,12 @@ from gmlx.systemone import d1
 MARKER = "<__media__>"
 MAX_MEDIA = 8
 _KINDS = ("image", "audio", "video")
+# Tower peaks measured on LFM3: 0.42 GB for a 2,048-token image, 0.39 GB
+# for a video of any length, 80 MB plus 8 KB for each audio token.
+_IMAGE_TOKEN_BYTES = 420_000_000 // 2048
+_VIDEO_BYTES = 450_000_000
+_AUDIO_BYTES = 80_000_000
+_AUDIO_TOKEN_BYTES = 8_000
 
 
 class D1MediaError(d1.D1RequestError):
@@ -218,6 +224,35 @@ def build_passes(fmt: d1.D1Format, questions: list, media: Media, cap: int) -> l
     return passes
 
 
+def _soft_tokens(item: Item) -> int:
+    from gmlx.models.lfm3.processing import AUDIO_TOKEN, IMAGE_TOKEN, VIDEO_TOKEN
+
+    token = {"image": IMAGE_TOKEN, "video": VIDEO_TOKEN, "audio": AUDIO_TOKEN}[item.kind]
+    return item.expansion.count(token)
+
+
+def tower_bytes(item: Item) -> int:
+    """The peak of one item's tower pass, beside the weights."""
+    tokens = _soft_tokens(item)
+    if item.kind == "image":
+        return max(_IMAGE_TOKEN_BYTES * tokens, _IMAGE_TOKEN_BYTES * 1024)
+    if item.kind == "video":
+        return _VIDEO_BYTES
+    return _AUDIO_BYTES + _AUDIO_TOKEN_BYTES * tokens
+
+
+def media_bytes(media: Optional[Media], hidden: int) -> tuple[int, int]:
+    """``(tower peak, features held)`` for a request's media: the largest
+    single tower pass, and the features every item keeps until the
+    request ends."""
+    if media is None:
+        return 0, 0
+    items = list(media.items) + list(media.spoken.values())
+    peak = max((tower_bytes(i) for i in items), default=0)
+    held = sum(_soft_tokens(i) for i in items) * hidden * 2
+    return peak, held
+
+
 def _features(vlm, item: Item):
     """The item's tower features, computed once, on the engine thread."""
     import mlx.core as mx
@@ -233,6 +268,14 @@ def _features(vlm, item: Item):
         mx.eval(feats)
         item.features = feats
     return item.features
+
+
+def encoder(vlm):
+    """The function that runs one item's tower and keeps its features."""
+    def encode(item: Item) -> None:
+        _features(vlm, item)
+
+    return encode
 
 
 def embedder(vlm):

@@ -141,8 +141,12 @@ def _run_d1(body: dict, path: str, settings) -> dict:
     import mlx.core as mx
 
     from gmlx.load.decision import DECISION_STATE_CAP
+    from types import SimpleNamespace
+
+    from gmlx._vendor.mlx_vlm.server.generation import PromptTooLongError
     from gmlx.load.loader import load_model
     from gmlx.serve.bridge_vlm import _make_text_processor
+    from gmlx.serve.mem_preflight import preflight_decision
     from gmlx.systemone import d1
 
     if d1.body_media(body):
@@ -156,7 +160,9 @@ def _run_d1(body: dict, path: str, settings) -> dict:
         if fmt is None:
             raise SystemExit(f"error: {path} names no d1 decision type")
         passes = d1.build_passes(fmt, questions, body.get("state"), DECISION_STATE_CAP)
-    except d1.D1RequestError as e:
+        max_rows = preflight_decision(SimpleNamespace(model=model),
+                                      [len(p.ids) for p in passes])
+    except (d1.D1RequestError, PromptTooLongError) as e:
         raise SystemExit(f"error: {e}") from e
     wired: Any = contextlib.nullcontext()
     if mx.default_device() == mx.gpu and mx.metal.is_available():
@@ -164,7 +170,7 @@ def _run_d1(body: dict, path: str, settings) -> dict:
     started = time.perf_counter()
     with wired:
         result = d1.run_to_end(d1.decide_d1(
-            d1.text_of(model), fmt, passes, has_media=False, budget=DECISION_STATE_CAP))
+            d1.text_of(model), fmt, passes, has_media=False, max_rows=max_rows))
     print(f"[systemone] {result['diagnostics']['forwards']} forwards in "
           f"{(time.perf_counter() - started) * 1e3:.0f} ms", file=sys.stderr)
     return d1.response(result, os.path.basename(path))

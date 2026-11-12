@@ -626,6 +626,49 @@ def preflight_scoring(rg, tokens: int, reader=None) -> None:
         _log.warning("scoring memory preflight failed; admitting", exc_info=True)
 
 
+def preflight_decision(rg, lengths, *, media_peak: int = 0,
+                       media_held: int = 0, cap: int = 64):
+    """The row cap of a d1 decision's batches: a function of a batch's
+    longest prompt that gives the most rows whose forward fits with the
+    batch drained, beside the media features and at most ``cap``. Raises
+    MemoryPreflightError when the longest prompt does not fit alone, or a
+    tower pass does not fit. Without a memory probe, every batch holds
+    one row."""
+    from gmlx.models.lfm3.decision import price_bytes
+    from gmlx.systemone.d1 import text_of
+
+    one = lambda n: 1  # noqa: E731
+    if os.environ.get("GMLX_PREFLIGHT_MEM", "1") == "0" or not lengths:
+        return one
+    try:
+        args = text_of(rg.model).args
+        avail = available_drained_bytes()
+    except Exception:
+        _log.warning("decision memory preflight failed; one row a batch",
+                     exc_info=True)
+        return one
+    if avail is None:
+        return one
+    room = avail - media_held
+    embeds = media_peak > 0
+    longest = max(lengths)
+    need = max(price_bytes(args, 1, longest, embeds=embeds), media_peak)
+    if need > room:
+        raise _preflight_error_cls()(
+            f"this decision needs an estimated {need / GB:.2f} GB beside the "
+            f"model weights for a prompt of {longest:,} tokens, but only "
+            f"{max(room, 0) / GB:.2f} GB is left under this Mac's memory "
+            "ceiling. Shorten the state or send fewer media.")
+
+    def max_rows(n: int) -> int:
+        rows = 1
+        while rows < cap and price_bytes(args, rows + 1, n, embeds=embeds) <= room:
+            rows += 1
+        return rows
+
+    return max_rows
+
+
 def _check_request_fit(rg, model, prompt, audio_tokens: int,
                        encode_bytes: int, others: int, args) -> bool:
     """The check for an arch that prices its prefill rows: what the

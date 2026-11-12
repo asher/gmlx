@@ -29,8 +29,40 @@ from gmlx.cache.attention import create_attention_mask, create_ssm_mask
 from .model import FULL, SLIDING
 
 DEFAULT_BLOCK = 2048
+# The fewest positions in a block, however many rows a batch has.
+MIN_BLOCK = 16
 # Head rows decoded to float32 at a time: 8,192 x 2,048 x 4 bytes, 64 MiB.
 HEAD_CHUNK = 8192
+# What a forward holds beside its rows and blocks: the head rows, masks
+# and the allocator's slack.
+_FIXED_BYTES = 128 << 20
+
+
+def block_for(rows: int, block: int = DEFAULT_BLOCK) -> int:
+    """The positions in one block of a batch of ``rows``: a block holds
+    about ``block`` rows x positions, whatever the batch width."""
+    return max(MIN_BLOCK, block // max(1, rows))
+
+
+def price_bytes(args, rows: int, n: int, *, embeds: bool = False,
+                block: int = DEFAULT_BLOCK) -> int:
+    """The bytes a forward of ``rows`` rows of ``n`` positions holds at its
+    peak, beside the weights.
+
+    - Held for the whole forward: every row's hidden state, and one full
+      layer's keys and values, twice while its blocks are joined. With
+      input embeddings, the stacked inputs too.
+    - Held for one block: its output, the attention projections and the
+      FFN's gate, up and product, with a quarter more for the slack.
+    """
+    hidden = args.hidden_size
+    kv_width = 2 * args.num_key_value_heads * args.head_dim
+    held = rows * n * (hidden * 2 + kv_width * 2 * 2)
+    if embeds:
+        held += rows * n * hidden * 2
+    tokens = rows * min(n, block_for(rows, block))
+    per_block = tokens * (hidden * 2 * 4 + args.intermediate_size * 2 * 4)
+    return int(held + per_block * 5 // 4 + _FIXED_BYTES)
 
 
 class _FrozenKeys:
@@ -76,35 +108,42 @@ def _all_keys_values(layer, blocks: list, starts: list):
     return keys, values
 
 
-def _head_rows(text, start: int, stop: int) -> mx.array:
-    """Rows ``start:stop`` of the tied head, decoded to float32. A Q8_0
-    value is an int8 times a float16 scale, so float32 holds it exactly."""
+def _head_rows(text, index) -> mx.array:
+    """The tied head's rows at ``index``, a slice or an array of ids,
+    decoded to float32. A Q8_0 value is an int8 times a float16 scale, so
+    float32 holds it exactly."""
     if not text.args.tie_word_embeddings:
         raise ValueError("decision forward: an lfm3 head must be tied")
     embed = text.model.embed_tokens
-    rows = embed["weight"][start:stop]
+    rows = embed["weight"][index]
     codec = getattr(embed, "kquant_type", None)
     if codec is not None:
         import mlx_kquant as kq
 
+        # GGUF scales live inside the rows; the scales argument is unused.
         out = kq.dequantize(rows, embed["scales"], codec, dtype=mx.float32)
-        return out.reshape(stop - start, -1)
+        return out.reshape(rows.shape[0], -1)
     if "scales" in embed:
-        return mx.dequantize(rows, embed["scales"], embed.get("biases"),
+        biases = embed.get("biases")
+        return mx.dequantize(rows, embed["scales"][index],
+                             None if biases is None else biases[index],
                              group_size=embed.group_size, bits=embed.bits,
                              mode=getattr(embed, "mode", "affine"),
                              dtype=mx.float32)
     return rows.astype(mx.float32)
 
 
-def _float32_logits(text, h: mx.array) -> mx.array:
-    """The unmasked head over the whole vocabulary, in float32, as
-    llama.cpp computes it. The quantized matmul of the chat head returns
-    16-bit logits."""
+def _float32_logits(text, h: mx.array,
+                    ids: Optional[Sequence[int]] = None) -> mx.array:
+    """The unmasked head in float32, as llama.cpp computes it: over the
+    whole vocabulary, or over ``ids`` only. The quantized matmul of the
+    chat head returns 16-bit logits."""
+    if ids is not None:
+        return h @ _head_rows(text, mx.array([int(i) for i in ids])).T
     vocab = text.args.vocab_size
     parts = []
     for start in range(0, vocab, HEAD_CHUNK):
-        rows = _head_rows(text, start, min(start + HEAD_CHUNK, vocab))
+        rows = _head_rows(text, slice(start, min(start + HEAD_CHUNK, vocab)))
         part = h @ rows.T
         mx.eval(part)
         parts.append(part)
@@ -143,9 +182,11 @@ def decision_forward(
     positions: Optional[Sequence[int]] = None,
     block: int = DEFAULT_BLOCK,
     causal: bool = False,
+    head_ids: Optional[Sequence[int]] = None,
 ) -> Generator[None, None, mx.array]:
     """Run a d1 text model over ``inputs`` and return float32 logits
-    ``[rows, vocab]`` from the unmasked head, computed in float32.
+    ``[rows, vocab]`` from the unmasked head, computed in float32, or
+    ``[rows, len(head_ids)]`` for the ``head_ids`` columns only.
 
     ``text`` is the lfm3 text ``Model``. ``inputs`` is ids ``[rows, n]``
     or input embeddings ``[rows, n, hidden]``, right-padded; row r holds
@@ -201,7 +242,7 @@ def decision_forward(
 
     picked = [blocks[p // block][r, p % block] for r, p in enumerate(positions)]
     h = mx.stack(picked).astype(mx.float32)
-    logits = _float32_logits(text, model.norm(h).astype(mx.float32))
+    logits = _float32_logits(text, model.norm(h).astype(mx.float32), head_ids)
     mx.eval(logits)
     return logits
 
@@ -216,4 +257,5 @@ def run_decision_forward(text, inputs, lengths, **kwargs) -> mx.array:
             return stop.value
 
 
-__all__ = ["DEFAULT_BLOCK", "decision_forward", "run_decision_forward"]
+__all__ = ["DEFAULT_BLOCK", "block_for", "decision_forward", "price_bytes",
+           "run_decision_forward"]

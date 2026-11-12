@@ -201,6 +201,14 @@ Each question's prompt, the state and its media included, holds at most
 65,536 tokens. d1 answers every question of a request, and ignores
 `ask_if`.
 
+The server runs one d1 decision at a time. A second request waits for the
+first, and gets a 503 `decision_busy` if the wait passes
+[`server.token_queue_timeout_s`](config.md#servertoken_queue_timeout_s),
+600 seconds by default. Each question's prompt is read in full, and a
+question of 65,536 tokens takes about 45 seconds on an M3 Max. A request
+with many long questions can pass the same timeout and get a 504. Raise
+`server.token_queue_timeout_s` if your requests do.
+
 ## Examples
 
 Each example gives a `questions` map and the answers that DiffusionGemma

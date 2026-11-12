@@ -401,13 +401,13 @@ def build_passes(fmt: D1Format, questions: list[Question], state, cap: int) -> l
     return passes
 
 
-def batches(lengths: Sequence[int], budget: int) -> list[list[int]]:
-    """Question indexes in batches of rows, longest first, so that rows x
-    the longest row stays within ``budget`` tokens."""
+def batches(lengths: Sequence[int], max_rows: Callable[[int], int]) -> list[list[int]]:
+    """Question indexes in batches of rows, longest first. A batch whose
+    longest row is n holds at most ``max_rows(n)`` rows, and at least one."""
     order = sorted(range(len(lengths)), key=lambda i: -lengths[i])
     out: list[list[int]] = []
     for i in order:
-        if out and (len(out[-1]) + 1) * lengths[out[-1][0]] <= budget:
+        if out and len(out[-1]) < max_rows(lengths[out[-1][0]]):
             out[-1].append(i)
         else:
             out.append([i])
@@ -415,31 +415,42 @@ def batches(lengths: Sequence[int], budget: int) -> list[list[int]]:
 
 
 def decide_d1(text, fmt: D1Format, passes: list[Pass], *, has_media: bool,
-              budget: int, should_stop: Optional[Callable[[], bool]] = None,
+              max_rows: Callable[[int], int],
+              should_stop: Optional[Callable[[], bool]] = None,
               embed: Optional[Callable[[Pass], Any]] = None,
+              encode: Optional[Callable[[Any], None]] = None,
               ) -> Generator[None, None, dict]:
-    """Answer every pass, a batch of rows per forward. ``embed`` gives a
-    pass with media its input embeddings, built when its batch runs. A
-    generator that yields after each block of each forward; returns the
-    answers and diagnostics."""
+    """Answer every pass, a batch of rows per forward. ``encode`` runs one
+    media item's tower and keeps its features; ``embed`` gives a pass with
+    media its input embeddings from them. A generator that yields after
+    each tower and each block of each forward; returns the answers and
+    diagnostics."""
     import time
 
     import mlx.core as mx
     import numpy as np
 
-    from gmlx.models.lfm3.decision import decision_forward
+    from gmlx.models.lfm3.decision import block_for, decision_forward
+
+    from .reads import Cancelled
 
     started = time.time()
     answers: dict[str, dict] = {}
     lengths = [len(p.ids) for p in passes]
-    groups_run = batches(lengths, budget)
+    groups_run = batches(lengths, max_rows)
     for rows in groups_run:
         if should_stop is not None and should_stop():
-            from .reads import Cancelled
-
             raise Cancelled("decision cancelled")
         n = max(lengths[i] for i in rows)
         if embed is not None and any(passes[i].items for i in rows):
+            if encode is not None:
+                for i in rows:
+                    for item in passes[i].items:
+                        if item.features is None:
+                            encode(item)
+                            yield
+                            if should_stop is not None and should_stop():
+                                raise Cancelled("decision cancelled")
             parts = []
             for i in rows:
                 p = passes[i]
@@ -449,12 +460,16 @@ def decide_d1(text, fmt: D1Format, passes: list[Pass], *, has_media: bool,
             del parts
         else:
             inputs = mx.array([passes[i].ids + [0] * (n - lengths[i]) for i in rows])
-        logits = yield from decision_forward(text, inputs, [lengths[i] for i in rows])
+        head_ids = sorted({t for i in rows for g in passes[i].groups for t in g})
+        column = {t: c for c, t in enumerate(head_ids)}
+        logits = yield from decision_forward(
+            text, inputs, [lengths[i] for i in rows], block=block_for(len(rows)),
+            head_ids=head_ids)
         del inputs
         logits = np.asarray(logits.astype(mx.float32))
         for r, i in enumerate(rows):
             p = passes[i]
-            scores = [float(logits[r, g].max()) for g in p.groups]
+            scores = [float(logits[r, [column[t] for t in g]].max()) for g in p.groups]
             answers[p.question.id] = fmt.answer(p.question, scores, has_media)
     ordered = {p.question.id: answers[p.question.id] for p in passes}
     return {

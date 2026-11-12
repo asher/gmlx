@@ -238,13 +238,14 @@ with the cache off the tier is `"off"`.
 |--------|-------|
 | 400 | The body is not a JSON object, carries `images` on a model other than d1, or does not fit the context or memory budget. |
 | 400 | On the letter readout, the tokenizer has no single token for each option letter, or an object `state` holds an image. |
-| 400 | On d1: media the model cannot read, more than 8 items, `adapters` or `lora`, or a question prompt over 65,536 tokens. |
+| 400 | On d1: media the model cannot read, more than 8 items, `adapters` or `lora`, a question prompt over 65,536 tokens, or more memory than is free. |
 | 400 | `decision_model_only`: a route other than this one names a d1 model. |
 | 400 | `unknown_profile`: `profile` names no profile. `no_model_specified`: `model` is absent and there is no fallback. |
 | 401 | The server has an API key, and the request does not present it. |
 | 404 | `model_not_found`: `model` names nothing and there is no fallback. `model_file_missing`: the model file is gone. |
 | 422 | `validation_error`: a field fails validation, such as a missing `state` or a value out of range. |
 | 503 | The queue is full or the model load is deferred, as [Limits and back-pressure](api.md#limits-and-back-pressure) describes. |
+| 503 | `decision_busy`: another d1 decision held the server past `server.token_queue_timeout_s`. The response carries `Retry-After`. |
 | 504 | `timeout`: the decision ran past [`server.token_queue_timeout_s`](config.md#servertoken_queue_timeout_s) after it left the queue. |
 | 500 | `server_error`: the engine failed. |
 

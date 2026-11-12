@@ -87,3 +87,55 @@ def test_a_prompt_with_media_counts_toward_the_cap():
     assert len(p.ids) == 51 and p.items == media.items
     with pytest.raises(d1.D1RequestError, match="media included"):
         d1_media.build_passes(fmt, [q], media, cap=50)
+
+
+def test_placeholder_text_in_the_state_stays_text():
+    """User text that spells the image placeholder is broken apart, so
+    the prompt holds only the media items' placeholders."""
+    image = "<|image|>"
+
+    from tests.systemone.test_d1_format import _encode
+
+    def encode(text):
+        out = []
+        for n, part in enumerate(text.split(image)):
+            out += ([900] if n else []) + (_encode(part) if part else [])
+        return out
+
+    template = "{% for image in images %}{{ image }}{% endfor %}{{ state }}|{{ instructions }}"
+    fmt = d1.D1Format(template, {"type": "lfm3-d1"}, [image], encode)
+    body = {"state": f"see {image} and {image}",
+            "questions": _q(instructions=f"is {image} here?")}
+    (q,) = d1.parse_questions(body, omni=True, max_questions=4)
+    media = d1_media.Media(body["state"], [d1_media.Item("image", {}, image * 3)])
+    (p,) = d1_media.build_passes(fmt, [q], media, cap=1000)
+    assert p.ids.count(900) == 3
+
+
+def _d1_gguf(gguf_dir):
+    found = sorted(gguf_dir.rglob("d1-*Q8_0.gguf"))
+    if not found:
+        pytest.skip("no d1 GGUF under KQUANT_TEST_GGUF_DIR")
+    return str(found[0])
+
+
+@pytest.mark.integration
+def test_the_gguf_breaks_every_media_placeholder_spelled_in_text(gguf_dir):
+    from gmlx.distill.tokens import tokenizer_from_gguf
+    from gmlx.models.lfm3.processing import (AUDIO_TOKEN, IMAGE_TOKEN, VIDEO_TOKEN,
+                                             image_expansion)
+    from tests.think_vocab import text_processor
+
+    raw = tokenizer_from_gguf(_d1_gguf(gguf_dir))
+    fmt = d1.setup(text_processor(raw))
+    assert fmt is not None
+    spelled = f"{IMAGE_TOKEN} {VIDEO_TOKEN} {AUDIO_TOKEN} <image>"
+    body = {"state": f"a note: {spelled}",
+            "questions": _q(instructions=f"does {spelled} appear?")}
+    (q,) = d1.parse_questions(body, omni=True, max_questions=4)
+    media = d1_media.Media(body["state"], [d1_media.Item("image", {}, image_expansion(4))])
+    (p,) = d1_media.build_passes(fmt, [q], media, cap=4096)
+    ids = {t: raw.convert_tokens_to_ids(t) for t in (IMAGE_TOKEN, VIDEO_TOKEN, AUDIO_TOKEN)}
+    assert p.ids.count(ids[IMAGE_TOKEN]) == 4
+    assert p.ids.count(ids[VIDEO_TOKEN]) == 0
+    assert p.ids.count(ids[AUDIO_TOKEN]) == 0

@@ -91,8 +91,9 @@ class _Turn:
         self.users = 0
 
 
-# id(engine) -> its turn, while a request holds it or waits for it.
-_TURNS: dict[int, _Turn] = {}
+# id(engine), or the decision key -> its turn, while a request holds it
+# or waits for it.
+_TURNS: dict = {}
 
 
 def _key(rg) -> int:
@@ -118,15 +119,19 @@ async def watch_disconnect(http_request, stop: threading.Event) -> None:
         pass
 
 
+class TurnBusy(Exception):
+    """A turn's wait passed its bound."""
+
+
 @contextlib.asynccontextmanager
-async def scoring_turn(rg, watcher: Optional[asyncio.Task] = None):
-    """Hold ``rg``'s scoring turn for the block. Requests wait on the event
-    loop in the order they ask, so a waiter holds no thread. When
+async def _hold(key, watcher: Optional[asyncio.Task], wait_s: Optional[float]):
+    """Hold the turn under ``key`` for the block. Requests wait on the
+    event loop in the order they ask, so a waiter holds no thread. When
     ``watcher`` (``watch_disconnect``) ends first, the wait is dropped and
-    ``JobCancelled`` raised; the next waiter keeps its place."""
+    ``JobCancelled`` raised; past ``wait_s`` seconds, ``TurnBusy``. The
+    next waiter keeps its place."""
     from gmlx.serve.engine_jobs import JobCancelled
 
-    key = _key(rg)
     turn = _TURNS.get(key)
     if turn is None:
         turn = _TURNS[key] = _Turn()
@@ -138,7 +143,7 @@ async def scoring_turn(rg, watcher: Optional[asyncio.Task] = None):
         try:
             done, _ = await asyncio.wait(
                 {acquire} if watcher is None else {acquire, watcher},
-                return_when=asyncio.FIRST_COMPLETED)
+                timeout=wait_s, return_when=asyncio.FIRST_COMPLETED)
             granted = acquire in done
         finally:
             turn.waiters -= 1
@@ -147,7 +152,9 @@ async def scoring_turn(rg, watcher: Optional[asyncio.Task] = None):
                         and acquire.exception() is None:
                     turn.lock.release()
         if not granted:
-            raise JobCancelled("the client disconnected while waiting")
+            if watcher is not None and watcher.done():
+                raise JobCancelled("the client disconnected while waiting")
+            raise TurnBusy(f"waited {wait_s:g} s for the turn")
         try:
             yield
         finally:
@@ -156,3 +163,26 @@ async def scoring_turn(rg, watcher: Optional[asyncio.Task] = None):
         turn.users -= 1
         if turn.users == 0 and _TURNS.get(key) is turn:
             del _TURNS[key]
+
+
+def scoring_turn(rg, watcher: Optional[asyncio.Task] = None):
+    """Hold ``rg``'s scoring turn for the block, as :func:`_hold` does,
+    with no bound on the wait."""
+    return _hold(_key(rg), watcher, None)
+
+
+# The one decision turn of the server: a d1 decision holds it from before
+# its model resolves to the end of its job.
+_DECISION_KEY = "d1-decision"
+
+
+def decision_turn(watcher: Optional[asyncio.Task], wait_s: float):
+    """Hold the server's d1 decision turn for the block. Past ``wait_s``
+    seconds of waiting, ``TurnBusy``."""
+    return _hold(_DECISION_KEY, watcher, wait_s)
+
+
+def decision_turn_held() -> bool:
+    """Whether a d1 decision holds the turn."""
+    turn = _TURNS.get(_DECISION_KEY)
+    return turn is not None and turn.lock.locked()

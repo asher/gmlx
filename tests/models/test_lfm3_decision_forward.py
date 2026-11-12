@@ -140,3 +140,40 @@ def test_lengths_and_positions_are_checked(mx):
         _forward(model, ids, [11])
     with pytest.raises(ValueError):
         _forward(model, ids, [5], positions=[5])
+
+
+def test_head_ids_give_the_full_head_columns(mx):
+    model = _model(mx)
+    ids = mx.concatenate([_ids(mx, 300, seed=4), _ids(mx, 300, seed=5)])
+    full = _forward(model, ids, [300, 211])
+    picked = [7, 0, 63, 12]
+    some = _forward(model, ids, [300, 211], head_ids=picked)
+    np.testing.assert_array_equal(some, full[:, picked])
+
+
+def test_a_wider_batch_takes_a_shorter_block():
+    from gmlx.models.lfm3.decision import DEFAULT_BLOCK, MIN_BLOCK, block_for
+
+    assert block_for(1) == DEFAULT_BLOCK
+    assert block_for(8) == DEFAULT_BLOCK // 8
+    assert block_for(10_000) == MIN_BLOCK
+
+
+def test_the_price_grows_with_rows_and_keeps_its_block_term():
+    """Rows add their held state; the block term stays near one block of
+    2,048 positions whatever the width, so 64 short questions are not
+    priced at 64 full blocks."""
+    from types import SimpleNamespace
+
+    from gmlx.models.lfm3.decision import price_bytes
+
+    args = SimpleNamespace(hidden_size=2048, num_key_value_heads=4,
+                           head_dim=128, intermediate_size=7680)
+    one = price_bytes(args, 1, 8192)
+    assert price_bytes(args, 8, 8192) > one
+    held = 8192 * (2048 * 2 + 1024 * 2 * 2)
+    wide = price_bytes(args, 64, 1024) - 64 * 1024 * (2048 * 2 + 1024 * 2 * 2)
+    narrow = price_bytes(args, 1, 8192) - held
+    assert wide == narrow
+    assert price_bytes(args, 2, 8192, embeds=True) == (
+        price_bytes(args, 2, 8192) + 2 * 8192 * 2048 * 2)

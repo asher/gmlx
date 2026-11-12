@@ -200,9 +200,9 @@ def test_a_non_finite_score_is_an_error():
         fmt.answer(q, [float("nan"), 0.0], False)
 
 
-def test_batches_keep_rows_times_the_longest_within_the_budget():
-    assert d1.batches([10, 40, 20, 30], 80) == [[1, 3], [2, 0]]
-    assert d1.batches([100], 10) == [[0]]
+def test_batches_take_the_row_cap_of_their_longest_row():
+    assert d1.batches([10, 40, 20, 30], lambda n: 80 // n) == [[1, 3], [2, 0]]
+    assert d1.batches([100], lambda n: 0) == [[0]]
 
 
 def test_batched_rows_answer_as_each_question_alone():
@@ -227,9 +227,9 @@ def test_batched_rows_answer_as_each_question_alone():
         passes = [d1.Pass(q, fmt.encode(fmt.prompt("state", q)), fmt.labels(q)[1])
                   for q in qs]
         together = d1.run_to_end(d1.decide_d1(model, fmt, passes, has_media=False,
-                                               budget=10 ** 6))
+                                               max_rows=lambda n: 64))
         alone = d1.run_to_end(d1.decide_d1(model, fmt, passes, has_media=False,
-                                            budget=1))
+                                            max_rows=lambda n: 1))
         assert together["diagnostics"]["forwards"] == 1
         assert alone["diagnostics"]["forwards"] == 3
         assert together["input_tokens"] == sum(len(p.ids) for p in passes)
@@ -241,5 +241,46 @@ def test_batched_rows_answer_as_each_question_alone():
             if "probabilities" in a:
                 np.testing.assert_allclose(list(a["probabilities"].values()),
                                            list(b["probabilities"].values()), atol=1e-4)
+    finally:
+        mx.set_default_device(prev)
+
+
+def test_each_tower_runs_in_a_step_of_its_own():
+    """decide_d1 runs one media item's tower per step, before the forward
+    that reads it, and runs a shared item once."""
+    mx = pytest.importorskip("mlx.core")
+    from types import SimpleNamespace
+
+    from tests.models.test_lfm3_decision_forward import _model
+
+    prev = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        model = _model(mx)
+        fmt = d1.D1Format(_TEMPLATE, {"type": "lfm3-d1", "temperature": {}}, [],
+                          lambda t: [i % 64 for i in _encode(t)])
+        qs = _parse({"a": {"type": "noul", "instructions": "first?"},
+                     "b": {"type": "noul", "instructions": "second?"}})
+        shared, own = SimpleNamespace(features=None), SimpleNamespace(features=None)
+        passes = [d1.Pass(qs[0], fmt.encode(fmt.prompt("s", qs[0])), fmt.labels(qs[0])[1],
+                          items=[shared]),
+                  d1.Pass(qs[1], fmt.encode(fmt.prompt("s", qs[1])), fmt.labels(qs[1])[1],
+                          items=[shared, own])]
+        encoded = []
+
+        def encode(item):
+            item.features = True
+            encoded.append(item)
+
+        def embed(p):
+            return model.model.embed_tokens(mx.array(p.ids))
+
+        step = d1.decide_d1(model, fmt, passes, has_media=True,
+                            max_rows=lambda n: 1, embed=embed, encode=encode)
+        next(step)
+        assert len(encoded) == 1
+        result = d1.run_to_end(step)
+        assert encoded == [shared, own] or encoded == [own, shared]
+        assert set(result["answers"]) == {"a", "b"}
     finally:
         mx.set_default_device(prev)

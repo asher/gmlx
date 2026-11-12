@@ -59,6 +59,8 @@ _D1_ATTR = "_kq_systemone_d1"
 _D1_FIELDS = frozenset({"model", "profile", "state", "questions", "images",
                         "files"})
 _NO_IMAGES = "images are not supported: the served model is text-only"
+# The Retry-After of a 503 when another d1 decision holds the turn.
+_BUSY_RETRY_S = 10
 
 _log = logging.getLogger(__name__)
 _runtime_lock = threading.Lock()
@@ -294,13 +296,12 @@ def _d1_for(rg) -> d1.D1Format:
 
 
 def _d1_passes(rg, fmt, questions, body):
-    """``(passes, media)``: each question's pass, and the request's
-    decoded media or None. The longest prompt is checked against the
-    memory budget."""
-    gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+    """``(passes, media, max_rows)``: each question's pass, the request's
+    decoded media or None, and the row cap of its batches from the memory
+    preflight."""
     from gmlx.load.decision import DECISION_STATE_CAP
     from gmlx.serve import d1_media
-    from gmlx.serve.mem_preflight import preflight_prompt_memory
+    from gmlx.serve.mem_preflight import preflight_decision
 
     media = None
     d1.check_spoken(fmt, questions)
@@ -312,10 +313,10 @@ def _d1_passes(rg, fmt, questions, body):
         passes = d1_media.build_passes(fmt, questions, media, DECISION_STATE_CAP)
     else:
         passes = d1.build_passes(fmt, questions, body.get("state"), DECISION_STATE_CAP)
-    longest = max(passes, key=lambda p: len(p.ids))
-    preflight_prompt_memory(rg, longest.ids,
-                            args=gen.GenerationArguments(max_tokens=1))
-    return passes, media
+    peak, held = d1_media.media_bytes(media, d1.text_of(rg.model).args.hidden_size)
+    max_rows = preflight_decision(rg, [len(p.ids) for p in passes],
+                                  media_peak=peak, media_held=held)
+    return passes, media, max_rows
 
 
 def _record_failure(runtime, model, error: str) -> None:
@@ -442,13 +443,12 @@ def make_systemone_endpoint(installed):
             return schema, job, admitted
 
         def _d1_run(rg, resolved):
-            from gmlx.load.decision import DECISION_STATE_CAP
             from gmlx.serve.engine_jobs import run_on_engine
 
             gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
             fmt = _d1_for(rg)
             try:
-                passes, media = _d1_passes(rg, fmt, d1_questions, body)
+                passes, media, max_rows = _d1_passes(rg, fmt, d1_questions, body)
             except d1.D1RequestError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -456,11 +456,13 @@ def make_systemone_endpoint(installed):
                 from gmlx.serve import d1_media
 
                 vlm = d1_media.media_model(engine_rg.model)
+                with_media = media is not None and vlm is not None
                 return d1.decide_d1(
                     d1.text_of(engine_rg.model), fmt, passes,
                     has_media=bool(media and media.items),
-                    budget=DECISION_STATE_CAP, should_stop=should_stop,
-                    embed=d1_media.embedder(vlm) if media is not None else None)
+                    max_rows=max_rows, should_stop=should_stop,
+                    embed=d1_media.embedder(vlm) if with_media else None,
+                    encode=d1_media.encoder(vlm) if with_media else None)
 
             return run_on_engine(
                 rg, job, request_id=request_id,
@@ -498,8 +500,22 @@ def make_systemone_endpoint(installed):
 
         watcher = asyncio.create_task(job_route.watch_disconnect(http_request, stop))
         try:
-            backend, schema, resolved, result, completion_tokens = (
-                await asyncio.to_thread(_run))
+            if is_d1:
+                gen = importlib.import_module("gmlx._vendor.mlx_vlm.server.generation")
+                # One d1 decision at a time: the turn comes before the model
+                # resolves, so the preflight sees no other decision's buffers.
+                async with job_route.decision_turn(
+                        watcher, gen.get_token_queue_timeout()):
+                    backend, schema, resolved, result, completion_tokens = (
+                        await asyncio.to_thread(_run))
+            else:
+                backend, schema, resolved, result, completion_tokens = (
+                    await asyncio.to_thread(_run))
+        except job_route.TurnBusy:
+            busy = fail(503, "decision_busy",
+                        "another decision is running on this server; retry later")
+            busy.headers["Retry-After"] = str(_BUSY_RETRY_S)
+            return busy
         except SchemaError as e:
             return fail(422, "validation_error", str(e))
         except HTTPException as e:
