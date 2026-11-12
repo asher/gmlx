@@ -388,7 +388,9 @@ def test_an_audio_reply_is_frames_up_to_the_budget(model, monkeypatch):
     assert audio.shape == (5 * FRAME,) and np.isfinite(audio).all()
     # The stream's audio is the codec's decode of the frames.
     whole = model.codec_decoder.decode(np.stack([e.codes for e in events]))
-    np.testing.assert_allclose(audio, whole, atol=2e-6)
+    # TF32 on M5 GPUs: over 10 weight seeds the two differed by up to
+    # 0.00135, at a sample scale near 0.67 (under 6e-7 on the CPU device).
+    np.testing.assert_allclose(audio, whole, atol=4e-3)
 
 
 def test_a_key_fixes_the_frames(model, monkeypatch):

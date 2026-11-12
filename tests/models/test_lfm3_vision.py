@@ -142,6 +142,14 @@ def _run(tower, projector, frames: np.ndarray) -> np.ndarray:
     return np.asarray(projector(hidden).astype(mx.float32))
 
 
+# M5 GPUs run float32 matmuls at TF32 precision. Over 10 weight seeds a
+# still image and a frame pair differed from the float64 reference by up
+# to 0.0117, at an output scale near 8 (under 3e-6 on the CPU device).
+# Patches in mirrored order move the output by at least 1.4, and swapped
+# frames by at least 1.9.
+_TF32_ATOL = 3.5e-2
+
+
 @pytest.mark.parametrize("height, width", [(16, 24), (24, 8), (8, 8)])
 def test_a_still_image_matches_the_reference(height, width):
     cfg, tower, projector, w = _build()
@@ -149,7 +157,7 @@ def test_a_still_image_matches_the_reference(height, width):
     got = _run(tower, projector, image)
     want = _reference(cfg, w, np.repeat(image, 2, axis=0))
     assert got.shape == want.shape == (height * width // (PATCH * 2) ** 2, 24)
-    np.testing.assert_allclose(got, want, rtol=2e-3, atol=2e-4)
+    np.testing.assert_allclose(got, want, rtol=0, atol=_TF32_ATOL)
 
 
 def test_a_frame_pair_matches_the_reference():
@@ -158,7 +166,7 @@ def test_a_frame_pair_matches_the_reference():
     pair = np.random.default_rng(2).standard_normal((2, 3, 16, 16))
     got = _run(tower, projector, pair)
     np.testing.assert_allclose(got, _reference(cfg, w, pair),
-                               rtol=2e-3, atol=2e-4)
+                               rtol=0, atol=_TF32_ATOL)
     swapped = _reference(cfg, w, pair[::-1])
     assert np.abs(got - swapped).max() > 0.05
 
@@ -646,7 +654,10 @@ def test_a_long_clip_runs_a_few_slices_at_a_time(monkeypatch):
     monkeypatch.setattr(vlm_model, "CLIP_PATCHES", 8)
     got = model.vision_features(mx.array(clip), [grid])
     assert calls == [(2, 2, 2), (2, 2, 2), (1, 2, 2)]
-    assert mx.allclose(got, want, rtol=1e-4, atol=1e-5)
+    # TF32 on M5 GPUs: over 10 weight seeds the passes differed from one
+    # pass by up to 2.3e-4, at a feature scale near 0.48 (under 1e-7 on
+    # the CPU device).
+    assert mx.allclose(got, want, rtol=0, atol=7e-4)
     with pytest.raises(ValueError, match="grids hold 20 patches but 24"):
         model.vision_features(mx.array(np.concatenate([clip, clip[:4]])),
                               [grid])

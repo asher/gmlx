@@ -172,6 +172,14 @@ def _run(encoder, projector, mel: np.ndarray) -> np.ndarray:
     return np.asarray(projector(encoder(mx.array(mel.astype(np.float32)))))
 
 
+# M5 GPUs run float32 matmuls at TF32 precision. Over 10 weight seeds a
+# clip and the passes over a long one differed from the float64 reference
+# by up to 0.0072, at an output scale near 4.5 (under 2e-6 on the CPU
+# device). An attention window one frame short moves the output by at
+# least 0.068, three times this bound.
+_TF32_ATOL = 2.2e-2
+
+
 @pytest.mark.parametrize("frames", [8, 21, 1, 40])
 def test_a_clip_matches_the_reference(frames):
     """Whole groups of 8 frames, a short last group, and one frame."""
@@ -179,8 +187,8 @@ def test_a_clip_matches_the_reference(frames):
     mel = np.random.default_rng(frames).standard_normal((16, frames))
     got = _run(encoder, projector, mel)
     assert got.shape == (-(frames // -8), 24)
-    np.testing.assert_allclose(got, _reference(cfg, w, mel), rtol=2e-4,
-                               atol=2e-5)
+    np.testing.assert_allclose(got, _reference(cfg, w, mel), rtol=0,
+                               atol=_TF32_ATOL)
 
 
 def test_a_position_reads_only_its_window():
@@ -215,7 +223,8 @@ def test_passes_over_a_long_clip_keep_the_output(monkeypatch, stretch,
     monkeypatch.setattr(audio, "Q_BLOCK", q_block)
     monkeypatch.setattr(audio, "LAYER_TOKENS", layer_tokens)
     np.testing.assert_allclose(_run(encoder, projector, mel),
-                               _reference(cfg, w, mel), rtol=2e-4, atol=2e-5)
+                               _reference(cfg, w, mel), rtol=0,
+                               atol=_TF32_ATOL)
 
 
 @pytest.mark.parametrize("name", ["bfloat16", "float16"])
