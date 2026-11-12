@@ -53,6 +53,12 @@ nothing is decoding, so one client alone sees no difference under any
 setting. The server reads both settings at start, so change them and run
 `gmlx restart`.
 
+Both settings protect a request that was decoding before the new ones
+arrived. When several requests arrive together and nothing was decoding,
+neither applies: the chunks run at full size with one decode step between
+them. The request that finishes its prefill first then decodes one step
+per chunk until the others have finished theirs.
+
 ## Shared prompts
 
 Requests often share the start of their prompt, such as a common system
