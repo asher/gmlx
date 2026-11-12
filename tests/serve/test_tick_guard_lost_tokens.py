@@ -471,7 +471,8 @@ class _Removal:
     the filter makes before it changes the batch; and "gpufault", a
     command buffer fault that is not a memory error at that eval; and
     "cbheld", a command buffer failure at that eval and then a refusal of
-    the kept rows' allocation, which must not hide it. ``skip`` lets that many errors' sites pass first."""
+    the kept rows' allocation, which must not hide it. ``skip`` lets
+    that many errors' sites pass first."""
 
     LOG = {"layer": "stopped a layer's filter half way",
            "before": "refused before the batch changed",
@@ -666,7 +667,7 @@ def test_governor_retire_whose_removal_stays_refused(engine, monkeypatch):
         removal.arm(gen)
         rows = list(gen._generation_batch.uids)
         assert rows == [0, 1]
-        assert gov._retire_largest(gen, gov._GovState())
+        assert gov._retire_largest(gen, gov._GovState()) == "refused"
         assert gen._generation_batch is removal.batch
         assert gen._generation_batch.uids == rows
         assert not gen._unprocessed_sequences

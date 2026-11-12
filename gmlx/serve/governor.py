@@ -668,32 +668,38 @@ def _apc_disk_armed(gen) -> bool:
     return mgr is not None and getattr(mgr, "disk", None) is not None
 
 
-def _retire_largest(gen, st: _GovState) -> bool:
+def _retire_largest(gen, st: _GovState) -> str:
     """Orange's width lever: remove the largest decode row and requeue
     it as itself through the tick guard's ledger (replay = prompt +
     delivered; APC makes the re-prefill warm). A row in the middle of a
     forced close is passed over: the retire can wait, and a close is a
     few tokens long. A speaking row is passed over too: it cannot
-    replay, so a retire would end its reply."""
+    replay, so a retire would end its reply. Returns "retired", "none"
+    when every row was passed over, or "refused" when the allocator
+    refused the removal at every try and the row still decodes."""
     from . import tick_guard as tg
 
     tg_st = tg._state(gen)
     victim = tg._pick_victim(gen, tg_st, spare=tg.mid_close,
                              spare_uid=lambda uid: tg.speaks(gen, uid))
     if victim is None:
-        return False
+        return "none"
+    before = mx.get_active_memory()
+    pending = _shed_transient_bytes(gen, st)
+    if not tg._rebuild_row(gen, tg_st, victim):
+        _log.warning("[governor] retire of row %s refused at every try; "
+                     "re-sampling next tick", victim)
+        return "refused"
     if victim == st.last_victim_uid:
         _STATS["victim_repeats"] += 1
     st.last_victim_uid = victim
     tg_st.last_victim = victim
-    before = mx.get_active_memory()
-    st.pending_shed_bytes = _shed_transient_bytes(gen, st)
-    tg._rebuild_row(gen, tg_st, victim, "orange retire: memory pressure")
+    st.pending_shed_bytes = pending
     st.shed_times.append(time.perf_counter())
     st.shed_measure_from = float(before)
     _STATS["orange_retires"] += 1
     _STATS["last_action"] = f"retire uid={victim}"
-    return True
+    return "retired"
 
 
 def _live_rows(gen) -> bool:
@@ -703,18 +709,24 @@ def _live_rows(gen) -> bool:
 
 
 def _fail_largest(gen, st: _GovState, why: str) -> bool:
+    """Red: fail the largest decode row for good. False when there is
+    none, or when the allocator refused its removal at every try and the
+    row still decodes; nothing is booked then."""
     from . import tick_guard as tg
 
     tg_st = tg._state(gen)
     victim = tg._pick_victim(gen, tg_st)
     if victim is None:
         return False
+    before = mx.get_active_memory()
+    if not tg._fail_row_permanently(gen, tg_st, victim, why):
+        _log.warning("[governor] red failure of row %s refused at every "
+                     "try; the row still decodes", victim)
+        return False
     if victim == st.last_victim_uid:
         _STATS["victim_repeats"] += 1
     st.last_victim_uid = victim
     tg_st.last_victim = victim
-    before = mx.get_active_memory()
-    tg._fail_row_permanently(gen, tg_st, victim, why)
     st.shed_times.append(time.perf_counter())
     st.shed_measure_from = float(before)
     _STATS["red_failures"] += 1
@@ -1031,7 +1043,14 @@ def _governor_tick(gen) -> None:
             if st.evict_fraction >= 1.0 and freed < shortfall:
                 # registered caches are dry; the width lever is next
                 if _apc_disk_armed(gen):
-                    if not _retire_largest(gen, st) and _live_rows(gen):
+                    outcome = _retire_largest(gen, st)
+                    if outcome == "refused":
+                        # The removal never ran, so the dry evict before
+                        # it is no shed either: nothing is measured, and
+                        # orange samples again next tick.
+                        st.shed_times.pop()
+                        st.shed_measure_from = None
+                    elif outcome == "none" and _live_rows(gen):
                         # Every row is in a forced close. A dry evict while
                         # they finish is not a shed, so it neither counts
                         # against the cap nor is measured as a failed

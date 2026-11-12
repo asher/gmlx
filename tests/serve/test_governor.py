@@ -362,6 +362,71 @@ def test_orange_defers_its_retire_while_every_row_closes(rig, monkeypatch):
     assert len(st.shed_times) == 2
 
 
+def _refusing(gen, monkeypatch):
+    """Make every try of ``gen``'s removals an allocator refusal."""
+    import gmlx.eval_guard as eg
+
+    monkeypatch.setattr(eg, "drain_for", lambda site: None)
+    tries = []
+
+    def remove(uid):
+        tries.append(uid)
+        raise RuntimeError("[metal::malloc] Attempting to allocate 1 bytes")
+
+    gen.remove = remove
+    return tries
+
+
+def test_an_orange_retire_refused_at_every_try_books_nothing(rig,
+                                                             monkeypatch):
+    """The allocator refuses the retire's removal at every try, so the
+    row still decodes. The retire counts nothing, spends no shed, is not
+    measured as a failed recovery, and is not taken for a forced close:
+    orange samples again each tick, red never fires off it, and the
+    retire runs once the removal goes through."""
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen, st = _dry_orange(rig, monkeypatch, None, None)
+    remove = gen.remove
+    tries = _refusing(gen, monkeypatch)
+    for n in range(1, 4):
+        gov._governor_tick(gen)
+        assert st.band == gov.ORANGE
+        assert tries == [0] * (tg._REMOVE_TRIES * n)
+        assert gen._generation_batch.uids == [0, 1]
+        assert gen._unprocessed_sequences == []
+        assert st.shed_times == [] and st.shed_measure_from is None
+        assert not st.orange_failed and st.last_victim_uid is None
+        assert gov._STATS["last_action"].startswith("evict")
+    assert gov._STATS["orange_retires"] == 0
+    assert gov._STATS["retires_deferred"] == 0
+    assert gov._STATS["red_failures"] == 0 and failed == []
+    gen.remove = remove
+    gov._governor_tick(gen)
+    assert gen.removed == [0]
+    assert gov._STATS["orange_retires"] == 1
+    assert gov._STATS["last_action"] == "retire uid=0"
+
+
+def test_a_red_failure_refused_at_every_try_books_nothing(rig, monkeypatch):
+    """Red's removal is refused at every try: the row still decodes, no
+    row fails, and nothing is booked."""
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    gen, st = _dry_orange(rig, monkeypatch, None, None)
+    tries = _refusing(gen, monkeypatch)
+    gov._STATS["last_action"] = "before"
+    assert not gov._fail_largest(gen, st, "test")
+    assert tries == [0] * tg._REMOVE_TRIES
+    assert gen._generation_batch.uids == [0, 1] and failed == []
+    assert 0 in tg._state(gen).ledger
+    assert st.shed_times == [] and st.shed_measure_from is None
+    assert gov._STATS["red_failures"] == 0
+    assert gov._STATS["last_action"] == "before"
+
+
 def test_red_and_the_tick_guard_take_a_row_in_a_close(rig, monkeypatch):
     monkeypatch.setattr(tg, "_row_failed_callbacks", [])
     gen, st = _dry_orange(rig, monkeypatch, _Closing(), _Closing())
