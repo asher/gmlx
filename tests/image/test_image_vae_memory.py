@@ -1,16 +1,15 @@
 """The footprint of a whole FLUX.1 VAE decode at 512x512 in bf16 stays
 under the memfit peak, which is fitted to measured whole decodes, and the
 MLX cache ends at or under its bound with the previous limit restored.
-The weights are random at the official shapes, so no file is needed. A
-sampler process reads this process's physical footprint every 2 ms,
-since the evaluation may hold the GIL, and the baseline is the largest
-reading over a quiet moment after the cache is cleared. Metal only."""
+The weights are random at the official shapes, so no file is needed.
+The footprint is the kernel's peak since a reset, so a short peak is
+never missed, and the baseline is the peak over a quiet moment after the
+cache is cleared. Metal only."""
 from __future__ import annotations
 
+import ctypes
 import gc
 import os
-import subprocess
-import sys
 import time
 
 import numpy as np
@@ -23,39 +22,19 @@ pytestmark = pytest.mark.skipif(
     bool(os.environ.get("KQUANT_FORCE_CPU")) or not mx.metal.is_available(),
     reason="measures a Metal decode")
 
-_SAMPLER = r"""
-import ctypes, sys, threading, time
-pid = int(sys.argv[1]); libc = ctypes.CDLL(None)
-buf = ctypes.create_string_buffer(512); top = [0]
-def fp():
-    return (int.from_bytes(buf.raw[72:80], "little")
-            if libc.proc_pid_rusage(pid, 4, buf) == 0 else 0)
-def poll():
-    while True:
-        top[0] = max(top[0], fp()); time.sleep(0.002)
-threading.Thread(target=poll, daemon=True).start()
-for line in sys.stdin:
-    v, top[0] = top[0], fp()
-    print(v, flush=True)
-"""
+_LIBC = ctypes.CDLL(None)
 
 
-class _Sampler:
-    def __init__(self):
-        self.p = subprocess.Popen(
-            [sys.executable, "-c", _SAMPLER, str(os.getpid())],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+def _peak_footprint() -> int:
+    """This process's peak physical footprint since _reset_peak:
+    rusage_info_v4 ri_interval_max_phys_footprint, bytes 280:288."""
+    buf = ctypes.create_string_buffer(512)
+    assert _LIBC.proc_pid_rusage(os.getpid(), 4, buf) == 0
+    return int.from_bytes(buf.raw[280:288], "little")
 
-    def reset(self) -> int:
-        assert self.p.stdin and self.p.stdout
-        self.p.stdin.write("r\n")
-        self.p.stdin.flush()
-        return int(self.p.stdout.readline())
 
-    def close(self):
-        if self.p.stdin:
-            self.p.stdin.close()
-        self.p.wait(10)
+def _reset_peak() -> None:
+    assert _LIBC.proc_reset_footprint_interval(os.getpid()) == 0
 
 
 def _limit_now() -> int:
@@ -81,23 +60,20 @@ def test_a_512_decode_stays_under_the_fitted_footprint():
     tiling.decode(vae, lat, tiled=False, free=1e12)     # compile kernels
     bound = memfit.vae_peak("decode", 512, 512, family="z_image",
                             itemsize=2)
-    sampler = _Sampler()
-    try:
-        # Arrays an earlier test left in reference cycles would otherwise
-        # reach the cache at the next collection, inside the measurement.
-        gc.collect()
-        mx.synchronize()
-        mx.clear_cache()
-        before = _limit_now()
-        time.sleep(1.0)
-        sampler.reset()
-        time.sleep(0.2)
-        start = sampler.reset()
-        out = tiling.decode(vae, lat, tiled=False, free=1e12)
-        mx.synchronize()
-        peak = sampler.reset()
-    finally:
-        sampler.close()
+    # Arrays an earlier test left in reference cycles would otherwise
+    # reach the cache at the next collection, inside the measurement.
+    gc.collect()
+    mx.synchronize()
+    mx.clear_cache()
+    before = _limit_now()
+    time.sleep(1.0)
+    _reset_peak()
+    time.sleep(0.2)
+    start = _peak_footprint()
+    _reset_peak()
+    out = tiling.decode(vae, lat, tiled=False, free=1e12)
+    mx.synchronize()
+    peak = _peak_footprint()
     assert out.shape == (1, 512, 512, 3)
     assert bool(mx.all(mx.isfinite(out)))
     grew = peak - start
