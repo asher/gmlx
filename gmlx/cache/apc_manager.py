@@ -312,9 +312,9 @@ class GmlxAPCManager(_apc.APCManager):
     def _grow_pool(self, pool_bytes: float, per_tok: float) -> None:
         target = int(pool_bytes // (self.block_size * per_tok))
         # The pool competes with everything else against the Metal resource
-        # limit, which APC_MAX_POOL_TENSORS guards. A committed block is one
-        # buffer when its layers share a shape (KVBlockHandle), and the
-        # store guard counts the rest.
+        # limit, which APC_MAX_POOL_TENSORS guards. The cap reads one buffer
+        # a block, as when its layers share a shape (KVBlockHandle). A block
+        # of more shapes holds more, and the store guard counts them.
         max_tensors = _max_pool_tensors()
         if max_tensors:
             target = min(target, max_tensors)
@@ -1040,7 +1040,8 @@ def _auto_block_size(model_path):
     """_BLOCK_TOKENS, or the largest of _BLOCK_SIZES under it that divides
     every sliding window, so rotating layers keep their checkpoints. It
     reads the model's header only. None keeps the stock default (non-GGUF
-    path, unreadable header, or no size above it divides the windows)."""
+    path, unreadable header, or no size above the stock 16 divides the
+    windows)."""
     if not model_path:
         return None
     try:

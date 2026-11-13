@@ -63,7 +63,7 @@ import numpy as np
 from ._stream_cleanup import clear_mlx_streams
 from .apc_adapters import reserve_checkpoint_capacity
 from .apc_coordinator import APCCoordinator, PrefillMemoryPlan
-from .apc_storage import APCNode, ComponentId, KVBlockHandle, StateHandle
+from .apc_storage import APCNode, ComponentId, KVBlockHandle, StateHandle  # gmlx: stacked blocks
 from .kv_quant import from_config as kv_quant_from_config
 from .kv_quant import kv_quant_fingerprint
 from .models.cache import cache_nbytes as _cache_nbytes
@@ -3868,6 +3868,7 @@ class APCManager:
             )
             new_blocks: List[APCBlock] = []
             disk_blocks: List[_DiskLayerMajorBlock] = []
+            # gmlx: a stacked block holds one buffer per array shape.
             per_block_tensors = KVBlockHandle.count_parts(layer_keys, layer_values)
             token_tuple = tuple(int(t) for t in token_ids[:layer_major_prefix_tokens])
             layer_major_stored = False

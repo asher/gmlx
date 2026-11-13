@@ -795,6 +795,15 @@ def test_unreadable_header_keeps_the_stock_block(monkeypatch, tmp_path):
     assert am._auto_block_size(str(tmp_path / "m.gguf")) is None
 
 
+@pytest.mark.parametrize("windows, bs", [
+    ({64}, 64), ({96}, 32), ({1024, 128}, 128), ({48}, None), ({2047}, None)])
+def test_block_divides_every_sliding_window(monkeypatch, tmp_path, windows, bs):
+    # A block that does not divide a window sends that layer to the exact
+    # tier. None keeps the stock 16.
+    costs = [(None, 1024.0)] + [(w, 1024.0) for w in sorted(windows)]
+    assert _pick(monkeypatch, tmp_path, costs, 8e9) == bs
+
+
 @pytest.mark.parametrize("bs, blocks", [(16, 2048), (128, 256)])
 def test_floor_is_32768_tokens_at_any_block(monkeypatch, bs, blocks):
     monkeypatch.setenv("GMLX_APC_ENABLED", "1")
@@ -803,9 +812,16 @@ def test_floor_is_32768_tokens_at_any_block(monkeypatch, bs, blocks):
     monkeypatch.setenv("APC_BLOCK_SIZE", str(bs))
     m = build_apc_manager()
     assert (m.block_size, len(m.pool)) == (bs, blocks)
-    assert blocks * bs == 32768
     monkeypatch.setenv("APC_NUM_BLOCKS", "100")
     assert len(build_apc_manager().pool) == 100
+
+
+def test_floor_follows_the_picked_block(monkeypatch, tmp_path):
+    assert _pick(monkeypatch, tmp_path, _q38_27b_costs(), 8e9) == 128
+    monkeypatch.setenv("GMLX_APC_ENABLED", "1")
+    monkeypatch.delenv("APC_DISK_PATH", raising=False)
+    m = build_apc_manager(model_namespace=str(tmp_path / "m.gguf"))
+    assert (m.block_size, len(m.pool)) == (128, 256)
 
 
 def test_27b_hybrid_takes_128_token_blocks_on_96_gb(monkeypatch, tmp_path):

@@ -107,6 +107,8 @@ class APCNode:
 
     components: Dict[ComponentId, StateHandle]
 
+    # gmlx: a released handle reads as no KV. The keys and values
+    # properties are gone: readers join blocks with gmlx.cache.apc_blocks.
     def kv_handle(self) -> Optional[KVBlockHandle]:
         handle = self.components.get(self.KV_COMPONENT)
         if isinstance(handle, KVBlockHandle) and handle.parts:

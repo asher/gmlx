@@ -56,14 +56,30 @@ def test_mixed_shapes_stack_one_part_per_shape():
     assert KVBlockHandle.count_parts(k, v) == 3
 
 
-def test_parts_do_not_alias_the_source():
-    keys, values = _kv([(2, 8)], 16, 2)
-    want = mx.array(keys[0])
+@pytest.mark.parametrize("v_dim, layers", [(8, 4), (16, 1)])
+def test_parts_do_not_alias_the_source(v_dim, layers):
+    # A block cut from a long prompt must not keep the prompt's buffers
+    # alive once the prompt is gone. Keys and values of different head
+    # dims store each array alone, the path that copies before stacking.
+    import gc
+
+    mx.clear_cache()
+    base = mx.get_active_memory()
+    mx.random.seed(2)
+    keys = [mx.random.normal((1, 2, 65536, 8)).astype(mx.bfloat16)
+            for _ in range(layers)]
+    values = [mx.random.normal((1, 2, 65536, v_dim)).astype(mx.bfloat16)
+              for _ in range(layers)]
+    mx.eval(keys + values)
+    source = sum(a.nbytes for a in keys + values)
     b = _Node()
-    b.set_kv(keys, values)
-    keys[0][..., 0, :] = 0
-    mx.eval(keys[0])
-    assert mx.array_equal(join_blocks([b])[0][0], want)
+    b.set_kv([k[..., :16, :] for k in keys], [v[..., :16, :] for v in values])
+    mx.eval(b.kv_handle().parts)
+    del keys, values
+    gc.collect()
+    mx.clear_cache()
+    assert b.kv_handle().resident_bytes() == layers * 2 * 16 * (8 + v_dim) * 2
+    assert mx.get_active_memory() - base < source // 8
 
 
 @pytest.mark.parametrize("group_bytes", [1 << 30, 1])
