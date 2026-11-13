@@ -47,14 +47,38 @@ _POPULATE_SKIP_RESIDENT = 0.95
 
 
 class _Stream:
-    """One file's populate: a shared file-order chunk frontier."""
+    """One file's populate: a shared file-order chunk frontier that steps
+    over the ``skip`` byte ranges (sorted, absolute)."""
 
-    def __init__(self, path: str, size: int):
+    def __init__(self, path: str, size: int,
+                 skip: list[tuple[int, int]] | None = None):
         self.path = path
         self.size = size
+        self.skip = skip or []
+        self.want = size - sum(min(b, size) - min(a, size) for a, b in self.skip)
         self.next = 0        # first unclaimed byte (frontier)
         self.done = 0        # bytes actually read
         self.threads: list[threading.Thread] = []
+
+    def claim(self) -> tuple[int, int] | None:
+        """The next run to read, ``(offset, length)``, or None at the end.
+        Call under ``_lock``."""
+        off = self.next
+        moved = True
+        while moved:
+            moved = False
+            for a, b in self.skip:
+                if a <= off < b:
+                    off, moved = b, True
+        if off >= self.size:
+            self.next = off
+            return None
+        end = min(off + _POPULATE_CHUNK, self.size)
+        for a, _ in self.skip:
+            if off < a < end:
+                end = a
+        self.next = end
+        return off, end - off
 
 
 _streams: dict[str, _Stream] = {}
@@ -120,11 +144,10 @@ def _reader(st: _Stream) -> None:
         mv = memoryview(buf)
         while True:
             with _lock:
-                off = st.next
-                if off >= st.size:
-                    return
-                st.next = off + _POPULATE_CHUNK
-            n = min(_POPULATE_CHUNK, st.size - off)
+                run = st.claim()
+            if run is None:
+                return
+            off, n = run
             r = os.preadv(fd, [mv[:n]], off)
             if r <= 0:
                 return
@@ -147,23 +170,31 @@ def start_populate(paths: list[str], log=print) -> None:
     evicted in between (served: TTL unload, neighbor loads evict, then a
     re-request). Already-resident shards are skipped (a warm re-read is a
     pointless pass of buffer copies; this also covers a just-finished
-    stream). Guaranteed reads, unlike F_RDADVISE; daemon threads own the
-    fds. Registry insert and thread start share one lock hold so a
-    concurrent kick or wait never sees a stream without live readers.
+    stream). The byte ranges of tables the load streams are never read
+    (``_streamed_tables``). Guaranteed reads, unlike F_RDADVISE; daemon
+    threads own the fds. Registry insert and thread start share one lock
+    hold so a concurrent kick or wait never sees a stream without live
+    readers.
     """
     started = 0
+    skipped = 0
+    tables = _streamed_tables(paths)
     with _lock:
         for path in paths:
             key = os.path.realpath(path)
             st = _streams.get(key)
             if st is not None and any(t.is_alive() for t in st.threads):
                 continue
-            if (resident_fraction(path) or 0.0) >= _POPULATE_SKIP_RESIDENT:
-                continue
             try:
-                st = _Stream(path, os.path.getsize(path))
+                st = _Stream(path, os.path.getsize(path), tables.get(key))
             except OSError:
                 continue
+            if st.want <= 0:
+                skipped += st.size
+                continue
+            if (resident_fraction(path) or 0.0) >= _POPULATE_SKIP_RESIDENT:
+                continue
+            skipped += st.size - st.want
             st.threads = [
                 threading.Thread(target=_reader, args=(st,),
                                  name="gmlx-populate", daemon=True)
@@ -174,8 +205,26 @@ def start_populate(paths: list[str], log=print) -> None:
                 t.start()
             started += 1
     if started:
+        left = (f"; {skipped / 1e9:.1f} GB of streamed tables left out"
+                if skipped else "")
         log(f"[load_weights] page-cache populate started ({started} file(s), "
-            f"{_POPULATE_WORKERS} readers)")
+            f"{_POPULATE_WORKERS} readers{left})")
+
+
+def _streamed_tables(paths: list[str]) -> dict[str, list[tuple[int, int]]]:
+    """The streamed tables' byte ranges in ``paths``, by real path
+    (``table_stream.streamed_table_ranges`` at the budget this module's
+    gate uses). Empty when the headers cannot be read: the populate is
+    a speedup, so it then reads whole files as before."""
+    try:
+        from gmlx.device import metal_value
+        from gmlx.stream.table_stream import streamed_table_ranges
+
+        budget = int(0.9 * metal_value("max_recommended_working_set_size"))
+        ranges = streamed_table_ranges(list(paths), budget)
+    except Exception:
+        return {}
+    return {os.path.realpath(p): r for p, r in ranges.items()}
 
 
 def wait_for(paths: list[str], log=print) -> None:
@@ -227,8 +276,8 @@ def _wait(pending: list[_Stream], tail: float, log) -> None:
         last_progress = time.perf_counter()
         while any(t.is_alive() for t in st.threads):
             with _lock:
-                remaining = st.size - st.done
-            if remaining <= tail * st.size:
+                remaining = st.want - st.done
+            if remaining <= tail * st.want:
                 break
             now = time.perf_counter()
             if last_remaining is None or remaining < last_remaining:

@@ -183,6 +183,65 @@ def test_populate_early_env_disables(tmp_path, monkeypatch):
     assert called == []
 
 
+def test_a_streamed_table_is_left_out_of_the_populate(tmp_path, monkeypatch):
+    """A load that streams its table reads every byte of the file but the
+    table's; with the table kept resident it reads the table too."""
+    import os
+
+    import mlx.core as mx
+    import numpy as np
+
+    gguf = pytest.importorskip("gguf")
+    from gmlx.load.headerscan import scan_gguf
+
+    path = str(tmp_path / "t.gguf")
+    w = gguf.GGUFWriter(path, "qwen4exp")
+    w.add_tensor("blk.0.attn_q.weight", np.ones((64, 64), np.float32))
+    w.add_tensor("per_layer_token_embd.weight", np.ones((512, 96), np.int8),
+                 raw_dtype=gguf.GGMLQuantizationType.I8)
+    w.add_tensor("output_norm.weight", np.ones((64,), np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    h = scan_gguf(path)
+    t = next(t for t in h.tensors if t.name == "per_layer_token_embd.weight")
+    lo, hi, size = h.data_offset + t.offset, h.data_offset + t.offset + t.nbytes, h.size
+    assert 0 < lo < hi < size
+
+    monkeypatch.setattr(
+        mx, "device_info",
+        lambda: {"max_recommended_working_set_size": 1 << 40})
+    monkeypatch.setattr(populate, "resident_fraction", lambda p: 0.0)
+    reads = []
+    real = os.preadv
+
+    def preadv(fd, bufs, off):
+        r = real(fd, bufs, off)
+        reads.append((off, off + r))
+        return r
+
+    monkeypatch.setattr(os, "preadv", preadv)
+
+    def covered():
+        reads.clear()
+        populate._streams.clear()
+        populate.maybe_populate_for_load([path], log=lambda *a: None)
+        populate.finish_all(log=lambda *a: None)
+        runs = []
+        for a, b in sorted(reads):
+            if runs and a <= runs[-1][1]:
+                runs[-1][1] = max(runs[-1][1], b)
+            else:
+                runs.append([a, b])
+        return [tuple(r) for r in runs]
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    assert covered() == [(0, lo), (hi, size)]
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    assert covered() == [(0, size)]
+
+
 def test_over_budget_streaming_model_never_populates(tmp_path, monkeypatch):
     import mlx.core as mx
 

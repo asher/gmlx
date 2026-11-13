@@ -16,9 +16,10 @@ mode) and only the gathered rows - a fresh, small buffer - cross back to
 the GPU for dequantization.
 
 This module is the single source of truth for what is streamable on an
-arch: ``every_token_ranges`` (pin_weights) and the load-time GPU warm
-touch both exclude declared components through it, so a streamed table
-can be neither mlocked nor GPU-touched by the load path.
+arch: ``every_token_ranges`` (pin_weights), the load-time GPU warm touch
+and the page-cache populate all exclude declared components through it,
+so a streamed table can be neither mlocked, GPU-touched nor read whole
+by the load path.
 
 ``GMLX_STREAM_PLE``: unset = automatic (stream the table when the rest
 of the model fits the budget without it, or the model is over budget); ``0`` = never stream the table; ``1`` = force table
@@ -389,6 +390,44 @@ def _selected(tbytes: int, total_bytes: int, budget: int | None,
 def latched() -> bool:
     """Whether a stream flag latched table streaming for the next load."""
     return _FORCED
+
+
+def streamed_table_ranges(shards: list[str], budget: int | None,
+                          env=None) -> dict[str, list[tuple[int, int]]]:
+    """Absolute byte ranges, by shard path, of the streamable tables a
+    load of ``shards`` keeps out of memory, from the headers alone: all of
+    them when the warm touch's test selects them (``_selected`` on header
+    bytes, ``budget`` as the touch uses it), else those the load reads
+    from the file (``table_pread.deferred_tables``). The page-cache
+    populate leaves these bytes unread, since the model reads a few rows
+    of them a token."""
+    from gmlx.load.headerscan import scan_gguf
+
+    from .table_pread import deferred_tables
+
+    if not shards:
+        return {}
+    scans = [scan_gguf(s, array_limit=0) for s in shards]
+    arch = scans[0].kv.get("general.architecture")
+    pattern = streamable_table_names(arch)
+    if pattern is None:
+        return {}
+    tables = [(h.path, t.name, h.data_offset + t.offset, t.nbytes)
+              for h in scans for t in h.tensors if pattern.fullmatch(t.name)]
+    if not tables:
+        return {}
+    total = sum(t.nbytes for h in scans for t in h.tensors)
+    tbytes = sum(n for *_, n in tables)
+    latch = any(tables_for_memory(p) for p in shards)
+    if _selected(tbytes, total, budget, latch, env):
+        keep = {name for _, name, _, _ in tables}
+    else:
+        keep = set(deferred_tables(shards, arch, env=env))
+    out: dict[str, list[tuple[int, int]]] = {}
+    for path, name, off, n in tables:
+        if name in keep:
+            out.setdefault(path, []).append((off, off + n))
+    return {p: sorted(r) for p, r in out.items()}
 
 
 class StreamPlan(NamedTuple):
