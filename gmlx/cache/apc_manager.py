@@ -952,7 +952,7 @@ class GmlxAPCManager(_apc.APCManager):
                 # and always before return.
                 b.set_kv([k[..., start:end, :] for k in layer_keys],
                          [v[..., start:end, :] for v in layer_values])
-                pending.extend(b.kv_handle().parts)
+                pending.extend(b.kv_handle().parts or ())
                 _flush_pending()
                 b.block_hash = h2
                 b.token_ids = chunk
