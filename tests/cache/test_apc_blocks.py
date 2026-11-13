@@ -76,6 +76,8 @@ def test_parts_do_not_alias_the_source(v_dim, layers):
     b.set_kv([k[..., :16, :] for k in keys], [v[..., :16, :] for v in values])
     mx.eval(b.kv_handle().parts)
     del keys, values
+    # The copy's inputs are dropped when its command buffer completes.
+    mx.synchronize()
     gc.collect()
     mx.clear_cache()
     assert b.kv_handle().resident_bytes() == layers * 2 * 16 * (8 + v_dim) * 2
