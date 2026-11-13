@@ -257,8 +257,7 @@ def deferred_tables(shards: list[str], arch: str | None,
     """Streamable tables of ``arch`` in ``shards`` that a load reads from
     the file, as wire name -> source: the oversize ones, and, on an arch
     that reads its tables ahead (``table_stream.tables_read_ahead``), all
-    of them when they alone bring the text tensors under the stream
-    budget, or the check before the load latched the step for the memory
+    of them when the text tensors fit the stream budget without them, or the check before the load latched the step for the memory
     free now (``table_stream.unflagged_tables_stream``), so that the
     model loads with its experts resident. Under a stream flag
     (``latched``, read from the latch when None) the install's ladder

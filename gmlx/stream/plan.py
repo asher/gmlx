@@ -22,8 +22,8 @@ GiB = 1 << 30
 _MIN_ARENA = GiB           # decode_feeder refuses a smaller arena
 
 VERDICT_RESIDENT = "resident"
-# The tables a load reads from the file bring it under the stream budget,
-# and the experts stay resident (capacity.deferred_table_bytes).
+# The load fits the stream budget without the tables it reads from the
+# file, and the experts stay resident (capacity.deferred_table_bytes).
 VERDICT_TABLES = "tables_from_file"
 VERDICT_STREAMS = "streams"
 VERDICT_PAGE_CACHE = "page_cache"
@@ -230,12 +230,12 @@ def weight_verdict(total_bytes: int, table_bytes: int, budget: int | None,
                    ram_bytes: int, *,
                    deferred_bytes: int | None = None) -> str | None:
     """The fit of a model's weights alone on a box: ``tables_from_file``
-    when the tables a load reads from the file bring the rest under
-    ``budget``, ``resident`` when the whole file is under it and not over
+    when the rest fits ``budget`` without the tables a load reads from
+    the file, ``resident`` when the whole file is under it and not over
     by its share of RAM, else None (the streaming verdicts need the room
     math). ``deferred_bytes`` is what a load reads from the file when the
     caller priced it, as ``box_plan`` does; without it, the tables alone,
-    when they alone bring the load under. The catalog's rung state and
+    when the load fits without them. The catalog's rung state and
     ``box_plan`` read this one rule."""
     from gmlx.serve.capacity import classify_weight_share
     from gmlx.stream.table_stream import tables_bring_under
@@ -255,8 +255,8 @@ def _deferred(model: ModelPlan, budget: int,
               max_buffer_bytes: int | None) -> int:
     """The table bytes a load of ``model`` without a stream flag reads
     from the file: ``capacity.deferred_table_bytes`` from the header,
-    with the box's buffer ceiling. All of them when they alone bring it
-    under ``budget``, on any arch that declares tables; on an arch that
+    with the box's buffer ceiling. All of them when it fits ``budget``
+    without them, on any arch that declares tables; on an arch that
     reads them ahead, also those no array can hold."""
     from gmlx.stream.table_pread import no_array_holds
     from gmlx.stream.table_stream import tables_bring_under, tables_read_ahead

@@ -128,7 +128,7 @@ def test_descriptor_empty_for_unknown_arch_and_missing_path():
 # --- selection ladder -----------------------------------------------------
 
 
-def test_selection_streams_table_only_when_it_clears_budget(monkeypatch):
+def test_selection_streams_table_whenever_the_rest_clears_budget(monkeypatch):
     model = _table_model()
     tbytes = ts.table_bytes(model)
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
@@ -139,27 +139,68 @@ def test_selection_streams_table_only_when_it_clears_budget(monkeypatch):
     monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")
     assert not ts.table_stream_selected(model, tbytes + 100, 50)
     monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE")
-    # fits -> no streaming
-    assert not ts.table_stream_selected(model, tbytes + 100, tbytes + 200)
+    # the whole model fits -> the table streams all the same
+    assert ts.table_stream_selected(model, tbytes + 100, tbytes + 200)
     # unknown budget -> conservative no
     assert not ts.table_stream_selected(model, tbytes + 100, None)
+    # no table bytes left in an array -> nothing to stream
+    assert not ts._selected(0, tbytes + 100, tbytes + 200, False)
+
+
+def test_a_model_just_under_the_budget_takes_the_table_only_step(monkeypatch):
+    """The whole model fits with about 1 GB to spare. Its table is read
+    from the file and its experts stay in memory."""
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE", raising=False)
+    total, tables, budget = (int(gb * 1e9) for gb in (102.7, 28.8, 103.9))
+    assert total < budget
+    assert ts.tables_bring_under(total, tables, budget)
+    assert ts.stream_plan(total, tables, budget) == (True, False, False)
+    # The same model with no declared table streams nothing.
+    assert not ts.tables_bring_under(total, 0, budget)
+    assert ts.stream_plan(total, 0, budget) == (False, False, False)
+
+
+@pytest.mark.parametrize("ple,rest_fits,expected", [
+    ("1", False, True),     # forced, with the rest over the budget
+    ("1", True, True),
+    ("0", True, False),     # kept in memory, though the rest fits
+    ("0", False, False),
+    (None, True, True),
+    (None, False, False),
+])
+def test_the_unflagged_table_step_honors_the_env(monkeypatch, ple, rest_fits,
+                                                 expected):
+    if ple is None:
+        monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    else:
+        monkeypatch.setenv("GMLX_STREAM_PLE", ple)
+    budget = 130 if rest_fits else 50
+    assert ts.unflagged_tables_stream("m.gguf", 150, 30, budget) is expected
+    # The same from a model's own env window.
+    env = {} if ple is None else {"GMLX_STREAM_PLE": ple}
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    assert ts.unflagged_tables_stream("m.gguf", 150, 30, budget,
+                                      env) is expected
+    # A model with no declared table has no step to take.
+    assert not ts.unflagged_tables_stream("m.gguf", 150, 0, budget, env)
 
 
 def test_selection_forced_by_stream_cpu(monkeypatch):
     model = _table_model()
     tbytes = ts.table_bytes(model)
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
-    fits = tbytes + 200
-    assert not ts.table_stream_selected(model, tbytes + 100, fits)
+    # With no budget known, the ladder alone selects nothing.
+    assert not ts.table_stream_selected(model, tbytes + 100, None)
     # --stream-cpu streams the experts whatever the size; the table rides
-    assert ts.table_stream_selected(model, tbytes + 100, fits,
+    assert ts.table_stream_selected(model, tbytes + 100, None,
                                     force_stream=True)
     # the latch reaches callers that never see the flag (the warm touch)
     ts.force_table_stream()
-    assert ts.table_stream_selected(model, tbytes + 100, fits)
+    assert ts.table_stream_selected(model, tbytes + 100, None)
     # an explicit off still wins
     monkeypatch.setenv("GMLX_STREAM_PLE", "0")
-    assert not ts.table_stream_selected(model, tbytes + 100, fits,
+    assert not ts.table_stream_selected(model, tbytes + 100, None,
                                         force_stream=True)
 
 
@@ -254,34 +295,39 @@ def test_warm_touch_excludes_table_iff_it_will_stream(monkeypatch):
     emb = model.model.ple_embed
     tbytes = ts.table_bytes(model)
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
-    # fits-in-RAM, no force: table is touched like any other weight
-    assert ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200) == set()
+    # no budget known, no force: table is touched like any other weight
+    assert ts.warm_touch_exclusions(model, tbytes + 100, None) == set()
+    # the whole model fits: the ladder still streams the table
+    skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200)
+    assert id(emb.weight) in skip and id(emb.scales) in skip
     # over budget with the table clearing it: the ladder will stream it
     skip = ts.warm_touch_exclusions(model, tbytes + 100, 150)
     assert id(emb.weight) in skip
     # --stream-cpu latched before the load: must also skip
     ts.force_table_stream()
-    skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200)
+    skip = ts.warm_touch_exclusions(model, tbytes + 100, None)
     assert id(emb.weight) in skip and id(emb.scales) in skip
     ts.force_table_stream(False)
-    assert ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200) == set()
-    # under the budget, latched for the memory free now: must also skip
+    assert ts.warm_touch_exclusions(model, tbytes + 100, None) == set()
+    # latched for the memory free now: must also skip
     ts.stream_tables_for_memory("m.gguf")
-    skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200,
+    skip = ts.warm_touch_exclusions(model, tbytes + 100, None,
                                     paths=["m.gguf"])
     assert id(emb.weight) in skip and id(emb.scales) in skip
     ts.stream_tables_for_memory("m.gguf", False)
-    # forced on a fits model (the P1 overhead A/B): must also skip
+    # forced with no budget known (the P1 overhead A/B): must also skip
     monkeypatch.setenv("GMLX_STREAM_PLE", "1")
-    skip = ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200)
+    skip = ts.warm_touch_exclusions(model, tbytes + 100, None)
     assert id(emb.weight) in skip
     monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     assert ts.warm_touch_exclusions(model, tbytes + 100, 150) == set()
+    assert ts.warm_touch_exclusions(model, tbytes + 100, tbytes + 200) == set()
 
 
 def test_warm_touch_skips_the_expert_stacks_under_a_stream_flag(monkeypatch):
     """A stream flag streams the experts of a model that fits; the load-time
-    touch must not wire them first."""
+    touch must not wire them first. With no flag the touch skips the table
+    alone."""
     from mlx.utils import tree_flatten
 
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
@@ -289,7 +335,9 @@ def test_warm_touch_skips_the_expert_stacks_under_a_stream_flag(monkeypatch):
     model.modules = lambda: [model.model.ple_embed, glu]
     experts = {id(a) for _, a in tree_flatten(glu.parameters())}
     fits = 1 << 40
-    assert ts.warm_touch_exclusions(model, 100, fits) == set()
+    table = model.model.ple_embed
+    assert ts.warm_touch_exclusions(model, 100, fits) == {
+        id(table.weight), id(table.scales)}
     ts.force_table_stream()
     skip = ts.warm_touch_exclusions(model, 100, fits)
     assert experts <= skip
@@ -599,10 +647,15 @@ def test_the_stream_plan_is_the_ladder(monkeypatch):
     assert plan(150, 0, 130, explicit=True, latched=True) == (False, True, False)
     # Under the budget the flag forces a stream: compose.
     assert plan(100, 30, 130, explicit=True, latched=True) == (True, True, False)
-    # No flag under the budget: nothing streams.
-    assert plan(100, 30, 130) == (False, False, False)
+    # No flag under the budget: the table alone streams.
+    assert plan(100, 30, 130) == (True, False, False)
+    # No flag, and no table or no budget: nothing streams.
+    assert plan(100, 0, 130) == (False, False, False)
+    assert plan(100, 30, None) == (False, False, False)
     monkeypatch.setenv("GMLX_STREAM_PLE_COMPOSE", "0")
     assert plan(150, 10, 130, explicit=True, latched=True) == (False, True, True)
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    assert plan(100, 30, 130) == (False, False, False)
 
 
 def _fresh_accounting(monkeypatch):

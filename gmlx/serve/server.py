@@ -875,11 +875,11 @@ def _warn_stale_stream_marks(cfg, path) -> None:
         stale = sorted(stale_stream_marks(path, path_of))
     except Exception:                                  # noqa: BLE001 - advisory
         return
-    from .capacity import gathered_table_bytes
+    from .capacity import deferred_table_bytes
 
     for mid in stale:
         fits = ("fits with its table read from the file"
-                if gathered_table_bytes(path_of[mid]) else "fits in memory")
+                if deferred_table_bytes(path_of[mid]) else "fits in memory")
         print(f"[server] warning: {mid}: a folder scan set stream: experts, "
               f"and the model now {fits}, so its experts stream. Run gmlx "
               "sync-models to keep them in memory.", file=sys.stderr)

@@ -681,8 +681,8 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
     # its text bytes are past the budget. Its install wires the experts in
     # chunks, which GMLX_OVERCOMMIT=1 still stops. The minted headers are
     # small, so the exemption is off. ``whole``: the whole file under the
-    # budget, short of the memory free now with its table: the table reads
-    # from the file all the same, and the load prices it so.
+    # budget, where the memory free now is short of it with its table: the
+    # table reads from the file all the same, and the load prices it so.
     import gmlx.device as device
     import gmlx.load.discovery as discovery
     import gmlx.serve.capacity as cap
@@ -703,7 +703,7 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_is_not_wired(
         text = discovery.text_tensor_bytes(path)
         monkeypatch.setattr(discovery, "_stream_budget_bytes", lambda: text)
         monkeypatch.setattr(device, "stream_budget_bytes", lambda: text)
-        assert cap.deferred_table_bytes(path) == 0
+        assert cap.deferred_table_bytes(path) == table
         _box(host_box.mac(128)[0], unwired=budget.kernel_floor_bytes() + text - table // 2)
     args = _args(path, no_speculative=True)
     cli.preload_wire_check(args, depth=None)

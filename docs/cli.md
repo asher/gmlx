@@ -949,8 +949,8 @@ line for each companion it would add. `gmlx pull` prints the same hint
 for a companion it leaves out.
 
 A scan writes `stream: experts` for a MoE model whose weights are larger
-than 90% of the GPU working set, with a comment that says so. A model whose
-lookup tables alone bring it under is not marked, since it keeps its
+than 90% of the GPU working set, with a comment that says so. A model that
+fits without its lookup tables is not marked, since it keeps its
 experts in memory without the key. Each sync checks a marked model again
 and drops the key once the model fits, such as after you raise the GPU
 wired limit, and `gmlx doctor` warns about a key that a sync would drop. A

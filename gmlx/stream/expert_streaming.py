@@ -164,8 +164,8 @@ def install_unflagged_tables(model, gguf_path: str | None, *,
                              fast_disk: str | None = None,
                              prefill_step: int | None = None,
                              stats_verbose: bool | None = None) -> bool:
-    """The install of a load with no stream placement whose tables alone
-    bring it under the budget, or under the memory free now, on an arch
+    """The install of a load with no stream placement that fits the
+    budget, or the memory free now, without its tables, on an arch
     that gathers them per layer (``capacity.gathered_table_bytes``). Its
     own ladder serves the tables
     from the file on the CPU stream and keeps the experts in memory when
@@ -654,8 +654,8 @@ def install_expert_streaming(
 
     # A table read from the file has no array, but the ladder runs on the
     # text bytes, as the header prediction (predicted_stream_bytes) does:
-    # a model whose tables alone bring it under the budget keeps its
-    # experts resident however its tables were loaded.
+    # a model that fits the budget without its tables keeps its experts
+    # resident however its tables were loaded.
     file_tables = file_table_bytes(model)
     ladder_bytes = total_bytes + file_tables
     over_budget = budget is not None and ladder_bytes > budget
@@ -664,8 +664,8 @@ def install_expert_streaming(
 
     # Streamed lookup tables (docs/internals/streaming-measurements.md): archs with a
     # declared streamable lookup table (e.g. qwen4exp's 26.8 GiB PLE
-    # n-gram table) stream it instead of the experts when it alone brings
-    # the resident set under budget - table gathers touch ~1.4 KB/token
+    # n-gram table) stream it instead of the experts when the resident set
+    # fits the budget without it - table gathers touch ~1.4 KB/token
     # against the experts' every-MoE-layer surcharge. The table wrap runs
     # its row gather on a dedicated CPU stream so the buffer is never a
     # GPU-stream input (a single GPU reference would wire all of it).
