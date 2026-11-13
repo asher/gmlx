@@ -541,7 +541,7 @@ server:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | <a id="cacheenabled"></a>`enabled` | `false` | Turns the prompt cache on. `gmlx init` writes `true`. |
-| <a id="cacheblock_size"></a>`block_size` | chosen per model | Tokens per cache block: 16, 32, 64, 128 or 256 |
+| <a id="cacheblock_size"></a>`block_size` | `128` | Tokens per cache block. A model whose sliding window 128 does not divide takes a smaller size. MLX checkpoints use 16. |
 | <a id="cachenum_blocks"></a>`num_blocks` | grows to fit | Blocks in the pool that all cached prompts share. A full pool drops the oldest prompts. |
 | <a id="cacheexact_entries"></a>`exact_entries` | `4` | Whole-prompt copies kept for hybrid and recurrent models. Each copy is a full cache. |
 | <a id="cachehash"></a>`hash` | `fast` | How blocks are identified. `sha256` is stable across processes and costs more per token. |

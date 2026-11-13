@@ -1702,6 +1702,7 @@ def _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
 def _assemble_from_record(manager, rec, geometry_check=None):
     """Warm cache list from a pinned record, or None (conjunction fail)."""
     import mlx.core as mx
+    from .apc_blocks import block_layers, join_blocks
     from .kv_cache import KVCache
 
     n_kv = sum(1 for t in rec.layout if _is_chain(t))
@@ -1715,15 +1716,9 @@ def _assemble_from_record(manager, rec, geometry_check=None):
     layer_kv = None
     if n_kv:
         if rec.b_full > 0:
-            if len(rec.main_blocks[0].keys) != n_kv:
+            if block_layers(rec.main_blocks[0]) != n_kv:
                 return None
-            layer_kv = [
-                (mx.concatenate([b.keys[j] for b in rec.main_blocks],
-                                axis=2),
-                 mx.concatenate([b.values[j] for b in rec.main_blocks],
-                                axis=2))
-                for j in range(n_kv)
-            ]
+            layer_kv = join_blocks(rec.main_blocks)
         if rec.tails:
             tails = [(t.keys[..., :t.offset, :], t.values[..., :t.offset, :])
                      for t in rec.tails]
@@ -1737,15 +1732,11 @@ def _assemble_from_record(manager, rec, geometry_check=None):
                 ]
     layer_rot = None
     if n_rot:
-        if len(rec.bounded_blocks[0].keys) != n_rot:
+        if block_layers(rec.bounded_blocks[0]) != n_rot:
             return None
         keep, w, off, L = rec.rot_meta
         layer_rot = []
-        for j in range(n_rot):
-            k = mx.concatenate([b.keys[j] for b in rec.bounded_blocks],
-                               axis=2)
-            v = mx.concatenate([b.values[j] for b in rec.bounded_blocks],
-                               axis=2)
+        for k, v in join_blocks(rec.bounded_blocks):
             rc = rotating_restore(k, v, (keep, w, rec.p, k.shape[2]))
             if rc is None or k.shape[2] != L:
                 return None
@@ -1983,6 +1974,7 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
     machinery, chains from the salted block keyspaces. p comes from the
     lookup's matched length, never from a placeholder."""
     import mlx.core as mx
+    from .apc_blocks import block_layers, join_blocks
     from .kv_cache import KVCache, RotatingKVCache
 
     salted = _skeleton_salt(ckpt_extra_hash(extra_hash), layout,
@@ -2048,12 +2040,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
             blocks, matched = manager.lookup_prefix(
                 ids[:b_full], extra_hash=salted)
             if matched >= b_full and blocks \
-                    and len(blocks[0].keys) == n_kv:
-                layer_kv = [
-                    (mx.concatenate([b.keys[j] for b in blocks], axis=2),
-                     mx.concatenate([b.values[j] for b in blocks], axis=2))
-                    for j in range(n_kv)
-                ]
+                    and block_layers(blocks[0]) == n_kv:
+                layer_kv = join_blocks(blocks)
             else:
                 manager.release(blocks)
                 blocks = []
@@ -2083,12 +2071,8 @@ def _ckpt_disk_lookup(manager, ids, *, extra_hash, min_prefix_tokens,
                 canon_ids, extra_hash=bsalt)
             src = None
             if wmatched >= L and wblocks \
-                    and len(wblocks[0].keys) == len(rot_entries):
-                src = [
-                    (mx.concatenate([b.keys[j] for b in wblocks], axis=2),
-                     mx.concatenate([b.values[j] for b in wblocks], axis=2))
-                    for j in range(len(rot_entries))
-                ]
+                    and block_layers(wblocks[0]) == len(rot_entries):
+                src = join_blocks(wblocks)
             else:
                 manager.release(wblocks)
                 wblocks = []

@@ -63,7 +63,7 @@ import numpy as np
 from ._stream_cleanup import clear_mlx_streams
 from .apc_adapters import reserve_checkpoint_capacity
 from .apc_coordinator import APCCoordinator, PrefillMemoryPlan
-from .apc_storage import APCNode, ComponentId, StateHandle
+from .apc_storage import APCNode, ComponentId, KVBlockHandle, StateHandle  # gmlx: stacked blocks
 from .kv_quant import from_config as kv_quant_from_config
 from .kv_quant import kv_quant_fingerprint
 from .models.cache import cache_nbytes as _cache_nbytes
@@ -3868,7 +3868,8 @@ class APCManager:
             )
             new_blocks: List[APCBlock] = []
             disk_blocks: List[_DiskLayerMajorBlock] = []
-            per_block_tensors = len(layer_keys) + len(layer_values)
+            # gmlx: a stacked block holds one buffer per array shape.
+            per_block_tensors = KVBlockHandle.count_parts(layer_keys, layer_values)
             token_tuple = tuple(int(t) for t in token_ids[:layer_major_prefix_tokens])
             layer_major_stored = False
             if (
@@ -3961,16 +3962,14 @@ class APCManager:
                     continue
                 start = i * self.block_size
                 end = start + self.block_size
-                # Deep-copy each slice into its own buffer so the block tensor
-                # is decoupled from the caller's cache, which mlx.clear_cache
-                # may release after generation. mx.contiguous alone can return
-                # a view when the source is already row-contiguous.
-                k_slabs = [_copy_mlx_array(k[..., start:end, :]) for k in layer_keys]
-                v_slabs = [_copy_mlx_array(v[..., start:end, :]) for v in layer_values]
-                mx.eval(k_slabs + v_slabs)
+                # gmlx: set_kv copies the slices into the block's own stacked
+                # buffer, decoupled from the caller's cache, which
+                # mlx.clear_cache may release after generation.
+                b.set_kv([k[..., start:end, :] for k in layer_keys],
+                         [v[..., start:end, :] for v in layer_values])
+                mx.eval(list(b.kv_handle().parts))
                 b.block_hash = h
                 b.token_ids = chunk
-                b.set_kv(k_slabs, v_slabs)
                 b.ref_cnt = 1
                 self.hash_table[h] = b
                 memory_slots -= 1
@@ -4175,11 +4174,15 @@ def make_warm_kv_cache(
     """
     from .models.cache import KVCache, should_quantize_kv_layer
 
+    from gmlx.cache.apc_blocks import block_tokens, join_blocks
+
     if not matched_blocks:
         return []
-    num_layers = len(matched_blocks[0].keys)
+    # gmlx: the written join (gmlx.cache.apc_blocks).
+    joined = join_blocks(matched_blocks)
+    num_layers = len(joined)
     out: List[Any] = []
-    prefix_len = sum(b.keys[0].shape[-2] for b in matched_blocks)
+    prefix_len = block_tokens(matched_blocks)
 
     step_probe = KVCache()
     kv_step = int(getattr(step_probe, "step", getattr(KVCache, "step", 256)))
@@ -4190,10 +4193,7 @@ def make_warm_kv_cache(
             capacity = ((capacity + kv_step - 1) // kv_step) * kv_step
 
     for layer_idx in range(num_layers):
-        ks = [b.keys[layer_idx] for b in matched_blocks]
-        vs = [b.values[layer_idx] for b in matched_blocks]
-        merged_k = mx.concatenate(ks, axis=2)
-        merged_v = mx.concatenate(vs, axis=2)
+        merged_k, merged_v = joined[layer_idx]
         quantize = kv_quant_config is not None and should_quantize_kv_layer(
             layer_idx, num_layers
         )
@@ -4256,18 +4256,19 @@ def make_warm_batch_kv_cache(
     quantized batch caches for layers that ``should_quantize_kv_layer`` allows,
     float ``BatchKVCache`` for the last layer when ``num_layers > 2``.
     """
+    from gmlx.cache.apc_blocks import block_tokens, join_blocks
+
     from .models.cache import should_quantize_kv_layer
 
     if not matched_blocks:
         return []
-    num_layers = len(matched_blocks[0].keys)
-    prefix_len = sum(b.keys[0].shape[-2] for b in matched_blocks)
+    # gmlx: the written join (gmlx.cache.apc_blocks).
+    joined = join_blocks(matched_blocks)
+    num_layers = len(joined)
+    prefix_len = block_tokens(matched_blocks)
     out: List[Any] = []
     for layer_idx in range(num_layers):
-        ks = [b.keys[layer_idx] for b in matched_blocks]
-        vs = [b.values[layer_idx] for b in matched_blocks]
-        merged_k = mx.concatenate(ks, axis=2)  # [1, H, prefix_len, D]
-        merged_v = mx.concatenate(vs, axis=2)
+        merged_k, merged_v = joined[layer_idx]  # [1, H, prefix_len, D]
         quantize = kv_quant_config is not None and should_quantize_kv_layer(
             layer_idx, num_layers
         )
@@ -4312,16 +4313,20 @@ def make_warm_batch_kv_cache_multi(
     if max_prefix == 0:
         return [], 0
 
+    # gmlx: the written join (gmlx.cache.apc_blocks), once a pick.
+    from gmlx.cache.apc_blocks import join_blocks
+
+    joined: dict = {}
+
     def layer_tensors(pick: dict, layer_idx: int) -> Tuple[mx.array, mx.array]:
         warm_cache = pick.get("warm_cache")
         if warm_cache is not None:
             c = warm_cache[layer_idx]
             prefix_len = pick["prefix_len"]
             return c.keys[..., :prefix_len, :], c.values[..., :prefix_len, :]
-        blocks = pick["matched_blocks"]
-        ks = [b.keys[layer_idx] for b in blocks]
-        vs = [b.values[layer_idx] for b in blocks]
-        return mx.concatenate(ks, axis=2), mx.concatenate(vs, axis=2)
+        if id(pick) not in joined:
+            joined[id(pick)] = join_blocks(pick["matched_blocks"])
+        return joined[id(pick)][layer_idx]
 
     # Discover dtype / head dims from the first non-empty pick.
     sample = next(p for p in picks if p)

@@ -14,6 +14,7 @@ import mlx.core as mx
 
 apc = pytest.importorskip("gmlx._vendor.mlx_vlm.apc")
 
+from gmlx.cache.apc_blocks import join_blocks  # noqa: E402
 from gmlx.cache.apc_manager import GmlxAPCManager  # noqa: E402
 
 # The stock method, captured at import: nothing in gmlx may mutate it.
@@ -42,10 +43,11 @@ def _pool_snapshot(mgr):
     """Comparable view of the manager's stored blocks."""
     out = {}
     for h, b in mgr.hash_table.items():
+        kv = join_blocks([b])
         out[h] = (
             b.token_ids,
-            [k.tolist() for k in b.keys],
-            [v.tolist() for v in b.values],
+            [k.tolist() for k, _ in kv],
+            [v.tolist() for _, v in kv],
         )
     return out
 
@@ -76,8 +78,9 @@ def test_patched_store_matches_stock():
     # The patched store's tensors must be materialized copies, decoupled
     # from the caller's arrays (the stock guarantee).
     for b in blocks_patch:
-        for arr in b.keys + b.values:
-            assert arr.shape == (1, 2, BLOCK, 8)
+        for kv in join_blocks([b]):
+            for arr in kv:
+                assert arr.shape == (1, 2, BLOCK, 8)
 
     mgr_stock.release(blocks_stock)
     mgr_patch.release(blocks_patch)
@@ -104,9 +107,9 @@ def test_patched_store_dedup_and_lookup():
     # Block data must equal the source slices exactly.
     for i, b in enumerate(matched):
         lo, hi = i * BLOCK, (i + 1) * BLOCK
-        for layer in range(N_LAYERS):
-            assert mx.array_equal(b.keys[layer], keys[layer][..., lo:hi, :])
-            assert mx.array_equal(b.values[layer], values[layer][..., lo:hi, :])
+        for layer, (k, v) in enumerate(join_blocks([b])):
+            assert mx.array_equal(k, keys[layer][..., lo:hi, :])
+            assert mx.array_equal(v, values[layer][..., lo:hi, :])
 
     mgr.release(first)
     mgr.release(second)

@@ -837,9 +837,9 @@ def test_apc_governor_bytes_and_evict():
 
     freed = mgr.governor_evict(1.0)
     assert freed == per_block + 64              # referenced block kept
-    assert mgr.pool[1].keys is None
+    assert mgr.pool[1].kv_handle() is None
     assert 1001 not in mgr.hash_table
-    assert mgr.pool[0].keys is not None         # ref_cnt 1 survives
+    assert mgr.pool[0].kv_handle() is not None  # ref_cnt 1 survives
     assert len(mgr._exact_cache) == 0
 
 
