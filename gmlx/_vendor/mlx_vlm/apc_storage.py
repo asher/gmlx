@@ -33,29 +33,66 @@ class StateHandle(Protocol):
     def release(self) -> None: ...
 
 
+# gmlx: a block stores its arrays stacked, one buffer per array shape, so
+# evicting it frees one buffer where it freed two a layer.
+def _owned_copy(x: mx.array) -> mx.array:
+    return mx.contiguous(mx.array(x, dtype=x.dtype))
+
+
 class KVBlockHandle:
-    """Per-layer float K/V slabs for a node's pageable KV component."""
+    """A node's pageable float K/V, one stacked array per array shape.
 
-    __slots__ = ("keys", "values")
+    The block's arrays are its layers' keys, then their values. Arrays of
+    one shape and dtype stack into one part, so a model whose layers share
+    a shape stores a block as one buffer, and a release frees one buffer.
+    ``index[i]`` is the (part, row) of array i. The parts are copies, never
+    views of the arrays they were built from. Join blocks with
+    gmlx.cache.apc_blocks.join_blocks.
+    """
 
-    def __init__(
-        self,
-        keys: Optional[List[mx.array]] = None,
-        values: Optional[List[mx.array]] = None,
-    ):
-        self.keys = keys
-        self.values = values
+    __slots__ = ("parts", "index", "n_layers")
+
+    def __init__(self, parts=None, index=(), n_layers: int = 0):
+        self.parts = parts
+        self.index = tuple(index)
+        self.n_layers = n_layers
+
+    @classmethod
+    def stack(cls, keys: List[mx.array], values: List[mx.array]) -> "KVBlockHandle":
+        order: Dict[tuple, int] = {}
+        members: List[List[mx.array]] = []
+        index = []
+        for a in list(keys) + list(values):
+            c = order.setdefault((tuple(a.shape), a.dtype), len(members))
+            if c == len(members):
+                members.append([])
+            index.append((c, len(members[c])))
+            members[c].append(a)
+        # A stack of two or more arrays writes a new buffer; a lone array
+        # is copied first, since a stack of one may return a view of it.
+        parts = tuple(
+            mx.stack(m) if len(m) > 1 else mx.expand_dims(_owned_copy(m[0]), 0)
+            for m in members)
+        return cls(parts, index, len(keys))
+
+    @staticmethod
+    def count_parts(keys: List[mx.array], values: List[mx.array]) -> int:
+        """Parts a block of these arrays stacks into."""
+        return len({(tuple(a.shape[:-2]), a.shape[-1], a.dtype)
+                    for a in list(keys) + list(values)})
+
+    @property
+    def tokens(self) -> int:
+        return int(self.parts[0].shape[-2]) if self.parts else 0
+
+    def buffers(self) -> int:
+        return len(self.parts or ())
 
     def resident_bytes(self) -> int:
-        total = 0
-        for group in (self.keys, self.values):
-            for t in group or ():
-                total += _array_bytes(t)
-        return total
+        return sum(_array_bytes(p) for p in self.parts or ())
 
     def release(self) -> None:
-        self.keys = None
-        self.values = None
+        self.parts = None
 
 
 class APCNode:
@@ -72,20 +109,13 @@ class APCNode:
 
     def kv_handle(self) -> Optional[KVBlockHandle]:
         handle = self.components.get(self.KV_COMPONENT)
-        return handle if isinstance(handle, KVBlockHandle) else None
-
-    @property
-    def keys(self) -> Optional[List[mx.array]]:
-        handle = self.kv_handle()
-        return handle.keys if handle is not None else None
-
-    @property
-    def values(self) -> Optional[List[mx.array]]:
-        handle = self.kv_handle()
-        return handle.values if handle is not None else None
+        if isinstance(handle, KVBlockHandle) and handle.parts:
+            return handle
+        return None
 
     def set_kv(self, keys: List[mx.array], values: List[mx.array]) -> None:
-        self.components[self.KV_COMPONENT] = KVBlockHandle(keys, values)
+        """Store copies of one block's per-layer keys and values, stacked."""
+        self.components[self.KV_COMPONENT] = KVBlockHandle.stack(keys, values)
 
     def release_components(self) -> None:
         for handle in self.components.values():

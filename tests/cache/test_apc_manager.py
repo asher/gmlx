@@ -588,19 +588,19 @@ def test_autosize_extends_pool_to_budget_share(monkeypatch):
     m = GmlxAPCManager(num_blocks=2048, block_size=16)
     m.autosize(_fake_model())
     per_tok = 10 * 2 * 4 * 64 * 2.0  # layers x 2KV x kv_heads x hd x fp16
-    want = min(int(100 * GB * 0.5 // (16 * per_tok)),
-               am._MAX_POOL_TENSORS // (2 * 10))
+    # A block is one stacked buffer, so the cap counts blocks.
+    want = min(int(100 * GB * 0.5 // (16 * per_tok)), am._MAX_POOL_TENSORS)
     assert m.num_blocks == want > 2048
     assert len(m.pool) == want
     assert m._free_tail is m.pool[-1]  # new blocks join the free queue
 
 
-def test_autosize_counts_block_tensors_on_attention_layers(monkeypatch):
-    # Qwen3.5 27B geometry: 16 attention layers among 64. A block holds K
-    # and V of those 16; the 48 recurrent states take no pool tensors.
+def test_autosize_takes_the_whole_share_on_a_27b_hybrid(monkeypatch):
+    # Qwen3.5 27B geometry: 16 attention layers among 64. A block is one
+    # stacked buffer, so the tensor cap does not scale with the layers.
     monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
     monkeypatch.delenv("APC_MAX_POOL_TENSORS", raising=False)
-    _autosize_rig(monkeypatch, budget=100 * GB)
+    _autosize_rig(monkeypatch, budget=200 * GB)
     cfg = SimpleNamespace(
         model_type="qwen3_5", num_hidden_layers=64, num_attention_heads=16,
         num_key_value_heads=4, head_dim=256, full_attention_interval=4,
@@ -610,15 +610,14 @@ def test_autosize_counts_block_tensors_on_attention_layers(monkeypatch):
     m = GmlxAPCManager(num_blocks=2048, block_size=64)
     m.autosize(SimpleNamespace(config=cfg))
     per_tok = 16 * 2 * 4 * 256 * 2.0
-    share = int(100 * GB * 0.5 // (64 * per_tok))
-    assert 450000 // (2 * 64) < share < 450000 // (2 * 16)
-    assert m.num_blocks == share
+    share = int(200 * GB * 0.5 // (64 * per_tok))
+    assert m.num_blocks == share > 450000 // (2 * 16)
 
 
 def test_block_layer_count_matches_a_stored_checkpoint_block():
-    # The count that caps the pool is the K and V arrays one block of the
-    # model's own cache list holds. A lower count would let the pool grow
-    # past the tensor limit, where the store skips blocks.
+    # The block size rule counts the K and V arrays one block of the
+    # model's own cache list holds. A lower count would pick blocks too
+    # small for the pool's share.
     pytest.importorskip("gmlx._vendor.mlx_vlm.models.qwen3_5.language")
     import mlx.core as mx
 
@@ -647,7 +646,7 @@ def test_block_layer_count_matches_a_stored_checkpoint_block():
             c.cache = [mx.zeros((1, 3, 192)), mx.zeros((1, 4, 32, 32))]
     m = GmlxAPCManager(num_blocks=8, block_size=16)
     assert ckpt_store(m, list(range(64)), cache)
-    held = {len(b.keys) + len(b.values)
+    held = {len(b.kv_handle().index)
             for b in m.pool if b.block_hash is not None}
     costs = kv_layer_costs(SimpleNamespace(config=cfg))
     assert held == {2 * _block_layers(costs)} == {4}
@@ -906,12 +905,14 @@ def test_zero_pool_tensor_cap_means_no_cap(monkeypatch, tmp_path):
     monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
     monkeypatch.setenv("APC_MAX_POOL_TENSORS", "0")
     _autosize_rig(monkeypatch, budget=8 * GB)
-    m = GmlxAPCManager(num_blocks=2048, block_size=16)
-    m.autosize(_fake_model())
+    with monkeypatch.context() as mp:
+        # A default under the share, so 0 read as the default would cap it.
+        mp.setattr(am, "_MAX_POOL_TENSORS", 1000)
+        m = GmlxAPCManager(num_blocks=2048, block_size=16)
+        m.autosize(_fake_model())
     per_tok = 10 * 2 * 4 * 64 * 2.0
     share = int(8 * GB * 0.5 // (16 * per_tok))
-    assert share > am._MAX_POOL_TENSORS // (2 * 10)
-    assert m.num_blocks == share
+    assert m.num_blocks == share > 1000
 
     # 10 layers and a 293k-token share: the 110000-array aim takes 64. Read
     # as an aim of 1 array, 0 would take 256, which the floor cuts to 128.

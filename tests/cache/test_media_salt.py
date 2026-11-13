@@ -18,6 +18,7 @@ import gmlx.lora_rows as lora_rows
 import gmlx.load.vlm as gvlm
 import gmlx.spec.mtp_prefill as mtp_prefill
 from gmlx.cache import fresh_gate, snapshot
+from gmlx.cache.apc_blocks import join_blocks
 from gmlx.cache.apc_manager import GmlxAPCManager
 from gmlx.cache.apc_media import install_media_token_ids
 from gmlx.cache.media_salt import (
@@ -520,7 +521,7 @@ def test_a_block_restore_holds_the_images_of_its_own_prefix():
         blocks, n = m.lookup_prefix(t3, extra_hash=salt)
         assert n == want
         if n:
-            got = mx.concatenate([blk.keys[0] for blk in blocks], axis=2)
+            got = join_blocks(blocks)[0][0]
             assert mx.array_equal(got, k2[0][..., :n, :])
         m.release(blocks)
     # A text prompt restores the text before the first image.

@@ -38,6 +38,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from gmlx._vendor.mlx_vlm import apc as _apc
+from gmlx._vendor.mlx_vlm.apc_storage import KVBlockHandle
 
 from gmlx.envflags import env_int
 from gmlx.upstream.patching import wrapped_with
@@ -79,7 +80,6 @@ def _store_helpers():
             "seed_parent": _apc.SEED_PARENT_HASH,
             "hash_tokens": _apc._hash_tokens,
             "disk_block_cls": _apc._DiskLayerMajorBlock,
-            "copy_arr": _apc._copy_mlx_array,
             "nbytes": _apc._cache_nbytes,
         }
     except AttributeError as e:
@@ -298,8 +298,7 @@ class GmlxAPCManager(_apc.APCManager):
             _log.info("APC exact tier budget: %.1f GB (count cap 64)",
                       self._exact_budget_bytes / 1e9)
         if not os.environ.get("APC_NUM_BLOCKS"):
-            self._grow_pool(free * budget_fraction, per_tok,
-                            _block_layers(costs))
+            self._grow_pool(free * budget_fraction, per_tok)
         self._working_set_bytes = int(budget)
         if not os.environ.get("APC_MEMORY_MAX_GB"):
             cap = (self.num_blocks * self.block_size * per_tok
@@ -310,16 +309,15 @@ class GmlxAPCManager(_apc.APCManager):
             self._gmlx_no_prefill_reserve = True
             self._prefill_reserve_bytes = 0
 
-    def _grow_pool(self, pool_bytes: float, per_tok: float,
-                   n_layers: int) -> None:
+    def _grow_pool(self, pool_bytes: float, per_tok: float) -> None:
         target = int(pool_bytes // (self.block_size * per_tok))
-        # A committed block holds K+V arrays per layer; the pool competes
-        # with everything else against the Metal resource limit, which is
-        # what APC_MAX_POOL_TENSORS guards.
-        tensors_per_block = 2 * n_layers
+        # The pool competes with everything else against the Metal resource
+        # limit, which APC_MAX_POOL_TENSORS guards. A committed block is one
+        # buffer when its layers share a shape (KVBlockHandle), and the
+        # store guard counts the rest.
         max_tensors = _max_pool_tensors()
         if max_tensors:
-            target = min(target, max_tensors // max(1, tensors_per_block))
+            target = min(target, max_tensors)
         if target <= self.num_blocks:
             return
         with self.lock:
@@ -417,9 +415,7 @@ class GmlxAPCManager(_apc.APCManager):
         total = 0
         with self.lock:
             for b in self.pool:
-                for arrs in (b.keys, b.values):
-                    if arrs:
-                        total += sum(a.nbytes for a in arrs)
+                total += b.resident_bytes()
             for e in self._exact_cache.values():
                 for c in e.prompt_cache:
                     nb = getattr(c, "nbytes", 0)
@@ -453,7 +449,8 @@ class GmlxAPCManager(_apc.APCManager):
                     nb = getattr(c, "nbytes", 0)
                     freed += int(nb) if isinstance(nb, int) else 0
             committed = sum(
-                1 for b in self.pool if b.keys and b.ref_cnt == 0)
+                1 for b in self.pool
+                if b.kv_handle() is not None and b.ref_cnt == 0)
             target = int(committed * fraction)
             evicted = 0
             guard = len(self.pool)
@@ -462,9 +459,8 @@ class GmlxAPCManager(_apc.APCManager):
                 head = self._free_head
                 if head is None:
                     break
-                had_slabs = bool(head.keys)
-                nb = (sum(a.nbytes for a in head.keys or ())
-                      + sum(a.nbytes for a in head.values or ()))
+                had_slabs = head.kv_handle() is not None
+                nb = head.resident_bytes()
                 b = self._evict_lru()
                 if b is None:
                     break
@@ -767,7 +763,6 @@ class GmlxAPCManager(_apc.APCManager):
         _seed_parent = h["seed_parent"]
         _hash_tokens = h["hash_tokens"]
         _disk_block_cls = h["disk_block_cls"]
-        _copy_arr = h["copy_arr"]
         _nbytes = h["nbytes"]
         eval_chunk_blocks = env_int("GMLX_APC_STORE_EVAL_CHUNK", 32)
 
@@ -816,7 +811,8 @@ class GmlxAPCManager(_apc.APCManager):
             )
             new_blocks = []
             disk_blocks = []
-            per_block_tensors = len(layer_keys) + len(layer_values)
+            per_block_tensors = KVBlockHandle.count_parts(
+                layer_keys, layer_values)
             token_tuple = tuple(
                 int(t) for t in token_ids[:layer_major_prefix_tokens])
             layer_major_stored = False
@@ -949,19 +945,17 @@ class GmlxAPCManager(_apc.APCManager):
                     continue
                 start = i * self.block_size
                 end = start + self.block_size
-                # Deep-copy each slice into its own buffer so the block
-                # tensor is decoupled from the caller's cache, which
+                # set_kv copies the slices into the block's own stacked
+                # buffer, decoupled from the caller's cache, which
                 # mlx.clear_cache may release after generation. The copies
                 # are lazy here; _flush_pending materializes them in chunks
                 # and always before return.
-                k_slabs = [_copy_arr(k[..., start:end, :]) for k in layer_keys]
-                v_slabs = [_copy_arr(v[..., start:end, :]) for v in layer_values]
-                pending.extend(k_slabs)
-                pending.extend(v_slabs)
+                b.set_kv([k[..., start:end, :] for k in layer_keys],
+                         [v[..., start:end, :] for v in layer_values])
+                pending.extend(b.kv_handle().parts)
                 _flush_pending()
                 b.block_hash = h2
                 b.token_ids = chunk
-                b.set_kv(k_slabs, v_slabs)
                 b.ref_cnt = 1
                 self.hash_table[h2] = b
                 self.kq_record("block", h2, b)

@@ -15,6 +15,7 @@ pytest.importorskip("gmlx._vendor.mlx_vlm")
 
 import mlx.core as mx  # noqa: E402
 
+from gmlx.cache.apc_blocks import join_blocks  # noqa: E402
 from gmlx.serve.patches.apc import install_apc_lone_harvest  # noqa: E402
 
 B, H, D, T, BLOCK = 2, 2, 64, 64, 16
@@ -80,8 +81,9 @@ def _assert_same_blocks(got, want):
     for g, w in zip(got, want):
         assert g.block_hash == w.block_hash
         assert g.token_ids == w.token_ids
-        assert len(g.keys) == len(w.keys) == N_LAYERS
-        for gk, wk, gv, wv in zip(g.keys, w.keys, g.values, w.values):
+        gkv, wkv = join_blocks([g]), join_blocks([w])
+        assert len(gkv) == len(wkv) == N_LAYERS
+        for (gk, gv), (wk, wv) in zip(gkv, wkv):
             assert gk.shape == wk.shape == (1, H, BLOCK, D)
             assert gk.dtype == wk.dtype
             assert mx.array_equal(gk, wk).item()

@@ -46,6 +46,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   what the join holds, so it no longer pushes the server past its memory budget.
 - The prompt cache uses larger blocks where its share of memory allows, so a
   server short of memory frees the cache without stalling.
+- The prompt cache holds each block as one array, so storing a prompt takes
+  less time and a server short of memory frees cache faster.
 - `gmlx init` and `--with-embeddings` set up EmbeddingGemma 2.
   `embeddings: true` still picks `qwen3-embed-0.6b`.
 - `prompt_name` and `dimensions` work on EmbeddingGemma and
