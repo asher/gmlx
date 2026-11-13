@@ -51,6 +51,18 @@ def _close_engines():
         _ENGINES.pop().close()
 
 
+@pytest.fixture
+def cpu():
+    """The CPU stream, for a test that holds the engine to the loop
+    exactly. M5 GPUs run float32 matmuls at TF32 precision, where the
+    batch and the one-row loop round apart and a sampled code near a tie
+    flips. The engine takes the stream too: its default stream, made at
+    import, is the GPU's even when the tests run on the CPU device."""
+    stream = mx.default_stream(mx.cpu)
+    with mx.stream(stream):
+        yield stream
+
+
 def _engine(model, **kw):
     processor = types.SimpleNamespace(tokenizer=types.SimpleNamespace(
         stopping_criteria=StoppingCriteria([END], None)))
@@ -197,9 +209,9 @@ def _same(got, want) -> None:
 
 
 def test_a_text_to_speech_row_is_the_marker_then_frames_to_the_end_frame(
-        model, monkeypatch):
+        model, monkeypatch, cpu):
     _never_ends(model, monkeypatch, end_after=5)
-    gen = _engine(model)
+    gen = _engine(model, stream=cpu)
     uid, record = _speak(gen, model, PROMPT, "audio", 40, stop_at_end=True)
     responses = _drain(gen, [uid])[uid]
     tokens, kinds, codes, audio, finish = _reply(responses, record)
@@ -216,9 +228,9 @@ def test_a_text_to_speech_row_is_the_marker_then_frames_to_the_end_frame(
 
 
 def test_an_interleaved_row_is_the_references_slot_pattern(
-        model, monkeypatch):
+        model, monkeypatch, cpu):
     _never_ends(model, monkeypatch)
-    gen = _engine(model)
+    gen = _engine(model, stream=cpu)
     uid, record = _speak(gen, model, PROMPT, "interleaved", 40)
     got = _reply(_drain(gen, [uid])[uid], record)
     want = _loop(model, PROMPT, "interleaved", 40)
@@ -230,9 +242,10 @@ def test_an_interleaved_row_is_the_references_slot_pattern(
     assert got[4] in ("length", "stop")
 
 
-def test_the_budget_counts_every_slot_after_the_marker(model, monkeypatch):
+def test_the_budget_counts_every_slot_after_the_marker(model, monkeypatch,
+                                                    cpu):
     _never_ends(model, monkeypatch)
-    gen = _engine(model)
+    gen = _engine(model, stream=cpu)
     uid, record = _speak(gen, model, PROMPT, "audio", 7)
     responses = _drain(gen, [uid])[uid]
     assert len(responses) == 1 + 7
@@ -273,21 +286,56 @@ def test_a_cancelled_row_closes_its_record(model, monkeypatch):
     assert gen.next()[1] == []
 
 
+def test_a_row_whose_removal_stays_refused_keeps_speaking(model, monkeypatch):
+    """The allocator refuses a speaking row's removal at every try, so the
+    row stays in the batch beside a text row. Its record stays open, and
+    the row goes on speaking instead of writing text."""
+    import gmlx.eval_guard as eg
+    import gmlx.serve.tick_guard as tg
+
+    _never_ends(model, monkeypatch)
+    monkeypatch.setattr(eg, "drain_for", lambda site: None)
+    gen = _engine(model)
+    uid, record = _speak(gen, model, PROMPT, "audio", 50)
+    (other,) = gen.insert([OTHER], max_tokens=50,
+                          prompt_kwargs=[_kw(model, OTHER)])
+    for _ in range(20):
+        if {uid, other} <= set(gen._generation_batch.uids):
+            break
+        gen.next()
+    gen.next()
+    assert {uid, other} <= set(gen._generation_batch.uids)
+    stream = record.state.stream
+    orig = ar.GenerationBatch.filter
+
+    def refused(self, keep):
+        raise RuntimeError("[metal::malloc] Attempting to allocate 1 bytes")
+
+    monkeypatch.setattr(ar.GenerationBatch, "filter", refused)
+    assert tg._take_out(gen, uid) == (tg._STAYS, [])
+    monkeypatch.setattr(ar.GenerationBatch, "filter", orig)
+    assert uid in gen._generation_batch.uids
+    assert not record.closed and record.state.stream is stream
+    mine = [r for r in gen.next()[1] if r.uid == uid]
+    assert mine and all(r.speech is not None and r.speech.kind == "frame"
+                        for r in mine)
+
+
 # -- rows side by side --------------------------------------------------------
 
 
-def _text_alone(model, prompt, budget):
-    gen = _engine(model)
+def _text_alone(model, prompt, budget, **kw):
+    gen = _engine(model, **kw)
     (uid,) = gen.insert([prompt], max_tokens=budget,
                         prompt_kwargs=[_kw(model, prompt)])
     return [int(r.token) for r in _drain(gen, [uid])[uid]]
 
 
 def test_a_text_row_beside_a_speaking_row_writes_what_it_writes_alone(
-        model, monkeypatch):
+        model, monkeypatch, cpu):
     _never_ends(model, monkeypatch)
-    alone = _text_alone(model, OTHER, 12)
-    gen = _engine(model)
+    alone = _text_alone(model, OTHER, 12, stream=cpu)
+    gen = _engine(model, stream=cpu)
     speaking, record = _speak(gen, model, PROMPT, "interleaved", 30)
     (text,) = gen.insert([OTHER], max_tokens=12,
                          prompt_kwargs=[_kw(model, OTHER)])
@@ -302,11 +350,11 @@ def test_a_text_row_beside_a_speaking_row_writes_what_it_writes_alone(
 
 
 def test_two_speaking_rows_each_speak_what_they_speak_alone(
-        model, monkeypatch):
+        model, monkeypatch, cpu):
     """The second row joins while the first is mid-reply, and the first
     leaves before the second ends."""
     _never_ends(model, monkeypatch)
-    gen = _engine(model)
+    gen = _engine(model, stream=cpu)
     first, record_a = _speak(gen, model, PROMPT, "audio", 9, seed=11)
     joined = {}
 

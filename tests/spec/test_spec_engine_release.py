@@ -517,6 +517,39 @@ def test_injected_first_tokens_go_out_on_a_failed_round(monkeypatch):
         (0, [1, 5, 21]), (1, [2, 5, 31]), (2, [3, 7])]
 
 
+def test_a_joiners_own_caches_go_at_the_join(monkeypatch):
+    """The live batch copies a joiner's rows, and the rounds drop the
+    injection that carried the joiner's caches. Nothing else holds them
+    through the step that follows the join."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+    held = []
+
+    def fake_rounds(model, draft_model, prompt_cache, hidden, **kw):
+        rows, n = 2, 0
+        while True:
+            n += 1
+            queue = getattr(model, "_generator_injections", None)
+            if queue:
+                rows += sum(len(inj["uids"]) for inj in queue)
+                queue.clear()   # the drain, once the rows are joined
+                held.append(entry() is not None)
+            yield [20 + n] * rows, None
+
+    monkeypatch.setattr(ar, "run_speculative_server_rounds", fake_rounds)
+    host = _make_batch(ar, max_tokens=8, uids=(0, 1))
+    other = _make_batch(ar, max_tokens=8, uids=(2,))
+    entry = weakref.ref(other.prompt_cache[0])
+    host.model = type("M", (), {})()
+    host.next()
+    host.next()
+    host.extend(other)
+    host.next()
+    assert host._all_uids == [0, 1, 2]
+    assert held == [False]
+
+
 def _queue(gen):
     return [(e[0], e[1]) for e in gen._unprocessed_sequences]
 

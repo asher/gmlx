@@ -48,6 +48,7 @@ import mlx.nn as nn
 import gmlx.gen.prefill_decay as prefill_decay
 from .drafter_protocol import native_block_size
 from gmlx.cache.attention import create_attention_mask
+from gmlx.cache.kv_append import eval_cache
 from gmlx.cache.kv_cache import BatchKVCache, KVCache
 from gmlx.envflags import env_bool, env_int
 from gmlx.models.qwen35.language import Qwen3_5DecoderLayer
@@ -175,6 +176,11 @@ class QwenMTPDrafter(nn.Module):
             or self._input_embed.as_linear
         )
         return self
+
+    @property
+    def row_ends_rollback(self) -> bool:
+        """A dense head's batch keeps row ends (gmlx/cache/row_ends.py)."""
+        return all(type(layer) is Qwen3_5DecoderLayer for layer in self.layers)
 
     def make_cache(self, left_padding: list[int] | None = None) -> list[Any]:
         if left_padding is not None:
@@ -619,6 +625,7 @@ class QwenMTPDrafter(nn.Module):
             elif cache.keys is not None:
                 cache.keys = cache.keys[keep]
                 cache.values = cache.values[keep]
+            eval_cache(cache)
         if self._seed_token is not None:
             self._seed_token = self._seed_token[keep]
         if self._seed_hidden is not None:
@@ -656,6 +663,7 @@ class QwenMTPDrafter(nn.Module):
         self._cache = old_cache
         for old, temp in zip(old_cache, temp_cache):
             old.extend(temp)
+            eval_cache(old)
         if old_seed_token is not None and new_seed_token is not None:
             self._seed_token = mx.concatenate([old_seed_token, new_seed_token])
         else:

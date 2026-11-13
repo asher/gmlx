@@ -37,7 +37,7 @@ is already running does not see a variable you export later.
 | `GMLX_PREFILL_TICK_MS` | Same as `server.prefill_tick_ms`. |
 | `GMLX_PREFILL_MIN_STEP` | Smallest chunk, in tokens, that the tick budget may halve a chunk down to. The default is `256`. |
 | `GMLX_MOE_WIDE_STEP` | Chunk of a sparse MoE with 20 GiB free and at most 128 tokens per expert per 2048 rows: `4096` from the M5 on, `2048` before. Set it to force a chunk. |
-| `GMLX_DECODE_BATCH` | Requests that decode together in a step. The default is `8`, or the capacity table's widest fit when smaller. `0` restores the upstream 32. |
+| `GMLX_DECODE_BATCH` | Same as in [Environment variables](../env-vars.md#server). The default is the capacity table's widest fit when that is under `8`. |
 | `GMLX_SSE_KEEPALIVE_S` | Interval in seconds of the SSE keepalive comment while a stream is silent. The default is `15`, and `0` disables it. |
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does. |
@@ -61,7 +61,7 @@ is already running does not see a variable you export later.
 | `GMLX_Q4_MTP_STREAK_CAP=N` | After a Qwen3.8-Flash-Next round where the model rejected a draft, draft at most N tokens. The default is 3, and `0` lifts the cap. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |
-| `GMLX_MTP_MIXED` | `0` decodes a batch past the width cap plain, not as a [mixed batch](speculative-batching.md#mixed-batches). `1` forces mixed batches on MoE targets too. |
+| `GMLX_MTP_MIXED` | `1` runs a batch past the width cap as a [mixed batch](speculative-batching.md#mixed-batches), `auto` does except on MoE targets. Default `0`, plain decode. |
 | `GMLX_MTP_MIXED_BLOCK=N` | Verify blocks of N positions in a mixed batch round, instead of the size picked from the batch width. |
 
 ## Prompt cache

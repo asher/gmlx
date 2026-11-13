@@ -237,6 +237,28 @@ def test_governor_evict_fraction_releases_lru_first():
     assert keys == [2000, 3000]
 
 
+def test_evict_bytes_releases_the_coldest_record_with_its_blocks():
+    """With every block pinned by a record, an eviction by bytes releases
+    the least recently used record and evicts the blocks it pinned. The
+    records after it keep theirs."""
+    from gmlx.cache.apc_manager import GmlxAPCManager
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for i in range(3):
+        ids = list(range(i * 1000, i * 1000 + 64))
+        assert ckpt_store(man, ids, make_hybrid_cache(64, seed=60 + i))
+    recs = list(man._kq_ckpt_records.values())
+    held = [list(r.main_blocks) + list(r.bounded_blocks) for r in recs]
+    assert all(held)
+    want = recs[0].nbytes + sum(b.resident_bytes() for b in held[0])
+    assert man.reclaimable_bytes() >= want
+
+    assert man.evict_bytes(want) == want
+    assert [k[0][0] for k in man._kq_ckpt_records.keys()] == [1000, 2000]
+    assert all(b.ref_cnt == 0 and not b.resident_bytes() for b in held[0])
+    assert all(b.ref_cnt > 0 and b.resident_bytes()
+               for blocks in held[1:] for b in blocks)
+
+
 def test_pool_eviction_prefers_fattest_chain():
     """Pool-pressure eviction charges the chain group holding the most
     blocks, deepest record first, so under round-robin sessions no

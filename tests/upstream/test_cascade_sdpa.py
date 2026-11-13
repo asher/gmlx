@@ -242,8 +242,9 @@ def test_qwen_owned_path_claims(monkeypatch):
 
 @pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
 def test_qwen_owned_verify_width_claims(monkeypatch):
-    """The owned qwen verify resolver routes stamped B>1 qL>1 calls
-    through the cascade claim ahead of the padded masked-sdpa branch."""
+    """The owned qwen verify resolver gives stamped B>1 qL>1 calls one
+    fused call per row ahead of the cascade claim; with the per-row route
+    off, the claim takes them ahead of the padded masked-sdpa branch."""
     import gmlx.models.qwen35.attn as qa
 
     monkeypatch.setenv("GMLX_CASCADE_MIN_P", "256")
@@ -262,6 +263,10 @@ def test_qwen_owned_verify_width_claims(monkeypatch):
         return c
 
     n0 = cs.claims()
+    per_row = qa._verify_attention(q, k, v, cache=_cache(), scale=0.088,
+                                   mask=None)
+    assert cs.claims() == n0
+    monkeypatch.setenv("GMLX_QWEN35_VERIFY_FOLD", "0")
     got = qa._verify_attention(q, k, v, cache=_cache(), scale=0.088,
                                mask=None)
     assert cs.claims() == n0 + 1
@@ -278,6 +283,8 @@ def test_qwen_owned_verify_width_claims(monkeypatch):
         mx.where(keep, sc, mx.array(-mx.inf)), axis=-1) @ vr
     err = mx.abs(got.astype(mx.float32) - ref).max().item()
     assert err < 2e-2, f"qwen verify-width cascade err={err}"
+    err0 = mx.abs(per_row.astype(mx.float32) - ref).max().item()
+    assert err0 < 2e-2, f"qwen verify-width per-row err={err0}"
 
     # kill switch: masked-sdpa branch answers instead, no claim
     monkeypatch.setenv("GMLX_CASCADE_SDPA", "0")
@@ -573,3 +580,114 @@ def test_stamp_install_real_seams(monkeypatch):
         ar.PromptProcessingBatch.__init__ = orig_init
         ar._extend_cache = orig_ext
         cs._installed_stamp = False
+
+
+# A row the speculative engine restores from the prompt cache keeps the
+# formation stamp, so a batch it joins keeps the shared prefix route.
+
+_SHARED = list(range(900, 996))
+
+
+def _hd_hybrid_cache(p, seed=0):
+    """The checkpoint tier's hybrid layout, with attention layers of 8 KV
+    heads of 128, the shape the route claims."""
+    from test_ckpt_tier import make_hybrid_cache
+
+    caches = make_hybrid_cache(p, seed)
+    for i, c in enumerate(caches):
+        if hasattr(c, "keys"):
+            mx.random.seed(seed * 1000 + i)
+            k = mx.random.normal((1, 8, p, 128)).astype(mx.float16)
+            c.state = (k, k)
+    return caches
+
+
+def _restore_row(ids, stamp_row=None):
+    """Store the shared prefix as a checkpoint, then restore it into a
+    stamped single-row speculative prompt batch for ``ids`` and prefill
+    the rest, as the engine's first prompt step and chunks do."""
+    from types import SimpleNamespace
+
+    from gmlx._vendor.mlx_vlm.apc import APCManager
+    import gmlx.spec.ckpt as ckpt
+    import gmlx.spec.engine as se
+    import gmlx.spec.mtp_prefill as mtp_prefill
+    from test_spec_apc_salt import _l1_batch
+
+    se._bind_l1_view()
+    man = APCManager(num_blocks=256, block_size=16)
+    model = SimpleNamespace(
+        _kq_apc_manager=man, _kq_apc_mode="exact", config=SimpleNamespace(),
+        make_cache=lambda: _hd_hybrid_cache(0))
+    first = _l1_batch(model, _SHARED + list(range(50, 74)), 111)
+    mtp_prefill._mtp_prefill_init(first)
+    cl = int(first._apc_meta[0]["checkpoint_len"])
+    first.prompt_cache = _hd_hybrid_cache(cl, seed=1)
+    first._row_real_tokens_processed = lambda idx: cl
+    ckpt._ckpt_mid_prefill_store(first)
+
+    batch = _l1_batch(model, ids, 111)
+    batch.prompt_cache = _hd_hybrid_cache(0)
+    cs._stamp_caches(batch.prompt_cache, [cs._row_bytes(stamp_row or ids)])
+    mtp_prefill._mtp_prefill_init(batch)
+    assert batch._mtp_l1_prefix_len == len(_SHARED)
+    kv = batch.prompt_cache[0]
+    rest = len(ids) - len(_SHARED)
+    k = mx.random.normal((1, 8, rest, 128)).astype(mx.float16)
+    kv.update_and_fetch(k, k)
+    return batch.prompt_cache
+
+
+def _join_and_step(rows, row_cache):
+    """A stamped live batch of ``rows`` takes in ``row_cache`` through the
+    engine's join, then runs one decode step; returns the joined cache."""
+    from gmlx.cache import kv_cache as owned
+    from gmlx.spec.speculative import _lift_injected_cache
+
+    lens = [len(r) for r in rows]
+    live = owned.BatchKVCache([max(lens) - n for n in lens])
+    k = mx.random.normal((len(rows), 8, max(lens), 128)).astype(mx.float16)
+    live.update_and_fetch(k, k)
+    cs._stamp_caches([live], [cs._row_bytes(r) for r in rows])
+    live.extend(_lift_injected_cache(live, row_cache))
+    b = len(rows) + 1
+    kn = mx.random.normal((b, 8, 1, 128)).astype(mx.float16)
+    keys, values = live.update_and_fetch(kn, kn)
+    q = mx.random.normal((b, 16, 1, 128)).astype(mx.float16)
+    mx.eval(llama_mod.scaled_dot_product_attention(
+        q, keys, values, cache=live, scale=0.088, mask=None))
+    return live
+
+
+@pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
+def test_a_restored_row_joins_a_stamped_batch_and_the_step_claims(monkeypatch):
+    _install()
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "64")
+    ids = _SHARED + list(range(700, 740))
+    restored = _restore_row(ids)
+    want = {"P": len(ids), "tok": (cs._row_bytes(ids),)}
+    assert [c.__dict__.get("_gmlx_cascade") for c in restored] == \
+        [want] * len(restored)
+    n0 = cs.claims()
+    live = _join_and_step([_SHARED + [1, 2, 3], _SHARED + [4, 5]], restored[0])
+    assert live._gmlx_cascade["P"] == len(_SHARED)
+    assert cs.claims() == n0 + 1
+
+
+@pytest.mark.skipif(not _has_cascade_op(), reason="fused cascade op needs GPU")
+def test_a_restored_row_with_another_prefix_leaves_the_batch_unstamped(
+        monkeypatch):
+    _install()
+    monkeypatch.setenv("GMLX_CASCADE_MIN_P", "64")
+    restored = _restore_row(_SHARED + list(range(700, 740)))
+    n0 = cs.claims()
+    other = list(range(5000, 5096))
+    live = _join_and_step([other + [1, 2, 3], other + [4, 5]], restored[0])
+    assert "_gmlx_cascade" not in live.__dict__
+    assert cs.claims() == n0
+
+
+def test_a_restore_under_another_row_s_stamp_stamps_nothing():
+    ids = _SHARED + list(range(700, 740))
+    restored = _restore_row(ids, stamp_row=_SHARED + list(range(800, 840)))
+    assert all("_gmlx_cascade" not in c.__dict__ for c in restored)

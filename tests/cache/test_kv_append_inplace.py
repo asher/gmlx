@@ -20,15 +20,22 @@ import numpy as np
 import pytest
 
 from gmlx._vendor.mlx_vlm import apc, apc_adapters
+from gmlx._vendor.mlx_vlm.generate import ar
+from gmlx import eval_guard
 from gmlx.cache import kv_append
 from gmlx.cache.apc_manager import GmlxAPCManager
+from gmlx.cache.apc_pooling import install_batched_cachelist_admission
 from gmlx.cache import kv_cache as owned
 from gmlx.cache.kv_policy import hold_fp16
 from gmlx.cache.snapshot import _truncate_kv_snapshot, row_snapshot
+from gmlx.serve import cb_phase
 from gmlx.serve.memtrace import _cache_report
 from gmlx.spec.helpers import _slice_shared_kv_after_reject
+from gmlx.spec.mtp_drafter import QwenMTPDrafter
 from gmlx.spec.speculative import (_cache_restore, _cache_snapshot,
-                                   _filter_batch_rows_empty)
+                                   _filter_batch_rows,
+                                   _filter_batch_rows_empty,
+                                   _join_injected_caches)
 
 pytestmark = pytest.mark.skipif(
     not kv_append.INPLACE, reason="mlx_kquant without kv_append")
@@ -564,6 +571,322 @@ def test_synchronous_trim_then_append_allocates_nothing():
     mx.eval(c.keys, c.values)
     mx.synchronize()
     assert mx.get_peak_memory() - base < 2 << 20
+
+
+# Memory: a join copies one layer at a time.
+
+JOIN_LAYERS = 16
+# The copied mlx-vlm body, read before any test installs over it.
+_VENDORED_EXTEND = ar._extend_cache
+
+
+@pytest.fixture
+def decode_caps():
+    """The command buffer caps a model in RAM decodes under. One buffer
+    takes every layer's pending copies, so they are all live together."""
+    saved = cb_phase.snapshot()
+    cb_phase._set(cb_phase.RAM_DECODE, "decode")
+    yield
+    cb_phase.restore(saved)
+
+
+def _rolled_back_batch(seed, kept=(3, 2, 1)):
+    """Rows near 8000 tokens after a verify block of 4 tokens that kept
+    ``kept`` of them, with the ragged rollback left pending as the round
+    leaves it. Returns the cache and each row's rows."""
+    n = len(kept)
+    c, rows = _batch([8000 - 10 * i for i in range(n)], seed)
+    k, v = _rows(4, seed + 1, b=n)
+    c.update_and_fetch(k, v)
+    mx.eval(c.keys, c.values)
+    c.trim(1)
+    c.prepare(right_padding=[3 - a for a in kept])
+    c.finalize()
+    rows = [(np.concatenate([rk, np.asarray(k[i:i + 1, :, :a])], 2),
+             np.concatenate([rv, np.asarray(v[i:i + 1, :, :a])], 2))
+            for i, ((rk, rv), a) in enumerate(zip(rows, kept))]
+    return c, rows
+
+
+def _layer_arrays(caches):
+    return [(c.keys, c.values) for c in caches]
+
+
+@metal
+@pytest.mark.parametrize("route", ["spec", "vendored", "pooling"])
+def test_join_copies_one_layer_at_a_time(route, decode_caps, monkeypatch):
+    # A request joins three running rows near 8000 tokens. Each layer's
+    # joined copy is made before the next layer's is built, so the join
+    # peaks at the new row plus a few layers' copies. Left to the next
+    # round, every layer's copies are live at once.
+    live, joiner, rows = [], [], []
+    for layer in range(JOIN_LAYERS):
+        c, want = _rolled_back_batch(10 * layer)
+        j = owned.KVCache()
+        k, v = _rows(8100, 10 * layer + 5)
+        j.update_and_fetch(k, v)
+        mx.eval(j.keys, j.values)
+        live.append(c)
+        joiner.append(j)
+        rows.append(want + [(np.asarray(k), np.asarray(v))])
+    # The joined batch keeps the live capacity, so the next append fits.
+    assert live[0]._idx < joiner[0].offset < live[0].keys.shape[2]
+    if route == "spec":
+        join = _join_injected_caches
+    else:
+        # GenerationBatch.extend evaluates both sides' pending state before
+        # it joins them.
+        mx.eval(_layer_arrays(live))
+        if route == "vendored":
+            join = _VENDORED_EXTEND
+            assert join.__module__ == ar.__name__
+        else:
+            monkeypatch.delenv("GMLX_BATCHED_CACHELIST_ADMISSION",
+                               raising=False)
+            monkeypatch.setattr(ar, "_extend_cache", _VENDORED_EXTEND)
+            install_batched_cachelist_admission()
+            join = ar._extend_cache
+            assert join is not _VENDORED_EXTEND
+
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    live = join(live, joiner) or live
+    mx.eval(_layer_arrays(live))  # the next round reads every layer
+    mx.synchronize()
+    peak = mx.get_peak_memory() - base
+
+    # One row of one layer, at the joined capacity.
+    row = (live[0].keys.nbytes + live[0].values.nbytes) // 4
+    assert JOIN_LAYERS * row > 60 << 20
+    assert peak <= (JOIN_LAYERS + 12) * row
+
+    # The first append after the join still writes into each layer's buffer.
+    k, v = _rows(1, 999, b=4)
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    for c in live:
+        c.update_and_fetch(k, v)
+    mx.eval(_layer_arrays(live))
+    mx.synchronize()
+    assert mx.get_peak_memory() - base < 4 * row
+
+    tk, tv = np.asarray(k), np.asarray(v)
+    for c, want in zip(live, rows):
+        assert c.keys.shape[0] == 4
+        for i, (wk, wv) in enumerate(want):
+            gk, gv = _batch_row(c, i)
+            np.testing.assert_array_equal(gk[:, :, :-1], wk)
+            np.testing.assert_array_equal(gv[:, :, :-1], wv)
+            np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
+            np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
+
+
+@metal
+@pytest.mark.parametrize("route", ["spec", "vendored"])
+def test_first_append_after_a_lone_row_is_joined_regrows_nothing(
+        route, decode_caps):
+    # A request joins a row that decoded alone near 8000 tokens. Both are
+    # lifted at their exact lengths, so the joined batch takes the grid
+    # point above its index and the next token is written into it. With
+    # no spare row, that token regrows every layer in one graph.
+    live, joiner, rows = [], [], []
+    for layer in range(JOIN_LAYERS):
+        pair = []
+        for lst, n, seed in ((live, 8000, 10 * layer),
+                             (joiner, 8100, 10 * layer + 5)):
+            c = owned.KVCache()
+            k, v = _rows(n, seed)
+            c.update_and_fetch(k, v)
+            mx.eval(c.keys, c.values)
+            lst.append(c)
+            pair.append((np.asarray(k), np.asarray(v)))
+        rows.append(pair)
+    if route == "spec":
+        _join_injected_caches(live, joiner)
+    else:
+        live = _VENDORED_EXTEND(live, joiner)
+    mx.eval(_layer_arrays(live))
+    assert all(c._idx == 8100 for c in live)
+
+    # One row of one layer, at the joined capacity.
+    row = (live[0].keys.nbytes + live[0].values.nbytes) // 2
+    assert JOIN_LAYERS * row > 30 << 20
+    k, v = _rows(1, 999, b=2)
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    for c in live:
+        c.update_and_fetch(k, v)
+    mx.eval(_layer_arrays(live))
+    mx.synchronize()
+    assert mx.get_peak_memory() - base < 2 * row
+
+    tk, tv = np.asarray(k), np.asarray(v)
+    for c, want in zip(live, rows):
+        assert c.keys.shape[0] == 2
+        for i, (wk, wv) in enumerate(want):
+            gk, gv = _batch_row(c, i)
+            np.testing.assert_array_equal(gk[:, :, :-1], wk)
+            np.testing.assert_array_equal(gv[:, :, :-1], wv)
+            np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
+            np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
+
+
+# Memory: a regrow is made one layer at a time.
+
+@metal
+def test_a_grid_crossing_regrows_one_layer_at_a_time(decode_caps):
+    # Four rows fill their buffers to a grid point near 8000 tokens, so
+    # the next token regrows every layer. Each layer's new buffers are
+    # made as its append is built: one layer's old and new buffers stand
+    # together. Left to the step's eval, every layer's do.
+    width = kv_append.grid_capacity(8000, owned.BatchKVCache.step)
+    live, rows = [], []
+    for layer in range(JOIN_LAYERS):
+        c, want = _batch([width - 10 * i for i in range(4)], 10 * layer)
+        live.append(c)
+        rows.append(want)
+    assert all(c._idx == c.keys.shape[2] == width for c in live)
+    old = live[0].keys.nbytes + live[0].values.nbytes
+    assert JOIN_LAYERS * old > 60 << 20
+
+    k, v = _rows(1, 999, b=4)
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    for c in live:
+        c.update_and_fetch(k, v)
+    mx.eval(_layer_arrays(live))  # the step's eval
+    mx.synchronize()
+    peak = mx.get_peak_memory() - base
+    new = live[0].keys.nbytes + live[0].values.nbytes
+    assert new > old
+    # What every layer grew by, and one layer's two buffers.
+    assert peak <= JOIN_LAYERS * (new - old) + 2 * new
+
+    tk, tv = np.asarray(k), np.asarray(v)
+    for c, want in zip(live, rows):
+        for i, (wk, wv) in enumerate(want):
+            gk, gv = _batch_row(c, i)
+            np.testing.assert_array_equal(gk[:, :, :-1], wk)
+            np.testing.assert_array_equal(gv[:, :, :-1], wv)
+            np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
+            np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
+
+
+class _EvalThrows:
+    """The eval guard's mx, with an eval that throws."""
+
+    def __init__(self, text):
+        self.text, self.calls = text, 0
+
+    def __getattr__(self, name):
+        return getattr(mx, name)
+
+    def eval(self, *arrays):
+        self.calls += 1
+        raise RuntimeError(self.text)
+
+
+def test_a_refused_regrow_eval_is_left_to_the_step(monkeypatch):
+    # The regrow's eval runs inside a forward. An allocator refusal there
+    # leaves the layer's buffers unevaluated and the append built, so the
+    # step's own eval is where the refusal is raised. A failed command
+    # buffer is not swallowed.
+    width = kv_append.grid_capacity(200, owned.BatchKVCache.step)
+    k, v = _rows(1, 5, b=2)
+    c, rows = _batch([width, width - 3], 0)
+    refused = _EvalThrows("[metal::malloc] Attempting to allocate 1 bytes")
+    monkeypatch.setattr(eval_guard, "mx", refused)
+    c.update_and_fetch(k, v)
+    assert refused.calls == 1 and c.keys.shape[2] > width
+    for i, (wk, wv) in enumerate(rows):
+        gk, gv = _batch_row(c, i)
+        np.testing.assert_array_equal(gk[:, :, :-1], wk)
+        np.testing.assert_array_equal(gv[:, :, :-1], wv)
+        np.testing.assert_array_equal(gk[:, :, -1:], np.asarray(k[i:i + 1]))
+        np.testing.assert_array_equal(gv[:, :, -1:], np.asarray(v[i:i + 1]))
+
+    c, _ = _batch([width, width - 3], 1)
+    monkeypatch.setattr(eval_guard, "mx", _EvalThrows(
+        "[METAL] Command buffer execution failed: Insufficient Memory "
+        "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)."))
+    with pytest.raises(RuntimeError, match="Command buffer"):
+        c.update_and_fetch(k, v)
+
+
+# Memory: a finish filters one layer at a time.
+
+@metal
+@pytest.mark.parametrize("route", ["spec", "head", "vendored"])
+def test_finish_filters_one_layer_at_a_time(route, decode_caps):
+    # One of four rows near 8000 tokens finishes after a ragged round.
+    # Each layer's rolled copy and its three kept rows are made before the
+    # next layer's are built, so the finish peaks at a few layers' copies.
+    # Left to the next round, every layer's copies are live at once.
+    live, rows = [], []
+    for layer in range(JOIN_LAYERS):
+        c, want = _rolled_back_batch(10 * layer, kept=(3, 2, 1, 3))
+        live.append(c)
+        rows.append([want[0], want[2], want[3]])
+    keep = [0, 2, 3]
+    if route == "spec":
+        def finish():
+            _filter_batch_rows(live, mx.array(keep, dtype=mx.int32))
+    elif route == "head":
+        head = SimpleNamespace(_cache=live, _seed_token=None,
+                               _seed_hidden=None)
+
+        def finish():
+            QwenMTPDrafter.filter_batch(head, keep)
+    else:
+        # The plain batch has no ragged round: its rows are evaluated
+        # when one finishes.
+        mx.eval(_layer_arrays(live))
+        batch = ar.GenerationBatch(
+            None, uids=[0, 1, 2, 3], inputs=mx.array([1, 2, 3, 4]),
+            prompt_cache=live, sampler=None, stop_criteria=None,
+            max_tokens=[64] * 4)
+
+        def finish():
+            batch.filter(keep)
+
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    finish()
+    mx.eval(_layer_arrays(live))  # the next round reads every layer
+    mx.synchronize()
+    peak = mx.get_peak_memory() - base
+
+    # One row of one layer, at the batch's capacity.
+    row = (live[0].keys.nbytes + live[0].values.nbytes) // 3
+    assert JOIN_LAYERS * row > 60 << 20
+    assert peak <= (5 if route == "vendored" else 12) * row
+
+    # The first append after the finish still writes into each layer's
+    # buffer.
+    k, v = _rows(1, 999, b=3)
+    mx.synchronize()
+    base = mx.get_active_memory()
+    mx.reset_peak_memory()
+    for c in live:
+        c.update_and_fetch(k, v)
+    mx.eval(_layer_arrays(live))
+    mx.synchronize()
+    assert mx.get_peak_memory() - base < 3 * row
+
+    tk, tv = np.asarray(k), np.asarray(v)
+    for c, want in zip(live, rows):
+        assert c.keys.shape[0] == 3
+        for i, (wk, wv) in enumerate(want):
+            gk, gv = _batch_row(c, i)
+            np.testing.assert_array_equal(gk[:, :, :-1], wk)
+            np.testing.assert_array_equal(gv[:, :, :-1], wv)
+            np.testing.assert_array_equal(gk[:, :, -1:], tk[i:i + 1])
+            np.testing.assert_array_equal(gv[:, :, -1:], tv[i:i + 1])
 
 
 # The capacity grid and the footprint prediction.

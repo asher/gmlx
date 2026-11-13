@@ -19,6 +19,19 @@ def masked_scatter(input_tensor, mask, source):
     )
 
 
+# gmlx: moved here from the unified container, which imports it from here,
+# so the audio path below can compact its rows too.
+def _compact_prefix_rows(features: mx.array, valid_mask: mx.array) -> mx.array:
+    rows = []
+    for batch_idx, row in enumerate(valid_mask.tolist()):
+        length = sum(bool(v) for v in row)
+        if length:
+            rows.append(features[batch_idx, :length])
+    if not rows:
+        return features.reshape(-1, features.shape[-1])[:0]
+    return mx.concatenate(rows, axis=0)
+
+
 class MultimodalEmbedder(nn.Module):
     """Projects soft tokens from vision/audio into language model space."""
 
@@ -157,8 +170,12 @@ class Model(nn.Module):
                     if audio_mask is not None
                     else mx.zeros(feat.shape[:2], dtype=mx.bool_)
                 )
-                enc, _ = self.audio_tower(feat, mask)
-                return self.embed_audio(enc)
+                enc, pad = self.audio_tower(feat, mask)
+                # gmlx: each clip's valid frames, in clip order. Clips are
+                # padded to the longest, and the scatter fills placeholders
+                # in flat order, so a later clip took an earlier one's
+                # padding frames.
+                return _compact_prefix_rows(self.embed_audio(enc), ~pad)
 
             inputs_embeds = _scatter(
                 audio_features,

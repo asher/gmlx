@@ -278,14 +278,8 @@ class GmlxAPCManager(_apc.APCManager):
             return
         if budget_fraction is None:
             budget_fraction = _POOL_BUDGET_FRACTION
-        import mlx.core as mx
-
         from gmlx.serve.capacity import working_budget_bytes
         from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
-        from gmlx.gen.prefill_decay import (
-            streamed_tracked_bytes,
-            untracked_weight_bytes,
-        )
 
         costs = kv_layer_costs(model)
         budget = working_budget_bytes()
@@ -297,16 +291,15 @@ class GmlxAPCManager(_apc.APCManager):
         # Stashed for stats: lets /metrics report committed pool bytes so
         # harnesses can separate evictable cache growth from real residue.
         self._pool_per_token_bytes = per_tok
-        weights = (float(mx.get_active_memory()) + untracked_weight_bytes()
-                   - streamed_tracked_bytes())
-        free = max(0.0, budget - weights)
+        free = _cache_room_bytes(budget)
         if not os.environ.get("APC_EXACT_CACHE_ENTRIES"):
             self._exact_budget_bytes = free * _EXACT_BUDGET_FRACTION
             self._exact_cache_max = 64
             _log.info("APC exact tier budget: %.1f GB (count cap 64)",
                       self._exact_budget_bytes / 1e9)
         if not os.environ.get("APC_NUM_BLOCKS"):
-            self._grow_pool(free * budget_fraction, per_tok, len(costs))
+            self._grow_pool(free * budget_fraction, per_tok,
+                            _block_layers(costs))
         self._working_set_bytes = int(budget)
         if not os.environ.get("APC_MEMORY_MAX_GB"):
             cap = (self.num_blocks * self.block_size * per_tok
@@ -324,8 +317,9 @@ class GmlxAPCManager(_apc.APCManager):
         # with everything else against the Metal resource limit, which is
         # what APC_MAX_POOL_TENSORS guards.
         tensors_per_block = 2 * n_layers
-        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
-        target = min(target, max_tensors // max(1, tensors_per_block))
+        max_tensors = _max_pool_tensors()
+        if max_tensors:
+            target = min(target, max_tensors // max(1, tensors_per_block))
         if target <= self.num_blocks:
             return
         with self.lock:
@@ -481,6 +475,74 @@ class GmlxAPCManager(_apc.APCManager):
                 if had_slabs:
                     freed += nb
                     evicted += 1
+        if freed:
+            _invalidate_free_ram()
+        return freed
+
+    def reclaimable_bytes(self) -> int:
+        """Bytes ``evict_bytes`` can free: idle pool blocks, exact-prefix
+        clones, and ckpt records with the blocks only they pin. A block a
+        row leases is not counted."""
+        total = 0
+        with self.lock:
+            pins: dict = {}
+            idx = getattr(self, "_kq_ckpt_records", None)
+            for rec in (idx or {}).values():
+                total += int(getattr(rec, "nbytes", 0) or 0)
+                for blocks in (rec.main_blocks, rec.bounded_blocks):
+                    for b in blocks or ():
+                        pins[id(b)] = pins.get(id(b), 0) + 1
+            for b in self.pool:
+                if b.ref_cnt == pins.get(id(b), 0):
+                    total += b.resident_bytes()
+            for e in self._exact_cache.values():
+                total += int(_apc._cache_nbytes(e.prompt_cache))
+        return total
+
+    def _evict_idle_blocks(self, want: int) -> int:
+        """Evict idle blocks from the head of the free queue, the least
+        recently released first, until ``want`` bytes are freed."""
+        freed = 0
+        guard = len(self.pool)
+        while freed < want and guard > 0:
+            guard -= 1
+            head = self._free_head
+            if head is None:
+                break
+            nb = head.resident_bytes()
+            b = self._evict_lru()
+            if b is None:
+                break
+            # An emptied block goes back to the tail, as in governor_evict.
+            self._free_push(b)
+            freed += nb
+        return freed
+
+    def evict_bytes(self, want: int) -> int:
+        """Evict at least ``want`` bytes, the coldest first, and return the
+        bytes freed. Idle pool blocks go first, from the head of the free
+        queue, since they come one block at a time and the eviction can
+        stop at the figure asked. Exact-prefix clones follow, oldest first,
+        and ckpt records last, least recently used first, each with the
+        blocks it pinned. A clone or a record is evicted whole, so the last
+        one can free more than what was left to free. Rows in flight never
+        lose blocks."""
+        want = int(want)
+        if want <= 0:
+            return 0
+        from .snapshot import ckpt_release_coldest
+
+        with self.lock:
+            freed = self._evict_idle_blocks(want)
+            while freed < want and self._exact_cache:
+                _, e = self._exact_cache.popitem(last=False)
+                freed += int(_apc._cache_nbytes(e.prompt_cache))
+            while freed < want:
+                own = ckpt_release_coldest(self)
+                if own is None:
+                    break
+                freed += own
+                freed += self._evict_idle_blocks(want - freed)
         if freed:
             _invalidate_free_ram()
         return freed
@@ -940,20 +1002,69 @@ class GmlxAPCManager(_apc.APCManager):
 _POOL_BUDGET_FRACTION = 0.5
 _EXACT_BUDGET_FRACTION = 0.15
 _BLOCK_SIZES = (16, 32, 64, 128, 256)
+# APC_MAX_POOL_TENSORS default: the Metal resource ceiling the pool and the
+# store guard keep under.
+_MAX_POOL_TENSORS = 450000
+# Arrays the block size aims to hold the pool's share in. Freeing costs
+# about the same per array, so fewer, larger blocks give memory back under
+# pressure in far less time than many small ones.
+_BLOCK_TENSOR_TARGET = 110000
+
+
+def _max_pool_tensors() -> int:
+    """APC_MAX_POOL_TENSORS, read as the vendored store guard reads it:
+    0 means no cap."""
+    return max(0, int(os.environ.get("APC_MAX_POOL_TENSORS",
+                                     _MAX_POOL_TENSORS)))
+
+
+def _cache_room_bytes(budget: float, loading_bytes: float = 0.0) -> float:
+    """The working budget left to the prompt cache: ``budget`` less the
+    weights held now and ``loading_bytes`` of weights not yet loaded. The
+    block-size pick runs before the load and passes the file size;
+    autosize runs after it. The pool's share is _POOL_BUDGET_FRACTION of
+    this."""
+    import mlx.core as mx
+
+    from gmlx.gen.prefill_decay import (
+        streamed_tracked_bytes,
+        untracked_weight_bytes,
+    )
+
+    held = (float(mx.get_active_memory()) + untracked_weight_bytes()
+            - streamed_tracked_bytes())
+    return max(0.0, budget - held - loading_bytes)
+
+
+def _sliding_windows(costs) -> set:
+    from gmlx.serve.mem_preflight import FixedRows, StepTokens
+
+    other = (bool, FixedRows, StepTokens)
+    return {int(w) for w, _b in costs
+            if isinstance(w, int) and not isinstance(w, other)}
+
+
+def _block_layers(costs) -> int:
+    """Cost entries a pool block holds arrays for: the growing ones. A
+    fixed buffer (a recurrent state) is kept beside the blocks."""
+    from gmlx.serve.mem_preflight import FixedRows
+
+    return sum(1 for w, _b in costs if not isinstance(w, FixedRows))
 
 
 def _auto_block_size(model_path):
-    """Smallest block size whose tensor-capped pool covers the byte
-    budget autosize will ask for. Committed blocks cost K+V arrays per
-    layer, so at block_size 16 the Metal resource limit (proxied by
-    APC_MAX_POOL_TENSORS) binds far below the byte budget on deep
-    workloads. None keeps the stock default (non-GGUF path, unreadable
-    header, or 16 already suffices)."""
+    """Smallest block size whose pool covers the byte budget autosize will
+    ask for in _BLOCK_TENSOR_TARGET arrays (or the lower
+    APC_MAX_POOL_TENSORS). Two limits beat that aim: the pool's floor of
+    blocks must fit the byte share, since the pool never shrinks below it,
+    and the block must divide every sliding window, or rotating layers
+    lose their checkpoints. None keeps the stock default (non-GGUF path,
+    unreadable header, or no block above 16 is needed or fits)."""
     if not model_path:
         return None
     try:
         from gmlx.serve.capacity import working_budget_bytes
-        from gmlx.serve.mem_preflight import FixedRows, per_token_bytes
+        from gmlx.serve.mem_preflight import per_token_bytes
         from gmlx.commands.tool_preflight import _kv_costs, _shards, _synth_config
 
         shards = _shards(str(model_path))
@@ -966,15 +1077,20 @@ def _auto_block_size(model_path):
         if per_tok <= 0:
             return None
         weights = float(sum(os.path.getsize(p) for p in shards))
-        budget_tokens = (max(0.0, budget - weights)
+        budget_tokens = (_cache_room_bytes(budget, weights)
                          * _POOL_BUDGET_FRACTION / per_tok)
-        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
-        growing = sum(1 for w, _b in costs if not isinstance(w, FixedRows))
-        need = 2 * growing * budget_tokens / max(1, max_tensors)
-        for bs in _BLOCK_SIZES:
-            if bs >= need:
-                return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
-        return _BLOCK_SIZES[-1]
+        ceiling = _max_pool_tensors()
+        aim = (min(_BLOCK_TENSOR_TARGET, ceiling) if ceiling
+               else _BLOCK_TENSOR_TARGET)
+        need = 2 * _block_layers(costs) * budget_tokens / aim
+        bs = next((s for s in _BLOCK_SIZES if s >= need), _BLOCK_SIZES[-1])
+        floor = int(os.environ.get("APC_NUM_BLOCKS", _apc.DEFAULT_NUM_BLOCKS))
+        windows = _sliding_windows(costs)
+        fits = [s for s in _BLOCK_SIZES
+                if s <= bs and floor * s <= budget_tokens
+                and all(w % s == 0 for w in windows)]
+        bs = max(fits, default=_apc.DEFAULT_BLOCK_SIZE)
+        return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
     except Exception:
         _log.debug("APC block-size derivation skipped", exc_info=True)
         return None

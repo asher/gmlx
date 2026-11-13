@@ -49,6 +49,7 @@ is internal and may change between releases.
 | `MLX_VLM_PINNED_MODELS` | Unset | Comma-separated model paths to pin, added to `--pin` and `pin: true` entries. |
 | `MLX_VLM_TOKEN_QUEUE_TIMEOUT` | `1800` | Seconds without a next token before a request fails. `server.token_queue_timeout_s` sets the same limit and wins. |
 | `TOP_LOGPROBS_K` | `20` | Most `top_logprobs` a request may get, up to 100. Chat clamps a larger request; `/v1/completions` answers 400. [Logprobs](api.md#logprobs) has more. |
+| `GMLX_DECODE_BATCH` | `8` | Requests that decode together in a step, and `1` serves one at a time. A model near capacity starts lower. `0` restores the upstream 32. |
 | `GMLX_QUEUE_DEPTH_CAP` | Twice the decode batch | Waiting requests the server admits before it answers 503. `0` disables the cap. |
 | `GMLX_PREFLIGHT_MEM` | `1` | `0` turns off the memory check that answers 400 when a prompt cannot fit. |
 | `GMLX_OVERCOMMIT` | `0` | `1` skips the memory checks before a load, so a MoE [keeps its experts in memory](streaming.md#when-a-moe-streams-its-experts), except as that page says. |

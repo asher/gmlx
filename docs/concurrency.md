@@ -19,9 +19,17 @@ the contexts grow, because each request does its own attention work.
 [Benchmarks](benchmarks.md) has measurements.
 
 A model with speculative decoding speculates only while the batch is
-narrow, as [Several requests at once](speculative-decoding.md#several-requests-at-once)
-describes. A model that streams from disk should get one request at a
-time, as [Serving a streamed model](streaming.md#serving-a-streamed-model)
+within its drafter's width cap, and a wider batch decodes without
+speculation. A DFlash drafter drafts for one request, and the native head
+of a dense Qwen model for up to 2.
+[Several requests at once](speculative-decoding.md#several-requests-at-once)
+lists the cap of each drafter.
+
+[`GMLX_DECODE_BATCH=1`](env-vars.md#server) serves one request at a time,
+and the others wait their turn. That suits a server whose drafter works for
+one request only, when each request matters more than the total. A model
+that streams from disk should get one request at a time too, as
+[Serving a streamed model](streaming.md#serving-a-streamed-model)
 explains.
 
 ## Admitting a new request
@@ -44,6 +52,12 @@ first token as it would without pacing. Prefill runs at full speed when
 nothing is decoding, so one client alone sees no difference under any
 setting. The server reads both settings at start, so change them and run
 `gmlx restart`.
+
+Both settings protect a request that was decoding before the new ones
+arrived. When several requests arrive together and nothing was decoding,
+neither applies: the chunks run at full size with one decode step between
+them. The request that finishes its prefill first then decodes one step
+per chunk until the others have finished theirs.
 
 ## Shared prompts
 

@@ -245,7 +245,11 @@ def test_a_stream_decodes_to_the_whole_clips_audio(codec, cuts):
         parts.append(codec.decode(frames[start:cut], stream, finalize=False))
         start = cut
     parts.append(codec.decode(frames[:0], stream, finalize=True))
-    np.testing.assert_allclose(np.concatenate(parts), whole, atol=2e-6)
+    # TF32 on M5 GPUs: over 10 weight seeds the stream differed from the
+    # whole decode by up to 0.0014, at a sample scale near 0.57 (under
+    # 5e-7 on the CPU device). Chunks decoded without the stream's carried
+    # state differ by at least 0.107.
+    np.testing.assert_allclose(np.concatenate(parts), whole, atol=4.5e-3)
     assert stream.finished
 
 

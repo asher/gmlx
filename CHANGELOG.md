@@ -39,6 +39,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [Faster clips with int8](docs/video.md#faster-clips-with-int8).
 - `gmlx serve` video jobs and ComfyUI video steps evaluate a step as
   `gmlx video generate` does, so a small clip's steps take less time.
+- A request that arrives short of memory beside others decoding takes what
+  it is short of from the oldest prompt cache entries and starts at once. It
+  waited up to a minute, and the server then emptied the whole prompt cache.
+- A request that joins others at long context is admitted only with room for
+  what the join holds, so it no longer pushes the server past its memory budget.
+- The prompt cache uses larger blocks where its share of memory allows, so a
+  server short of memory frees the cache without stalling.
 - `gmlx init` and `--with-embeddings` set up EmbeddingGemma 2.
   `embeddings: true` still picks `qwen3-embed-0.6b`.
 - `prompt_name` and `dimensions` work on EmbeddingGemma and
@@ -48,15 +55,32 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - With ffmpeg installed, the server reads video input with it, so chat and
   embeddings models get the frames their reference code gets. OpenCV reads
   video only when ffmpeg is missing.
+- Past the drafter's width cap a batch decodes without speculation, and a dense
+  Qwen model's native head has a cap of 2. `GMLX_MTP_MIXED=1` undoes the first.
 
 ### Fixed
 
+- Running short of memory or a failed GPU command while a request was
+  cancelled, or shed to free memory, no longer fails every other request.
+- A request held for memory beside others decoding starts once memory frees.
+  It could wait again after its hold, and the log said it had started.
+- With a drafter, requests that shared a long prompt prefix decoded slower
+  once one of them had restored its prefix from the prompt cache.
+- With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long
+  context checked each draft slower than a request decoding alone.
+- With a dense Qwen model's native head, requests decoding together at long
+  context slowed each step they kept different numbers of drafted tokens.
+- With a dense Qwen model's native head, a request that joined as every
+  request decoding together finished in the same step failed.
 - A MoE model with a lookup table, such as Qwen3.8-Flash-Next, now reads
   the table from the file whenever the rest of the model fits in memory.
   A model just under the memory budget no longer streams its experts.
 - Gemma 4 audio input now matches the reference model. The audio encoder
-  saw one frame too many, and with a GGUF projector it also scaled its
-  attention queries wrongly.
+  saw one frame too many, for some clip lengths the prompt held one audio
+  token more than the encoder made, and with a GGUF projector the encoder
+  scaled its attention queries wrongly.
+- In a Gemma 4 request with several audio clips, a clip that came after a
+  shorter one reached the model partly as that clip's padding.
 - A video request to a server with neither ffmpeg nor OpenCV gets a 400
   that names both installs, not a 500.
 - A damaged WAV, FLAC or MP3 file in a request gets a 400, not a 500.
@@ -64,6 +88,20 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   attention gates, which they refused.
 - `gmlx pull --list` no longer marks Nemotron 3.5 Transcribe as a model
   that reads images.
+- On Qwen3.5 and other hybrid models the prompt cache stopped well short of
+  its memory share, so long conversations side by side reran their prompts.
+- On a hybrid model with no drafter, the last of several overlapping requests
+  to finish could end its turn uncached, so its next turn reran it.
+- On a hybrid model with no drafter, a chat request that others had joined
+  could hold extra memory while it decoded alone, more the longer its context.
+- A request that joined others already decoding long contexts could push
+  memory far past what its admission had counted, for the length of one step.
+- A request that finished beside others decoding long contexts could push
+  memory up by several gigabytes for the length of one step.
+- A request that joined one decoding alone, or a long conversation as it
+  grew, could push memory up by several gigabytes for the length of one step.
+- On Qwen3.5 and other hybrid models with a drafter, the last request left
+  of a batch decoded slower than a request alone, more the longer its context.
 
 ## [0.5.5] - 2026-11-08
 

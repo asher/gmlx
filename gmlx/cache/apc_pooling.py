@@ -510,10 +510,15 @@ def install_batched_cachelist_admission() -> None:
             return cache_b
         if not cache_b:
             return cache_a
+        # Imported here: a function this one closes over counts as a
+        # wrapper of the name it replaces (gmlx.upstream.claims).
+        from .kv_append import eval_cache
+
         extended = []
         for ca, cb in zip(cache_a, cache_b):
             ca = _promote(ca)
             ca.extend(_promote(cb))
+            eval_cache(ca)
             extended.append(ca)
         return extended
 

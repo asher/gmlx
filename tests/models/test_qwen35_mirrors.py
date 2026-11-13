@@ -88,12 +88,12 @@ def test_attention_call_mirror():
                 1,
             ),
             (
-                # the kvarn claim inserted ahead of the verify branch
-                "if target_verify and L > 1 or left_padded_decode:",
+                # the kvarn claim inserted ahead of the row ends branch
+                "if getattr(cache, '_row_ends', None) is not None:",
                 "if isinstance(keys, KVarNView):\n"
                 "        output = _kvarn_attention(queries, cache=cache, "
                 "scale=self.scale, mask=mask)\n"
-                "    elif target_verify and L > 1 or left_padded_decode:",
+                "    elif getattr(cache, '_row_ends', None) is not None:",
                 1,
             ),
             ("scaled_dot_product_attention(", "_sdpa(", 2),

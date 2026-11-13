@@ -38,6 +38,13 @@ unpaced under the live decode rows. For a model that keeps only the last
 logits the loop hands generate() up to a step's columns, and that forward
 is a chunk: it is paced and its time is observed.
 
+The admission gate wraps this pacer and hides a join it holds, so on its
+held ticks the pacer sees no prefill work and decode runs alone. That
+decode counts toward what the next chunk owes all the same
+(``_kq_admit_holding`` marks those ticks): otherwise a join the gate
+admits is paced again for decode the batch already ran, and a governor
+band that turns back in the meantime holds it once more.
+
 Ratio resolution: `gmlx serve --decode-prefill-ratio` / config
 `server.decode_prefill_ratio` both export GMLX_DECODE_PREFILL_RATIO; the
 wrapper reads the env per tick (install order never matters, and a live
@@ -129,6 +136,19 @@ def install_decode_priority_sched() -> None:
             _pd.note_chunk_cost(spent)
         return out
 
+    def _unpaced_next(self, **kwargs):
+        # A tick that runs unpaced. On a tick the admission gate holds a
+        # join, its decode is decode since the last chunk.
+        if not getattr(self, "_kq_admit_holding", False):
+            return _observed_next(self, **kwargs)
+        tic = time.perf_counter()
+        try:
+            return _observed_next(self, **kwargs)
+        finally:
+            self._kq_decode_since_chunk = getattr(
+                self, "_kq_decode_since_chunk", 0.0) + (
+                time.perf_counter() - tic)
+
     def _tick(self, ratio, **kwargs):
         # One scheduler tick at a resolved ratio. Pace only when decode
         # AND prefill work are both live; otherwise stock behavior
@@ -139,7 +159,7 @@ def install_decode_priority_sched() -> None:
             # so chunk sizing goes stock too instead of riding a stale
             # pressure value.
             _pd.note_decode_pressure(0)
-            return _observed_next(self, **kwargs)
+            return _unpaced_next(self, **kwargs)
         decode_rows = batch_rows(self)
         _pd.note_decode_pressure(decode_rows)
         if _last_column_only(self):
@@ -152,7 +172,7 @@ def install_decode_priority_sched() -> None:
         )
         decode_live = decode_rows > 0
         if not (prefill_live and decode_live):
-            return _observed_next(self, **kwargs)
+            return _unpaced_next(self, **kwargs)
 
         last_chunk = getattr(self, "_kq_last_chunk_time", 0.0)
         decode_owed = ratio * last_chunk

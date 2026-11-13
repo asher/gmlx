@@ -103,37 +103,38 @@ bits if memory requires it.
 
 Checking a draft costs little while one request decodes and much more when
 several do. The server therefore gives each model a width cap, the number
-of requests that speculate together. Past the cap, the oldest requests keep
-speculating and the others decode without speculation in the same step,
-and when a speculating request finishes, the next oldest takes its place.
-This needs a drafter that keeps its own state for each request and a model
-that undoes each request's rejected drafts separately. In these cases the
-whole batch decodes without speculation past the cap instead, and
-speculates again when the batch shrinks:
-
-- Any mixture-of-experts model, because the padded positions of the other
-  requests widen the set of experts each step reads.
-  `GMLX_MTP_MIXED=1` gives such a model mixed batches anyway.
-- The gemma-4 assistant drafter, which reads the model's own KV cache.
-- gemma-4 and MiniMax-M3 models, and the MTP heads of GLM-DSA, Inkling and
-  Hy-V4 models, which accept the same number of drafts for every request in
-  a batch.
-- Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and
-  GLM-5.3-Flash models, which undo the rejected drafts of one request at a
-  time.
-- A quantized KV cache that cannot roll back each request separately.
+of requests that speculate together. Up to the cap, every request in the
+batch speculates. A batch wider than the cap decodes without speculation.
+When enough requests finish to bring the batch back within the cap, the
+ones left speculate again, unless one of them has fewer than 32 tokens left
+before its token limit.
 
 | Drafter | Default cap |
 |---------|-------------|
-| A native head on a dense Qwen model | No cap |
-| The gemma-4 assistant drafter, and any family without a default of its own | 2 |
+| A native head on a dense Qwen model, the gemma-4 assistant drafter, and any family without a default of its own | 2 |
 | Any mixture-of-experts model | 1 |
 | The heads of Hy3, DeepSeek-V4, Muse Glimmer, Nemotron-H, Qwen3.8-Flash-Next and GLM-5.3-Flash, and every DFlash drafter | 1, which no setting raises |
 
+A DFlash drafter therefore drafts only for a request that decodes alone,
+and two or more requests decode without speculation. The native head of a
+dense Qwen model drafts for up to 2 requests, and 3 or more decode without
+speculation.
+
 [`speculative_width_cap`](config.md#modelsspeculative_width_cap) sets the
 cap for one model, and `0` removes it. `gmlx serve --speculative-width-cap N`
-sets it for every model and overrides each model's key. [Speculative batching](internals/speculative-batching.md)
-describes how the batch switches between these modes.
+sets it for every model and overrides each model's key.
+
+To give every request the drafter, serve one request at a time: start the
+server with [`GMLX_DECODE_BATCH=1`](env-vars.md#server). The other requests
+wait their turn, and the waiting queue is two requests long at that
+setting, so raise `GMLX_QUEUE_DEPTH_CAP` if clients get a 503.
+
+[`GMLX_MTP_MIXED=1`](internals/debug-switches.md#speculative-decoding)
+turns on mixed batches: past the cap, the oldest requests keep speculating
+and the others decode without speculation in the same step. It is off by
+default because such a batch is slower than the same requests without
+speculation. [Speculative batching](internals/speculative-batching.md)
+describes it, and how the batch switches between these modes.
 
 ## DFlash drafters
 

@@ -1063,6 +1063,21 @@ def ckpt_governor_release(manager, fraction: float) -> int:
     return freed
 
 
+def ckpt_release_coldest(manager) -> int | None:
+    """Release the least recently used ckpt record and return its own
+    bytes, or None when no record is left. The blocks it pinned go to the
+    tail of the free queue for the caller to evict."""
+    idx = _ckpt_records(manager)
+    with manager.lock:
+        if not idx:
+            return None
+        _, rec = idx.popitem(last=False)
+        own = int(getattr(rec, "nbytes", 0) or 0)
+        _release_record(manager, rec)
+    _ckpt_bump(manager, "ckpt_governor_released", 1)
+    return own
+
+
 def _fatchain_victim(idx, bs: int):
     """Key of the eviction victim: the deepest non-anchor record of the
     chain group holding the most blocks, the group's anchor only once
@@ -2340,10 +2355,14 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             _log.info("APC decode ckpt frozen: render diverges at %d "
                       "(live %d)", pred, p)
             return
-        from .kv_cache import KVCache, RotatingKVCache
+        from .kv_cache import BatchKVCache, KVCache, RotatingKVCache
         states = []
         for c in prompt_cache:
-            if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
+            # Plain KV is sliced from the row at retirement. A row that
+            # was joined holds it in the batch class.
+            if isinstance(c, BatchKVCache) or (
+                    isinstance(c, KVCache)
+                    and not isinstance(c, RotatingKVCache)):
                 continue
             clone = _clone_single_row(c)
             if clone is None:
@@ -2403,9 +2422,9 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
         if max_len is not None and max_len < len(ids):
             cap = max_len
         elif len(ids) >= 2:
-            # The row is already single-row on the B=1 path; ckpt_store
-            # slices it directly (its own stores copy internally), so no
-            # full-cache clone happens -- the exact tier's whole sin. A
+            # A row still on its single-row caches is sliced directly:
+            # the stores copy per block, with no clone of the row. A row
+            # taken out of batch classes arrives as one copy of its KV. A
             # rotating layer below the window stores its block-grid
             # prefix (grid_truncate); the ring below holds aligned
             # clones for the post-wrap off-grid cases.

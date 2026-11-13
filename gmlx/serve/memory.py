@@ -113,9 +113,10 @@ def resolve_cache_limit(cfg_gb, model_paths, ws_bytes) -> tuple[int | None, str]
 # kv_bits, pooling, or quantized storage change underneath.
 #
 # The projection is the padded form: every row is priced at the batch's
-# maximum row length rounded up to the allocation block, because batched
-# caches allocate rows to a shared padded length and under-projection is
-# the direction that fails to prevent an abort. Rotating-window kinds are
+# maximum row length rounded up to the allocation block, or to the point
+# of the capacity grid for caches that grow on it, because batched caches
+# allocate rows to a shared padded length and under-projection is the
+# direction that fails to prevent an abort. Rotating-window kinds are
 # capped at their window so deep prompts do not price linear growth a ring
 # will never hold.
 
@@ -128,6 +129,16 @@ def _round_block(n: float) -> int:
     return -(-int(n) // _STEP_BLOCK) * _STEP_BLOCK
 
 
+def _reserve_env() -> float | None:
+    env = os.environ.get("GMLX_ADMIT_RESERVE_GB", "")
+    if env:
+        try:
+            return max(0.0, float(env)) * 1e9
+        except ValueError:
+            pass
+    return None
+
+
 def admit_reserve_bytes(ws_bytes: float, gen=None) -> float:
     """Headroom held back beyond the projection, geometry-derived when a
     measured batch walk is available: one cache's transient (a filter
@@ -137,12 +148,9 @@ def admit_reserve_bytes(ws_bytes: float, gen=None) -> float:
     percent of the working set) stands in until the first walk, and
     GMLX_ADMIT_RESERVE_GB overrides everything. Decimal GB (1e9)
     throughout; GiB consumers convert at the edge."""
-    env = os.environ.get("GMLX_ADMIT_RESERVE_GB", "")
-    if env:
-        try:
-            return max(0.0, float(env)) * 1e9
-        except ValueError:
-            pass
+    env = _reserve_env()
+    if env is not None:
+        return env
     max_cache = getattr(gen, "_kq_admit_max_cache_bytes", 0.0) if gen \
         else 0.0
     if max_cache > 0:
@@ -152,6 +160,56 @@ def admit_reserve_bytes(ws_bytes: float, gen=None) -> float:
         shed_term = live / (rows * n_caches)
         return max(1e9, max_cache + shed_term)
     return max(2e9, 0.05 * ws_bytes)
+
+
+def _priced_rate(kind: dict) -> float:
+    """Bytes per row token a kind is priced at: per capacity token for a
+    cache on the capacity grid, which is priced at the grid point, and per
+    content token otherwise, the padded form."""
+    if kind.get("grid"):
+        return kind["rate"] * kind.get("fill", 1.0)
+    return kind["rate"]
+
+
+def _span(kind: dict, tokens: int) -> int:
+    """Tokens of capacity a kind holds at ``tokens`` of context."""
+    if kind.get("grid"):
+        from gmlx.cache.kv_append import grid_capacity
+
+        cap = grid_capacity(max(int(tokens), 1), _STEP_BLOCK)
+    else:
+        cap = _round_block(tokens)
+    window = kind.get("window")
+    return cap if window is None else min(cap, _round_block(window))
+
+
+def join_reserve_bytes(gen, ws_bytes: float, joiners: int, prompt: int,
+                       depth: int, width: int, scale: float = 1.0) -> float:
+    """Bytes a join holds beyond the steady KV of the joined batch, which
+    the projection prices on its own. At the join: the joiners' own caches
+    at their prompt, which go only when the join returns, beside one live
+    layer's old buffers. Later: one layer at the joined width and the
+    final depth, whose old and new buffers a regrow or a finish holds
+    together. The larger of the two, as the moments do not coincide.
+    ``scale`` is the projection's rescale of the rates. Before a measured
+    walk, and under GMLX_ADMIT_RESERVE_GB, as admit_reserve_bytes."""
+    env = _reserve_env()
+    if env is not None:
+        return env
+    layer_now = float(getattr(gen, "_kq_admit_max_cache_bytes", 0.0) or 0.0)
+    rates = getattr(gen, "_kq_admit_kv_rates", None)
+    if layer_now <= 0 or not rates:
+        return admit_reserve_bytes(ws_bytes, gen)
+    row = sum(_priced_rate(k) * _span(k, prompt) for k in rates.values())
+    row += getattr(gen, "_kq_admit_spec_row_const", 0.0)
+    held_join = joiners * row * scale + layer_now
+    rate, window, fill, grid = getattr(gen, "_kq_admit_layer",
+                                       (0.0, None, 1.0, False))
+    one = {"rate": rate, "window": window, "fill": fill, "grid": grid}
+    per_row = max(_priced_rate(one) * _span(one, depth),
+                  getattr(gen, "_kq_admit_layer_state", 0.0))
+    held_later = width * per_row * scale
+    return max(1e9, held_join, held_later)
 
 
 def priced_admit_reserve_bytes(costs, depth: int, rows: int) -> float:
@@ -284,6 +342,10 @@ def update_kv_rates(gen) -> None:
     state_row_bytes = 0.0
     max_cache_bytes = 0.0
     n_caches = 0
+    # The largest single layer, per row token, and the largest constant
+    # state per row: the layer a regrow or a finish holds twice.
+    layer = (0.0, None, 1.0, False)
+    layer_state = 0.0
     for c in _leaf_caches(pc):
         acct = getattr(c, "admit_bytes", None)
         if callable(acct):
@@ -295,12 +357,15 @@ def update_kv_rates(gen) -> None:
             max_cache_bytes = max(max_cache_bytes, float(nbytes))
             n_caches += 1
             state_row_bytes += row_bytes
+            layer_state = max(layer_state, row_bytes / rows)
             if depth > 0 and per_token > 0:
                 live_depth = max(live_depth, depth)
                 kind = fresh.setdefault(type(c).__name__,
                                         {"rate": 0.0, "window": None})
                 kind["rate"] += per_token / rows
                 _fold_window(kind, c)
+                if per_token / rows > layer[0]:
+                    layer = (per_token / rows, kind["window"], 1.0, False)
             continue
         nbytes = 0
         alen = 0
@@ -320,6 +385,7 @@ def update_kv_rates(gen) -> None:
             # per row, never per token. A bytes/state_dim rate would
             # scale constant state with depth.
             state_row_bytes += nbytes
+            layer_state = max(layer_state, nbytes / rows)
             continue
         live_depth = max(live_depth, off)
         tokens = min(off, alen) if alen else off
@@ -327,6 +393,14 @@ def update_kv_rates(gen) -> None:
                                 {"rate": 0.0, "window": None})
         kind["rate"] += nbytes / tokens / rows
         _fold_window(kind, c)
+        # Content tokens over capacity tokens, so a cache on the grid is
+        # priced per token of capacity at the grid point.
+        fill = tokens / alen if alen else 1.0
+        kind["fill"] = min(kind.get("fill", 1.0), fill)
+        kind["grid"] = bool(getattr(c, "_kv_grid", False))
+        if nbytes / tokens / rows > layer[0]:
+            layer = (nbytes / tokens / rows, kind["window"], fill,
+                     kind["grid"])
     if not fresh:
         return
     spec_depth_bytes, spec_row_const = spec_state_bytes(gen)
@@ -341,6 +415,9 @@ def update_kv_rates(gen) -> None:
         rate = (k["rate"] if old is None else
                 (1 - _KV_EWM_ALPHA) * old["rate"] + _KV_EWM_ALPHA * k["rate"])
         merged[name] = {"rate": rate, "window": k["window"]}
+        for key in ("fill", "grid"):
+            if key in k:
+                merged[name][key] = k[key]
     gen._kq_admit_kv_rates = merged
     gen._kq_admit_live_bytes = live_bytes
     gen._kq_admit_live_depth = live_depth
@@ -348,6 +425,8 @@ def update_kv_rates(gen) -> None:
     gen._kq_admit_spec_row_const = row_const / rows if row_const else 0.0
     gen._kq_admit_max_cache_bytes = max_cache_bytes
     gen._kq_admit_n_caches = n_caches
+    gen._kq_admit_layer = layer
+    gen._kq_admit_layer_state = layer_state
 
 
 def project_admission(gen, candidates):
@@ -376,23 +455,22 @@ def project_admission(gen, candidates):
     if head is None:
         return None
     cand_tokens = []
+    prompts = []
     for s in candidates:
         try:
             prompt_toks = len(s[1])
         except TypeError:
             prompt_toks = 0
         max_toks = s[2] if isinstance(s[2], int) else 0
+        prompts.append(prompt_toks)
         cand_tokens.append(prompt_toks + max_toks)
     if not cand_tokens:
         return None
     width = batch_rows(gen) + len(cand_tokens)
-    depth = _round_block(max([getattr(gen, "_kq_admit_live_depth", 0)]
-                             + cand_tokens))
+    tokens = max([getattr(gen, "_kq_admit_live_depth", 0)] + cand_tokens)
     kv_total = 0.0
     for k in rates.values():
-        capped = depth if k["window"] is None else min(
-            depth, _round_block(k["window"]))
-        kv_total += k["rate"] * width * capped
+        kv_total += _priced_rate(k) * width * _span(k, tokens)
     kv_total += getattr(gen, "_kq_admit_spec_row_const", 0.0) * width
     live_bytes = getattr(gen, "_kq_admit_live_bytes", 0.0)
     # Self-consistency: the rate model evaluated at the live batch must
@@ -405,6 +483,7 @@ def project_admission(gen, candidates):
         capped = live_depth if k["window"] is None else min(
             live_depth, _round_block(k["window"]))
         model_now += k["rate"] * rows * capped
+    scale = 1.0
     if live_bytes > 0 and model_now > 0 and not (
             live_bytes / _MODEL_NOW_TOL <= model_now
             <= _MODEL_NOW_TOL * live_bytes):
@@ -422,7 +501,8 @@ def project_admission(gen, candidates):
         ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:
         ws = 0.0
-    reserve = admit_reserve_bytes(ws, gen)
+    reserve = join_reserve_bytes(gen, ws, len(cand_tokens), max(prompts),
+                                 tokens, width, scale)
     projected = kv_new + transient + reserve
     parts = (f"kv {kv_new / 1e9:.1f} + transient {transient / 1e9:.1f}"
              f" + reserve {reserve / 1e9:.1f}")
@@ -433,6 +513,20 @@ def project_admission(gen, candidates):
 
     gen._kq_admit_last_projection = (time.perf_counter(), projected)
     return projected, head, parts
+
+
+def admission_slack_bytes(gen, n_candidates: int) -> float:
+    """What an eviction for a join takes beyond the join's shortfall: one
+    more block of KV for every row of the joined batch, at the rates the
+    projection prices with. The rows decoding grow by less than that
+    before the join lands."""
+    rates = getattr(gen, "_kq_admit_kv_rates", None)
+    if not rates:
+        from .capacity import boot_kv_rates
+
+        rates = boot_kv_rates(getattr(gen, "model", None))
+    width = batch_rows(gen) + n_candidates
+    return sum(k["rate"] for k in (rates or {}).values()) * width * _STEP_BLOCK
 
 
 def apply_cache_limit(cfg) -> None:

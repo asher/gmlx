@@ -56,8 +56,14 @@ from .common import (
 )
 from .types import GenerateKwargs, ProcessorLike, Unpack
 
+# gmlx: a join and a finish evaluate each layer's cache as it changes.
+from gmlx.cache.kv_append import eval_cache as _eval_cache
 # gmlx: raw f32 logprobs and a bounded top-k for the batch engine.
 from gmlx.gen.logprobs import raw_logprobs, top_logprobs
+from gmlx.serve.tick_guard import is_allocator_refusal as _is_allocator_refusal
+from gmlx.serve.tick_guard import (
+    is_command_buffer_failure as _is_command_buffer_failure,
+)
 from gmlx.serve.tick_guard import mark_broken as _mark_broken
 from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
@@ -936,6 +942,9 @@ def _extend_cache(cache_a, cache_b):
             if not callable(getattr(entry, "extend", None)):
                 raise ValueError(f"{type(entry)} does not yet support batching")
         ca.extend(cb)
+        # gmlx: one layer's joined copy at a time, not every layer's at the
+        # next step.
+        _eval_cache(ca)
         extended.append(ca)
     return extended
 
@@ -1612,10 +1621,31 @@ class GenerationBatch:
             self._rope_deltas = mx.concatenate([self._rope_deltas, other._rope_deltas])
         self._kq_extending = False
 
+    def _kq_eval_filtered(self):
+        # gmlx: the layers a failed filter left unevaluated, one at a time.
+        if getattr(self, "_kq_filter_lazy", False):
+            for c in self.prompt_cache:
+                _eval_cache(c)
+            self._kq_filter_lazy = False
+
     def filter(self, keep: List[int]):
         """Filter the batch to keep only the specified indices."""
+        # gmlx: a failed eval is the filter's last. The rest runs
+        # unevaluated, so the batch is filtered whole when it is raised.
+        failed = None
         if len(keep) < len(self.uids):
-            self._eval_pending_state()
+            try:
+                self._kq_eval_filtered()
+                self._eval_pending_state()
+            except BaseException as e:
+                failed = e
+        if failed is not None and _is_command_buffer_failure(failed):
+            # gmlx: nothing the batch holds is valid; the caller drops it,
+            # so the failure goes out before a refusal below can hide it.
+            raise failed
+        # gmlx: the kept indices are allocated before the batch changes, so
+        # a refusal here leaves every row in it.
+        keep_arr = mx.array(keep, mx.int32) if keep else None
 
         self.uids = [self.uids[idx] for idx in keep]
         self.max_tokens = [self.max_tokens[idx] for idx in keep]
@@ -1643,10 +1673,25 @@ class GenerationBatch:
             self.token_context = []
             self.logits_processors = []
             self.thinking_budget_criteria = []
+            self._kq_filter_lazy = False
         else:
-            keep_arr = mx.array(keep, mx.int32)
             for c in self.prompt_cache:
-                c.filter(keep_arr)
+                try:
+                    c.filter(keep_arr)
+                except BaseException as e:
+                    # gmlx: a layer's own filter stopped, so the layers
+                    # disagree and no filter can finish the batch. The
+                    # guard drops it whole and rebuilds every row.
+                    self._kq_torn = True
+                    _mark_broken(e, self.uids)
+                    raise
+                # gmlx: one layer's kept rows at a time, not every layer's
+                # at the next step.
+                if failed is None:
+                    try:
+                        _eval_cache(c)
+                    except BaseException as e:
+                        failed = e
             if self._next_tokens is not None:
                 self._next_tokens = self._next_tokens[keep_arr]
             if self._next_lps is not None:
@@ -1661,6 +1706,13 @@ class GenerationBatch:
                 self._kq_owed = tuple(
                     a[keep_arr] if a is not None else None for a in owed
                 )
+            if failed is not None:
+                self._kq_filter_lazy = True
+        if failed is not None:
+            # gmlx: raised from a filtered batch. The next filter or step
+            # evaluates the layers left.
+            failed._kq_filtered = True
+            raise failed
 
     def next(self) -> List[Response]:
         """Generate the next batch of tokens."""
@@ -1672,6 +1724,7 @@ class GenerationBatch:
             keep = [i for i, uid in enumerate(self.uids) if uid not in drop]
             if len(keep) < len(self.uids):
                 self.filter(keep)
+        self._kq_eval_filtered()
         if not self.uids:
             return []
 
@@ -3378,8 +3431,14 @@ class BatchGenerator:
 
     def remove(self, uid) -> bool:
         """Remove a sequence from the batch by uid."""
+        out = self._kq_remove(uid)
         # gmlx: a speaking row never requeues, so its record closes here.
+        # A removal that raised can leave the row decoding, and a closed
+        # record would decode it as text.
         _speech_rows.close_row(self, uid)
+        return out
+
+    def _kq_remove(self, uid) -> bool:
         with mx.stream(self._stream):
             # Waiting in the queue.
             for i, (seq_uid, _, _, _, _, _) in enumerate(self._unprocessed_sequences):
@@ -3403,7 +3462,23 @@ class BatchGenerator:
             if uid in self._generation_batch.uids:
                 idx = self._generation_batch.uids.index(uid)
                 keep = [i for i in range(len(self._generation_batch.uids)) if i != idx]
-                self._generation_batch.filter(keep)
+                try:
+                    self._generation_batch.filter(keep)
+                except RuntimeError as e:
+                    # gmlx: an allocator refusal after the row left. The
+                    # next step evaluates what it could not.
+                    if not (
+                        getattr(e, "_kq_filtered", False)
+                        and _is_allocator_refusal(e)
+                    ):
+                        raise
+                    logger.warning(
+                        "remove: the allocator refused an eval of the rows "
+                        "left by uid %s; the next step evaluates them: %s",
+                        uid,
+                        str(e).splitlines()[0][:200],
+                    )
+                    mx.clear_cache()
                 return True
 
             return False

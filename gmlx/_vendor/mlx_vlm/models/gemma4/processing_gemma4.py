@@ -530,6 +530,18 @@ class Gemma4Processor(ProcessorMixin):
         Uses ceil(audio_duration_ms / audio_ms_per_token) capped at audio_seq_length.
         """
         num_samples = len(audio_waveform)
+        fe = self.feature_extractor
+        if hasattr(fe, "hop_length"):
+            # gmlx: one token per frame the tower emits: the mel frames, then
+            # the two stride-2 convs of the subsampling stack, as transformers
+            # counts. The duration count ran one past the tower's frames (49
+            # for 48 on a 1.92 s clip), and the extra placeholder took frame 0
+            # again. A frame-per-token extractor (gemma4_unified) keeps it.
+            frames = (num_samples + fe.frame_length // 2
+                      - (fe.frame_length + 1)) // fe.hop_length + 1
+            for _ in range(2):
+                frames = (frames + 2 - 3) // 2 + 1
+            return max(0, min(frames, self.audio_seq_length))
         duration_ms = num_samples / sampling_rate * 1000.0
         num_tokens = math.ceil(duration_ms / self.audio_ms_per_token)
         return min(num_tokens, self.audio_seq_length)

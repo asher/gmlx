@@ -9,13 +9,14 @@ import logging
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
 from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.cache.retire_key as retire_key
 import gmlx.spec.ckpt as ckpt
 import gmlx.spec.engine as engine
 from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
-from test_ckpt_tier import LAYOUT, make_hybrid_cache
+from test_ckpt_tier import LAYOUT, assert_warm_matches, make_hybrid_cache
 
 TAGS = tuple("arr" if k == "arr" else "kv" for k in LAYOUT)
 
@@ -334,6 +335,178 @@ def test_gen_batch_filter_retires_leaving_row_batched():
     assert gb._kq_apc_retire_rows == {}
     warm, got = ckpt_lookup(man, full + gen + [1], extra_hash=0)
     assert got == 40
+
+
+def _one_row(uid, cache):
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+
+    b = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    b.uids, b.max_tokens, b._num_tokens = [uid], [64], [0]
+    b.prompt_cache = cache
+    return b
+
+
+def _join_and_leave(gb, stash, p, seed):
+    """A second request joins the row of ``gb`` and leaves again: the row
+    is alone on batch classes."""
+    gb.extend(_one_row(8, make_hybrid_cache(p + 8, seed=seed)))
+    gb.filter([0])
+    assert gb.uids == [7] and gb._kq_apc_retire_rows == {7: stash}
+
+
+def _joined_then_alone(stash, p, seed):
+    gb = _one_row(7, make_hybrid_cache(p, seed=seed))
+    gb.prompt_cache[0]._kq_apc_retire = stash
+    _join_and_leave(gb, stash, p, seed + 1)
+    return gb
+
+
+def _row_prefix(truth, p):
+    """Single-row caches holding the first ``p`` tokens of ``truth``."""
+    row = make_hybrid_cache(p)
+    for c, t in zip(row, truth):
+        if hasattr(c, "keys"):
+            c.state = (t.keys[..., :p, :], t.values[..., :p, :])
+        else:
+            c.cache = list(t.cache)
+    return row
+
+
+def _decode_to(caches, truth, hi, states):
+    """Decode steps up to ``hi`` tokens on a one-row cache list: K and V
+    rows from ``truth``, recurrent states replaced by those of ``states``."""
+    for c, t, s in zip(caches, truth, states):
+        if hasattr(c, "keys"):
+            lo = int(c.offset)
+            c.update_and_fetch(t.keys[..., lo:hi, :], t.values[..., lo:hi, :])
+        else:
+            c.cache = list(s.cache)
+
+
+def _expected_at(truth, states):
+    """``truth`` KV beside the recurrent states of ``states``."""
+    return [t if hasattr(t, "keys") else s for t, s in zip(truth, states)]
+
+
+def test_gen_batch_filter_retires_last_row_of_a_joined_batch():
+    ckpt._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    full = list(range(1100, 1124))
+    gen = list(range(1200, 1216))               # 24 + 16 = 40
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "ckpt",
+             "manager": man, "render_ctx": None, "snap_ok": True,
+             "gen": gen}
+    gb = _joined_then_alone(stash, 40, seed=31)
+    gb.filter([])
+    warm, got = ckpt_lookup(man, full + gen + [1], extra_hash=0)
+    assert got == 40
+    assert_warm_matches(warm, make_hybrid_cache(40, seed=31), 40)
+
+
+def test_joined_lone_row_retires_from_its_decode_snapshot(monkeypatch):
+    # The snapshot holds the recurrent states alone, never a copy of the
+    # row's KV, and the turn stores from it under a shorter next-turn key.
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "16")
+    ckpt._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    full = list(range(1300, 1324))
+    gen = list(range(1400, 1415))
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "ckpt",
+             "manager": man, "render_ctx": {"stub": True}, "snap_ok": True,
+             "gen": gen}
+    gb = _joined_then_alone(stash, 40, seed=41)
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, g, **kw: len(seq))
+    ckpt._plain_step_tick(gb, ([1415], None, None, None))   # 24 + 16 = 40
+    (p, states), = stash["snaps"]
+    assert p == 40 and len(states) == LAYOUT.count("arr")
+    # Eight more decode steps, then the turn ends with a next-turn render
+    # that diverges at 44.
+    for c in gb.prompt_cache:
+        if hasattr(c, "keys"):
+            c.update_and_fetch(mx.random.normal((1, 2, 8, 8)),
+                               mx.random.normal((1, 2, 8, 8)))
+        else:
+            c.cache = [mx.random.normal(a.shape) for a in c.cache]
+    gen.extend(range(1416, 1424))
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, g, **kw: 44)
+    gb.filter([])
+    warm, got = ckpt_lookup(man, full + gen[:16] + [1], extra_hash=0)
+    assert got == 40
+    assert_warm_matches(warm, make_hybrid_cache(40, seed=41), 40)
+
+
+def _replays(ctx, seq, g, **kw):
+    return len(seq)
+
+
+@pytest.mark.parametrize("lcp, want", [(48, 40), (60, 56)])
+def test_retire_reads_snapshots_from_before_and_after_a_join(
+        monkeypatch, lcp, want):
+    # The ring holds one snapshot from the row's single-row caches and one
+    # from its batch classes. The newest at or below the next-turn key
+    # stores, whichever side of the join it came from.
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "16")
+    ckpt._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    truth = make_hybrid_cache(64, seed=51)
+    at56 = make_hybrid_cache(1, seed=52)
+    full = list(range(1500, 1524))
+    gen = list(range(1600, 1615))
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "ckpt",
+             "manager": man, "render_ctx": {"stub": True}, "snap_ok": True,
+             "gen": gen}
+    monkeypatch.setattr(retire_key, "next_turn_lcp", _replays)
+    gb = _one_row(7, _row_prefix(truth, 40))
+    gb.prompt_cache[0]._kq_apc_retire = stash
+    ckpt._plain_step_tick(gb, ([1615], None, None, None))   # 24 + 16 = 40
+    _join_and_leave(gb, stash, 40, seed=54)
+    _decode_to(gb.prompt_cache, truth, 56, at56)
+    gen.extend(range(1616, 1631))
+    ckpt._plain_step_tick(gb, ([1631], None, None, None))   # 24 + 32 = 56
+    n_arr = LAYOUT.count("arr")
+    assert [(p, len(s)) for p, s in stash["snaps"]] == [(40, n_arr),
+                                                        (56, n_arr)]
+    _decode_to(gb.prompt_cache, truth, 64, make_hybrid_cache(1, seed=53))
+    gen.extend(range(1632, 1640))
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, g, **kw: lcp)
+    gb.filter([])
+    warm, got = ckpt_lookup(man, (full + gen)[:want] + [1], extra_hash=0)
+    assert got == want
+    states = truth if want == 40 else at56
+    assert_warm_matches(warm, _expected_at(truth, states), want)
+
+
+def test_row_alone_on_batch_classes_then_leaves_a_batch(monkeypatch):
+    # The row is joined, runs alone on batch classes and takes a decode
+    # snapshot there. A third request joins and the row finishes first:
+    # its turn stores from that snapshot.
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "16")
+    ckpt._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    truth = make_hybrid_cache(48, seed=61)
+    full = list(range(1700, 1724))
+    gen = list(range(1800, 1815))
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "ckpt",
+             "manager": man, "render_ctx": {"stub": True}, "snap_ok": True,
+             "gen": gen}
+    monkeypatch.setattr(retire_key, "next_turn_lcp", _replays)
+    gb = _one_row(7, _row_prefix(truth, 40))
+    gb.prompt_cache[0]._kq_apc_retire = stash
+    _join_and_leave(gb, stash, 40, seed=63)
+    ckpt._plain_step_tick(gb, ([1815], None, None, None))   # 24 + 16 = 40
+    _decode_to(gb.prompt_cache, truth, 48, make_hybrid_cache(1, seed=62))
+    gen.extend(range(1816, 1824))
+    gb.extend(_one_row(9, make_hybrid_cache(56, seed=64)))
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, g, **kw: 44)
+    gb.filter([1])
+    assert gb.uids == [9]
+    warm, got = ckpt_lookup(man, full + gen[:16] + [1], extra_hash=0)
+    assert got == 40
+    assert_warm_matches(warm, truth, 40)
 
 
 def test_gen_batch_extend_carries_stash():

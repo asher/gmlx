@@ -49,6 +49,14 @@ a shallow one growing fast is not.
           the same uid twice in a row and victim repeats are counted
           in /v1/metrics so starvation is visible.
 
+A join over the budget does not wait for the ladder. In green and
+yellow the admission gate asks cover_admission_shortfall to evict what
+the join is short of by yellow's own test (pending shed + projection +
+K_y x rate - headroom, plus the gate's slack) from the prompt cache pool
+by bytes, the coldest first, and admits when that covers it. A pool that
+cannot cover it is not touched. Orange and red keep the pool to their
+rungs.
+
 Anti-thrash: minimum dwell per band and a cap on shed actions per
 minute, or orange fights a decode loop that immediately
 re-allocates. Every shed reports measured recovery (before/after
@@ -104,12 +112,19 @@ Knobs (all calib values are U5's to tighten):
     GMLX_GOV_RUNG_TICKS      measured-miss window per demand rung
                              (default 4)
     GMLX_GOV_SHEDS_PER_MIN   shed rate cap (default 4)
+    GMLX_GOV_REFUSAL_BACKOFF_S
+                             seconds orange and red wait to try a shed
+                             again, and the kernel floor collapse to
+                             try its failure again, after the
+                             allocator refused a removal at every try
+                             (default 5, at most 60; 0 turns it off)
     GMLX_GOV_MIN_DWELL_S     min seconds in a band before
                              de-escalating (default 2.0)
 """
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import time
@@ -141,6 +156,7 @@ _STATS = {
     "orange_evictions": 0,
     "orange_retires": 0,
     "retires_deferred": 0,
+    "removals_refused": 0,
     "red_failures": 0,
     "victim_repeats": 0,
     "sheds_suppressed": 0,
@@ -150,6 +166,7 @@ _STATS = {
     "kernel_free_page_waiters": None,
     "kernel_floor_reds": 0,
     "kernel_floor": None,
+    "shortfall_evictions": 0,
 }
 
 
@@ -270,6 +287,8 @@ class _GovState:
         self.reg_bytes = 0.0
         self.reg_sampled_tick = -999
         self.last_victim_uid = None
+        # a shed whose removal the allocator refused: no retry before
+        self.refused_until = 0.0
         # kernel-floor trend: last sub-floor sample of the memory not
         # wired, and the last wall time a stable (non-collapsing) breach
         # was logged
@@ -279,6 +298,8 @@ class _GovState:
         self.kernel_prompt_prev = False
         self.prompt_time_seen = None
         self.floor_warned_at = 0.0
+        # last time the pool could not cover a join's shortfall
+        self.shortfall_missed_at = None
         # U5 fault injection: (kind, tick) directives already fired
         self.injected: set = set()
 
@@ -314,6 +335,76 @@ def make_room_for_admission(gen) -> None:
                  "registered caches before past-ceiling admit",
                  freed / 1e9)
     st.pending_shed_bytes = 0.0
+
+
+# A join the pool could not cover asks again this often, since the answer
+# walks every block of the pool.
+_SHORTFALL_RETRY_S = 1.0
+
+
+def _admission_shortfall(gen, st: "_GovState", projected: float):
+    """Bytes a join of ``projected`` is over the budget by yellow's own
+    test: what the clock needs with the join charged, less the headroom
+    there is. Negative when the join fits. None without a reading."""
+    head, _ = _headroom_and_ws(_env_f("GMLX_GOV_MARGIN", 0.05))
+    if head is None:
+        return None
+    rate, _ = _demand_bytes(gen, st)
+    rate = min(rate, max(8.0 * st.obs_delta_ema, 64e6))
+    ky = _env_f("GMLX_GOV_KY", 16.0)
+    return st.pending_shed_bytes + projected + ky * rate - head
+
+
+def shortfall_eviction_due(gen) -> bool:
+    """Whether ``cover_admission_shortfall`` may evict for a join now:
+    a governed batch with a prompt cache pool, in green or yellow, that
+    has not just found the pool short. Orange and red own the pool with
+    their own rungs."""
+    if not governor_enabled():
+        return False
+    st = getattr(gen, "_kq_governor", None)
+    mgr = getattr(gen, "apc_manager", None)
+    if st is None or st.band > YELLOW or not hasattr(mgr, "evict_bytes"):
+        return False
+    missed = st.shortfall_missed_at
+    return (missed is None
+            or time.perf_counter() - missed >= _SHORTFALL_RETRY_S)
+
+
+def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
+    """Evict what a pending join is over budget from the prompt cache
+    pool, the coldest first, so the gate admits it now and not after the
+    deferral. ``slack`` is the gate's price of what the batch grows by
+    before the join lands. True when the pool gave the shortfall and the
+    join then fits.
+
+    Nothing is evicted when the join fits already or when the pool cannot
+    cover the whole shortfall: the deferral and its handoff stand."""
+    if not shortfall_eviction_due(gen):
+        return False
+    st = gen._kq_governor
+    mgr = gen.apc_manager
+    short = _admission_shortfall(gen, st, projected)
+    if short is None or short < 0:
+        return False
+    now = time.perf_counter()
+    want = short + max(0.0, slack)
+    if mgr.reclaimable_bytes() < want:
+        st.shortfall_missed_at = now
+        return False
+    freed = mgr.evict_bytes(want)
+    mx.clear_cache()
+    _STATS["shortfall_evictions"] += 1
+    _STATS["last_action"] = (
+        f"admission shortfall evict freed {freed / 1e9:.2f} GB")
+    left = _admission_shortfall(gen, st, projected)
+    fits = left is not None and left < 0
+    st.shortfall_missed_at = None if fits else now
+    _log.info("[governor] admission shortfall %.2f GB: evicted %.2f GB of "
+              "the prompt cache pool, coldest first; the join %s",
+              short / 1e9, freed / 1e9,
+              "fits" if fits else "is still over budget")
+    return fits
 
 
 # ---------------------------------------------------------------- sampling
@@ -534,6 +625,41 @@ def _restore_demand_rungs(gen, st: _GovState) -> None:
     st.rung_rate_before = None
 
 
+def _refusal_backoff(st: _GovState) -> bool:
+    """Whether a refused removal's back-off holds. Orange and red skip
+    their whole shed step until it ends: the evict, the reclaim and the
+    removal would each repeat at tick rate against the same refusal.
+    The kernel floor collapse skips only its failure; its evict and
+    cache clear still run."""
+    return time.perf_counter() < st.refused_until
+
+
+def _refused(st: _GovState, what: str, victim) -> None:
+    """Book a shed whose removal the allocator refused at every try: the
+    row still decodes, so nothing is shed, and the next try waits out
+    the back-off. Logged once per back-off window; with the back-off
+    off, a refusal that persists logs at every tick."""
+    backoff = _refusal_backoff_s()
+    st.refused_until = time.perf_counter() + backoff
+    _STATS["removals_refused"] += 1
+    _STATS["last_action"] = f"{what} uid={victim} refused"
+    _log.warning("[governor] %s of row %s refused at every try; the row "
+                 "still decodes, trying again in %.3g s", what, victim,
+                 backoff)
+
+
+_REFUSAL_BACKOFF_MAX_S = 60.0
+
+
+def _refusal_backoff_s() -> float:
+    """GMLX_GOV_REFUSAL_BACKOFF_S, at most a minute so no value blocks
+    every shed; 0, a negative value or NaN turns the back-off off."""
+    v = _env_f("GMLX_GOV_REFUSAL_BACKOFF_S", 5.0)
+    if not v > 0.0:
+        return 0.0
+    return min(v, _REFUSAL_BACKOFF_MAX_S)
+
+
 def _shed_allowed(st: _GovState) -> bool:
     now = time.perf_counter()
     cap = int(_env_f("GMLX_GOV_SHEDS_PER_MIN", 4))
@@ -587,32 +713,49 @@ def _apc_disk_armed(gen) -> bool:
     return mgr is not None and getattr(mgr, "disk", None) is not None
 
 
-def _retire_largest(gen, st: _GovState) -> bool:
+class RetireOutcome(enum.Enum):
+    """What ``_retire_largest`` did. Compare by identity: an outcome has
+    no truth value."""
+
+    RETIRED = "retired"
+    NONE = "none"          # every row was passed over
+    REFUSED = "refused"    # the allocator refused the removal
+
+    def __bool__(self):
+        raise TypeError("compare a RetireOutcome by identity")
+
+
+def _retire_largest(gen, st: _GovState) -> RetireOutcome:
     """Orange's width lever: remove the largest decode row and requeue
     it as itself through the tick guard's ledger (replay = prompt +
     delivered; APC makes the re-prefill warm). A row in the middle of a
     forced close is passed over: the retire can wait, and a close is a
     few tokens long. A speaking row is passed over too: it cannot
-    replay, so a retire would end its reply."""
+    replay, so a retire would end its reply. Returns REFUSED when the
+    allocator refused the removal at every try and the row still
+    decodes."""
     from . import tick_guard as tg
 
     tg_st = tg._state(gen)
     victim = tg._pick_victim(gen, tg_st, spare=tg.mid_close,
                              spare_uid=lambda uid: tg.speaks(gen, uid))
     if victim is None:
-        return False
+        return RetireOutcome.NONE
+    before = mx.get_active_memory()
+    pending = _shed_transient_bytes(gen, st)
+    if not tg._rebuild_row(gen, tg_st, victim):
+        _refused(st, "retire", victim)
+        return RetireOutcome.REFUSED
     if victim == st.last_victim_uid:
         _STATS["victim_repeats"] += 1
     st.last_victim_uid = victim
     tg_st.last_victim = victim
-    before = mx.get_active_memory()
-    st.pending_shed_bytes = _shed_transient_bytes(gen, st)
-    tg._rebuild_row(gen, tg_st, victim)
+    st.pending_shed_bytes = pending
     st.shed_times.append(time.perf_counter())
     st.shed_measure_from = float(before)
     _STATS["orange_retires"] += 1
     _STATS["last_action"] = f"retire uid={victim}"
-    return True
+    return RetireOutcome.RETIRED
 
 
 def _live_rows(gen) -> bool:
@@ -622,18 +765,23 @@ def _live_rows(gen) -> bool:
 
 
 def _fail_largest(gen, st: _GovState, why: str) -> bool:
+    """Red: fail the largest decode row for good. False when there is
+    none, or when the allocator refused its removal at every try and the
+    row still decodes; nothing is booked then."""
     from . import tick_guard as tg
 
     tg_st = tg._state(gen)
     victim = tg._pick_victim(gen, tg_st)
     if victim is None:
         return False
+    before = mx.get_active_memory()
+    if not tg._fail_row_permanently(gen, tg_st, victim, why):
+        _refused(st, "red fail", victim)
+        return False
     if victim == st.last_victim_uid:
         _STATS["victim_repeats"] += 1
     st.last_victim_uid = victim
     tg_st.last_victim = victim
-    before = mx.get_active_memory()
-    tg._fail_row_permanently(gen, tg_st, victim, why)
     st.shed_times.append(time.perf_counter())
     st.shed_measure_from = float(before)
     _STATS["red_failures"] += 1
@@ -672,6 +820,8 @@ def _enter(gen, st: _GovState, band: int, ws: float, margin: float) -> None:
         _restore_demand_rungs(gen, st)
         st.evict_fraction = 0.5
         st.orange_failed = False
+        # a refusal before the pressure passed says nothing of the next
+        st.refused_until = 0.0
 
 
 def _measure_rung(gen, st: _GovState) -> None:
@@ -877,7 +1027,8 @@ def _governor_tick(gen) -> None:
                      "< %.2f GB and collapsing (prev %.2f GB); evicted "
                      "%.2f GB", cur / 1e9, floor / 1e9,
                      (prev or 0) / 1e9, freed / 1e9)
-        if batch_rows(gen) > 0 and _shed_allowed(st):
+        if (batch_rows(gen) > 0 and not _refusal_backoff(st)
+                and _shed_allowed(st)):
             _fail_largest(gen, st, (
                 f"governor red: memory not wired "
                 f"{cur / 1e9:.2f} GB below floor "
@@ -888,7 +1039,7 @@ def _governor_tick(gen) -> None:
 
     if red_now and batch_rows(gen) > 0:
         _enter(gen, st, RED, ws, margin)
-        if _shed_allowed(st):
+        if not _refusal_backoff(st) and _shed_allowed(st):
             static_red = head - demand < 0.0
             if static_red and not st.orange_failed:
                 # Reclaim before destroying work: registered caches and
@@ -934,7 +1085,7 @@ def _governor_tick(gen) -> None:
         return
     if orange_now and batch_rows(gen) > 0:
         _enter(gen, st, ORANGE, ws, margin)
-        if _shed_allowed(st):
+        if not _refusal_backoff(st) and _shed_allowed(st):
             before = mx.get_active_memory()
             freed = _evict_registered(st.evict_fraction)
             mx.clear_cache()
@@ -950,7 +1101,14 @@ def _governor_tick(gen) -> None:
             if st.evict_fraction >= 1.0 and freed < shortfall:
                 # registered caches are dry; the width lever is next
                 if _apc_disk_armed(gen):
-                    if not _retire_largest(gen, st) and _live_rows(gen):
+                    outcome = _retire_largest(gen, st)
+                    if outcome is RetireOutcome.REFUSED:
+                        # The removal never ran, so the dry evict before
+                        # it is no shed either: nothing is measured, and
+                        # orange samples again after the back-off.
+                        st.shed_times.pop()
+                        st.shed_measure_from = None
+                    elif outcome is RetireOutcome.NONE and _live_rows(gen):
                         # Every row is in a forced close. A dry evict while
                         # they finish is not a shed, so it neither counts
                         # against the cap nor is measured as a failed

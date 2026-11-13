@@ -26,6 +26,7 @@ from gmlx._vendor.mlx_vlm.models.rope_utils import apply_multimodal_rotary_pos_e
 
 from gmlx.cache.attention import create_attention_mask, scaled_dot_product_attention
 from gmlx.cache.kv_cache import ArraysCache, KVCache
+from gmlx.cache.row_ends import row_ends_attention
 from gmlx.device import metal_info
 from gmlx.eval_guard import guard
 
@@ -1655,7 +1656,10 @@ class Qwen3_5Attention(nn.Module):
         if left_padded_decode:
             mask = None
 
-        if (target_verify and L > 1) or left_padded_decode:
+        if getattr(cache, "_row_ends", None) is not None:
+            # Rows of an uneven native head batch end apart (gmlx/cache/row_ends.py).
+            output = row_ends_attention(queries, keys, values, cache, self.scale)
+        elif (target_verify and L > 1) or left_padded_decode:
             output = _target_verify_left_padded_attention(
                 queries, keys, values, cache=cache, scale=self.scale, mask=mask
             )

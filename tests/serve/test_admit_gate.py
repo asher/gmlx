@@ -205,6 +205,76 @@ def test_gate_outside_pacer_composes(monkeypatch):
     assert [s[0] for s in pending] == [1]  # candidate kept its position
 
 
+def _held_then_green(monkeypatch, bands):
+    """Both wrappers over a stock body whose tick is 0.5 s of decode. The
+    last chunk took 3 s and just ran, so the pacer owes 3 s of decode
+    before the next. ``bands`` gives the governor band tick by tick: a
+    hold while yellow, and a join that fits while green."""
+    import gmlx.serve.governor as gov
+
+    monkeypatch.setenv("GMLX_DECODE_PREFILL_RATIO", "1.0")
+    clock = _Clock()
+
+    def _decode_tick(self, **kw):
+        clock.advance(0.5)
+        return _fake_next(self, **kw)
+
+    monkeypatch.setattr(ar.BatchGenerator, "_next", _decode_tick)
+    monkeypatch.setattr(batch_sched, "time",
+                        SimpleNamespace(perf_counter=clock))
+    monkeypatch.setattr(ag, "time", SimpleNamespace(perf_counter=clock))
+    batch_sched.install_decode_priority_sched()
+    ag.install_admit_headroom_gate()
+    band = iter(bands)
+    monkeypatch.setattr(gov, "admission_hold_reason",
+                        lambda gen: next(band) or None)
+    monkeypatch.setattr(ag, "_evict_shortfall", lambda *a: False)
+    monkeypatch.setattr(ag, "_evict_shortfall_held", lambda *a: False)
+    _always_decline(monkeypatch, projected=1e9, headroom=10e9)
+    g = FakeGen(rows=1)
+    g._kq_last_chunk_time = 3.0
+    g._kq_decode_since_chunk = 0.0
+    return ar.BatchGenerator._next, g
+
+
+def test_a_join_held_past_what_the_pacer_owes_is_taken_when_the_band_clears(
+        monkeypatch, caplog):
+    """The governed rung: a join held 4 s in yellow, then one green tick
+    before the band turns back. The decode the hold ran pays the 3 s the
+    pacer owed, so the green tick takes the join. Without it the pacer
+    held the join that tick, the band turned back and held it again."""
+    yellow = "governor yellow"
+    wrapped, g = _held_then_green(monkeypatch, [yellow] * 8 + [""]
+                                  + [yellow] * 20)
+    with caplog.at_level("INFO", logger=ag._log.name):
+        for _ in range(9):
+            wrapped(g)
+    assert g.admitted == [1]
+    admits = [r.message for r in caplog.records if "admitting" in r.message]
+    assert admits == ["[admit] admitting uid=[1] after 3.0s deferred"]
+
+
+def test_the_admitting_line_is_logged_once_on_the_tick_that_takes_the_join(
+        monkeypatch, caplog):
+    """A join held 1 s, under the 3 s of decode the pacer owes: the pacer
+    holds it for the rest. The admitting line comes once, on the tick the
+    join is taken, not on every tick the gate lets it through."""
+    yellow = "governor yellow"
+    wrapped, g = _held_then_green(monkeypatch, [yellow] * 2 + [""] * 20)
+    taken_at = None
+    with caplog.at_level("INFO", logger=ag._log.name):
+        for tick in range(1, 13):
+            wrapped(g)
+            if g.admitted and taken_at is None:
+                taken_at = tick
+                lines = sum("admitting" in r.message for r in caplog.records)
+    assert g.admitted == [1]
+    # 1 s of held decode and 4 paced ticks of 0.5 s pay the 3 s.
+    assert taken_at == 7
+    assert lines == 1
+    assert sum("admitting" in r.message for r in caplog.records) == 1
+
+
 def test_update_kv_rates_and_projection(monkeypatch):
     import gmlx.gen.prefill_decay as pd
 
@@ -545,6 +615,81 @@ def test_projection_window_caps_rotating_kinds(monkeypatch):
         kv_new + transient + sm.admit_reserve_bytes(0), rel=0.05)
 
 
+class FakeGridKV(FakeKV):
+    """A cache that grows on the capacity grid, as the gmlx KV caches do."""
+
+    _kv_grid = True
+
+
+def test_a_join_on_the_grid_is_priced_at_the_grid_point(monkeypatch):
+    """A row 80000 tokens deep holds the grid point 80384. A join that
+    takes the batch to 83000 tokens grows both rows to the next grid
+    point, 88576, not to 83200, the block past it."""
+    import gmlx.gen.prefill_decay as pd
+    from gmlx.cache.kv_append import grid_capacity
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    monkeypatch.setattr(pd, "score_transient_bytes", lambda *a, **k: 0.0)
+    g = FakeGen(rows=1)
+    kv = FakeGridKV(length=80384, offset=80000)
+    g._generation_batch.prompt_cache = [kv]
+    live = kv.keys.nbytes + kv.values.nbytes
+    assert grid_capacity(83000, 256) == 88576
+
+    projected, _, _ = sm.project_admission(g, [_pending(2, 82000, 1000)])
+
+    kv_new = live / 80384 * 2 * 88576 - live
+    assert projected - 2e9 == pytest.approx(kv_new, rel=1e-3)
+
+
+class _LayerKV:
+    """One attention layer that reports its bytes: ``per_token`` for the
+    whole batch at ``depth``."""
+
+    def __init__(self, per_token, depth):
+        self.per_token, self.depth = per_token, depth
+
+    def admit_bytes(self):
+        return self.per_token, self.depth, 0.0
+
+
+@pytest.mark.parametrize("rows, depth, prompt, gen",
+                         [(1, 80000, 40000, 1000), (3, 40000, 1000, 80000)],
+                         ids=["the-join", "the-final-depth"])
+def test_a_join_reserves_its_own_caches_or_one_layer_at_the_final_depth(
+        monkeypatch, rows, depth, prompt, gen):
+    """16 layers of 16 KiB a row token. Beside a row 80000 deep, a join
+    with a 40000 token prompt holds its own 16 layers at that prompt
+    beside one live layer until the join returns: about 12 GB. Beside
+    three rows 40000 deep, a short join that may write 80000 tokens takes
+    the batch to that depth, where one layer at the joined width is held
+    twice by a regrow: about 5 GB. The reserve held one live layer and
+    one row of it, under 3 GB in both."""
+    import gmlx.gen.prefill_decay as pd
+
+    monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 200e9)
+    monkeypatch.setattr(pd, "score_transient_bytes", lambda *a, **k: 0.0)
+    bpt, layers = 16384.0, 16
+    g = FakeGen(rows=rows)
+    g._generation_batch = FakeBatch(
+        range(rows), [_LayerKV(bpt * rows, depth) for _ in range(layers)])
+    live = layers * bpt * rows * depth
+
+    projected, _, parts = sm.project_admission(
+        g, [_pending(2, prompt, gen)])
+
+    width, final = rows + 1, sm._round_block(max(depth, prompt + gen))
+    kv_new = layers * bpt * width * final - live
+    held_join = layers * bpt * sm._round_block(prompt) + bpt * rows * depth
+    held_later = width * bpt * final
+    want = held_join if rows == 1 else held_later
+    assert want == max(held_join, held_later)
+    assert projected - kv_new == pytest.approx(want, rel=1e-6)
+    assert f"reserve {want / 1e9:.1f}" in parts
+
+
 def test_empty_batch_projection_none():
     g = FakeGen(rows=0)
     g._generation_batch.prompt_cache = []
@@ -613,3 +758,126 @@ def test_fresh_model_projects_from_boot_rates(monkeypatch):
         1000.0 * 512 + pd.score_transient_bytes(g.model, None, 500)
         + sm.admit_reserve_bytes(0), rel=0.05)
     assert "kv" in parts
+
+
+def _pooled_gen(monkeypatch, projected_blocks, band=None, fits_ws=False):
+    """A decoding row, a waiting request, and a prompt cache pool of two
+    finished prompts: 32 idle blocks released first, then 4. The budget
+    has room for 2 blocks, and each evicted block gives its bytes back."""
+    import time
+
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx.cache.apc_manager import GmlxAPCManager
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.governor as gov
+
+    monkeypatch.delenv("GMLX_GOVERNOR", raising=False)
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 100 << 30)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(pd, "streamed_tracked_bytes", lambda: 0.0)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    for start, n in ((0, 512), (1000, 64)):
+        k = mx.zeros((1, 2, n, 16), mx.float16)
+        m.release(m.store_kv_blocks(
+            list(range(start, start + n)), [k, k], [k, k]))
+    assert len(m.hash_table) == 36
+    full = m.resident_bytes()
+    block = full // 36
+
+    def head():
+        return 2 * block + full - m.resident_bytes()
+
+    monkeypatch.setattr(gov, "_headroom_and_ws",
+                        lambda margin: (head(), 100e9))
+    def project(gen, cands):
+        # Stamped for the governor's charge, as the real projection is.
+        gen._kq_admit_last_projection = (
+            time.perf_counter(), projected_blocks * block)
+        return (projected_blocks * block,
+                head() + (1e9 if fits_ws else 0), "kv")
+
+    monkeypatch.setattr(sm, "project_admission", project)
+    monkeypatch.setitem(gov._STATS, "shortfall_evictions", 0)
+    g = FakeGen(rows=1)
+    g.apc_manager = m
+    g._kq_admit_kv_rates = {"k": {"rate": 1.0, "window": None}}
+    if band is not None:
+        gov._state(g).band = band
+    return g, m, block
+
+
+def _cold_first(m):
+    out, b = [], m._free_head
+    while b is not None:
+        if b.block_hash is not None:
+            out.append(b.block_hash)
+        b = b.next
+    return out
+
+
+@pytest.mark.parametrize("band, fits_ws", [(0, False), (0, True), (1, False)],
+                         ids=["would-defer", "fits-the-working-set",
+                              "held-in-yellow"])
+def test_a_join_over_budget_evicts_its_shortfall_and_admits_at_once(
+        gated, monkeypatch, band, fits_ws):
+    """A join 5 blocks over the budget, with a pool that holds 36. The
+    gate takes the shortfall from the pool's coldest blocks and admits on
+    the same tick: no deferral, and the rest of the pool stays. Without
+    the eviction the join defers, or it is admitted over the governed
+    budget and every join after it is held."""
+    import gmlx.serve.governor as gov
+
+    wrapped, _ = gated
+    g, m, block = _pooled_gen(monkeypatch, 7, band=band, fits_ws=fits_ws)
+    cold = _cold_first(m)
+    full = m.resident_bytes()
+
+    wrapped(g)
+
+    assert g.admitted == [1]
+    assert not getattr(g, "_kq_admit_deferred_s", None)
+    gone = [h for h in cold if h not in m.hash_table]
+    assert gone == cold[:6]
+    # The shortfall is 5 blocks and 16 bytes, the slack 512 bytes: one
+    # more block covers both.
+    assert full - m.resident_bytes() == 6 * block
+    assert gov._STATS["shortfall_evictions"] == 1
+
+
+@pytest.mark.parametrize("projected_blocks, band", [(50, 0), (7, 2)],
+                         ids=["pool-short", "orange"])
+def test_a_shortfall_the_pool_cannot_give_leaves_it_whole_and_defers(
+        gated, monkeypatch, projected_blocks, band):
+    """A join the pool cannot cover takes nothing from it, and neither
+    does a join under an orange hold, where the governor's own rung owns
+    the pool. The join defers as before."""
+    wrapped, clock = gated
+    g, m, _ = _pooled_gen(monkeypatch, projected_blocks, band=band)
+    for _ in range(3):
+        clock.advance(0.05)
+        wrapped(g)
+    assert g.admitted == []
+    assert 1 in g._kq_admit_deferred_s
+    assert len(m.hash_table) == 36
+
+
+def test_a_join_still_held_in_yellow_keeps_its_projection_stamp(
+        gated, monkeypatch):
+    """Under a yellow hold the gate projects only to price an eviction. A
+    join the pool cannot cover stays held with the stamp of its last
+    projection, so the governor's charge for it runs out as it did. A join
+    the eviction admits takes the new stamp, as any admitted join does."""
+    wrapped, _ = gated
+    g, _, block = _pooled_gen(monkeypatch, 50, band=1)
+    old = g._kq_admit_last_projection = (1.5, 3.0 * block)
+    wrapped(g)
+    assert g.admitted == []
+    assert g._kq_admit_last_projection is old
+
+    g, _, block = _pooled_gen(monkeypatch, 7, band=1)
+    g._kq_admit_last_projection = (1.5, 3.0 * block)
+    wrapped(g)
+    assert g.admitted == [1]
+    assert g._kq_admit_last_projection[1] == 7 * block

@@ -50,7 +50,8 @@ def test_emptied_batch_adopts_a_row_without_padding():
     assert live.offset.tolist() == [300]
     # The language model reads a one-row batch's position off _idx.
     assert live._idx == 300
-    assert live.keys[0, 0, :, 0].tolist() == [float(t + 1) for t in range(300)]
+    # The buffer has spare rows past the watermark, on the capacity grid.
+    assert live.keys[0, 0, :300, 0].tolist() == [float(t + 1) for t in range(300)]
 
 
 def test_emptied_batch_adopts_two_rows_right_aligned():

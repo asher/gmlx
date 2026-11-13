@@ -1099,8 +1099,9 @@ class ResponseGenerator:
     def _drop_cancelled(self, batch_gen, active: dict):
         """gmlx: drop abandoned requests, and their tick-guard ledger
         entries. A row ``remove`` cannot take out yet (it shares a prompt
-        batch) is retried each call until it is gone. Returns the engine
-        to keep, or None when only abandoned rows were left in it."""
+        batch, or the allocator refused its removal through every retry)
+        is retried each call until it is gone. Returns the engine to keep,
+        or None when only abandoned rows were left in it."""
         from gmlx.serve import tick_guard
         from gmlx.serve.row_sampling import live_uids
 
@@ -1113,12 +1114,13 @@ class ResponseGenerator:
         if unremoved:
             live = live_uids(batch_gen)
             for uid in list(unremoved):
-                if uid not in live or batch_gen.remove(uid):
+                if uid not in live or tick_guard.remove_row(batch_gen, uid):
                     unremoved.discard(uid)
         for uid in cancelled:
             if uid not in active:
                 continue
-            removed = batch_gen.remove(uid)
+            # A refusal inside the removal requeues the rows beside it.
+            removed = tick_guard.remove_row(batch_gen, uid)
             tick_guard.forget(batch_gen, uid)
             info = active.pop(uid)
             logger.info(

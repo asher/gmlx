@@ -362,6 +362,200 @@ def test_orange_defers_its_retire_while_every_row_closes(rig, monkeypatch):
     assert len(st.shed_times) == 2
 
 
+def _refusing(gen, monkeypatch):
+    """Make every try of ``gen``'s removals an allocator refusal."""
+    import gmlx.eval_guard as eg
+
+    monkeypatch.setattr(eg, "drain_for", lambda site: None)
+    tries = []
+
+    def remove(uid):
+        tries.append(uid)
+        raise RuntimeError("[metal::malloc] Attempting to allocate 1 bytes")
+
+    gen.remove = remove
+    return tries
+
+
+class _Clock:
+    """``time`` for the governor, with the clock moved on by ``skip``."""
+
+    def __init__(self):
+        self.skip = 0.0
+
+    def perf_counter(self):
+        return time.perf_counter() + self.skip
+
+    def __getattr__(self, n):
+        return getattr(time, n)
+
+
+def test_an_orange_retire_refused_at_every_try_backs_off(rig, monkeypatch):
+    """The allocator refuses the retire's removal at every try, so the
+    row still decodes. The retire counts nothing, spends no shed, is not
+    measured as a failed recovery and is not taken for a forced close.
+    Orange then waits out the refusal back-off with no evict and no
+    retry, red never fires off it, and after the back-off the retire is
+    tried again and runs once the removal goes through."""
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    clock = _Clock()
+    monkeypatch.setattr(gov, "time", clock)
+    gen, st = _dry_orange(rig, monkeypatch, None, None)
+    remove = gen.remove
+    tries = _refusing(gen, monkeypatch)
+    for _ in range(4):
+        gov._governor_tick(gen)
+        assert st.band == gov.ORANGE
+        assert tries == [0] * tg._REMOVE_TRIES
+        assert gov._STATS["orange_evictions"] == 1
+        assert gen._generation_batch.uids == [0, 1]
+        assert gen._unprocessed_sequences == []
+        assert st.shed_times == [] and st.shed_measure_from is None
+        assert not st.orange_failed and st.last_victim_uid is None
+        assert gov._STATS["removals_refused"] == 1
+        assert gov._STATS["last_action"] == "retire uid=0 refused"
+    assert gov._STATS["orange_retires"] == 0
+    assert gov._STATS["retires_deferred"] == 0
+    assert gov._STATS["red_failures"] == 0 and failed == []
+    clock.skip = 6.0
+    gov._governor_tick(gen)
+    assert tries == [0] * (2 * tg._REMOVE_TRIES)
+    assert gov._STATS["orange_evictions"] == 2
+    assert gov._STATS["removals_refused"] == 2
+    clock.skip = 12.0
+    gen.remove = remove
+    gov._governor_tick(gen)
+    assert gen.removed == [0]
+    assert gov._STATS["orange_retires"] == 1
+    assert gov._STATS["last_action"] == "retire uid=0"
+
+
+def test_a_red_failure_refused_at_every_try_backs_off(rig, monkeypatch):
+    """Red's removal is refused at every try: the row still decodes, no
+    row fails and no shed is booked. Red waits out the refusal back-off
+    before it tries again."""
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    clock = _Clock()
+    monkeypatch.setattr(gov, "time", clock)
+    gen, st = _dry_orange(rig, monkeypatch, None, None)
+    tries = _refusing(gen, monkeypatch)
+    assert not gov._fail_largest(gen, st, "test")
+    assert tries == [0] * tg._REMOVE_TRIES
+    assert gen._generation_batch.uids == [0, 1] and failed == []
+    assert 0 in tg._state(gen).ledger
+    assert st.shed_times == [] and st.shed_measure_from is None
+    assert gov._STATS["red_failures"] == 0
+    assert gov._STATS["removals_refused"] == 1
+    assert gov._STATS["last_action"] == "red fail uid=0 refused"
+    for _ in range(3):
+        st.orange_failed = True             # red holds
+        gov._governor_tick(gen)
+        assert st.band == gov.RED
+    assert tries == [0] * tg._REMOVE_TRIES
+    clock.skip = 6.0
+    st.orange_failed = True
+    gov._governor_tick(gen)
+    assert tries == [0] * (2 * tg._REMOVE_TRIES)
+    assert gov._STATS["removals_refused"] == 2
+    assert gov._STATS["red_failures"] == 0 and failed == []
+
+
+def test_an_orange_refusal_holds_red_back_inside_its_window(rig,
+                                                           monkeypatch):
+    """An orange retire is refused; red inside the back-off does not try
+    its failure, and red after the back-off does."""
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    clock = _Clock()
+    monkeypatch.setattr(gov, "time", clock)
+    gen, st = _dry_orange(rig, monkeypatch, None, None)
+    tries = _refusing(gen, monkeypatch)
+    gov._governor_tick(gen)
+    assert st.band == gov.ORANGE
+    assert tries == [0] * tg._REMOVE_TRIES
+    st.orange_failed = True                 # red next tick
+    gov._governor_tick(gen)
+    assert st.band == gov.RED
+    assert tries == [0] * tg._REMOVE_TRIES
+    clock.skip = 6.0
+    st.orange_failed = True
+    gov._governor_tick(gen)
+    assert tries == [0] * (2 * tg._REMOVE_TRIES)
+    assert gov._STATS["last_action"] == "red fail uid=0 refused"
+    assert gov._STATS["red_failures"] == 0 and failed == []
+
+
+def test_a_refusal_back_off_ends_when_the_band_goes_green(rig, monkeypatch):
+    """A retire is refused, the pressure passes and the band goes green
+    inside the back-off. A new orange inside that window takes its first
+    evict: the old refusal says nothing of the new pressure."""
+    gen, st = _dry_orange(rig, monkeypatch, None, None)
+    _refusing(gen, monkeypatch)
+    gov._governor_tick(gen)
+    assert gov._STATS["removals_refused"] == 1
+    assert gov._STATS["orange_evictions"] == 1
+    rig["head"] = 100e9
+    st.obs_delta_ema = 0.0
+    for _ in range(int(gov._env_f("GMLX_GOV_DY", 8)) + 2):
+        gov._governor_tick(gen)
+    assert st.band == gov.GREEN
+    assert st.refused_until == 0.0
+    rig["head"] = 44e9
+    st.obs_delta_ema = 1e9
+    gov._governor_tick(gen)
+    assert st.band == gov.ORANGE
+    assert gov._STATS["orange_evictions"] == 2
+    assert st.evict_fraction == 1.0         # the first evict, at 0.5
+
+
+def test_the_kernel_floor_collapse_backs_off_only_its_failure(rig,
+                                                             monkeypatch):
+    """The kernel floor collapses and its failure's removal is refused.
+    While the back-off holds, a further collapse still evicts and clears
+    the cache but tries no failure; after it, the failure is tried."""
+    failed = []
+    monkeypatch.setattr(tg, "_row_failed_callbacks",
+                        [lambda uid, info: failed.append(uid)])
+    clock = _Clock()
+    monkeypatch.setattr(gov, "time", clock)
+    cleared = []
+    monkeypatch.setattr(gov.mx, "clear_cache", lambda: cleared.append(1))
+    evicted = []
+    gov.register_cache("apc", lambda: 0, lambda f: (evicted.append(f), 0)[1])
+    gen = FakeGen(rows=1, rate=1e6, live=8e9)
+    tg._state(gen).ledger[0] = tg._Row([1] * 8, 64, {}, None, None)
+    tries = _refusing(gen, monkeypatch)
+    rig["kernel"] = 7.5e9
+    gov._governor_tick(gen)
+    rig["kernel"] = 6.0e9                   # collapsing: red and a failure
+    gov._governor_tick(gen)
+    assert tries == [0] * tg._REMOVE_TRIES
+    assert gov._STATS["last_action"] == "red fail uid=0 refused"
+    n_evict, n_clear = len(evicted), len(cleared)
+    rig["kernel"] = 4.5e9                   # still collapsing, inside
+    gov._governor_tick(gen)
+    assert tries == [0] * tg._REMOVE_TRIES
+    assert len(evicted) == n_evict + 1 and len(cleared) > n_clear
+    clock.skip = 6.0
+    rig["kernel"] = 3.0e9
+    gov._governor_tick(gen)
+    assert tries == [0] * (2 * tg._REMOVE_TRIES)
+    assert failed == [] and gov._STATS["red_failures"] == 0
+
+
+@pytest.mark.parametrize("raw, want", [
+    ("inf", 60.0), ("600", 60.0), ("0.25", 0.25), ("0", 0.0), ("-1", 0.0),
+    ("nan", 0.0)])
+def test_the_refusal_back_off_is_at_most_a_minute(monkeypatch, raw, want):
+    monkeypatch.setenv("GMLX_GOV_REFUSAL_BACKOFF_S", raw)
+    assert gov._refusal_backoff_s() == want
+
+
 def test_red_and_the_tick_guard_take_a_row_in_a_close(rig, monkeypatch):
     monkeypatch.setattr(tg, "_row_failed_callbacks", [])
     gen, st = _dry_orange(rig, monkeypatch, _Closing(), _Closing())

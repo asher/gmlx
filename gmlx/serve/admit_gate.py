@@ -27,6 +27,13 @@ batch: the ceiling tick trims the pending list to its head row, and the
 rest re-project next tick, so past-ceiling admission stays serialized
 for as long as the projection keeps failing.
 
+Before it declines, the gate has the governor evict what the join is
+over the governed budget from the prompt cache pool, the coldest blocks
+first (governor.cover_admission_shortfall), and admits on the same tick
+when that covers it. The pool is plain active memory to the budget, so a
+full pool would otherwise defer every join. A pool that cannot cover the
+whole shortfall is left alone and the deferral above stands.
+
 The projection is conservative in one direction by design: a finished
 batch that has not yet released its footprint makes measured headroom
 look smaller than it will be, which biases toward deferring. That is the
@@ -40,7 +47,11 @@ tick.
 
 Install after the pacer (install_decode_priority_sched) so this wrapper
 runs outside it: on a declined tick the pacer sees no prefill work and
-passes straight through, decode runs unpaced while admission waits. Both
+passes straight through, decode runs unpaced while admission waits, and
+``_kq_admit_holding`` has the pacer count that decode toward the next
+chunk, so the join is not paced again once the gate lets it through. The
+pacer may still hold a join for the rest of what it owes, so the
+admitting line is logged only once the tick has taken the join. Both
 wrappers merge-never-clobber the pending list on restore, so an insert
 from a handler thread mid-call survives one stash nested in the other.
 
@@ -132,11 +143,15 @@ def _should_decline(gen) -> bool:
     from .governor import admission_hold_reason
     from .memory import project_admission
 
+    cands = pending[: len(uids)]
     hold = admission_hold_reason(gen)
     if hold:
         projected, headroom, parts = 0.0, 0.0, hold
+        if _evict_shortfall_held(gen, cands):
+            _log_admit(gen, uids, deferred)
+            return False
     else:
-        verdict = project_admission(gen, pending[: len(uids)])
+        verdict = project_admission(gen, cands)
         if verdict is None:
             # No basis to project (nothing measured yet): admit. The
             # first request on a freshly loaded model cannot be the one
@@ -144,7 +159,10 @@ def _should_decline(gen) -> bool:
             _log_admit(gen, uids, deferred)
             return False
         projected, headroom, parts = verdict
-        if projected <= headroom:
+        # A join over the governed budget takes its shortfall from the
+        # prompt cache pool first, also when it fits the working set: the
+        # governor would hold every join behind it.
+        if _evict_shortfall(gen, cands, projected) or projected <= headroom:
             _log_admit(gen, uids, deferred)
             return False
 
@@ -191,11 +209,49 @@ def _should_decline(gen) -> bool:
     return True
 
 
+def _evict_shortfall(gen, cands, projected: float) -> bool:
+    """Have the governor evict what the join is over budget from the
+    prompt cache pool. True when the join then fits."""
+    from .governor import cover_admission_shortfall, shortfall_eviction_due
+    from .memory import admission_slack_bytes
+
+    if not shortfall_eviction_due(gen):
+        return False
+    return cover_admission_shortfall(
+        gen, projected, admission_slack_bytes(gen, len(cands)))
+
+
+def _evict_shortfall_held(gen, cands) -> bool:
+    """The same under a yellow hold, where the gate does not project. A
+    join still held keeps the stamp of its last projection, so the
+    governor's charge for it ages as it does today."""
+    from .governor import shortfall_eviction_due
+    from .memory import project_admission
+
+    if not shortfall_eviction_due(gen):
+        return False
+    stamp = getattr(gen, "_kq_admit_last_projection", None)
+    verdict = project_admission(gen, cands)
+    if verdict is not None and _evict_shortfall(gen, cands, verdict[0]):
+        return True
+    gen._kq_admit_last_projection = stamp
+    return False
+
+
 def _log_admit(gen, uids, deferred) -> None:
-    waited = [deferred.get(u, 0.0) for u in uids if u in deferred]
-    if waited:
+    """Mark deferred candidates for the admitting line, which the wrapper
+    logs once the tick has taken them (_log_taken). The pacer inside the
+    gate can still hold a join the gate lets through."""
+    waited = {u: deferred[u] for u in uids if u in deferred}
+    gen._kq_admit_announce = waited or None
+
+
+def _log_taken(gen, waited) -> None:
+    pending = {s[0] for s in gen._unprocessed_sequences}
+    taken = [u for u in waited if u not in pending]
+    if taken:
         _log.info("[admit] admitting uid=%s after %.1fs deferred",
-                  uids, max(waited))
+                  taken, max(waited[u] for u in taken))
 
 
 def _one_row_next(gen, orig_next, kwargs):
@@ -239,6 +295,7 @@ def install_admit_headroom_gate() -> None:
     _orig_next = _ar.BatchGenerator._next
 
     def _gated_next(self, **kwargs):
+        self._kq_admit_announce = None
         try:
             decline = _should_decline(self)
         except Exception:
@@ -251,12 +308,18 @@ def install_admit_headroom_gate() -> None:
         if not decline:
             if ceiling and len(self._unprocessed_sequences) > 1:
                 return _one_row_next(self, _orig_next, kwargs)
-            return _orig_next(self, **kwargs)
+            out = _orig_next(self, **kwargs)
+            if self._kq_admit_announce:
+                _log_taken(self, self._kq_admit_announce)
+            return out
         stash_pending = self._unprocessed_sequences
         self._unprocessed_sequences = []
+        # The pacer inside counts this tick's decode toward the next chunk.
+        self._kq_admit_holding = True
         try:
             return _orig_next(self, **kwargs)
         finally:
+            self._kq_admit_holding = False
             # insert() may have appended to (or rebound) the temp list
             # from a handler thread mid-call; merge, never clobber.
             arrived = self._unprocessed_sequences

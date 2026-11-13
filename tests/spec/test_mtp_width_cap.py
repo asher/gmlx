@@ -252,7 +252,7 @@ def test_model_is_moe_no_layers_is_false():
 
 def test_moe_target_caps_at_one_over_any_family_default():
     """Routed experts cap at 1 whatever the family says: the gemma assistant
-    (2, earned on the dense 31B) and dense qwen (uncapped) both drop."""
+    (2, earned on the dense 31B) and the dense qwen head both drop."""
     moe = _fake_model(MOE_PROJ_3D)
     assert _stamped("gemma4_assistant", target=moe) == (1, 0)
     assert _stamped("qwen3_5", target=moe) == (1, 0)
@@ -261,9 +261,11 @@ def test_moe_target_caps_at_one_over_any_family_default():
 
 
 def test_dense_target_keeps_the_family_default():
+    from gmlx.spec.mtp_load import _NATIVE_HEAD_WIDTH_CAP
+
     dense = _fake_model(DENSE_PROJ)
     assert _stamped("gemma4_assistant", target=dense) == (2, 0)
-    assert _stamped("qwen3_5", target=dense) == (0, 0)
+    assert _stamped("qwen3_5", target=dense) == (_NATIVE_HEAD_WIDTH_CAP, 0)
     assert _stamped("brand_new_arch", target=dense) == (2, 0)
 
 
@@ -292,9 +294,11 @@ def test_absent_target_falls_back_to_the_family_default():
 
 
 def test_stamp_family_defaults():
-    # dense qwen nextn: measured a win through c4, so uncapped
-    assert _stamped("qwen3_5") == (0, 0)
-    assert _stamped("qwen3_5_text") == (0, 0)
+    from gmlx.spec.mtp_load import _NATIVE_HEAD_WIDTH_CAP
+
+    # dense qwen nextn: drafts up to its switch width, plain above it
+    assert _stamped("qwen3_5") == (_NATIVE_HEAD_WIDTH_CAP, 0)
+    assert _stamped("qwen3_5_text") == (_NATIVE_HEAD_WIDTH_CAP, 0)
     # MoE nextn loses at B=2 (0.78x aggregate, d14k) -> speculate at B=1 only
     assert _stamped("qwen3_5_moe") == (1, 0)
     assert _stamped("qwen3_5_moe_text") == (1, 0)

@@ -32,7 +32,9 @@ from collections.abc import Callable, Iterator
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
 from gmlx import mlx_guards
+from gmlx.cache.kv_append import eval_cache as _eval_cache
 from gmlx.cache.kv_append import release as _release_kv
+from gmlx.cache import row_ends as _row_ends
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
 from gmlx.gen.logprobs import RoundLogprobs
@@ -2372,14 +2374,21 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         _log.warning("APC retire failed; continuing", exc_info=True)
 
 
+def _filter_batch_rows(prompt_cache: list, keep: mx.array) -> None:
+    """Keep the rows ``keep`` of each layer cache, one layer at a time: the
+    layer's pending rollback copy and its kept rows are evaluated before
+    the next layer's are built, so a finish holds one layer's old and new
+    arrays together and not every layer's."""
+    for c in prompt_cache:
+        c.filter(keep)
+        _eval_cache(c)
+
+
 def _filter_batch_rows_empty(prompt_cache: list) -> None:
     """Drop every row from each batch cache entry.
 
-    Both cache origins' BatchKVCache.filter min-reduce left_padding after
-    the take to shift out shared padding; that reduce throws on an empty
-    index set, so the all-rows-finished injection adoption could never
-    empty a batch this way. Mirror filter's take for the empty set and
-    return the entry to its empty state (no buffers, watermark 0). An
+    Each entry goes back to its empty state (no buffers, watermark 0, no
+    row ends), which the all-rows-finished injection adoption needs. An
     emptied batch has nothing left to align against: with the finished
     batch's watermark kept, extend() left-padded the adopted row by that
     watermark, and the qwen3_5 language model resolves a one-row batch's
@@ -2406,6 +2415,8 @@ def _filter_batch_rows_empty(prompt_cache: list) -> None:
         c._idx = 0
         if hasattr(c, "_right_padding"):
             c._right_padding = None
+        if hasattr(c, "_clear_row_ends"):
+            c._clear_row_ends()  # no rows, no row ends
         if hasattr(c, "rotated"):
             # BatchRotatingKVCache: the constructor's empty ring state.
             c.rotated = False
@@ -2662,6 +2673,25 @@ def _lift_live_cache(cache):
     return lifted
 
 
+def _join_injected_caches(prompt_cache: list, inj_cache: list) -> None:
+    """Extend each live layer cache with the injected rows' cache for that
+    layer, one layer at a time: the layer's pending rollback copy and then
+    its joined copy are evaluated before the next layer's are built, so a
+    join holds one layer's old and new arrays together and not every
+    layer's."""
+    for i, cache in enumerate(prompt_cache):
+        lifted = _lift_live_cache(cache)
+        if lifted is not cache:
+            prompt_cache[i] = cache = lifted
+        _eval_cache(cache)
+        extend_fn = getattr(cache, "extend", None)
+        if callable(extend_fn):
+            other = _lift_injected_cache(cache, inj_cache[i])
+            extend_fn(other)
+            _eval_cache(cache)
+            del other
+
+
 _width_cap_memo: tuple[str, int | None] = ("", None)
 
 # A gated batch back under the cap only re-arms when every surviving row
@@ -2732,15 +2762,17 @@ def _mixed_policy(drafter, lm, cap: int) -> bool:
     ``cap`` rows and decodes the rest plain in the same verify forward
     (a mixed batch), instead of converting to plain decode until it drains.
 
-    GMLX_MTP_MIXED: ``auto`` (default), ``1`` forces it where the mechanism
-    applies, ``0`` restores the plain-decode trip. The mechanism needs a
-    drafter that owns its per-row state (no shared target KV), a target
-    that rolls back each row by its own accept count (_ragged_rollback),
-    and a cap. ``auto`` also leaves routed-expert targets on the trip: a
-    plain row verifies a full block of padding drafts, and on an MoE target
-    those positions widen the expert union the same as speculating on every
+    GMLX_MTP_MIXED: ``0`` (default) is the plain-decode trip, ``1`` turns
+    the mixed batch on where the mechanism applies, ``auto`` does the same
+    except on routed-expert targets. The mechanism needs a drafter that
+    owns its per-row state (no shared target KV), a target that rolls back
+    each row by its own accept count (_ragged_rollback), and a cap. Off is
+    the default because a mixed batch decodes slower than the same rows
+    plain. ``auto`` leaves routed-expert targets on the trip: a plain row
+    verifies a full block of padding drafts, and on an MoE target those
+    positions widen the expert union the same as speculating on every
     row, the cost the MoE cap exists to avoid."""
-    mode = os.environ.get("GMLX_MTP_MIXED", "auto").strip().lower()
+    mode = os.environ.get("GMLX_MTP_MIXED", "0").strip().lower()
     if mode in ("0", "off", "false", "no") or cap < 1:
         return False
     if getattr(drafter, "uses_shared_kv", True):
@@ -2919,11 +2951,12 @@ def _owned_decode_rounds_batch(
     while one is active the gated rounds give up their lookahead step,
     because the next step's processing depends on the token it produces.
 
-    Mixed batches (_mixed_policy): past the width cap the batch keeps
-    speculating on the ``cap`` oldest rows and verifies every other row in
-    the same forward behind padding drafts, which the exact-match walk
-    accepts only where they equal the target's token. The drafter runs on
-    the speculating rows alone. A plain row keeps a parked drafter context
+    Mixed batches (_mixed_policy, off by default): past the width cap the
+    batch keeps speculating on the ``cap`` oldest rows and verifies every
+    other row in the same forward behind padding drafts, which the
+    exact-match walk accepts only where they equal the target's token. The
+    drafter runs on the speculating rows alone. A plain row keeps a parked
+    drafter context
     (row_context_* on the drafter) warm from each round's capture, so it
     takes over the drafter at full context when a speculating row
     finishes; a drafter without parked contexts is cold-started from the
@@ -3014,6 +3047,9 @@ def _owned_decode_rounds_batch(
               if _packed_batch_cache(c)]
     packed_gate = bool(packed) and len(b) > 1
     mixed = not packed_gate and _mixed_policy(drafter, lm, cap)
+    # The native head batch keeps each row's end through an uneven rollback
+    # instead of rolling the rows right (gmlx/cache/row_ends.py).
+    row_ends_on = _row_ends.row_ends_active(drafter, lm, mixed)
     gated = bool(cap) and len(b) > cap and not mixed
     if gated:
         _log_width_cap_once(
@@ -3360,6 +3396,10 @@ def _owned_decode_rounds_batch(
         """Latch the batch into plain decode until it drains under the cap."""
         nonlocal gated
         gated = True
+        if row_ends_on:
+            # Plain decode reads right-justified rows.
+            _row_ends.disarm(prompt_cache)
+            _row_ends.disarm(getattr(drafter, "_cache", None))
         _log_width_cap_once(
             f"trip: B={width} > cap={cap}; batch converts to plain decode "
             f"until drained")
@@ -3473,15 +3513,7 @@ def _owned_decode_rounds_batch(
                 row_deltas = _join_deltas(
                     row_deltas, len(active_idx),
                     _row_deltas(inj.get("rope_deltas"), B_new), B_new)
-                for i, cache in enumerate(prompt_cache):
-                    lifted = _lift_live_cache(cache)
-                    if lifted is not cache:
-                        prompt_cache[i] = cache = lifted
-                    extend_fn = getattr(cache, "extend", None)
-                    if callable(extend_fn):
-                        other = _lift_injected_cache(
-                            cache, inj["prompt_cache"][i])
-                        extend_fn(other)
+                _join_injected_caches(prompt_cache, inj["prompt_cache"])
 
                 # hidden is None while un-armed (arm-from-capture entry):
                 # the drafter holds no state to inject into, and the capture
@@ -3619,6 +3651,9 @@ def _owned_decode_rounds_batch(
                 dispatch_next = False
         n_active = len(active_idx)
         mixed_round = None
+        if row_ends_on and not gated:
+            _row_ends.arm(prompt_cache)
+            _row_ends.arm(getattr(drafter, "_cache", None))
         # Every round reads the active rows' own settings.
         eff, greedy, want, round_k = _round_rows()
         _walk_sampler = eff
@@ -4053,8 +4088,7 @@ def _owned_decode_rounds_batch(
                 j for j in range(n_active) if not finished[active_idx[j]]]
             if len(keep_slots) < n_active:
                 keep_mx = mx.array(keep_slots, dtype=mx.int32)
-                for c in prompt_cache:
-                    c.filter(keep_mx)
+                _filter_batch_rows(prompt_cache, keep_mx)
                 if row_deltas is not None:
                     row_deltas = row_deltas[keep_mx]
                 if _gated_pending is not None:

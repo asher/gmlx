@@ -489,6 +489,10 @@ def install_continuous_batch_admission() -> None:
                     }
                 )
                 pending.pop(0)
+                # The queue entry holds the joiner's caches now, and the
+                # rounds drop it at the join. This object would hold them
+                # through the step below.
+                other.prompt_cache = []
                 # The joined rows are live now: a failure on a later batch
                 # must find them in uids.
                 self._refresh_uids()
