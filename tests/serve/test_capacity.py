@@ -752,7 +752,8 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_gets_no_mark(
     every-token weights. Discovery writes no mark, and the run preflight
     and a plain serve entry price the model without the table. Past the
     budget without it, the mark stays and nothing is taken off. A model
-    that fits whole keeps its table: no mark, and nothing taken off."""
+    that fits whole reads its table from the file too: no mark, and the
+    table taken off. GMLX_STREAM_PLE=0 keeps the table of such a model."""
     from types import SimpleNamespace
 
     import gmlx.device as dev
@@ -775,13 +776,49 @@ def test_a_table_gathered_per_layer_that_brings_the_model_under_gets_no_mark(
     monkeypatch.setattr(disc, "_gguf_set_bytes", lambda p: rest + table)
     entry = disc.ClassifiedGguf(path, "model", "qwen4_exp", False, "Q4",
                                 True)
-    for budget, off, marked in ((int(budget_gb * GB), table, False),
-                                (rest - 1, 0, True),
-                                (rest + table + 1, 0, False)):
+    def check(budget, off, marked):
         monkeypatch.setattr(disc, "_stream_budget_bytes", lambda: budget)
         monkeypatch.setattr(dev, "stream_budget_bytes", lambda: budget)
         assert cap.deferred_table_bytes(path) == off
         assert cap.gathered_table_bytes(path) == off
         assert _plain_footprint(path, rest + table) == rest + table - off
         assert (disc._over_budget(entry) is not None) == marked
+
+    check(int(budget_gb * GB), table, False)
+    check(rest - 1, 0, True)
+    check(rest + table + 1, table, False)
     assert cap.held_table_bytes(path) == (table if held else 0)
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    check(rest + table + 1, 0, False)
+
+
+def test_a_per_layer_table_of_a_file_under_the_budget_is_read_from_the_file(
+        tmp_path, monkeypatch):
+    """A qwen4exp header whose whole file is under the stream budget: the
+    table is gathered from the file all the same, and the header-level
+    sizes report its bytes. Past the budget without the table, or with
+    GMLX_STREAM_PLE=0, they report none."""
+    import numpy as np
+
+    gguf = pytest.importorskip("gguf")
+    path = str(tmp_path / "q.gguf")
+    w = gguf.GGUFWriter(path, "qwen4exp")
+    w.add_tensor("per_layer_token_embd.weight", np.ones((1000, 33), np.int8),
+                 raw_dtype=gguf.GGMLQuantizationType.I8)
+    w.add_tensor("token_embd.weight", np.zeros((4, 8), np.float32),
+                 raw_dtype=gguf.GGMLQuantizationType.F32)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    table, rest = 1000 * 33, 4 * 8 * 4
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    whole = 2 * (table + rest)
+    assert cap.streamed_table_bytes(path) == table
+    assert cap.gathered_table_bytes(path, budget=whole) == table
+    assert cap.deferred_table_bytes(path, budget=whole) == table
+    assert cap.gathered_table_bytes(path, budget=rest - 1) == 0
+    assert cap.deferred_table_bytes(path, budget=rest - 1) == 0
+    off = {"GMLX_STREAM_PLE": "0"}
+    assert cap.gathered_table_bytes(path, budget=whole, env=off) == 0
+    assert cap.deferred_table_bytes(path, budget=whole, env=off) == 0

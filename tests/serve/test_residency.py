@@ -146,7 +146,8 @@ def test_a_plain_entry_is_priced_without_the_tables_read_from_the_file(
         tmp_path, monkeypatch):
     """A model loaded without a stream placement maps its file less the
     lookup tables the load reads from it: a table no GPU buffer holds, or
-    one whose bytes alone bring the model under the budget."""
+    one the rest of the model fits the budget without. GMLX_STREAM_PLE=0
+    keeps a table a buffer can hold."""
     import os
 
     import numpy as np
@@ -165,10 +166,13 @@ def test_a_plain_entry_is_priced_without_the_tables_read_from_the_file(
     w.write_tensors_to_file()
     w.close()
     size = os.path.getsize(path)
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
     assert residency._plain_footprint(path, size) == size - 4096 * 33
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
     assert residency._plain_footprint(path, size) == size
+    monkeypatch.delenv("GMLX_STREAM_PLE")
+    assert residency._plain_footprint(path, size) == size - 4096 * 33
 
 
 def test_pin_protected_even_when_over_budget():
@@ -1228,8 +1232,9 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
     """Over the budget, a table that alone brings the model under it
     streams and the experts stay resident: admission, the entry, the boot
     table and the build credit discount the table alone. ``whole``: the
-    150 GB file under a 160 GB budget, which the gate defers with its
-    table and passes without it: the table streams all the same."""
+    150 GB file under a 160 GB budget: the table streams all the same, on
+    the budget step, so the gate never judges the file with its table and
+    no step is latched for the memory free now."""
     import gmlx.serve.capacity as cap
     import gmlx.stream.table_stream as ts
 
@@ -1247,13 +1252,11 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
         entry = pool.acquire("a.gguf", None, "auto",
                              build_spec=SimpleNamespace(stream=None))
     pool.release(entry)
-    # Admission evicts for the whole file first; the gate after it judges
-    # the memory free now.
-    assert asked == [(150 if whole else 120) * GB]   # no arena or ring
+    assert asked == [120 * GB]   # no arena or ring
     assert entry.footprint == 120 * GB
     assert tables == [120 * GB]
     assert [c[1] for c in credits[0].values()] == [30 * GB]
-    assert ts.tables_for_memory("a.gguf") is whole
+    assert not ts.tables_for_memory("a.gguf")
     line = ("[stream] a.gguf: per-layer embedding table of "
             f"{30 * GB / 1e9:.1f} GB offloaded to disk")
     assert caplog.text.count(line) == 1
@@ -1271,16 +1274,17 @@ def test_a_plain_build_whose_table_brings_it_under_prices_the_resident_experts(
                      build_spec=SimpleNamespace(stream=None))
     assert caplog.text.count(line) == 1
     if whole:
-        # Then built with the memory to hold it whole: nothing streams.
-        model.tables = False
+        # Then built with the memory to hold it whole: the table streams
+        # again, and the build is priced the same.
         monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
         with caplog.at_level("WARNING", logger="gmlx.serve.residency"):
             entry = pool.acquire("a.gguf", None, "auto",
                                  build_spec=SimpleNamespace(stream=None))
         pool.release(entry)
-        assert asked[1:] == [150 * GB] * 2
-        assert entry.footprint == 150 * GB
-        assert caplog.text.count(line) == 1
+        assert asked[1:] == [120 * GB] * 2
+        assert entry.footprint == 120 * GB
+        assert caplog.text.count(line) == 2
+        assert "re-pricing" not in caplog.text
 
 
 @pytest.mark.parametrize("experts,stream,arch", [
@@ -1334,14 +1338,15 @@ def test_a_plain_build_reprices_experts_that_stream_for_want_of_memory(
 
 
 @pytest.mark.parametrize("unwired,kept", [
-    (200 * GB, "experts"), (160 * GB, "tables"), (130 * GB, "nothing")])
+    (200 * GB, "all"), (160 * GB, "experts"), (130 * GB, "nothing")])
 def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
         monkeypatch, caplog, unwired, kept):
-    """As a run judges it: the 150 GB set with a 20 GB KV room keeps its
-    experts in memory, or keeps them without its 30 GB table, or streams
+    """As a run judges it: the 150 GB set reads its 30 GB table from the
+    file, and with a 20 GB KV room keeps its experts in memory or streams
     them, decided before the load so its install never starts a wire the
-    chunk guard stops for want of that room. A build kept in memory loads
-    with another model's raised wired limit held at 0, so its walk wires
+    chunk guard stops for want of that room. ``all``: GMLX_STREAM_PLE=0
+    keeps the table in memory too. A build kept in memory loads with
+    another model's raised wired limit held at 0, so its walk wires
     nothing ahead of the guard, and gets the limit back after, unless
     something of it streams."""
     import mlx.core as mx
@@ -1353,7 +1358,9 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
     monkeypatch.setattr(ts, "_GUARDED", {})
     _table_only_header(monkeypatch, budget=200 * GB, unwired=unwired,
                        room=20 * GB)
-    model = (SimpleNamespace() if kept == "experts" else SimpleNamespace(
+    if kept == "all":
+        monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    model = (SimpleNamespace() if kept == "all" else SimpleNamespace(
         _kq_streaming=kept == "nothing", tables=True))
     pool, tables, _credits, asked = _table_only_pool(monkeypatch, model)
     stock = pool._stock_get
@@ -1381,14 +1388,16 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
         entry = pool.acquire("a.gguf", None, "auto",
                              build_spec=SimpleNamespace(stream=None))
     pool.release(entry)
-    assert seen == [{"experts": (True, False, ""),
-                     "tables": (True, True, ""),
+    # The budget step reads the table from the file, so no build latches
+    # the table step for the memory free now.
+    assert seen == [{"all": (True, False, ""),
+                     "experts": (True, False, ""),
                      "nothing": (False, False, "unwired")}[kept]]
     # The install's guard keeps the room the check kept.
     assert kept_rooms == [(None if kept == "nothing" else 20 * GB, 0)]
     # A streamed table or experts keep the sweep off for the process.
-    assert limit == [90 * GB if kept == "experts" else 0]
-    want = {"experts": 150, "tables": 120, "nothing": 20}[kept] * GB
+    assert limit == [90 * GB if kept == "all" else 0]
+    want = {"all": 150, "experts": 120, "nothing": 20}[kept] * GB
     assert entry.footprint == want and tables == [want]
     assert "re-pricing" not in caplog.text
     assert (STREAM_FREE_NOW in caplog.text) is (kept == "nothing")
@@ -1397,8 +1406,9 @@ def test_a_plain_moe_build_is_judged_with_its_kv_room_before_the_load(
 def test_a_build_right_after_an_unload_keeps_its_experts_in_memory(
         monkeypatch):
     """The check reads 130 GB not wired while the model unloaded for the
-    build unwires its pages, and 200 GB once they land: the set is judged
-    on the memory that landed, and its experts stay in memory."""
+    build unwires its pages, and 200 GB once they land: the 120 GB set
+    beside its 20 GB room is judged on the memory that landed, and its
+    experts stay in memory."""
     import gmlx.serve.capacity as cap
     import gmlx.stream.table_stream as ts
 
@@ -1413,13 +1423,13 @@ def test_a_build_right_after_an_unload_keeps_its_experts_in_memory(
         return sample()
 
     monkeypatch.setattr(cap, "_settle_unwired", settle)
-    pool, tables, _credits, _asked = _table_only_pool(monkeypatch,
-                                                      SimpleNamespace())
+    model = SimpleNamespace(_kq_streaming=False, tables=True)
+    pool, tables, _credits, _asked = _table_only_pool(monkeypatch, model)
     entry = pool.acquire("a.gguf", None, "auto",
                          build_spec=SimpleNamespace(stream=None))
     pool.release(entry)
     assert landed
-    assert entry.footprint == 150 * GB and tables == [150 * GB]
+    assert entry.footprint == 120 * GB and tables == [120 * GB]
 
 
 @pytest.mark.parametrize("auto,unwired,kept", [
@@ -1472,8 +1482,8 @@ def test_a_plain_moe_build_is_repriced_on_what_its_install_did(
         monkeypatch, caplog, streamed):
     """A kept build whose chunked wire stopped streams its experts: the
     entry is priced as streaming. A build latched to stream whose load has
-    no streaming install keeps them: the entry is priced up to the whole
-    set."""
+    no streaming install keeps them: the entry is priced up to the set a
+    plain build holds, the file less its table."""
     import gmlx.stream.table_stream as ts
 
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
@@ -1489,10 +1499,10 @@ def test_a_plain_moe_build_is_repriced_on_what_its_install_did(
     pool.release(entry)
     assert "re-pricing" in caplog.text
     if streamed:
-        assert entry.footprint == 20 * GB and tables == [150 * GB, 20 * GB]
+        assert entry.footprint == 20 * GB and tables == [120 * GB, 20 * GB]
         assert not entry.priced_up
     else:
-        assert entry.footprint == 150 * GB and tables == [20 * GB, 150 * GB]
+        assert entry.footprint == 120 * GB and tables == [20 * GB, 120 * GB]
         assert entry.priced_up
         assert ts.experts_stream_for_memory("a.gguf") == ""
 

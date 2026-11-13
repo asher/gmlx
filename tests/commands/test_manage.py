@@ -2062,9 +2062,10 @@ def test_validate_prints_the_stream_line_a_load_would_print(
     (36, 0, "with the memory free now, auto MTP is off: the experts stay in "
      "memory, and the 3.0 GB MTP drafter does not fit beside them. "
      "--speculative streams the experts to keep it.", True),
-    # Its tables read from the file keep the experts and the drafter.
-    (36, 10_000_000_000, "with the memory free now, its tables are "
-     "offloaded to disk and its experts stay in memory", False),
+    # The plan reads its tables from the file, which keeps the experts
+    # and the drafter.
+    (36, 10_000_000_000, "with the memory free now, its experts stay in "
+     "memory", False),
     # Streaming turns auto MTP off, so the line counts the model alone.
     (10, 0, "{free_now}: holding them takes 30.0 GB, against 17.2 GB of "
      "memory not wired, less", True),
@@ -2115,6 +2116,7 @@ def test_validate_prices_the_auto_mtp_head_a_run_loads(
     stream = json.loads(capsys.readouterr().out)["stream"]
     assert stream["experts_in_memory_now"] is (free_gib > 10)
     assert stream["auto_mtp_off_now"] is mtp_off
+    assert stream["box"]["deferred_bytes"] == table
     assert stream["tables_from_file_now"] is bool(table)
 
 

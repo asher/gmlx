@@ -72,6 +72,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   context slowed each step they kept different numbers of drafted tokens.
 - With a dense Qwen model's native head, a request that joined as every
   request decoding together finished in the same step failed.
+- A MoE model with a lookup table, such as Qwen3.8-Flash-Next, now reads
+  the table from the file whenever the rest of the model fits in memory.
+  A model just under the memory budget no longer streams its experts.
 - Gemma 4 audio input now matches the reference model. The audio encoder
   saw one frame too many, for some clip lengths the prompt held one audio
   token more than the encoder made, and with a GGUF projector the encoder

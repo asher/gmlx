@@ -222,7 +222,8 @@ def _stream_plan(scans: list | None, path: str | None = None) -> dict | None:
                 lines.append(sp.live_line(live, box, model))
                 out["experts_in_memory_now"] = live.fits
                 out["auto_mtp_off_now"] = live.mtp_off
-                out["tables_from_file_now"] = bool(live.table_bytes)
+                out["tables_from_file_now"] = bool(
+                    live.table_bytes or (live.fits and box.deferred_bytes))
         else:
             lines.append("this Mac: working set not readable, no fit verdict")
     except Exception:                                      # noqa: BLE001
