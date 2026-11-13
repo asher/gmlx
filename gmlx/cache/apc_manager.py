@@ -278,14 +278,8 @@ class GmlxAPCManager(_apc.APCManager):
             return
         if budget_fraction is None:
             budget_fraction = _POOL_BUDGET_FRACTION
-        import mlx.core as mx
-
         from gmlx.serve.capacity import working_budget_bytes
         from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
-        from gmlx.gen.prefill_decay import (
-            streamed_tracked_bytes,
-            untracked_weight_bytes,
-        )
 
         costs = kv_layer_costs(model)
         budget = working_budget_bytes()
@@ -297,9 +291,7 @@ class GmlxAPCManager(_apc.APCManager):
         # Stashed for stats: lets /metrics report committed pool bytes so
         # harnesses can separate evictable cache growth from real residue.
         self._pool_per_token_bytes = per_tok
-        weights = (float(mx.get_active_memory()) + untracked_weight_bytes()
-                   - streamed_tracked_bytes())
-        free = max(0.0, budget - weights)
+        free = _cache_room_bytes(budget)
         if not os.environ.get("APC_EXACT_CACHE_ENTRIES"):
             self._exact_budget_bytes = free * _EXACT_BUDGET_FRACTION
             self._exact_cache_max = 64
@@ -325,8 +317,9 @@ class GmlxAPCManager(_apc.APCManager):
         # with everything else against the Metal resource limit, which is
         # what APC_MAX_POOL_TENSORS guards.
         tensors_per_block = 2 * n_layers
-        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
-        target = min(target, max_tensors // max(1, tensors_per_block))
+        max_tensors = _max_pool_tensors()
+        if max_tensors:
+            target = min(target, max_tensors // max(1, tensors_per_block))
         if target <= self.num_blocks:
             return
         with self.lock:
@@ -1009,6 +1002,46 @@ class GmlxAPCManager(_apc.APCManager):
 _POOL_BUDGET_FRACTION = 0.5
 _EXACT_BUDGET_FRACTION = 0.15
 _BLOCK_SIZES = (16, 32, 64, 128, 256)
+# APC_MAX_POOL_TENSORS default: the Metal resource ceiling the pool and the
+# store guard keep under.
+_MAX_POOL_TENSORS = 450000
+# Arrays the block size aims to hold the pool's share in. Freeing costs
+# about the same per array, so fewer, larger blocks give memory back under
+# pressure in far less time than many small ones.
+_BLOCK_TENSOR_TARGET = 110000
+
+
+def _max_pool_tensors() -> int:
+    """APC_MAX_POOL_TENSORS, read as the vendored store guard reads it:
+    0 means no cap."""
+    return max(0, int(os.environ.get("APC_MAX_POOL_TENSORS",
+                                     _MAX_POOL_TENSORS)))
+
+
+def _cache_room_bytes(budget: float, loading_bytes: float = 0.0) -> float:
+    """The working budget left to the prompt cache: ``budget`` less the
+    weights held now and ``loading_bytes`` of weights not yet loaded. The
+    block-size pick runs before the load and passes the file size;
+    autosize runs after it. The pool's share is _POOL_BUDGET_FRACTION of
+    this."""
+    import mlx.core as mx
+
+    from gmlx.gen.prefill_decay import (
+        streamed_tracked_bytes,
+        untracked_weight_bytes,
+    )
+
+    held = (float(mx.get_active_memory()) + untracked_weight_bytes()
+            - streamed_tracked_bytes())
+    return max(0.0, budget - held - loading_bytes)
+
+
+def _sliding_windows(costs) -> set:
+    from gmlx.serve.mem_preflight import FixedRows, StepTokens
+
+    other = (bool, FixedRows, StepTokens)
+    return {int(w) for w, _b in costs
+            if isinstance(w, int) and not isinstance(w, other)}
 
 
 def _block_layers(costs) -> int:
@@ -1020,12 +1053,13 @@ def _block_layers(costs) -> int:
 
 
 def _auto_block_size(model_path):
-    """Smallest block size whose tensor-capped pool covers the byte
-    budget autosize will ask for. Committed blocks cost K+V arrays per
-    layer, so at block_size 16 the Metal resource limit (proxied by
-    APC_MAX_POOL_TENSORS) binds far below the byte budget on deep
-    workloads. None keeps the stock default (non-GGUF path, unreadable
-    header, or 16 already suffices)."""
+    """Smallest block size whose pool covers the byte budget autosize will
+    ask for in _BLOCK_TENSOR_TARGET arrays (or the lower
+    APC_MAX_POOL_TENSORS). Two limits beat that aim: the pool's floor of
+    blocks must fit the byte share, since the pool never shrinks below it,
+    and the block must divide every sliding window, or rotating layers
+    lose their checkpoints. None keeps the stock default (non-GGUF path,
+    unreadable header, or no block above 16 is needed or fits)."""
     if not model_path:
         return None
     try:
@@ -1043,14 +1077,20 @@ def _auto_block_size(model_path):
         if per_tok <= 0:
             return None
         weights = float(sum(os.path.getsize(p) for p in shards))
-        budget_tokens = (max(0.0, budget - weights)
+        budget_tokens = (_cache_room_bytes(budget, weights)
                          * _POOL_BUDGET_FRACTION / per_tok)
-        max_tensors = int(os.environ.get("APC_MAX_POOL_TENSORS", "450000"))
-        need = 2 * _block_layers(costs) * budget_tokens / max(1, max_tensors)
-        for bs in _BLOCK_SIZES:
-            if bs >= need:
-                return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
-        return _BLOCK_SIZES[-1]
+        ceiling = _max_pool_tensors()
+        aim = (min(_BLOCK_TENSOR_TARGET, ceiling) if ceiling
+               else _BLOCK_TENSOR_TARGET)
+        need = 2 * _block_layers(costs) * budget_tokens / aim
+        bs = next((s for s in _BLOCK_SIZES if s >= need), _BLOCK_SIZES[-1])
+        floor = int(os.environ.get("APC_NUM_BLOCKS", _apc.DEFAULT_NUM_BLOCKS))
+        windows = _sliding_windows(costs)
+        fits = [s for s in _BLOCK_SIZES
+                if s <= bs and floor * s <= budget_tokens
+                and all(w % s == 0 for w in windows)]
+        bs = max(fits, default=_apc.DEFAULT_BLOCK_SIZE)
+        return bs if bs > _apc.DEFAULT_BLOCK_SIZE else None
     except Exception:
         _log.debug("APC block-size derivation skipped", exc_info=True)
         return None

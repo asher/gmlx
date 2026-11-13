@@ -562,26 +562,34 @@ def _fake_model(layers=10, n_kv=4, head_dim=64):
     return SimpleNamespace(config=cfg)
 
 
-def _autosize_rig(monkeypatch, budget):
+def _weights_held(monkeypatch, held=0):
     import mlx.core as mx
 
-    import gmlx.serve.capacity as capacity
     import gmlx.gen.prefill_decay as prefill_decay
 
-    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     monkeypatch.setattr(prefill_decay, "untracked_weight_bytes", lambda: 0.0)
     monkeypatch.setattr(prefill_decay, "streamed_tracked_bytes", lambda: 0.0)
-    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: int(held))
+
+
+def _autosize_rig(monkeypatch, budget):
+    import gmlx.serve.capacity as capacity
+
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    _weights_held(monkeypatch)
 
 
 def test_autosize_extends_pool_to_budget_share(monkeypatch):
+    import gmlx.cache.apc_manager as am
+
     monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    monkeypatch.delenv("APC_MAX_POOL_TENSORS", raising=False)
     _autosize_rig(monkeypatch, budget=100 * GB)
     m = GmlxAPCManager(num_blocks=2048, block_size=16)
     m.autosize(_fake_model())
     per_tok = 10 * 2 * 4 * 64 * 2.0  # layers x 2KV x kv_heads x hd x fp16
     want = min(int(100 * GB * 0.5 // (16 * per_tok)),
-               450000 // (2 * 10))
+               am._MAX_POOL_TENSORS // (2 * 10))
     assert m.num_blocks == want > 2048
     assert len(m.pool) == want
     assert m._free_tail is m.pool[-1]  # new blocks join the free queue
@@ -758,17 +766,158 @@ def test_auto_block_size_covers_budget(monkeypatch, tmp_path):
     monkeypatch.setattr(tp, "_kv_costs",
                         lambda cfg: [(None, 90e3 / layers)] * layers)
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 114e9)
+    _weights_held(monkeypatch)
     monkeypatch.delenv("APC_BLOCK_SIZE", raising=False)
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
     monkeypatch.delenv("APC_MAX_POOL_TENSORS", raising=False)
     bs = am._auto_block_size(str(f))
-    # budget tokens ~ (114e9 * 0.5) / 90e3 = 633k; need = 96*633k/450k = 135
+    # budget tokens ~ (114e9 * 0.5) / 90e3 = 633k; need = 96*633k/110k = 553
     assert bs == 256
-    # tiny model: 16 suffices, keep stock default
+    # small budget: 2048 blocks fit the 44k-token share only at 16
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 8e9)
     assert am._auto_block_size(str(f)) is None
     # non-derivable header keeps default
     monkeypatch.setattr(tp, "_synth_config", lambda p: None)
     assert am._auto_block_size(str(f)) is None
+
+
+# Qwen3.8-27B Q4_K_S: 16 attention layers of 4 KV heads at head dim 256,
+# fp16, beside 48 recurrent layers.
+_Q38_27B_BYTES = 16363513568
+_Q38_27B_CFG = dict(
+    model_type="qwen3_5", num_hidden_layers=64, num_attention_heads=16,
+    num_key_value_heads=4, head_dim=256, full_attention_interval=4,
+    linear_num_value_heads=32, linear_num_key_heads=16,
+    linear_key_head_dim=128, linear_value_head_dim=128,
+    linear_conv_kernel_dim=4)
+_Q38_27B_PER_TOK = 16 * 2 * 4 * 256 * 2.0
+
+
+def _q38_27b_costs():
+    from gmlx.serve.mem_preflight import kv_layer_costs
+
+    cfg = SimpleNamespace(**_Q38_27B_CFG)
+    return kv_layer_costs(SimpleNamespace(config=cfg))
+
+
+def _pick(monkeypatch, tmp_path, costs, room, held=0):
+    """_auto_block_size for a model whose cache has ``room`` bytes of the
+    budget once it loads, beside ``held`` bytes of weights already loaded,
+    every APC setting at its default."""
+    import gmlx.cache.apc_manager as am
+    import gmlx.serve.capacity as capacity
+    import gmlx.commands.tool_preflight as tp
+
+    for k in ("APC_BLOCK_SIZE", "APC_NUM_BLOCKS", "APC_MAX_POOL_TENSORS"):
+        monkeypatch.delenv(k, raising=False)
+    f = tmp_path / "m.gguf"
+    f.write_bytes(b"\0" * 1024)
+    monkeypatch.setattr(tp, "_shards", lambda p: [str(f)])
+    monkeypatch.setattr(tp, "_synth_config", lambda p: {"ok": True})
+    monkeypatch.setattr(tp, "_kv_costs", lambda cfg: costs)
+    # The stand-in shard is 1024 bytes; the budget carries the rest.
+    budget = room + held + 1024
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
+    _weights_held(monkeypatch, held)
+    return am._auto_block_size(str(f))
+
+
+def _block_size_on_a_mac(monkeypatch, tmp_path, costs, weights, gib, held=0):
+    """(block size, cache room after the load) for a model of ``weights``
+    file bytes on a Mac of ``gib`` GiB, governor settings at default."""
+    import gmlx.serve.capacity as capacity
+
+    monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
+    monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
+    room = capacity.ram_budget_bytes(gib << 30) - held - weights
+    return _pick(monkeypatch, tmp_path, costs, room, held), room
+
+
+def _pool_blocks(monkeypatch, cfg, free, bs):
+    _autosize_rig(monkeypatch, budget=free)
+    m = GmlxAPCManager(num_blocks=2048, block_size=bs)
+    m.autosize(SimpleNamespace(config=SimpleNamespace(**cfg)))
+    return m.num_blocks
+
+
+def test_27b_hybrid_takes_128_token_blocks_on_96_gb(monkeypatch, tmp_path):
+    # Fewer, larger blocks free the pool under pressure without a stall.
+    from gmlx.serve.mem_preflight import FixedRows
+
+    costs = _q38_27b_costs()
+    assert sum(isinstance(w, FixedRows) for w, _b in costs) == 48
+    bs, free = _block_size_on_a_mac(
+        monkeypatch, tmp_path, costs, _Q38_27B_BYTES, 96)
+    assert bs == 128
+    assert _pool_blocks(monkeypatch, _Q38_27B_CFG, free, bs) == 3402
+
+
+def test_27b_hybrid_takes_its_full_share_on_512_gb(monkeypatch, tmp_path):
+    bs, free = _block_size_on_a_mac(
+        monkeypatch, tmp_path, _q38_27b_costs(), _Q38_27B_BYTES, 512)
+    assert bs == 256
+    share = int(free * 0.5 // (bs * _Q38_27B_PER_TOK))
+    assert _pool_blocks(monkeypatch, _Q38_27B_CFG, free, bs) == share == 11185
+
+
+def test_27b_beside_a_loaded_model_fits_its_floor(monkeypatch, tmp_path):
+    # 30 GB of another model held when the 27B loads on a 96 GB Mac. The
+    # pick sees the share autosize will, so the 2048-block floor fits it.
+    bs, free = _block_size_on_a_mac(
+        monkeypatch, tmp_path, _q38_27b_costs(), _Q38_27B_BYTES, 96,
+        held=30e9)
+    assert bs == 64
+    share = free * 0.5
+    assert 2048 * bs * _Q38_27B_PER_TOK <= share
+    assert (_pool_blocks(monkeypatch, _Q38_27B_CFG, free, bs)
+            == int(share // (bs * _Q38_27B_PER_TOK)))
+
+
+def test_qwen3_8b_keeps_64_token_blocks_on_96_gb(monkeypatch, tmp_path):
+    # At the 110000-array aim the 2048-block floor pool would overshoot
+    # the byte share; that limit keeps today's block and pool.
+    cfg = dict(model_type="qwen3", num_hidden_layers=36,
+               num_attention_heads=32, num_key_value_heads=8, head_dim=128)
+    bs, free = _block_size_on_a_mac(
+        monkeypatch, tmp_path, [(None, 2 * 8 * 128 * 2.0)] * 36,
+        8709519168, 96)
+    assert bs == 64
+    assert _pool_blocks(monkeypatch, cfg, free, bs) == 3429
+
+
+@pytest.mark.parametrize("gib", [64, 96, 128])
+def test_gpt_oss_blocks_keep_its_checkpoint_tier(monkeypatch, tmp_path, gib):
+    # gpt-oss-20b: 12 layers slide over a 128-token window. A block that
+    # does not divide the window sends them to the exact tier.
+    from gmlx.cache.kv_cache import RotatingKVCache
+    from gmlx.cache.snapshot import rotating_geometry
+
+    costs = [(None, 2 * 8 * 64 * 2.0), (128, 2 * 8 * 64 * 2.0)] * 12
+    bs, _free = _block_size_on_a_mac(
+        monkeypatch, tmp_path, costs, 12109566560, gib)
+    assert bs is not None
+    rings = [RotatingKVCache(max_size=128) for _ in range(12)]
+    assert rotating_geometry(rings, bs) == (128, 0)
+
+
+def test_zero_pool_tensor_cap_means_no_cap(monkeypatch, tmp_path):
+    import gmlx.cache.apc_manager as am
+
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    monkeypatch.setenv("APC_MAX_POOL_TENSORS", "0")
+    _autosize_rig(monkeypatch, budget=8 * GB)
+    m = GmlxAPCManager(num_blocks=2048, block_size=16)
+    m.autosize(_fake_model())
+    per_tok = 10 * 2 * 4 * 64 * 2.0
+    share = int(8 * GB * 0.5 // (16 * per_tok))
+    assert share > am._MAX_POOL_TENSORS // (2 * 10)
+    assert m.num_blocks == share
+
+    # 10 layers and a 293k-token share: the 110000-array aim takes 64. Read
+    # as an aim of 1 array, 0 would take 256, which the floor cuts to 128.
+    assert _pick(monkeypatch, tmp_path, [(None, 1024.0)] * 10, 6e9) == 64
+    monkeypatch.setenv("APC_MAX_POOL_TENSORS", "0")
+    assert am._auto_block_size(str(tmp_path / "m.gguf")) == 64
 
 
 def test_exact_tier_byte_budget(monkeypatch):

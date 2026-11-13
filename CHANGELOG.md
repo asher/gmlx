@@ -44,6 +44,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   waited up to a minute, and the server then emptied the whole prompt cache.
 - A request that joins others at long context is admitted only with room for
   what the join holds, so it no longer pushes the server past its memory budget.
+- The prompt cache uses larger blocks where its share of memory allows, so a
+  server short of memory frees the cache without stalling.
 - `gmlx init` and `--with-embeddings` set up EmbeddingGemma 2.
   `embeddings: true` still picks `qwen3-embed-0.6b`.
 - `prompt_name` and `dimensions` work on EmbeddingGemma and
