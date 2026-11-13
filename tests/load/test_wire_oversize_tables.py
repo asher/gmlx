@@ -34,6 +34,9 @@ def table_gguf(tmp_path):
 
 
 def test_names_the_tables_past_the_ceiling(table_gguf, monkeypatch):
+    # GMLX_STREAM_PLE=0 leaves the ceiling as the only reason to read a
+    # table from the file.
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
     assert wire._deferred_table_names([table_gguf], "deepseek41") == [
         "blk.1.engram_embd.weight"]
@@ -41,6 +44,16 @@ def test_names_the_tables_past_the_ceiling(table_gguf, monkeypatch):
         "blk.1.engram_embd.weight"]        # arch read from the header
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
     assert wire._deferred_table_names([table_gguf], "deepseek41") == []
+
+
+def test_names_the_tables_of_a_load_that_fits_without_them(table_gguf,
+                                                           monkeypatch):
+    """Under the ceiling, a load whose other tensors fit the stream budget
+    still reads its tables from the file."""
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", str(1 << 40))
+    assert wire._deferred_table_names([table_gguf], "deepseek41") == [
+        "blk.1.engram_embd.weight"]
 
 
 def test_skips_the_table_and_loads_the_rest(table_gguf, monkeypatch):

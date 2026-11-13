@@ -20,8 +20,8 @@ arch: ``every_token_ranges`` (pin_weights) and the load-time GPU warm
 touch both exclude declared components through it, so a streamed table
 can be neither mlocked nor GPU-touched by the load path.
 
-``GMLX_STREAM_PLE``: unset = automatic (stream the table when the model
-is over budget); ``0`` = never stream the table; ``1`` = force table
+``GMLX_STREAM_PLE``: unset = automatic (stream the table when the rest
+of the model fits the budget without it, or the model is over budget); ``0`` = never stream the table; ``1`` = force table
 streaming even on a fits-in-RAM model (the overhead A/B). ``--stream-cpu``
 forces it too, because that mode streams the experts whatever the model
 size. When the model is still over budget without the tables, the
@@ -63,7 +63,7 @@ class ArchTables(NamedTuple):
     # The model issues every table read before its first layer runs
     # (``prefetch``), so a table read from the file costs a load without
     # a stream flag no decode time: such a load reads it from the file
-    # when that alone brings the model under the budget.
+    # when the rest of the model fits the budget without it.
     reads_ahead: bool = False
     # What the load's stream line calls the tables.
     label: str = "lookup tables"
@@ -329,14 +329,16 @@ def experts_stream_for_memory(path: str | None) -> str:
 
 def unflagged_tables_stream(path: str | None, total_bytes: int, tbytes: int,
                             budget: int | None, env=None) -> bool:
-    """The table-only step of a load of ``path`` with no stream flag: its
-    tables bring it under ``budget`` (``tables_bring_under``), or the
-    check before the load latched the step for the memory free now
-    (``tables_for_memory``). ``GMLX_STREAM_PLE=0`` keeps the tables
-    resident."""
-    if stream_ple_env(env) == "0" or not tbytes:
+    """The table-only step of a load of ``path`` with no stream flag: the
+    rest of the model fits ``budget`` without its tables
+    (``tables_bring_under``), or the check before the load latched the
+    step for the memory free now (``tables_for_memory``).
+    ``GMLX_STREAM_PLE=1`` forces the step and ``GMLX_STREAM_PLE=0`` keeps
+    the tables resident."""
+    ple = stream_ple_env(env)
+    if ple == "0" or not tbytes:
         return False
-    return (tables_for_memory(path)
+    return (ple == "1" or tables_for_memory(path)
             or tables_bring_under(total_bytes, tbytes, budget, env))
 
 
@@ -345,22 +347,25 @@ def table_stream_selected(model, total_bytes: int, budget: int | None,
     """The selection ladder's step-1 test, shared by the loader and the
     load-time warm touch so both see the same decision: stream the
     declared tables iff forced (``GMLX_STREAM_PLE=1``, or ``--stream-cpu``,
-    which streams the experts whatever the model size) or the model is
-    over budget. When the tables alone bring it back under, the experts
-    go resident (table-only); otherwise the experts stream too (compose;
-    ``GMLX_STREAM_PLE_COMPOSE=0`` keeps the table resident instead)."""
+    which streams the experts whatever the model size), the rest of the
+    model fits the budget without them, or the model is over budget. When
+    the rest fits, the experts go resident (table-only); otherwise the
+    experts stream too (compose; ``GMLX_STREAM_PLE_COMPOSE=0`` keeps the
+    table resident instead)."""
     return _selected(table_bytes(model), total_bytes, budget, force_stream)
 
 
 def tables_bring_under(total_bytes: int, tbytes: int, budget: int | None,
                        env=None) -> bool:
-    """The ladder's table-only step: a load over ``budget`` that its
-    declared tables alone bring back under it. The tables then serve
-    from disk and the experts stay resident. ``GMLX_STREAM_PLE=0`` keeps
-    the tables resident."""
+    """The ladder's table-only step: a load whose declared tables leave
+    the rest of it under ``budget``, whether or not the whole load is
+    over. The tables then serve from disk and the experts stay resident.
+    A table gather reads a few KB a token, so holding the table buys
+    nothing, and a load that fits whole only just would lose its experts
+    to a short wire. ``GMLX_STREAM_PLE=0`` keeps the tables resident."""
     if stream_ple_env(env) == "0" or not tbytes or budget is None:
         return False
-    return total_bytes > budget and total_bytes - tbytes <= budget
+    return total_bytes - tbytes <= budget
 
 
 def _selected(tbytes: int, total_bytes: int, budget: int | None,

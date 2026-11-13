@@ -574,8 +574,8 @@ def _table_shards(gguf_path: str) -> tuple[list[str], str | None]:
 def deferred_table_bytes(gguf_path: str, budget: int | None = None,
                          env=None) -> int:
     """Bytes of the arch's streamable tables a load without a stream flag
-    serves from the file instead of holding. All of them when they alone
-    bring the text tensors under the stream budget (``budget``, the
+    serves from the file instead of holding. All of them when the text
+    tensors fit the stream budget without them (``budget``, the
     device's when None), or the check before the load latched the step
     for the memory free now (``table_stream.unflagged_tables_stream``),
     on any arch that declares tables. On an arch
@@ -607,7 +607,7 @@ def gathered_table_bytes(gguf_path: str, budget: int | None = None,
     """Bytes of the streamable tables a load without a stream flag serves
     from the file on the CPU stream, on an arch that gathers its tables
     per layer (not ``table_stream.tables_read_ahead``): all of them when
-    they alone bring the text tensors under the stream budget (``budget``
+    the text tensors fit the stream budget without them (``budget``
     the device's when None), or the step is latched for the memory free
     now (``table_stream.unflagged_tables_stream``). Such a load maps the
     table, and its install

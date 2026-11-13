@@ -205,8 +205,12 @@ def test_weight_verdict_is_the_rule_box_plan_reads(flat_room, monkeypatch):
     assert sp.weight_verdict(total, table, budget, ram) == sp.VERDICT_TABLES
     assert sp.weight_verdict(total - table, 0, budget, ram) == sp.VERDICT_RESIDENT
     assert sp.weight_verdict(total, 0, budget, ram) is None
-    # Under the budget with a table: the table is not read from the file.
-    assert sp.weight_verdict(50e9, 10e9, budget, ram) == sp.VERDICT_RESIDENT
+    # Under the budget with a table: the table is still read from the
+    # file, unless GMLX_STREAM_PLE=0 keeps it.
+    assert sp.weight_verdict(50e9, 10e9, budget, ram) == sp.VERDICT_TABLES
+    with monkeypatch.context() as mp:
+        mp.setenv("GMLX_STREAM_PLE", "0")
+        assert sp.weight_verdict(50e9, 10e9, budget, ram) == sp.VERDICT_RESIDENT
     # Under the budget but over by share of RAM: not resident.
     assert sp.weight_verdict(budget, 0, budget, int(budget / 0.99)) is None
     # The same answers through box_plan on the same inputs.
@@ -222,12 +226,16 @@ def test_weight_verdict_is_the_rule_box_plan_reads(flat_room, monkeypatch):
         assert b is not None and b.verdict == verdict
 
 
-def test_flash_next_streams_from_32_gib_and_is_resident_from_192(monkeypatch):
+def test_flash_next_streams_from_32_gib_and_keeps_its_experts_from_128(
+        monkeypatch):
     """Qwen3.8-Flash-Next UD-Q4_K_XL across the memory classes at the
     planner's working set and the default room: page_cache at 24 GiB,
-    streams from 32 to 96, tables_from_file at 128 and resident from 192.
-    A walk that counted only resident and streams would call it a 192 GB
-    model. The refresh script records this ladder as streams_from_gib."""
+    streams from 32 to 96 and tables_from_file from 128. The table is
+    read from the file on every class whose budget holds the rest, so no
+    class is resident. A walk that counted only resident and streams
+    would find no class that holds its experts. The refresh script
+    records this ladder as streams_from_gib. GMLX_STREAM_PLE=0 keeps the
+    table: the model streams at 128 and is resident from 192."""
     from gmlx.serve.capacity import working_set_for_ram
 
     for var in ("GMLX_STREAM_PLE", "GMLX_GOV_MARGIN", "GMLX_GOV_RESERVE_GB",
@@ -241,18 +249,27 @@ def test_flash_next_streams_from_32_gib_and_is_resident_from_192(monkeypatch):
                      ring_bytes=4_100_000_000, kv_costs=None,
                      trained_ctx=None, table_bytes=table,
                      tables=((table, "Q4_K"),))
-    ladder = {}
-    for cls in (16, 24, 32, 48, 64, 96, 128, 192, 256):
-        ram = cls * GiB
-        b = sp.box_plan(m, ram_bytes=ram, ws_bytes=working_set_for_ram(ram),
-                        max_buffer_bytes=int(0.63 * ram))
-        assert b is not None
-        ladder[cls] = b.verdict
-    assert ladder == {16: sp.VERDICT_TOO_BIG, 24: sp.VERDICT_PAGE_CACHE,
-                      32: sp.VERDICT_STREAMS, 48: sp.VERDICT_STREAMS,
-                      64: sp.VERDICT_STREAMS, 96: sp.VERDICT_STREAMS,
-                      128: sp.VERDICT_TABLES, 192: sp.VERDICT_RESIDENT,
-                      256: sp.VERDICT_RESIDENT}
+    def ladder(classes):
+        out = {}
+        for cls in classes:
+            ram = cls * GiB
+            b = sp.box_plan(m, ram_bytes=ram,
+                            ws_bytes=working_set_for_ram(ram),
+                            max_buffer_bytes=int(0.63 * ram))
+            assert b is not None
+            out[cls] = b.verdict
+        return out
+
+    assert ladder((16, 24, 32, 48, 64, 96, 128, 192, 256)) == {
+        16: sp.VERDICT_TOO_BIG, 24: sp.VERDICT_PAGE_CACHE,
+        32: sp.VERDICT_STREAMS, 48: sp.VERDICT_STREAMS,
+        64: sp.VERDICT_STREAMS, 96: sp.VERDICT_STREAMS,
+        128: sp.VERDICT_TABLES, 192: sp.VERDICT_TABLES,
+        256: sp.VERDICT_TABLES}
+    monkeypatch.setenv("GMLX_STREAM_PLE", "0")
+    assert ladder((128, 192, 256)) == {
+        128: sp.VERDICT_STREAMS, 192: sp.VERDICT_RESIDENT,
+        256: sp.VERDICT_RESIDENT}
 
 
 def _model(*, total, expert, ring=0):
@@ -368,10 +385,10 @@ def test_a_table_that_brings_the_load_under_keeps_the_experts(flat_room,
 def test_a_table_no_array_holds_keeps_the_experts_without_the_flag(
         flat_room, monkeypatch):
     """A table past the buffer ceiling, or MXFP8 on an mlx-kquant without
-    the codec, is read from the file even where it does not alone bring
-    the model under the budget: with GMLX_STREAM_PLE=0, or on a model
-    already under it. The other bytes fit, so the load keeps its experts
-    in memory, and --stream-experts streams them, as the loader does."""
+    the codec, is read from the file even with GMLX_STREAM_PLE=0, which
+    keeps a table an array can hold in memory. The other bytes fit, so
+    the load keeps its experts in memory, and --stream-experts streams
+    them, as the loader does."""
     import gmlx.stream.table_pread as tpr
 
     lines = ["=> loads with its experts in memory; --stream-experts "
@@ -384,9 +401,9 @@ def test_a_table_no_array_holds_keeps_the_experts_without_the_flag(
     assert sp.box_lines(m, b)[1:] == [
         "tables 202.8 GB read from the file; the other 165.3 GB fit the "
         "185.5 GB resident budget"] + lines
-    # The whole model is under a 512 GB Studio's 371.1 GB budget, and an
-    # mlx-kquant without MXFP8 holds no such table.
-    monkeypatch.delenv("GMLX_STREAM_PLE")
+    # The table is under a 512 GB Studio's ceiling and the whole model
+    # under its 371.1 GB budget, but an mlx-kquant without MXFP8 holds no
+    # such table.
     monkeypatch.setattr(tpr, "_kq_has", lambda codec: codec != "mxfp8")
     b = sp.box_plan(m, **STUDIO_512)
     assert b is not None and b.verdict == sp.VERDICT_TABLES
@@ -396,6 +413,10 @@ def test_a_table_no_array_holds_keeps_the_experts_without_the_flag(
     monkeypatch.setattr(tpr, "_kq_has", lambda codec: True)
     b = sp.box_plan(m, **STUDIO_512)
     assert b is not None and b.verdict == sp.VERDICT_RESIDENT
+    # Without the switch the table is read from the file there too.
+    monkeypatch.delenv("GMLX_STREAM_PLE")
+    b = sp.box_plan(m, **STUDIO_512)
+    assert b is not None and b.verdict == sp.VERDICT_TABLES
 
 
 def test_a_table_gathered_per_layer_that_brings_the_load_under_keeps_the_experts(

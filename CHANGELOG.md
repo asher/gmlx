@@ -51,6 +51,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A MoE model with a lookup table, such as Qwen3.8-Flash-Next, now reads
+  the table from the file whenever the rest of the model fits in memory.
+  A model just under the memory budget no longer streams its experts.
 - Gemma 4 audio input now matches the reference model. The audio encoder
   saw one frame too many, and with a GGUF projector it also scaled its
   attention queries wrongly.

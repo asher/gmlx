@@ -152,8 +152,8 @@ Some architectures have large lookup tables that every token reads a few
 rows of, such as DeepSeek-V4.1-Flash's engram tables. gmlx streams these
 tables too, and the plan shows them as `streamed tables`, outside the
 every-token total. A table too large for a single GPU buffer is read from
-the file row by row, and so is a table whose bytes alone bring the model
-back under the budget, such as DeepSeek-V4.1-Flash's engram tables or
+the file row by row, and so is the table of a model that fits the budget
+without it, such as DeepSeek-V4.1-Flash's engram tables or
 Qwen3.8-Flash-Next's per-layer table, when no stream flag is set. The load
 names it on an `[install]` line.
 

@@ -177,8 +177,8 @@ class _ChatBuild:
         streamed = 0
         shares = (0, 0)
         offloaded = 0
-        # Tables that alone bring a plain build under the budget, or under
-        # the memory free now, on an arch that gathers them per layer: the
+        # Tables whose build fits the budget without them, or the memory
+        # free now, on an arch that gathers them per layer: the
         # load maps them and the bridge's install serves them from the
         # file, as a stream build's table share. The experts stay in
         # memory if they fit.

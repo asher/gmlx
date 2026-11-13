@@ -134,12 +134,13 @@ In the last two cases, `run` and `chat` print why:
 [stream] the experts stream because the model is over its memory budget: holding them takes 12.1 GB, past the 10.3 GB budget. GMLX_OVERCOMMIT=1 keeps them in memory unless the memory the kernel can reclaim runs out while they wire.
 ```
 
-A model whose lookup tables alone bring it under the budget, such as
+A model that fits the budget without its lookup tables, such as
 Qwen3.8-Flash-Next UD-Q4_K_XL on a Mac with 128 GB, reads those tables from
 the file and keeps its experts in memory without the flag, and a folder
-scan leaves its entry without `stream: experts`. A model under the budget
-does the same when the memory free at load holds it only without its
-tables. Each load that reads its tables from the file says so:
+scan leaves its entry without `stream: experts`. This holds whether or not
+the whole file is over the budget, since a table read costs a few KB per
+token. `GMLX_STREAM_PLE=0` keeps the tables in memory. Each load that
+reads its tables from the file says so:
 
 ```text
 [stream] per-layer embedding table of 28.8 GB offloaded to disk

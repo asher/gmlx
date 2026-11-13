@@ -932,7 +932,8 @@ def test_a_load_the_check_did_not_keep_in_memory_is_left_alone(monkeypatch):
 
 def test_the_warm_touch_leaves_a_latched_load_to_its_install(monkeypatch):
     # The warm touch would wire the weights in one burst before the
-    # install's guard reads memory.
+    # install's guard reads memory. With no latch it skips the table
+    # alone, which the install streams.
     from mlx.utils import tree_flatten
 
     import gmlx.load.loader as loader
@@ -944,8 +945,10 @@ def test_the_warm_touch_leaves_a_latched_load_to_its_install(monkeypatch):
     model, _ = _moe_table_model()
     pairs = tree_flatten(model.parameters())
     total = sum(a.nbytes for _, a in pairs)
+    table = model.model.ple_embed
     assert ts.warm_touch_exclusions(model, total, 10 * total,
-                                    paths=["m.gguf"]) == set()
+                                    paths=["m.gguf"]) == {
+        id(table.weight), id(table.scales)}
     ts.guard_resident_wire("m.gguf")
     assert ts.warm_touch_exclusions(model, total, 10 * total,
                                     paths=["m.gguf"]) == {

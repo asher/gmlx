@@ -1593,8 +1593,8 @@ def _apply_placement(args, model) -> None:
             )
         from gmlx.stream.expert_streaming import install_unflagged_tables
 
-        # Tables that alone bring the model under the budget serve from the
-        # file; its experts stay in memory if they fit, else they stream.
+        # The tables of a model that fits the budget without them serve from
+        # the file; its experts stay in memory if they fit, else they stream.
         # An MTP load installs this before its wire, and the call is a no-op.
         install_unflagged_tables(
             model, getattr(args, "gguf", None),

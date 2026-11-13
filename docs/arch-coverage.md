@@ -27,7 +27,7 @@ family, backend, status and caveat:
 | `beam` | beam | mlx-lm | loadable | Speculative decoding is not available: the DFlash2 drafter ships only as safetensors. |
 | `deepseek2` | deepseek | mlx-lm | loadable | DeepSeek-V2, with softmax gating, is not supported. |
 | `deepseek4` | deepseek | mlx-lm | loadable | The GGUF is not a llama.cpp conversion. |
-| `deepseek41` | deepseek | mlx-lm | loadable | MTP is not yet implemented. An engram table too large for one GPU buffer, or that alone brings the model under budget, is read from the file. |
+| `deepseek41` | deepseek | mlx-lm | loadable | MTP is not yet implemented. An engram table too large for one GPU buffer, or of a model that fits the budget without it, is read from the file. |
 | `diffusion-gemma` | gemma | mlx-vlm | loadable |  |
 | `ernie4_5-moe` | ernie | mlx-lm | loadable |  |
 | `falcon-h1` | falcon | mlx-lm | loadable |  |

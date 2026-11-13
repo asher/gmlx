@@ -1404,15 +1404,20 @@ def test_sync_drops_the_mark_of_a_moe_that_its_table_brings_under(
         "    speculative: auto\n")
 
 
-@pytest.mark.parametrize("marked,whole", [(True, False), (False, False),
-                                          (True, True)])
+@pytest.mark.parametrize("marked,whole,keep_table", [
+    (True, False, False), (False, False, False), (True, True, False),
+    (True, True, True)])
 def test_the_start_warns_of_a_mark_the_model_fits_without(monkeypatch,
                                                           tmp_path, capsys,
-                                                          marked, whole):
+                                                          marked, whole,
+                                                          keep_table):
     """An old discovery mark streams Flash-Next's experts on every start
     until sync-models drops it: the start says so once, in the server log.
-    ``whole``: the config moved to a Mac the whole model fits. A key the
-    user wrote is theirs, and the start says nothing of it."""
+    ``whole``: the config moved to a Mac the whole model fits, where the
+    table is read from the file all the same. ``keep_table``:
+    GMLX_STREAM_PLE=0 keeps the table there, and the line says the model
+    fits in memory. A key the user wrote is theirs, and the start says
+    nothing of it."""
     import ast
     import inspect
     import re
@@ -1427,13 +1432,16 @@ def test_the_start_warns_of_a_mark_the_model_fits_without(monkeypatch,
     cfg_path, lib = _sync_config(
         tmp_path, f"models:\n  flash-next:\n    path: {FLASH_NEXT}\n"
         f"    stream: experts{note}\n")
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     table = flash_next_under_its_table(monkeypatch, lib)
     if whole:
         big = device.stream_budget_bytes() + table
         monkeypatch.setattr(srv.discovery, "_stream_budget_bytes", lambda: big)
         monkeypatch.setattr(device, "stream_budget_bytes", lambda: big)
+    if keep_table:
+        monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     srv._warn_stale_stream_marks(load_config(str(cfg_path)), str(cfg_path))
-    fits = ("fits in memory" if whole
+    fits = ("fits in memory" if keep_table
             else "fits with its table read from the file")
     line = ("[server] warning: flash-next: a folder scan set stream: "
             f"experts, and the model now {fits}, so its experts stream. Run "

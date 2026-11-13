@@ -67,12 +67,12 @@ def test_only_tables_past_the_ceiling(table_gguf, monkeypatch):
     assert oversize_tables([path], "llama") == {}
 
 
-def test_a_table_that_brings_the_load_under_the_budget_is_read_from_the_file(
+def test_a_table_is_read_from_the_file_when_the_rest_fits_the_budget(
         table_gguf, monkeypatch):
-    """A load over the stream budget whose tables alone bring it under
-    reads them from the file, so its experts stay resident. A load that
-    fits, or that stays over without them, holds them as before, unless
-    the check before the load latched the step for the memory free now; a
+    """A load whose other tensors fit the stream budget reads its tables
+    from the file, so its experts stay resident, whether or not the whole
+    load fits. A load that stays over without them holds them, unless the
+    check before the load latched the step for the memory free now; a
     stream flag leaves them to the install's ladder, and
     GMLX_STREAM_PLE=0 keeps them."""
     import gmlx.stream.table_stream as ts
@@ -88,15 +88,18 @@ def test_a_table_that_brings_the_load_under_the_budget_is_read_from_the_file(
 
     assert list(defer(table + rest - 1)) == ["blk.1.engram_embd.weight"]
     assert list(defer(rest)) == ["blk.1.engram_embd.weight"]
-    assert defer(table + rest) == {}
+    assert list(defer(table + rest)) == ["blk.1.engram_embd.weight"]
+    assert list(defer(2 * (table + rest))) == ["blk.1.engram_embd.weight"]
+    assert defer(rest - 1) == {}
     monkeypatch.setattr(ts, "_FOR_MEMORY", set())
     ts.stream_tables_for_memory(path)
-    assert list(defer(table + rest)) == ["blk.1.engram_embd.weight"]
+    assert list(defer(rest - 1)) == ["blk.1.engram_embd.weight"]
     ts.stream_tables_for_memory(path, False)
     assert defer(rest - 1) == {}
     assert defer(rest, latched=True) == {}
     monkeypatch.setenv("GMLX_STREAM_PLE", "0")
     assert defer(rest) == {}
+    assert defer(2 * (table + rest)) == {}
     # A table past the ceiling is read from the file whatever the budget.
     monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
     assert list(defer(rest - 1, latched=True)) == ["blk.1.engram_embd.weight"]
