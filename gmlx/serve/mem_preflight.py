@@ -473,21 +473,22 @@ def prompt_kv_bytes(costs, tokens: int) -> float:
 
 def available_drained_bytes():
     """The wired cap minus zero-copy weights, minus a streaming model's
-    decode arena, the admission reserve and the cache limit: what a lone
-    request could hold with the batch drained. The arena is MLX-tracked,
-    sized at install and never drained, and the buffer cache is wired up
-    to its limit beside the request. Other MLX-tracked weight allocations
-    are not subtracted, which only admits more."""
+    decode arena and the admission reserve: what a lone request could hold
+    with the batch drained. The arena is MLX-tracked, sized at install and
+    never drained. The buffer cache yields at the cap, so it takes no
+    share. Other MLX-tracked weight allocations are not subtracted, which
+    only admits more. None when the device cannot be read; a cap of 0 is
+    a known one, and leaves no room."""
     from gmlx.gen.prefill_decay import untracked_weight_bytes
     from gmlx.stream.installs import live_arena_bytes
-    from .capacity import cache_limit_bytes, wired_cap_bytes
+    from .capacity import wired_cap_bytes
     from .memory import admit_reserve_bytes
 
     cap = wired_cap_bytes()
-    if not cap or cap <= 0:
+    if cap is None:
         return None
     return (cap - untracked_weight_bytes() - live_arena_bytes()
-            - admit_reserve_bytes(cap) - cache_limit_bytes())
+            - admit_reserve_bytes(cap))
 
 
 def _need_bytes(model, costs, prompt_tokens: int, gen_tokens: int = 0):

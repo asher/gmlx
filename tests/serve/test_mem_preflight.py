@@ -645,8 +645,8 @@ class _Arena:
 
 def test_available_drained_charges_live_arena(monkeypatch):
     """The wired cap (95 GB of a 100 GB working set) less the zero-copy
-    weights, the admission reserve, the cache limit the buffer cache is
-    wired up to, and a live decode arena."""
+    weights, the admission reserve and a live decode arena. The buffer
+    cache yields at the cap, so its limit takes no share."""
     import mlx.core as mx
 
     import gmlx.gen.prefill_decay as pd
@@ -659,10 +659,10 @@ def test_available_drained_charges_live_arena(monkeypatch):
     monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", int(4e9))
     monkeypatch.setattr(sm, "admit_reserve_bytes", lambda ws, gen=None: 2e9)
     monkeypatch.setattr(installs, "_ARENAS", [])
-    assert mp.available_drained_bytes() == pytest.approx(79e9)
+    assert mp.available_drained_bytes() == pytest.approx(83e9)
     arena = _Arena(30e9)
     installs.record_arena(arena)
-    assert mp.available_drained_bytes() == pytest.approx(49e9)
+    assert mp.available_drained_bytes() == pytest.approx(53e9)
 
 
 def test_an_id_prompt_is_priced_by_its_length(tight):

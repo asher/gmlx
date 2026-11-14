@@ -82,6 +82,37 @@ def test_weight_bytes_sums_shards(monkeypatch, tmp_path):
     assert sm.model_weight_bytes(str(a)) == 150
 
 
+def test_a_wired_cap_of_zero_keeps_the_cache_bounded(monkeypatch):
+    """A cap of 0 (the memory wired outside the server leaves the RAM
+    term nothing) is a known cap, not an unknown working set. The auto
+    cache limit stays bounded, sized from the working set; the room a
+    drained batch leaves reads as none rather than unknown; and the MLX
+    memory limit stays MLX's own instead of 0, under which every
+    allocation would empty the cache and every eval wait for the GPU."""
+    import mlx.core as mx
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as capacity
+    import gmlx.serve.mem_preflight as mp
+    from gmlx.stream import installs
+
+    monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
+    monkeypatch.setattr(capacity, "working_set_bytes", lambda: 48e9)
+    monkeypatch.setattr(capacity, "wired_cap_bytes",
+                        lambda ws=None, m=None: 0.0)
+    monkeypatch.setattr(capacity, "note_outside_wired", lambda: 0.0)
+    limits: list = []
+    monkeypatch.setattr(mx, "set_cache_limit", limits.append)
+    mlx_limit = mx.get_memory_limit()
+    sm.apply_local_cache_limit([])
+    assert limits == [sm.auto_cache_limit_bytes(48e9, 0)]
+    assert mx.get_memory_limit() == mlx_limit
+    monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 0.0)
+    monkeypatch.setattr(installs, "_ARENAS", [])
+    drained = mp.available_drained_bytes()
+    assert drained is not None and drained <= 0
+
+
 def test_weight_bytes_hf_ref_is_zero():
     assert sm.model_weight_bytes("hf:org/repo/file.gguf") == 0
     assert sm.model_weight_bytes("/nonexistent/m.gguf") == 0

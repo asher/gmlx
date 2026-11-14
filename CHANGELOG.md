@@ -59,8 +59,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   video only when ffmpeg is missing.
 - Past the drafter's width cap a batch decodes without speculation, and a dense
   Qwen model's native head has a cap of 2. `GMLX_MTP_MIXED=1` undoes the first.
-- gmlx wires at most one cap per Mac, and the server plans models, KV and the
-  MLX buffer cache under it. See
+- gmlx wires at most one cap per Mac, the server plans models and KV under it,
+  and the MLX buffer cache gives memory back there. See
   [The GPU memory limit](docs/memory.md#the-gpu-memory-limit).
 
 ### Fixed

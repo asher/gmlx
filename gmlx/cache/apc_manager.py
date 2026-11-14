@@ -1015,8 +1015,8 @@ def _max_pool_tensors() -> int:
 
 def _cache_room_bytes(budget: float) -> float:
     """The working budget (the wired cap) left to the prompt cache:
-    ``budget`` less the weights held now and the MLX cache limit, since
-    the buffer cache is wired beside them. The pool's share is
+    ``budget`` less the weights held now. The MLX buffer cache yields at
+    the cap, so it takes no share. The pool's share is
     _POOL_BUDGET_FRACTION of this."""
     import mlx.core as mx
 
@@ -1024,11 +1024,10 @@ def _cache_room_bytes(budget: float) -> float:
         streamed_tracked_bytes,
         untracked_weight_bytes,
     )
-    from gmlx.serve.capacity import cache_limit_bytes
 
     held = (float(mx.get_active_memory()) + untracked_weight_bytes()
             - streamed_tracked_bytes())
-    return max(0.0, budget - held - cache_limit_bytes())
+    return max(0.0, budget - held)
 
 
 def _sliding_windows(costs) -> set:

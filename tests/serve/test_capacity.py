@@ -71,6 +71,54 @@ def test_working_set_for_ram_and_the_reserve(monkeypatch):
     assert cap.reserve_bytes(128 * GiB) == 5e9
 
 
+def _ceiling_before(ws: float, mem: float) -> float:
+    """The serve ceiling as gmlx computed it before the memory wired
+    outside the server counted (the ceiling_bytes of the release before):
+    the working set less the margin, never closer to RAM than the
+    reserve."""
+    return min(ws * (1.0 - cap.margin()), mem - cap.reserve_bytes(mem))
+
+
+def _a_mac(monkeypatch, mem: float, ws: float) -> None:
+    import mlx.core as mx
+
+    monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
+    monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
+    monkeypatch.setattr(mx, "device_info", lambda: {
+        "max_recommended_working_set_size": ws, "memory_size": mem})
+
+
+@pytest.mark.parametrize("gib", [16, 24, 32, 64, 128])
+def test_a_stock_mac_plans_under_the_ceiling_it_had(monkeypatch, gib):
+    """The memory wired outside the server comes off the RAM term of the
+    cap only. macOS's own working set (2/3 of RAM under 64 GiB, 3/4 from
+    it) already leaves room for the system and sits under that term, so
+    with up to 10% of RAM wired outside, a stock Mac's cap and working
+    budget are the ceiling it planned under before."""
+    mem = gib * (1 << 30)
+    ws = cap.working_set_for_ram(mem)
+    _a_mac(monkeypatch, mem, ws)
+    before = _ceiling_before(ws, mem)
+    for share in (0.0, 0.05, 0.10):
+        monkeypatch.setattr(cap, "_OUTSIDE_WIRED", share * mem)
+        assert cap.wired_cap_bytes() == pytest.approx(before)
+        assert cap.working_budget_bytes() == pytest.approx(before)
+
+
+def test_a_raised_working_set_meets_the_memory_wired_outside(monkeypatch):
+    """A 128 GiB Mac whose GPU limit was raised to 112 GiB: its working
+    set term (114 GB) sits above RAM less the reserve and the 10% of RAM
+    wired outside the server (110 GB), so the cap is the RAM term, lower
+    than the ceiling it had."""
+    mem = 128 * (1 << 30)
+    ws = 112 * (1 << 30)
+    _a_mac(monkeypatch, mem, ws)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 0.10 * mem)
+    want = mem - cap.reserve_bytes(mem) - 0.10 * mem
+    assert want < _ceiling_before(ws, mem)
+    assert cap.wired_cap_bytes() == pytest.approx(want)
+
+
 def test_table_math_and_monotone_frontier(rig):
     path = rig(weights_gb=10.0, ws_gb=20.0)
     t = cap.derive_table(path)
@@ -352,8 +400,14 @@ def test_preload_gate_judges_the_wired_cap(rig, monkeypatch):
     # next to a pinned 31.5 GB resident on a 112 GB wire limit and Metal
     # OOM'd.
     rig(weights_gb=10.0, ws_gb=20.0)
+    import mlx.core as mx
+
     import gmlx.gen.prefill_decay as pd
     monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
+    monkeypatch.delenv("GMLX_GOV_RESERVE_GB", raising=False)
+    monkeypatch.setattr(mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 20.0 * GB,
+        "memory_size": 22.0 * GB})
     for name in ("_UNTRACKED_WEIGHTS", "_STREAMED_TRACKED", "_STREAMED_CAP",
                  "_BUILD_CREDIT"):
         monkeypatch.setattr(pd, name, {})
@@ -361,11 +415,12 @@ def test_preload_gate_judges_the_wired_cap(rig, monkeypatch):
     monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 14.0 * GB)
     monkeypatch.setattr(pd.mx, "get_cache_memory", lambda: 0)
     monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
-    # The cap: 20 GB x 0.95 less 1 GB wired outside the server, 18 GB,
-    # of which 14 GB is held.
-    cap.preload_gate(3.9 * GB, "fits")
-    with pytest.raises(cap.LoadDeferred, match="free working set 4.0 GB"):
-        cap.preload_gate(4.5 * GB, "edge")
+    # The cap: 22 GB of RAM less the 2.2 GB reserve and 1 GB wired
+    # outside the server, 18.8 GB, under the 19 GB of the working set
+    # term; 14 GB is held.
+    cap.preload_gate(4.7 * GB, "fits")
+    with pytest.raises(cap.LoadDeferred, match="free working set 4.8 GB"):
+        cap.preload_gate(5.0 * GB, "edge")
 
 
 def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):

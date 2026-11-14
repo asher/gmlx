@@ -1140,8 +1140,9 @@ def test_ceiling_reserve_binds_when_ws_is_close_to_ram(monkeypatch):
 
 
 def test_the_governor_plans_under_the_wired_cap(monkeypatch):
-    """The governed ceiling is the wired cap: the ceiling less the memory
-    wired outside the server at load. The headroom is free memory under
+    """The governed ceiling is the wired cap: the working set less the
+    margin, or RAM less the reserve and the memory wired outside the
+    server at load, whichever is lower. The headroom is free memory under
     that cap, the buffer cache counted as wired beside the active bytes."""
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
@@ -1155,7 +1156,8 @@ def test_the_governor_plans_under_the_wired_cap(monkeypatch):
         monkeypatch.setattr(pd, name, {})
     monkeypatch.setattr(gov.mx, "get_active_memory", lambda: 30e9)
     monkeypatch.setattr(gov.mx, "get_cache_memory", lambda: 2e9)
-    # The 97 GB ceiling less 6 GB wired outside the server.
+    # 137 GB of RAM less the 40 GB reserve and 6 GB wired outside the
+    # server, under the 114 GB of the working set term.
     assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(91e9)
     head, ws = gov._headroom_and_ws(0.05)
     assert ws == 120e9

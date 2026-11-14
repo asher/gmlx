@@ -3,11 +3,34 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
+import sys
 
 import mlx.core as mx
 
 from gmlx.upstream.patching import link, wrapped_with
+
+_log = logging.getLogger(__name__)
+
+# (MLX's memory limit as install_wired_cap found it, the wired cap it set
+# in its place); the pin puts the first back while the second stands.
+# None until a cap sets the limit.
+_CAP_MEMORY_LIMIT: tuple[int, int] | None = None
+# True once the clamp has told of a request it lowered.
+_CLAMP_LOGGED = False
+# True when the cap's lines print (the server); else they show under
+# --verbose only.
+_ANNOUNCE = False
+
+
+def _say(msg: str) -> None:
+    if _ANNOUNCE:
+        print(msg)
+    else:
+        from gmlx.load import loadlog
+
+        loadlog.info(msg)
 
 
 @contextlib.contextmanager
@@ -62,24 +85,33 @@ def wired_limit_held():
                 real[0](want[0])
 
 
-def install_wired_cap() -> None:
+def install_wired_cap(announce: bool = False) -> None:
     """Clamp every ``mx.set_wired_limit`` call to the wired cap
-    (``capacity.wired_cap_bytes``), once per process, at the first load
-    or server start: it reads the memory wired outside the server first,
-    before the process wires anything. gmlx sets the limit in many places
-    (the generation contexts of the copied mlx-lm and mlx-vlm, the MTP
-    sticky wire, the trainers, the CLI verbs), all through ``mx.`` at call
-    time, so this one wrapper owns the figure each gets: min(request,
-    cap). A pinned process (``_neutralize_wired_limit_sweep``) stays at 0,
-    and ``wired_limit_held`` holds and restores through the clamp. A
-    no-op without Metal."""
+    (``capacity.wired_cap_bytes``) and set the MLX memory limit to it,
+    once per process, at the first load or server start: it reads the
+    memory wired outside the server first, before the process wires
+    anything. gmlx sets the wired limit in many places (the generation
+    contexts of the copied mlx-lm and mlx-vlm, the MTP sticky wire, the
+    trainers, the CLI verbs), all through ``mx.`` at call time, so this
+    one wrapper owns the figure each gets: min(request, cap). Under the
+    memory limit, MLX frees cached buffers before its active bytes and
+    its buffer cache together pass the cap, so the cache takes no fixed
+    share of it. A pinned process (``_neutralize_wired_limit_sweep``)
+    stays at 0 and keeps MLX's memory limit, and ``wired_limit_held``
+    holds and restores through the clamp. ``announce`` (the server)
+    prints the cap and the first request the clamp lowers; else they show
+    under --verbose. A no-op without Metal."""
+    global _ANNOUNCE
+    if announce:
+        _ANNOUNCE = True
     if (wrapped_with(mx.set_wired_limit, "_kq_wired_cap")
             or wrapped_with(mx.set_wired_limit, "_kq_no_sweep")):
         return
     from gmlx.serve import capacity
 
     capacity.note_outside_wired()
-    if capacity.wired_cap_bytes() is None:
+    cap = capacity.wired_cap_bytes()
+    if cap is None:
         return
     # Inside a hold, the clamp goes under it, on what the hold puts back.
     held, real = None, mx.set_wired_limit
@@ -87,9 +119,14 @@ def install_wired_cap() -> None:
         held, real = real, real._kq_wired_real[0]
 
     def _capped(limit, *a, **k):
+        global _CLAMP_LOGGED
         cap = capacity.wired_cap_bytes()
-        if cap is not None:
-            limit = min(int(limit), int(cap))
+        if cap is not None and int(limit) > int(cap):
+            if not _CLAMP_LOGGED:
+                _CLAMP_LOGGED = True
+                _say(f"[memory] wired limit {int(limit) / 1e9:.1f} GB "
+                     f"asked, set to the wired cap {cap / 1e9:.1f} GB")
+            limit = int(cap)
         return real(limit, *a, **k)
 
     capped = link(_capped, real, "_kq_wired_cap")
@@ -98,6 +135,52 @@ def install_wired_cap() -> None:
     else:
         held._kq_wired_real[0] = capped
         link(held, capped)
+    _limit_memory_to_cap(cap)
+
+
+def _limit_memory_to_cap(cap: float) -> None:
+    """Set the MLX memory limit to the wired cap, and log both. A cap of
+    0 (more memory wired outside the server than the RAM term leaves)
+    keeps MLX's limit: under a limit of 0 every allocation would empty the
+    buffer cache and every eval would wait for the GPU."""
+    global _CAP_MEMORY_LIMIT
+    from gmlx.serve import capacity
+
+    ws = capacity.working_set_bytes() or 0.0
+    why = (f"working set {ws / 1e9:.1f} GB less {capacity.margin():.0%}, or "
+           f"RAM less the reserve and the "
+           f"{capacity.outside_wired_bytes() / 1e9:.1f} GB wired outside "
+           f"the server, whichever is lower")
+    if cap <= 0:
+        print(f"[memory] warning: wired cap 0 GB ({why}): the MLX memory "
+              "limit stays at its default", file=sys.stderr)
+        return
+    try:
+        prev = int(mx.set_memory_limit(int(cap)))
+    except Exception:
+        _log.warning("[memory] set_memory_limit failed; the MLX memory "
+                     "limit stays at its default", exc_info=True)
+        return
+    _CAP_MEMORY_LIMIT = (prev, int(cap))
+    _say(f"[memory] wired cap {cap / 1e9:.1f} GB ({why}): "
+         f"mx.set_wired_limit clamped to it, MLX memory limit "
+         f"{int(cap) / 1e9:.1f} GB (was {prev / 1e9:.1f} GB)")
+
+
+def _restore_mlx_memory_limit() -> None:
+    """Put back the MLX memory limit install_wired_cap replaced, while
+    the cap it set still stands (a later owner, such as expert
+    streaming's allocator, keeps its own)."""
+    global _CAP_MEMORY_LIMIT
+    saved = _CAP_MEMORY_LIMIT
+    if saved is None:
+        return
+    try:
+        if int(mx.get_memory_limit()) == saved[1]:
+            mx.set_memory_limit(saved[0])
+    except Exception:
+        return
+    _CAP_MEMORY_LIMIT = None
 
 
 def _neutralize_wired_limit_sweep():
@@ -139,6 +222,10 @@ def _neutralize_wired_limit_sweep():
     if prev:
         print(f"[stream] wired limit lowered from {prev / 1e9:.1f} GB to 0: "
               "a raised limit wires every live buffer, zero-copy views included")
+    # MLX wires nothing from here on, and the file-backed views a pinned
+    # load tracks count as active bytes: under a memory limit at the wired
+    # cap each eval would wait for the GPU work in flight.
+    _restore_mlx_memory_limit()
 
     def _no_sweep(*_a, **_k):
         return 0

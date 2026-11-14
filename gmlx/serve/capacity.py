@@ -91,12 +91,16 @@ def reserve_bytes(mem_size: float) -> float:
         return default
 
 
-def ceiling_bytes(ws: float, m: float | None = None) -> float:
+def ceiling_bytes(ws: float, m: float | None = None,
+                  outside: float = 0.0) -> float:
     """The one ceiling on tracked bytes: Metal's recommended working
     set less the margin, but never closer to physical RAM than the
-    reserve. Metal's recommendation assumes the GPU owns the box; a
-    serve process sharing it with the kernel and the user does not
-    (2026-08-24: WS x 0.95 = 114 GB on a 128 GB box, box panicked)."""
+    reserve plus ``outside``, the memory wired outside this process.
+    Metal's recommendation assumes the GPU owns the box; a serve
+    process sharing it with the kernel and the user does not
+    (2026-08-24: WS x 0.95 = 114 GB on a 128 GB box, box panicked).
+    ``outside`` comes off the RAM term only: Apple's stock working set
+    already leaves room for the system, so only a raised one meets it."""
     from gmlx.device import metal_value
 
     cap = ws * (1.0 - (margin() if m is None else m))
@@ -104,7 +108,7 @@ def ceiling_bytes(ws: float, m: float | None = None) -> float:
         mem = float(metal_value("memory_size"))
     except Exception:
         return cap
-    return min(cap, mem - reserve_bytes(mem))
+    return min(cap, mem - reserve_bytes(mem) - outside)
 
 
 # The kernel's wired bytes before this process wired any of its own, read
@@ -134,27 +138,18 @@ def outside_wired_bytes() -> float:
 
 def wired_cap_bytes(ws: float | None = None,
                     m: float | None = None) -> float | None:
-    """The wired cap, one figure per machine: the ceiling
-    (``ceiling_bytes``) less the memory wired outside the server at load.
-    The governor plans under it and ``mx.set_wired_limit`` is clamped to
-    it (``stream.wired_limit.install_wired_cap``). Under a raised limit
-    MLX wires its active bytes and its buffer cache, so a plan counts
-    both against it. None when the device cannot be read."""
+    """The wired cap, one figure per machine: the lower of the working
+    set less the margin and the RAM less the reserve and the memory wired
+    outside the server at load (``ceiling_bytes``). The governor plans
+    under it, and ``stream.wired_limit.install_wired_cap`` clamps
+    ``mx.set_wired_limit`` to it and sets the MLX memory limit to it, so
+    the buffer cache yields there instead of taking a fixed share. None
+    when the device cannot be read."""
     if ws is None:
         ws = working_set_bytes()
     if ws is None:
         return None
-    return max(0.0, ceiling_bytes(ws, m) - outside_wired_bytes())
-
-
-def cache_limit_bytes() -> float:
-    """The MLX cache limit the server set (``prefill_decay.note_cache_limit``),
-    0 when none was set. The buffer cache is wired beside the active bytes
-    under a raised limit, so a plan under the wired cap keeps this much
-    of it."""
-    from gmlx.gen import prefill_decay
-
-    return float(prefill_decay._NOTED_CACHE_LIMIT or 0.0)
+    return max(0.0, ceiling_bytes(ws, m, outside_wired_bytes()))
 
 
 def working_budget_bytes() -> float | None:
@@ -405,12 +400,11 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
 
     budget = wired_cap_bytes(ws) or 0.0
     reserve = admit_reserve_bytes(ws)
-    cache = cache_limit_bytes()
 
     def fits(w: int, d: int) -> bool:
         kv = prompt_kv_bytes(costs, d)
         tr = _transient_bytes(heads, d, decl=decl, kv_fp16=kv_fp16, rows=w)
-        if weights + w * kv + tr + reserve + cache > budget:
+        if weights + w * kv + tr + reserve > budget:
             return False
         if max_buffer > 0:
             if tr > max_buffer:
@@ -448,7 +442,6 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         "margin": margin(),
         "budget_bytes": int(budget),
         "reserve_bytes": int(reserve),
-        "cache_limit_bytes": int(cache),
         "max_buffer_length": int(max_buffer),
         "resource_limit": resource_limit,
         "trained_ctx": trained if isinstance(trained, int) else None,
@@ -543,11 +536,10 @@ def _log_table(t: dict) -> None:
     ctx = ", ".join(f"w{w}={t['max_ctx'][w]}" for w in _WIDTHS)
     _log.info(
         "[capacity] weights %.1f GB, budget %.1f GB (WS %.1f GB, margin "
-        "%.2f), reserve %.1f GB, cache limit %.1f GB, max single buffer "
-        "%.1f GB, resource limit %d; max context by width: %s; trained %s",
+        "%.2f), reserve %.1f GB, max single buffer %.1f GB, resource "
+        "limit %d; max context by width: %s; trained %s",
         t["weight_bytes"] / GB, t["budget_bytes"] / GB,
         t["working_set_bytes"] / GB, t["margin"], t["reserve_bytes"] / GB,
-        t.get("cache_limit_bytes", 0) / GB,
         t["max_buffer_length"] / GB, t["resource_limit"], ctx,
         t["trained_ctx"])
 
@@ -818,8 +810,9 @@ def preload_gate(weight_bytes: float, model_id: str, *,
             f"model does not fit: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed this box's working "
             f"budget {budget / GB:.1f} GB (working set x "
-            f"{1 - margin():.2f}, less the memory wired outside the "
-            f"server). GMLX_OVERCOMMIT=1 overrides; {fix}")
+            f"{1 - margin():.2f}, or RAM less the reserve and the memory "
+            f"wired outside the server when lower). GMLX_OVERCOMMIT=1 "
+            f"overrides; {fix}")
     if head is not None and weight_bytes > head:
         _defer(
             f"model load deferred: {model_id} {what} "
@@ -955,8 +948,7 @@ def install_boot_table(gguf_path: str, weight_bytes: float | None,
         raise RuntimeError(
             f"model cannot fit at width 1: {model_id} weights "
             f"{t['weight_bytes'] / GB:.1f} GB + reserve "
-            f"{t['reserve_bytes'] / GB:.1f} GB + cache limit "
-            f"{t['cache_limit_bytes'] / GB:.1f} GB leave no context inside "
+            f"{t['reserve_bytes'] / GB:.1f} GB leave no context inside "
             f"the {t['budget_bytes'] / GB:.1f} GB working budget "
             f"(working set {t['working_set_bytes'] / GB:.1f} GB, margin "
             f"{t['margin']:.2f}). GMLX_OVERCOMMIT=1 overrides; for MoE "
