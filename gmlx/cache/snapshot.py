@@ -363,8 +363,8 @@ def drafter_sidecar_store(
             _side_room(idx, key, _caches_nbytes(clones), _SIDECAR_ENTRIES,
                        _SIDECAR_BUDGET_BYTES, _caches_nbytes)
         if pending:
-            import mlx.core as mx
-            mx.eval(*pending)
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="sidecar-store", owner="owned")
         with manager.lock:
             idx[key] = clones
             if record is not None:
@@ -519,8 +519,8 @@ def anchor_exact_store(
             _side_room(idx, key, nbytes, _ANCHOR_ENTRIES,
                        _ANCHOR_BUDGET_BYTES, lambda v: v[1])
         if pending:
-            import mlx.core as mx
-            mx.eval(pending)
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="anchor-store", owner="owned")
         with manager.lock:
             idx[key] = (clones, nbytes)
             idx.move_to_end(key)
@@ -2709,8 +2709,8 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         snaps = stash.setdefault("snaps", [])
         del snaps[:-1]
         if pending:
-            import mlx.core as mx
-            mx.eval(*pending)
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="decode-ckpt-tick", owner="owned")
         snaps.append((p, states))
         stash["snap_next"] = _grid_ceil(p + eff, grid)
         _log.info("APC decode ckpt snapshot: p=%d pred=%d", p, pred)
