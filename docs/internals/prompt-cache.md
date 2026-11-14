@@ -77,6 +77,7 @@ This table gives each counter and what a change in it means.
 | `ckpt_declines` | Each save the server skips counts under its reason. When every request lands under one reason, reuse does not work for that traffic. |
 | `ckpt_missed_adoptions` | Each request that matched a saved prefix but could not use it adds one. Any growth indicates a bug. |
 | `ckpt_pool_evictions` | Each prefix discarded to make room adds one. Evictions are normal on long sessions. |
+| `ckpt_budget_evictions`, `ckpt_budget_evicted_mb` | Each checkpoint dropped to keep checkpoints and pool blocks within the pool's memory share adds one, and its MB with the blocks freed beside it. The log names each one. Growth with a few conversations side by side means the share is too small for them. |
 | `ckpt_skeleton_writes` | Each save mirrored to the disk tier adds one. Zero with `disk` on means a restart starts cold. |
 | `sidecar_writes` | Each drafter cache entry saved beside its target entry adds one. |
 | `retire_fallback_suppressed` | Each retirement store skipped because the predicted next-turn render diverged adds one. The turn checkpoint covers it. |

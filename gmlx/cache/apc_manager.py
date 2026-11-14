@@ -301,6 +301,15 @@ class GmlxAPCManager(_apc.APCManager):
                       self._exact_budget_bytes / 1e9)
         if not os.environ.get("APC_NUM_BLOCKS"):
             self._grow_pool(free * budget_fraction, per_tok)
+        # Checkpoint records share the pool's room with its blocks
+        # (snapshot._record_room): the share the pool cap is sized from,
+        # or the pool APC_NUM_BLOCKS sets, never less than the pool's cap.
+        pool_cap = self.num_blocks * self.block_size * per_tok
+        share = (pool_cap if os.environ.get("APC_NUM_BLOCKS")
+                 else max(free * budget_fraction, pool_cap))
+        self._kq_ckpt_share_bytes = int(share)
+        _log.info("APC pool share: %.1f GB for pool blocks and checkpoint "
+                  "records together", share / 1e9)
         self._working_set_bytes = int(budget)
         if not os.environ.get("APC_MEMORY_MAX_GB"):
             cap = (self.num_blocks * self.block_size * per_tok

@@ -112,6 +112,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of a batch decoded slower than a request alone, more the longer its context.
 - After a turn restored from the prompt cache, Qwen3.8-Flash-Next held that
   conversation's attention and indexer keys at twice their memory.
+- On hybrid models such as Qwen3.8-Flash-Next, a conversation running beside
+  others could lose its deepest prompt cache entry and rerun most of its prompt.
 
 ## [0.5.5] - 2026-11-08
 

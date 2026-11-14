@@ -92,7 +92,7 @@ layers.
 | `GMLX_APC_ANCHOR_BUDGET_MB` | Keep the exact-tier anchors within this many MB. The newest anchor is never evicted. |
 | `GMLX_APC_CKPT_TRIPWIRE` | Warn about a model that stores nothing, or that matches but adopts nothing, after this many requests. `0` silences both warnings. |
 | `GMLX_APC_CKPT_RECORDS` | Keep this many checkpoint records. |
-| `GMLX_APC_CKPT_BUDGET_MB` | Keep the checkpoint payload within this many MB. |
+| `GMLX_APC_CKPT_BUDGET_MB` | Keep the checkpoint payload within this many MB, counted apart from the pool. Unset, checkpoints and the pool's blocks share the pool's memory share. |
 | `GMLX_APC_DECODE_CKPT` | Snapshot a checkpoint-tier model at this interval in generated tokens. `0` turns it off. |
 | `GMLX_APC_RETIRE_LCP=0` | Key retirement on the forwarded ids instead of the predicted next-turn render. This also disables decode-time snapshots. |
 | `GMLX_APC_FRESH_WAIT_MS` | Admit siblings that arrive together one at a time, holding each at most this many ms. `0` disables the gate. |

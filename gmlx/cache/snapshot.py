@@ -680,10 +680,14 @@ _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
 # Decision records a manager keeps, so a stream of decisions on new states
 # cannot push the chat records out.
 _CKPT_DECISION_ENTRIES = 8
-# Byte budget for record-owned payload (recurrent states + KV tails; chain
-# blocks are bounded by the manager pool). A GDN record can carry >100 MB
-# of state, so a count bound alone silently pins gigabytes.
+# Records-only byte budget for record-owned payload (recurrent states, KV
+# tails, indexer keys). A GDN record can carry >100 MB of state, so a count
+# bound alone silently pins gigabytes. It bounds the records of a manager
+# autosize never sized; on an autosized one the records share the pool's
+# room with its blocks (_record_room), unless GMLX_APC_CKPT_BUDGET_MB sets
+# this budget in its place.
 _CKPT_BUDGET_BYTES = max(1, env_int("GMLX_APC_CKPT_BUDGET_MB", 4096)) << 20
+_CKPT_BUDGET_SET = bool(os.environ.get("GMLX_APC_CKPT_BUDGET_MB", "").strip())
 
 
 def _iter_arrays(obj):
@@ -883,7 +887,7 @@ _CKPT_STAT_INTS = (
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
     "retire_fallback_suppressed",
     "ckpt_pool_evictions", "ckpt_governor_released",
-    "ckpt_evict_own_chain",
+    "ckpt_evict_own_chain", "ckpt_budget_evictions", "ckpt_budget_evicted_mb",
     "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
@@ -1156,22 +1160,132 @@ def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
     return evicted
 
 
-def _evict_lru_record(manager, idx, keep):
-    """Release and return the eviction victim: the least-recently-used
-    spared record, else non-anchor record, else anchor, never the
-    ``keep`` key (the record being inserted always survives). Lookup
-    hits move_to_end, so anchor order is LRU by last hit: an anchor
-    that never serves a sibling ages out, one that does stays hot.
-    Caller holds the lock and guarantees a non-keep record exists."""
+def _lru_victim_key(idx, keep):
+    """Key of the eviction victim: the least-recently-used spared record,
+    else non-anchor record, else anchor, never the ``keep`` key (the
+    record being inserted always survives). Lookup hits move_to_end, so
+    anchor order is LRU by last hit: an anchor that never serves a
+    sibling ages out, one that does stays hot. Caller holds the lock and
+    guarantees a non-keep record exists."""
     key = next((k for k, r in idx.items() if r.spared and k != keep), None)
     if key is None:
         key = next((k for k, r in idx.items()
                     if r.kind != "anchor" and k != keep), None)
     if key is None:
         key = next(k for k in idx if k != keep)
-    victim = idx.pop(key)
+    return key
+
+
+def _evict_lru_record(manager, idx, keep):
+    """Release and return the eviction victim (``_lru_victim_key``)."""
+    victim = idx.pop(_lru_victim_key(idx, keep))
     _release_record(manager, victim)
     return victim
+
+
+def _record_room(manager) -> tuple[int, bool]:
+    """The bytes checkpoint records may hold, and whether the pool's
+    committed blocks count against the same figure. autosize stashes the
+    pool's share of the prompt cache's room (``_kq_ckpt_share_bytes``),
+    and records and blocks live within it together.
+    GMLX_APC_CKPT_BUDGET_MB, when set, is a records-only budget in its
+    place, and a manager autosize never sized keeps the records-only
+    default."""
+    share = getattr(manager, "_kq_ckpt_share_bytes", None)
+    if share and not _CKPT_BUDGET_SET:
+        return int(share), True
+    return int(_CKPT_BUDGET_BYTES), False
+
+
+def _committed_block_bytes(manager) -> int:
+    return sum(int(b.resident_bytes())
+               for b in getattr(manager, "pool", None) or ())
+
+
+def _free_unheld(manager, blocks) -> int:
+    """Free each of ``blocks`` that nothing holds any more: on a
+    checkpoint model a chain of blocks is useless without its record. The
+    block leaves the hash table and releases its slabs, and stays empty
+    in the free queue, as the pool's own eviction leaves one. A block a
+    live record or a lookup still holds stays. Returns the bytes freed."""
+    freed = 0
+    table = getattr(manager, "hash_table", None)
+    seen: set[int] = set()
+    for b in blocks:
+        if id(b) in seen or b.ref_cnt > 0:
+            continue
+        seen.add(id(b))
+        nb = int(b.resident_bytes())
+        if not nb:
+            continue
+        if (table is not None and b.block_hash is not None
+                and table.get(b.block_hash) is b):
+            del table[b.block_hash]
+            manager.stats.evictions += 1
+        b.block_hash = None
+        b.token_ids = ()
+        b.release_components()
+        freed += nb
+    return freed
+
+
+def _fit_record_room(manager, idx, keep) -> tuple[list, dict]:
+    """Bring the records, and the pool's committed blocks when they share
+    the room, within the room (``_record_room``). What goes first: blocks
+    no record holds, then records in eviction order (``_lru_victim_key``),
+    each with the blocks only it held, so a record is never dropped while
+    its blocks stay. The record ``keep`` always stays. Caller holds the
+    lock. Returns each dropped record with the bytes it freed, and the
+    figures the log line reports."""
+    room, shared = _record_room(manager)
+    total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
+    blocks = _committed_block_bytes(manager) if shared else 0
+    note = {"room": room, "shared": shared, "before": total + blocks,
+            "idle": 0}
+    victims: list = []
+    if total + blocks <= room:
+        return victims, note
+    evict_idle = getattr(manager, "_evict_idle_blocks", None)
+    if shared and evict_idle is not None:
+        note["idle"] = int(evict_idle(total + blocks - room))
+        blocks -= note["idle"]
+    while total + blocks > room and len(idx) > 1:
+        victim = idx.pop(_lru_victim_key(idx, keep))
+        held = list(victim.main_blocks or ()) + list(
+            victim.bounded_blocks or ())
+        own = int(getattr(victim, "nbytes", 0) or 0)
+        _release_record(manager, victim)
+        freed = _free_unheld(manager, held)
+        total -= own
+        if shared:
+            blocks -= freed
+        victims.append((victim, own + freed))
+    note["after"] = total + blocks
+    return victims, note
+
+
+def _note_budget_evictions(manager, rec, victims, note) -> None:
+    """The budget's counters and its one log line for an insert that
+    dropped records."""
+    mib = float(1 << 20)
+    freed = sum(b for _, b in victims)
+    st = _ckpt_stats(manager)
+    with manager.lock:
+        st["ckpt_budget_evictions"] = (st.get("ckpt_budget_evictions", 0)
+                                       + len(victims))
+        st["_budget_evicted_bytes"] = (st.get("_budget_evicted_bytes", 0)
+                                       + int(freed))
+        st["ckpt_budget_evicted_mb"] = st["_budget_evicted_bytes"] >> 20
+    _log.info(
+        "APC ckpt budget: dropped %d record(s), %.1f MiB, for the p=%d %s "
+        "store: %s; %s %.1f MiB, now %.1f MiB, of %.1f MiB%s",
+        len(victims), freed / mib, rec.p, rec.kind,
+        ", ".join(f"p={v.p} {v.kind} {b / mib:.1f} MiB"
+                  for v, b in victims),
+        "records and pool blocks" if note["shared"] else "records",
+        note["before"] / mib, note["after"] / mib, note["room"] / mib,
+        f"; blocks no record held {note['idle'] / mib:.1f} MiB"
+        if note["idle"] else "")
 
 
 def _record_insert(manager, rec, keep: int | None = None) -> None:
@@ -1198,6 +1312,9 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
     other insert strips a decision record. A decision insert past
     _CKPT_DECISION_ENTRIES releases the least recently used decision
     record. Eviction ranks them with the non-anchors.
+
+    Bytes: the records, with the pool's committed blocks on an autosized
+    manager, stay within the room (``_fit_record_room``).
 
     Against real memory pressure the exemptions pin little: the count
     and byte bounds evict anchors after non-anchors (LRU by last hit),
@@ -1269,10 +1386,9 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
                 _release_record(manager, idx.pop(k))
         while len(idx) > _CKPT_RECORD_ENTRIES:
             _evict_lru_record(manager, idx, key)
-        total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
-        while total > _CKPT_BUDGET_BYTES and len(idx) > 1:
-            victim = _evict_lru_record(manager, idx, key)
-            total -= int(getattr(victim, "nbytes", 0) or 0)
+        victims, note = _fit_record_room(manager, idx, key)
+    if victims:
+        _note_budget_evictions(manager, rec, victims, note)
 
 
 def ckpt_store(
