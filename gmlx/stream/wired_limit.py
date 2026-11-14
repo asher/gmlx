@@ -85,29 +85,12 @@ def wired_limit_held():
                 real[0](want[0])
 
 
-def read_outside_wired(announce: bool = False) -> None:
-    """Read the memory wired outside this process
-    (``capacity.note_outside_wired``) before it wires anything: at server
-    start, at the CLI's cache limit and at the first load. The wired cap
-    of a load that maps a table outside MLX's tracker takes it off its
-    RAM term (``install_wired_cap``). ``announce`` (the server) prints the
-    cap's lines when it goes in; else they show under --verbose."""
-    global _ANNOUNCE
-    if announce:
-        _ANNOUNCE = True
-    from gmlx.serve import capacity
-
-    capacity.note_outside_wired()
-
-
 def install_wired_cap(announce: bool = False) -> None:
-    """Plan and limit this process under the wired cap from here on, once
-    a load maps a streamable table outside MLX's tracker (the wire load,
-    at the map): ``capacity.engage_cap``, then clamp every
-    ``mx.set_wired_limit`` call to the cap (``capacity.wired_cap_bytes``)
-    and set the MLX memory limit to it, once per process. The memory
-    wired outside the process was read before it wired anything
-    (``read_outside_wired``). gmlx sets the wired limit in many places
+    """Limit this process under the wired cap for its life, once
+    ``capacity.decide_cap`` puts it there, before its first load: clamp
+    every ``mx.set_wired_limit`` call to the cap
+    (``capacity.wired_cap_bytes``) and set the MLX memory limit to it,
+    once per process. gmlx sets the wired limit in many places
     (the generation contexts of the copied mlx-lm and mlx-vlm, the MTP
     sticky wire, the trainers, the CLI verbs), all through ``mx.`` at
     call time, so this one wrapper owns the figure each gets:
@@ -117,15 +100,13 @@ def install_wired_cap(announce: bool = False) -> None:
     (``_neutralize_wired_limit_sweep``) stays at 0 and keeps MLX's memory
     limit, and ``wired_limit_held`` holds and restores through the clamp.
     ``announce`` prints the cap and the first request the clamp lowers;
-    else they show under --verbose. A process whose loads map no table
-    that way never calls this, and keeps MLX's limits. A no-op without
-    Metal."""
+    else they show under --verbose. A process not under the cap never
+    calls this, and keeps MLX's limits. A no-op without Metal."""
     global _ANNOUNCE
     if announce:
         _ANNOUNCE = True
     from gmlx.serve import capacity
 
-    capacity.engage_cap()
     if (wrapped_with(mx.set_wired_limit, "_kq_wired_cap")
             or wrapped_with(mx.set_wired_limit, "_kq_no_sweep")):
         return

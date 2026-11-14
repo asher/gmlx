@@ -99,7 +99,7 @@ def test_a_stock_mac_plans_under_the_ceiling_it_had(monkeypatch, gib):
     """The memory wired outside the server comes off the RAM term of the
     wired cap only. macOS's own working set (2/3 of RAM under 64 GiB, 3/4
     from it) already leaves room for the system and sits under that term:
-    in a process that maps a table untracked, a stock Mac's cap is the
+    in a process under the wired cap, a stock Mac's cap is the
     ceiling it planned under before until the memory wired outside passes
     18.75% of RAM at 64 and 128 GiB, 25.0% at 16 GiB and 26.7% at 24 and
     32 GiB, and lower past it. Any other process plans under that ceiling
@@ -114,7 +114,7 @@ def test_a_stock_mac_plans_under_the_ceiling_it_had(monkeypatch, gib):
         monkeypatch.setattr(cap, "_OUTSIDE_WIRED", share * mem)
         assert cap.wired_cap_bytes() == pytest.approx(before)
         assert cap.working_budget_bytes() == pytest.approx(before)
-    monkeypatch.setattr(cap, "_CAP_ENGAGED", True)
+    monkeypatch.setattr(cap, "_CAP", True)
     for share in (0.0, 0.10, edge - 1e-3):
         monkeypatch.setattr(cap, "_OUTSIDE_WIRED", share * mem)
         assert cap.wired_cap_bytes() == pytest.approx(before)
@@ -129,41 +129,51 @@ def test_a_raised_working_set_meets_the_memory_wired_outside(
         monkeypatch, engaged):
     """A 128 GiB Mac whose GPU limit was raised to 112 GiB: its working
     set term (114 GB) sits above RAM less the reserve and the 10% of RAM
-    wired outside the server (110 GB). In a process that maps a table
-    untracked the cap is the RAM term, lower than the ceiling it had; any
+    wired outside the server (110 GB). In a process under the wired cap
+    the cap is the RAM term, lower than the ceiling it had; any
     other process plans under that ceiling."""
     mem = 128 * (1 << 30)
     ws = 112 * (1 << 30)
     _a_mac(monkeypatch, mem, ws)
     monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 0.10 * mem)
-    monkeypatch.setattr(cap, "_CAP_ENGAGED", engaged)
+    monkeypatch.setattr(cap, "_CAP", engaged)
     want = mem - cap.reserve_bytes(mem) - 0.10 * mem
     assert want < _ceiling_before(ws, mem)
     assert cap.wired_cap_bytes() == pytest.approx(
         want if engaged else _ceiling_before(ws, mem))
 
 
-def test_a_load_predicted_untracked_plans_under_the_cap_until_it_ends(
-        monkeypatch, tmp_path):
-    """A load predicted to map a table untracked plans under the cap from
-    its declaration (plan_cap); when it ends without a map, the process
-    plans as before. A map engages the cap for the life of the process."""
+def test_the_cap_is_decided_once_before_the_first_load(monkeypatch):
+    """A process decides the wired cap once, from the models it starts
+    with: under the cap when any of them is predicted to map its table
+    untracked, and the cap goes in then. The decision stands for the life
+    of the process, so a model added later changes nothing."""
+    import gmlx.stream.table_stream as ts
+    import gmlx.stream.wired_limit as wl
+
     mem = 128 * (1 << 30)
     ws = 112 * (1 << 30)
     _a_mac(monkeypatch, mem, ws)
     monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 0.10 * mem)
-    monkeypatch.setattr(cap, "_CAP_ENGAGED", False)
-    monkeypatch.setattr(cap, "_CAP_PLANNED", set())
-    path = str(tmp_path / "m.gguf")
+    monkeypatch.setattr(cap, "note_outside_wired", lambda: 0.10 * mem)
+    monkeypatch.setattr(ts, "predicts_untracked",
+                        lambda path, stream=None, env=None:
+                        path == "/m/flash.gguf")
+    installs = []
+    monkeypatch.setattr(wl, "install_wired_cap",
+                        lambda announce=False: installs.append(announce))
     before = _ceiling_before(ws, mem)
-    assert not cap.cap_applies()
-    cap.plan_cap(path)
-    assert cap.cap_applies() and cap.wired_cap_bytes() < before
-    cap.plan_cap(path, False)
-    assert not cap.cap_applies()
+    monkeypatch.setattr(cap, "_CAP", None)
+    assert not cap.decide_cap([("/m/dense.gguf", None)])
+    assert not cap.decide_cap([("/m/flash.gguf", None)])
+    assert not cap.cap_applies() and installs == []
     assert cap.wired_cap_bytes() == pytest.approx(before)
-    cap.engage_cap()
-    assert cap.cap_applies() and cap.wired_cap_bytes() < before
+    monkeypatch.setattr(cap, "_CAP", None)
+    assert cap.decide_cap([("/m/dense.gguf", None),
+                           ("/m/flash.gguf", None)], announce=True)
+    assert cap.decide_cap([])
+    assert cap.cap_applies() and installs == [True]
+    assert cap.wired_cap_bytes() < before
 
 
 def test_table_math_and_monotone_frontier(rig):
@@ -457,7 +467,7 @@ def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
 
 @pytest.mark.parametrize("engaged", [True, False])
 def test_preload_gate_judges_the_wired_cap(rig, monkeypatch, engaged):
-    # In a process that maps a table untracked, the gate reads the free
+    # In a process under the wired cap, the gate reads the free
     # memory under the wired cap, the budget the boot table and admission
     # use, with the memory wired outside the server off its RAM term. Any
     # other process reads it under the serve ceiling, as before.
@@ -474,7 +484,7 @@ def test_preload_gate_judges_the_wired_cap(rig, monkeypatch, engaged):
                  "_BUILD_CREDIT"):
         monkeypatch.setattr(pd, name, {})
     monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 1.0 * GB)
-    monkeypatch.setattr(cap, "_CAP_ENGAGED", engaged)
+    monkeypatch.setattr(cap, "_CAP", engaged)
     monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 14.0 * GB)
     monkeypatch.setattr(pd.mx, "get_cache_memory", lambda: 0)
     monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)

@@ -1697,14 +1697,15 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
 def free_bytes() -> float | None:
     """Room for new work now: the measured free working set, with the
     buffer cache counted as free, held to the serve ceiling. None when
-    the device does not report it. In a process that maps a table outside
-    MLX's tracker, the headroom is measured under the wired cap already."""
+    the device does not report it. In a process under the wired cap
+    (``capacity.cap_applies``), the headroom is measured under the cap
+    already."""
     from gmlx.gen.prefill_decay import headroom_bytes
-    from gmlx.serve.capacity import (in_one_regime, working_budget_bytes,
+    from gmlx.serve.capacity import (cap_applies, working_budget_bytes,
                                      working_set_bytes)
 
-    head, engaged = in_one_regime(lambda capped: headroom_bytes())
-    if engaged:
+    head = headroom_bytes()
+    if cap_applies():
         return head
     budget = working_budget_bytes()
     ws = working_set_bytes()

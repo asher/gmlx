@@ -866,8 +866,7 @@ def test_a_tracked_or_untracked_table_leaves_the_same_resident_weights(
     path = "/models/Flash-Next-Q4.gguf"
     # The untracked map installs the wired cap; a tracked load keeps the
     # working set.
-    monkeypatch.setattr(capacity, "_CAP_ENGAGED", untracked)
-    monkeypatch.setattr(capacity, "_CAP_PLANNED", set())
+    monkeypatch.setattr(capacity, "_CAP", untracked)
     if untracked:
         ts.note_untracked_load(path, ["per_layer_token_embd.weight"])
     # The load's arrays in active memory: all of them, or all but the

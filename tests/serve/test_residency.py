@@ -491,19 +491,20 @@ def test_a_build_credits_no_table_it_reads_from_the_file(
 # Flash-Next built plain on a 128 GB M5 Max: its 28.8 GB PLE table brings
 # it under the budget, so the load maps the table, the install streams it
 # on the CPU stream and the experts stay in memory.
-@pytest.mark.parametrize("untracked", [True, False])
+@pytest.mark.parametrize("supported, decided", [
+    (True, True), (False, False), (True, False)])
 def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
-        monkeypatch, untracked):
-    """With an mlx-kquant that maps the table outside MLX's tracker, the
-    build puts nothing it streams in a residency set: no pin before the
-    walk, and no build credit, as the table adds to no MLX count. The walk
-    runs under the hold, so a load that falls back to a tracked table
-    wires nothing before its install pins. Without it, the build pins
-    before the walk and credits the table. Either way the build declares
-    the table stream's install for its load only. A build predicted to
-    map its table untracked plans under the wired cap from its gate to
-    the end of its walk; the cap stands after it only if a map installed
-    it."""
+        monkeypatch, supported, decided):
+    """In a server that decided the wired cap at start, with an mlx-kquant
+    that maps the table outside MLX's tracker, the build puts nothing it
+    streams in a residency set: no pin before the walk, and no build
+    credit, as the table adds to no MLX count. The walk runs under the
+    hold, so a load that falls back to a tracked table wires nothing
+    before its install pins. Without that mlx-kquant, the start decides
+    no cap; nor does it for a model added after the start. Either way the
+    build pins before the walk and credits the table. Every build
+    declares the table stream's install for its load only, and gates and
+    walks in the regime the start decided, which stands after it."""
     import contextlib
 
     import gmlx.gen.prefill_decay as pd
@@ -520,13 +521,13 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
         monkeypatch.setattr(pd, attr, {})
     box = {"active": 10e9}
     monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
-    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: untracked)
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: supported)
     # The header the load maps: the iq4_nl table, which no cast copies.
     monkeypatch.setattr(ts, "_mapped_tables", lambda p, env=None: [
         SimpleNamespace(name="per_layer_token_embd.weight",
                         type_name="IQ4_NL", nbytes=int(table))])
-    monkeypatch.setattr(cap, "_CAP_ENGAGED", False)
-    monkeypatch.setattr(cap, "_CAP_PLANNED", set())
+    monkeypatch.setattr(cap, "_CAP", decided)
+    untracked = supported and decided
     monkeypatch.setattr(cap, "gathered_table_bytes",
                         lambda p, budget=None, env=None: int(table))
     monkeypatch.setattr(cap, "held_table_bytes", lambda p: 0)
@@ -576,10 +577,10 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     if untracked:
         assert seen == [("gate", True), "held", True, True, 0, "released"]
     else:
-        assert seen == [("gate", False), "pinned", True, False,
+        assert seen == [("gate", decided), "pinned", True, decided,
                         pytest.approx(table, abs=1)]
     assert not ts.install_follows(path)
-    assert not cap.cap_applies()
+    assert cap.cap_applies() == decided
 
 
 def test_release_returns_refcount_to_zero_and_entry_evictable():

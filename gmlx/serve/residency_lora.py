@@ -521,11 +521,11 @@ class _LoraTurn:
             return self._headroom_fn()
         from gmlx.gen.prefill_decay import headroom_bytes
 
-        from .capacity import (in_one_regime, working_budget_bytes,
+        from .capacity import (cap_applies, working_budget_bytes,
                                working_set_bytes)
 
-        head, engaged = in_one_regime(lambda capped: headroom_bytes())
-        if head is None or engaged:
+        head = headroom_bytes()
+        if head is None or cap_applies():
             # Under the wired cap the headroom is measured against it.
             return head
         budget, ws = working_budget_bytes(), working_set_bytes()

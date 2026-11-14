@@ -3232,6 +3232,14 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     )
 
     register_resolved_models(cfg)
+    # One decision before any load: the server runs under the wired cap
+    # for its life when a configured model is predicted to map its table
+    # outside MLX's tracker. A model added later maps its table tracked
+    # unless the start decided the cap.
+    from .capacity import decide_cap
+
+    decide_cap([(mc.path, mc.stream) for mc in cfg.models.values()],
+               announce=True)
     # MLX buffer-cache limit: explicit env/config wins, else the auto policy
     # bounds the cache when the biggest configured model leaves little slack
     # (deep-context safety; see server_memory).

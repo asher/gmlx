@@ -100,16 +100,20 @@ If one dense model and its cache sit right at that limit on a Mac with a
 lot of RAM, `sudo sysctl iogpu.wired_limit_mb=<MB>` raises the limit until
 the next restart, at your own risk. Leave several GB for macOS.
 
-A model that streams a lookup table from disk without MLX counting it,
-such as Qwen3.8-Flash-Next with an mlx-kquant that maps the table
-untracked, runs under a wired cap: the GPU working set less 5%, or RAM
-less a reserve (the larger of 2 GB and 10% of RAM) and less the memory
-wired outside gmlx when it starts, whichever is lower. macOS's own working
-set leaves room for the system, so the memory wired elsewhere lowers the
-cap only on a Mac with a raised limit. gmlx wires at most the cap, plans
-the model and the KV cache under it, and MLX frees buffers from its buffer
-cache before the two together pass it. Every other model plans and limits
-as before. `GMLX_GOV_RESERVE_GB` sets the reserve, as
+A server or command started with a model that streams a lookup table
+from disk without MLX counting it, such as Qwen3.8-Flash-Next with an
+mlx-kquant that maps the table untracked, runs under a wired cap for as
+long as it runs. gmlx decides this before the first load, from the models
+it starts with. The cap is the GPU working set less 5%, or RAM less a
+reserve (the larger of 2 GB and 10% of RAM) and less the memory wired
+outside gmlx when it starts, whichever is lower. macOS's own working set
+leaves room for the system, so the memory wired elsewhere lowers the cap
+only on a Mac with a raised limit. gmlx wires at most the cap, plans every
+model it holds and their KV caches under it, and MLX frees buffers from
+its buffer cache before they together pass it. A server or command
+started without such a model plans and limits as before, and a model
+added to that server later loads its table counted by MLX.
+`GMLX_GOV_RESERVE_GB` sets the reserve, as
 [Debug switches](internals/debug-switches.md) lists.
 
 ## The MLX buffer cache

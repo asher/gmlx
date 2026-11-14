@@ -950,9 +950,8 @@ def headroom_bytes(m: float | None = None) -> float | None:
     zero-copy weights minus MLX-tracked allocations, plus the streamed
     expert bytes the tracker counts but the pager can reclaim and the
     open build credit. The buffer cache counts as free (the allocator
-    evicts it under pressure). In a process that maps a table outside
-    MLX's tracker (``capacity.cap_applies``), it is measured under the
-    wired cap instead (``capacity.wired_cap_bytes``, ``m`` its margin),
+    evicts it under pressure). In a process under the wired cap
+    (``capacity.cap_applies``), it is measured under the cap instead (``capacity.wired_cap_bytes``, ``m`` its margin),
     and the buffer cache counts as used. Sampled fresh per call, never
     memoized. The one shared accounting: the governor, the prefill caps,
     the serve memory trace, the load gate and the admission gate all read

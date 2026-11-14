@@ -303,11 +303,11 @@ def test_ceiling_and_governor_headroom(monkeypatch):
     assert budget.ceiling_bytes() == pytest.approx(95.0 * GB)
     monkeypatch.setattr(pd, "headroom_bytes", lambda m=None: 30.0 * GB)
     assert budget.governor_headroom_bytes() == pytest.approx(25.0 * GB)
-    # In a process that maps a table untracked, the headroom is measured
+    # In a process under the wired cap, the headroom is measured
     # under the wired cap: the governor reads it as is.
-    monkeypatch.setattr(cap, "_CAP_ENGAGED", True)
+    monkeypatch.setattr(cap, "_CAP", True)
     assert budget.governor_headroom_bytes() == pytest.approx(30.0 * GB)
-    monkeypatch.setattr(cap, "_CAP_ENGAGED", False)
+    monkeypatch.setattr(cap, "_CAP", False)
     monkeypatch.setattr(cap, "working_set_bytes", lambda: None)
     assert budget.ceiling_bytes() is None
     assert budget.governor_headroom_bytes() is None

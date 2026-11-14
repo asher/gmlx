@@ -183,7 +183,7 @@ def test_thread_stream_ownership_matrix():
 
 
 def test_the_buffer_cache_yields_at_the_memory_limit():
-    """The wired cap of a process that maps a table untracked sets the
+    """The wired cap of a process under it sets the
     memory limit, so the cache yields there instead of holding a fixed
     share of the plan: active plus cache stays under the limit across
     allocations and frees, which the same steps under MLX's own limit do

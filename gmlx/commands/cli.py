@@ -2530,37 +2530,38 @@ def _ensure_stream_cb_caps(args) -> None:
     stream flags before the load, for `run` and `chat` alike: the warm
     touch reads the latch to leave the streamable tables and the expert
     stacks untouched. And it declares the table stream's install on the
-    model of ``args.gguf`` (``_declare_table_install``), again with the
-    latch set."""
+    model of ``args.gguf`` and decides the wired cap
+    (``_decide_table_cap``), for a caller that has not yet."""
     from gmlx.stream.table_stream import force_table_stream
 
     stream = bool(getattr(args, "stream_experts", False)
                   or getattr(args, "stream_cpu", False))
     force_table_stream(stream)
-    _declare_table_install(args)
+    _decide_table_cap(args)
     if stream:
         _lift_live_cb_caps()
 
 
-def _declare_table_install(args) -> None:
+def _decide_table_cap(args) -> None:
     """Declare that the placement installs the table stream on the model
     of ``args.gguf``, so a table that streams may load outside MLX's
-    tracker (``table_stream.table_install_follows``), and plan under the
-    wired cap when the load is predicted to map one
-    (``capacity.plan_cap``). Before the first fit: the check before the
-    load (``preload_wire_check``) and the run preflight read the cap of
-    such a load. `run --report-only` builds no model and installs
+    tracker (``table_stream.table_install_follows``), and decide from
+    that one model and its stream flags whether the process runs under
+    the wired cap (``capacity.decide_cap``). Before the first fit: the
+    check before the load (``preload_wire_check``) and the run preflight
+    read the decision. `run --report-only` builds no model and installs
     nothing."""
     if getattr(args, "report_only", False):
         return
-    from gmlx.serve.capacity import plan_cap
-    from gmlx.stream.table_stream import (table_install_follows,
-                                          tables_load_untracked)
+    from gmlx.serve.capacity import decide_cap
+    from gmlx.stream.table_stream import table_install_follows
 
     path = getattr(args, "gguf", None)
+    stream = ("cpu" if getattr(args, "stream_cpu", False)
+              else "experts" if getattr(args, "stream_experts", False)
+              else None)
     table_install_follows(path)
-    if path and tables_load_untracked(path):
-        plan_cap(path)
+    decide_cap([(path, stream)])
 
 
 def _lift_live_cb_caps() -> None:
@@ -3059,9 +3060,9 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     if why:
         print(f"error: {why}.", file=sys.stderr)
         return 2
-    # Before the first fit, so a load that maps a table untracked is
-    # judged against the wired cap.
-    _declare_table_install(args)
+    # Before the first fit, so a load predicted to map a table untracked
+    # is judged against the wired cap.
+    _decide_table_cap(args)
     if not args.report_only:
         preload_wire_check(args, depth=run_room_depth(args),
                            depth_without_mtp=run_room_depth(args, mtp=False))

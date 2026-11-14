@@ -424,12 +424,13 @@ def untracked_tables_supported() -> bool:
     return "untracked" in (getattr(kq.load_gguf, "__doc__", None) or "")
 
 
-def tables_stream_for_sure(path: str | None, env=None) -> bool:
+def tables_stream_for_sure(path: str | None, env=None,
+                           forced: bool = False) -> bool:
     """Whether a load of ``path`` streams every streamable table it maps,
-    decided before the load: a stream flag latched the table stream
-    (``force_table_stream``), the check before the load latched the
-    table-only step (``stream_tables_for_memory``), or the rest of the
-    model fits the stream budget without them
+    decided before the load: a stream placement streams them (``forced``,
+    or the flag ``force_table_stream`` latched), the check before the load
+    latched the table-only step (``stream_tables_for_memory``), or the
+    rest of the model fits the stream budget without them
     (``capacity.gathered_table_bytes``). ``GMLX_STREAM_PLE=0`` keeps the
     tables resident and ``GMLX_STREAM_PLE_COMPOSE=0`` can, so under
     either nothing is sure. Such a load maps the tables outside MLX's
@@ -439,7 +440,7 @@ def tables_stream_for_sure(path: str | None, env=None) -> bool:
     if (not path or stream_ple_env(env) == "0"
             or not env_bool("GMLX_STREAM_PLE_COMPOSE", True, env)):
         return False
-    if _FORCED or tables_for_memory(path):
+    if forced or _FORCED or tables_for_memory(path):
         return True
     from gmlx.serve.capacity import gathered_table_bytes
 
@@ -527,20 +528,45 @@ def copied_table_bytes(path: str | None, env=None) -> int:
     return 0
 
 
-def tables_load_untracked(path: str | None, env=None) -> bool:
-    """Whether a load of ``path`` maps a streamable table outside MLX's
-    tracker, decided before the load as the wire load decides per shard
-    (``untracked_table_names``): the caller installs the table stream on
-    the model (``table_install_follows``), the load streams its tables
-    for sure and maps at least one, and it writes none into a buffer of
-    its own (``table_load_copies``). The load can still fall back to
-    tracked buffers; its install then pins the wired limit."""
-    if not (install_follows(path) and untracked_tables_supported()
-            and tables_stream_for_sure(path, env)):
+def _maps_untracked(path: str | None, env, forced: bool) -> bool:
+    """A load of ``path`` whose caller installs the table stream maps a
+    streamable table outside MLX's tracker: mlx-kquant can, the load
+    streams its tables for sure (``forced``: a stream placement) and maps
+    at least one, and it writes none into a buffer of its own
+    (``table_load_copies``)."""
+    if not (untracked_tables_supported()
+            and tables_stream_for_sure(path, env, forced)):
         return False
     mapped = _mapped_tables(path, env)
     return bool(mapped) and not any(
         table_load_copies(t.type_name, path, env) for t in mapped)
+
+
+def predicts_untracked(path: str | None, stream=None, env=None) -> bool:
+    """Whether a load of ``path`` under the stream placement ``stream``
+    (None, ``"experts"`` or ``"cpu"``), by a caller that installs the
+    table stream, maps a streamable table outside MLX's tracker: the
+    prediction a process decides the wired cap on before its first load
+    (``capacity.decide_cap``). False when the header cannot be read."""
+    try:
+        return _maps_untracked(path, env, stream in ("cpu", "experts"))
+    except Exception:
+        return False
+
+
+def tables_load_untracked(path: str | None, env=None) -> bool:
+    """Whether a load of ``path`` maps a streamable table outside MLX's
+    tracker, decided before the load as the wire load decides per shard
+    (``untracked_table_names``): the process is under the wired cap
+    (``capacity.cap_applies``), the caller installs the table stream on
+    the model (``table_install_follows``), and the load maps one
+    (``predicts_untracked``, its placement latched by
+    ``force_table_stream``). The load can still fall back to tracked
+    buffers; its install then pins the wired limit."""
+    from gmlx.serve.capacity import cap_applies
+
+    return (cap_applies() and install_follows(path)
+            and _maps_untracked(path, env, False))
 
 
 def untracked_table_names(path: str | None, shard: str, arch: str | None,
@@ -550,12 +576,15 @@ def untracked_table_names(path: str | None, shard: str, arch: str | None,
     table stream on the model (``table_install_follows``), those it
     streams for sure (``tables_stream_for_sure``), less the ones it reads
     from the file (``skip``). MLX never counts or wires such a buffer, so
-    its install leaves the wired limit free. Empty for any other load,
-    and for one that writes any table it maps into a buffer of its own
+    its install leaves the wired limit free. Empty in a process not under
+    the wired cap (``capacity.cap_applies``), for any other load, and for
+    one that writes any table it maps into a buffer of its own
     (``table_load_copies``): every table of that load loads tracked, as
     ``tables_load_untracked`` predicts."""
+    from gmlx.serve.capacity import cap_applies
+
     pattern = streamable_table_names(arch)
-    if (pattern is None or not install_follows(path)
+    if (pattern is None or not cap_applies() or not install_follows(path)
             or not tables_stream_for_sure(path, env)
             or any(table_load_copies(t.type_name, path, env)
                    for t in _mapped_tables(path, env))):

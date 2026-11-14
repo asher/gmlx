@@ -782,7 +782,7 @@ class WireCheck:
     """A resident wire judged against live memory. ``reason`` names the
     first leg it fails: ``budget`` (past the resident budget), ``cap``
     (the set and its KV room of ``room_bytes`` pass ``cap_bytes``, the
-    wired cap of a process that maps a table outside MLX's tracker) or
+    wired cap of a process under it, ``capacity.cap_applies``) or
     ``unwired`` (unwired RAM less ``keep`` is short); empty when
     it fits, the memory cannot be read, or GMLX_OVERCOMMIT=1 on a set
     that fits in RAM. ``ram_bytes`` is physical RAM, None when unread.
@@ -881,7 +881,7 @@ def check_resident_wire(wire_bytes: int, *, room_bytes: int,
     (``unwired_ram_bytes``). Only wired memory is out of reach: the kernel
     compresses or swaps other apps' memory, and drops file pages, to make
     room. The model's own cached pages are unwired until the wire takes
-    them, so they count once. In a process that plans under the wired cap
+    them, so they count once. In a process under the wired cap
     (``capacity.cap_applies``), the set and ``room_bytes`` must also fit
     under the cap, where its MLX memory limit sits: past it, every eval
     waits for the GPU work in flight. A wire of at most

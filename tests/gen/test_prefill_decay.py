@@ -365,8 +365,8 @@ def _active(monkeypatch, ws_gb=120):
 def test_headroom_reads_the_wired_cap_only_where_it_applies(monkeypatch,
                                                             engaged):
     # A process measures the headroom against the working set and counts
-    # the buffer cache as free. One that maps a table untracked measures
-    # it under the wired cap, at the margin passed, and counts the cache
+    # the buffer cache as free. One under the wired cap measures it
+    # under the cap, at the margin passed, and counts the cache
     # as used: MLX wires it beside the active bytes.
     import gmlx.serve.capacity as capacity
 
@@ -380,7 +380,7 @@ def test_headroom_reads_the_wired_cap_only_where_it_applies(monkeypatch,
         return 100 * GB
 
     monkeypatch.setattr(capacity, "wired_cap_bytes", cap)
-    monkeypatch.setattr(capacity, "_CAP_ENGAGED", engaged)
+    monkeypatch.setattr(capacity, "_CAP", engaged)
     if engaged:
         assert pd.headroom_bytes(0.07) == 100 * GB - 10 * GB - 3 * GB
         assert margins == [0.07]

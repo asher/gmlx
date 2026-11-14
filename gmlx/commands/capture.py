@@ -410,7 +410,7 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
 
     emit = _Emitter(args.json)
     with emit.quiet_stdout():
-        from .cli import (_TEMPLATE_TOKENS, _declare_table_install,
+        from .cli import (_TEMPLATE_TOKENS, _decide_table_cap,
                           _ensure_stream_cb_caps, maybe_load_from_config,
                           preload_wire_check)
 
@@ -447,8 +447,8 @@ def cmd_capture(argv: list | None = None, prog: str = "gmlx capture") -> int:
         facts = gguf_facts(path)
         # The KV room is priced at the longest prompt, a token for each byte.
         longest = max(len(p.encode()) for _, ps in sets for p in ps)
-        # Before the first fit, as run declares it.
-        _declare_table_install(args)
+        # Decided before the first fit, as run decides it.
+        _decide_table_cap(args)
         preload_wire_check(args, depth=longest + len((system or "").encode())
                            + _TEMPLATE_TOKENS)
         _ensure_stream_cb_caps(args)

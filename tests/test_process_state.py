@@ -284,13 +284,12 @@ def test_k_a_build_leaves_its_credit_owner_and_table_declaration():
     _MIRRORS["build_credit"] = dict(pd._BUILD_CREDIT)
     _MIRRORS["weights_owner"] = pd._WEIGHTS_OWNER
     _MIRRORS["install_follows"] = set(ts._INSTALL_FOLLOWS)
-    _MIRRORS["cap"] = (capacity._CAP_ENGAGED, set(capacity._CAP_PLANNED))
+    _MIRRORS["cap"] = capacity._CAP
     owner = ("a", None, "auto")
     pd.set_untracked_weights_owner(owner)
     pd.note_build_credit(owner, 3.5e11)
     ts.table_install_follows("/m/a.gguf")
-    capacity.plan_cap("/m/a.gguf")
-    capacity.engage_cap()
+    capacity._CAP = True
     assert owner in pd._BUILD_CREDIT
 
 
@@ -306,9 +305,8 @@ def test_l_the_next_test_finds_none_of_them():
     assert pd._BUILD_CREDIT == _MIRRORS["build_credit"]
     assert pd._WEIGHTS_OWNER == _MIRRORS["weights_owner"]
     assert ts._INSTALL_FOLLOWS == _MIRRORS["install_follows"]
-    # A stale latch or plan would put every later test under the wired cap.
-    assert (capacity._CAP_ENGAGED,
-            capacity._CAP_PLANNED) == _MIRRORS["cap"]
+    # A stale decision would put every later test under the wired cap.
+    assert capacity._CAP == _MIRRORS["cap"]
 
 
 # The harness itself, run in a fresh pytest process on the CPU device over

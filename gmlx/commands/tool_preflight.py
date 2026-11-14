@@ -134,9 +134,10 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
     model's trained context) on this box, or None when any input cannot
     be read (the caller must treat None as permit). ``limit`` is the
     bytes judged against in place of the GPU working set: physical RAM.
-    A process that plans under the wired cap (``capacity.cap_applies``:
-    its load maps a table outside MLX's tracker) is judged against the
-    cap, where its MLX memory limit sits."""
+    A process under the wired cap (``capacity.cap_applies``: decided
+    before its load, which is predicted to map a table outside MLX's
+    tracker) is judged against the cap, where its MLX memory limit
+    sits."""
     try:
         from gmlx.serve.capacity import (cap_applies, deferred_table_bytes,
                                          wired_cap_bytes)

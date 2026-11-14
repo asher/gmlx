@@ -19,8 +19,8 @@ Auto policy: always bounded. When the largest configured model's weight
 bytes its load can wire (``model_weight_bytes``) exceed ``_AUTO_PRESSURE``
 of the recommended working set, cap the cache at a quarter of the
 remaining slack, clamped to [4, 12] GiB. Otherwise cap it at
-``_AUTO_SLACK_SHARE`` of the working set, same clamp. In a process that
-maps a table outside MLX's tracker, the wired cap
+``_AUTO_SLACK_SHARE`` of the working set, same clamp. In a process under
+the wired cap (``capacity.cap_applies``), the cap
 (``capacity.wired_cap_bytes``) sets the MLX memory limit too, so the
 cache also yields there.
 MLX's own default is the memory limit (1.5x the working set), so an
@@ -50,7 +50,8 @@ _UNLIMITED_WORDS = ("off", "none", "unlimited")
 
 def model_weight_bytes(path: str) -> int:
     """On-disk bytes of a GGUF (all shards) its load can wire: the file,
-    less the streamable tables a served load maps outside MLX's tracker
+    less, in a process under the wired cap (``capacity.cap_applies``),
+    the streamable tables a served load maps outside MLX's tracker
     (``table_stream.untracked_tables_supported`` and
     ``tables_stream_for_sure``) or reads from the file, which MLX never
     wires. A table the load writes into a buffer of its own
@@ -69,8 +70,11 @@ def model_weight_bytes(path: str) -> int:
                                           tables_stream_for_sure,
                                           untracked_tables_supported)
 
+    from .capacity import cap_applies
+
     try:
-        if untracked_tables_supported() and tables_stream_for_sure(str(path)):
+        if (cap_applies() and untracked_tables_supported()
+                and tables_stream_for_sure(str(path))):
             from .capacity import streamed_table_bytes
 
             total -= (streamed_table_bytes(str(path))
@@ -553,17 +557,12 @@ def admission_slack_bytes(gen, n_candidates: int) -> float:
 
 
 def apply_cache_limit(cfg) -> None:
-    """Resolve and apply the server's cache limit; called once at startup,
-    before any load. Working-set source: capacity (the one accounting,
-    U4). Reads the memory wired outside the server first, for the wired
-    cap of a load that maps a table outside MLX's tracker."""
+    """Resolve and apply the server's cache limit; called once at startup.
+    Working-set source: capacity (the one accounting, U4)."""
     import mlx.core as mx
-
-    from gmlx.stream.wired_limit import read_outside_wired
 
     from .capacity import working_set_bytes
 
-    read_outside_wired(announce=True)
     ws = working_set_bytes() or 0.0
     paths = [str(mc.path) for mc in getattr(cfg, "models", {}).values()]
     limit, source = resolve_cache_limit(
@@ -582,16 +581,11 @@ def apply_cache_limit(cfg) -> None:
 def apply_local_cache_limit(model_paths, verbose: bool = False) -> None:
     """The serve policy for the in-process verbs (run, chat), set before
     the load: GMLX_CACHE_LIMIT_GB, else the auto policy. A later owner
-    (expert streaming's allocator) replaces it. Reads the memory wired
-    outside the process first, for the wired cap of a load that maps a
-    table outside MLX's tracker."""
+    (expert streaming's allocator) replaces it."""
     import mlx.core as mx
-
-    from gmlx.stream.wired_limit import read_outside_wired
 
     from .capacity import working_set_bytes
 
-    read_outside_wired()
     ws = working_set_bytes() or 0.0
     paths = [str(p) for p in model_paths if p]
     limit, source = resolve_cache_limit(None, paths, ws)

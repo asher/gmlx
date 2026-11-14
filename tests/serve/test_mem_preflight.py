@@ -646,8 +646,8 @@ class _Arena:
 @pytest.mark.parametrize("engaged", [False, True])
 def test_available_drained_charges_live_arena(monkeypatch, engaged):
     """The working set (100 GB) less the zero-copy weights, the admission
-    reserve and a live decode arena. In a process that maps a table
-    untracked, the wired cap (95 GB of it) takes the working set's place;
+    reserve and a live decode arena. In a process under the wired cap,
+    the cap (95 GB of it) takes the working set's place;
     the buffer cache yields at the cap, so its limit takes no share."""
     import mlx.core as mx
 
@@ -662,7 +662,7 @@ def test_available_drained_charges_live_arena(monkeypatch, engaged):
     monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", int(4e9))
     monkeypatch.setattr(sm, "admit_reserve_bytes", lambda ws, gen=None: 2e9)
     monkeypatch.setattr(installs, "_ARENAS", [])
-    monkeypatch.setattr(capacity, "_CAP_ENGAGED", engaged)
+    monkeypatch.setattr(capacity, "_CAP", engaged)
     base = 83e9 if engaged else 88e9
     assert mp.available_drained_bytes() == pytest.approx(base)
     arena = _Arena(30e9)

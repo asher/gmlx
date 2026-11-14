@@ -424,10 +424,10 @@ def _headroom_and_ws(margin: float):
     """The headroom under the governed ceiling, and the working set."""
     from gmlx.gen.prefill_decay import headroom_bytes
 
-    from .capacity import in_one_regime, working_set_bytes
+    from .capacity import cap_applies, working_set_bytes
 
-    head, engaged = in_one_regime(
-        lambda capped: headroom_bytes(margin) if capped else headroom_bytes())
+    engaged = cap_applies()
+    head = headroom_bytes(margin) if engaged else headroom_bytes()
     if head is None:
         return None, 0.0
     ws = working_set_bytes()

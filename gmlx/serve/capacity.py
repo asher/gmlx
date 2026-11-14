@@ -136,61 +136,40 @@ def outside_wired_bytes() -> float:
     return _OUTSIDE_WIRED or 0.0
 
 
-# True once a load in this process mapped a streamable table outside MLX's
-# tracker (engage_cap); it stays for the life of the process.
-_CAP_ENGAGED = False
-# Real paths of the GGUFs whose loads in progress are predicted to map a
-# table that way (plan_cap).
-_CAP_PLANNED: set[str] = set()
+# Whether this process plans and limits under the wired cap, decided once
+# before its first load (decide_cap); None until then.
+_CAP: bool | None = None
 
 
-def engage_cap() -> None:
-    """Plan under the wired cap for the rest of the process: a load mapped
+def decide_cap(loads, env=None, announce: bool = False) -> bool:
+    """Decide once, before the process loads anything, whether it plans
+    and limits under the wired cap for its whole life: when the load of
+    any of ``loads``, (path, stream placement) pairs, is predicted to map
     a streamable table outside MLX's tracker
-    (``stream.wired_limit.install_wired_cap``, at the map)."""
-    global _CAP_ENGAGED
-    note_outside_wired()
-    _CAP_ENGAGED = True
+    (``table_stream.predicts_untracked``). Serve passes its configured
+    models at start; a command passes its one model. The cap then goes in
+    at once (``stream.wired_limit.install_wired_cap``), after the memory
+    wired outside the process is read. Later calls keep the first
+    decision, so a model it did not predict maps its table tracked."""
+    global _CAP
+    if _CAP is None:
+        from gmlx.stream.table_stream import predicts_untracked
 
+        _CAP = any(predicts_untracked(path, stream, env)
+                   for path, stream in loads)
+        if _CAP:
+            from gmlx.stream.wired_limit import install_wired_cap
 
-def plan_cap(path: str | None, on: bool = True) -> None:
-    """Plan under the wired cap while the load of ``path`` is predicted to
-    map a table outside MLX's tracker
-    (``table_stream.tables_load_untracked``), from before its first fit;
-    ``on=False`` ends the prediction, as the wire load does once its maps
-    are done (``load.wire.load_gguf_wire_bytes``). The cap then stands
-    only if the load mapped one (``engage_cap``)."""
-    if not path:
-        return
-    key = os.path.realpath(os.path.expanduser(str(path)))
-    if on:
-        note_outside_wired()
-        _CAP_PLANNED.add(key)
-    else:
-        _CAP_PLANNED.discard(key)
+            note_outside_wired()
+            install_wired_cap(announce=announce)
+    return _CAP
 
 
 def cap_applies() -> bool:
-    """Whether this process plans and limits under the wired cap: a load
-    mapped a table outside MLX's tracker, or one in progress is predicted
-    to. Every other process plans under ``ceiling_bytes`` and keeps MLX's
-    own memory limit."""
-    return _CAP_ENGAGED or bool(_CAP_PLANNED)
-
-
-def in_one_regime(read):
-    """``read(engaged)`` under one reading of ``cap_applies``, and that
-    reading. A serve build's plan can start or end on its own thread
-    during the read, and ``prefill_decay.headroom_bytes`` reads the
-    regime again inside it; when the regime moved, the read runs once
-    more, so a figure measured in one regime is not shifted as the
-    other's."""
-    engaged = cap_applies()
-    out = read(engaged)
-    if cap_applies() != engaged:
-        engaged = cap_applies()
-        out = read(engaged)
-    return out, engaged
+    """Whether this process plans and limits under the wired cap
+    (``decide_cap``). Every other process plans under ``ceiling_bytes``
+    and keeps MLX's own memory limit."""
+    return bool(_CAP)
 
 
 def wired_cap_bytes(ws: float | None = None,
@@ -854,7 +833,8 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         fix = "for MoE models --stream-experts serves the experts from disk."
     from gmlx.gen.prefill_decay import headroom_bytes
 
-    head, engaged = in_one_regime(lambda capped: headroom_bytes())
+    head = headroom_bytes()
+    engaged = cap_applies()
     budget = working_budget_bytes()
     ws = working_set_bytes()
     if (not engaged and head is not None and budget is not None

@@ -57,12 +57,6 @@ def load_gguf_wire_bytes(
     (``stream.table_pread``), and the loader attaches the sources with
     ``install_deferred_tables``.
     """
-    from gmlx.stream.wired_limit import read_outside_wired
-
-    # Before the first array: the memory wired outside the process, read
-    # once, before the process wires any of its own, for the wired cap a
-    # table mapped untracked brings in (_load_shard).
-    read_outside_wired()
     if shards is None:
         shards = find_split_shards(gguf_path)
     arch = _arch_of(shards, arch)
@@ -96,13 +90,6 @@ def load_gguf_wire_bytes(
         loadlog.verbose_print(
             f"[gguf] loaded {len(shards)} shards, {len(arrays)} total tensors"
         )
-    from gmlx.serve.capacity import plan_cap
-
-    # The prediction that this load maps a table untracked ends with the
-    # map: a map installed the cap for good, and a load that fell back
-    # to tracked tables plans as any other.
-    plan_cap(gguf_path, False)
-
     if expect_quant and not kquant_meta:
         loadlog.warn(
             "WARNING: no quantized tensors found - is this actually a K-quant GGUF?"
@@ -118,17 +105,24 @@ def _load_shard(gguf_path: str, shard: str, arch: str | None,
     streams for sure, when the caller installs the table stream on the
     model, map outside MLX's tracker
     (``table_stream.untracked_table_names``), so MLX neither counts nor
-    wires them. The first such map puts the process under the wired cap
-    (``wired_limit.install_wired_cap``); a process that maps none keeps
-    MLX's limits. An mlx-kquant without ``load_gguf(untracked=...)``, or a
-    table it cannot view that way, reloads the shard tracked; the install
-    then pins the wired limit as for any tracked table."""
+    wires them. Only a process under the wired cap maps one
+    (``capacity.decide_cap``, before its first load); asked to map one in
+    any other process, the load raises. An mlx-kquant without
+    ``load_gguf(untracked=...)``, or a table it cannot view that way,
+    reloads the shard tracked; the install then pins the wired limit as
+    for any tracked table."""
+    from gmlx.serve.capacity import cap_applies
     from gmlx.stream.table_stream import (note_untracked_load,
                                           untracked_table_names)
 
     args = (shard, zero_copy, skip) if skip else (shard, zero_copy)
     untracked = (untracked_table_names(gguf_path, shard, arch, skip)
                  if zero_copy else [])
+    if untracked and not cap_applies():
+        raise RuntimeError(
+            f"{', '.join(untracked)}: a table maps outside MLX's tracker "
+            "only in a process under the wired cap, decided before its "
+            "first load")
     if untracked:
         try:
             out = kq.load_gguf(*args, untracked=untracked)
@@ -142,10 +136,7 @@ def _load_shard(gguf_path: str, shard: str, arch: str | None,
             loadlog.warn(f"[stream] {', '.join(untracked)} loads "
                          f"MLX-tracked: {e}")
         else:
-            from gmlx.stream.wired_limit import install_wired_cap
-
             note_untracked_load(shard, untracked)
-            install_wired_cap()
             loadlog.note(
                 f"[stream] {', '.join(untracked)} mapped untracked, "
                 f"{_table_bytes(out[0], untracked) / 1e9:.1f} GB: MLX "

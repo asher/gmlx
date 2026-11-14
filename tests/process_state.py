@@ -331,8 +331,7 @@ def capture() -> dict:
                                              "_INSTALL_FOLLOWS", ())),
         "armed_floor": getattr(_governor(), "_ARMED_FLOOR", 0.0),
         "outside_wired": getattr(_capacity(), "_OUTSIDE_WIRED", None),
-        "cap_engaged": getattr(_capacity(), "_CAP_ENGAGED", False),
-        "cap_planned": set(getattr(_capacity(), "_CAP_PLANNED", ())),
+        "cap_decision": getattr(_capacity(), "_CAP", None),
         "wired_limit_fields": {
             name: getattr(_wired_limit(), name)
             for name in _WIRED_LIMIT_FIELDS if _wired_limit() is not None},
@@ -455,15 +454,9 @@ def restore(state: dict) -> list:
             capacity._OUTSIDE_WIRED != state["outside_wired"]:
         changed.append("outside wired reading")
         capacity._OUTSIDE_WIRED = state["outside_wired"]
-    if capacity is not None and \
-            capacity._CAP_ENGAGED != state["cap_engaged"]:
-        changed.append("wired cap latch")
-        capacity._CAP_ENGAGED = state["cap_engaged"]
-    if capacity is not None and \
-            capacity._CAP_PLANNED != state["cap_planned"]:
-        changed.append("wired cap plans")
-        capacity._CAP_PLANNED.clear()
-        capacity._CAP_PLANNED.update(state["cap_planned"])
+    if capacity is not None and capacity._CAP != state["cap_decision"]:
+        changed.append("wired cap decision")
+        capacity._CAP = state["cap_decision"]
     wired = _wired_limit()
     if wired is not None:
         for name, fresh in _WIRED_LIMIT_FIELDS.items():

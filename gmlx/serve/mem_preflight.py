@@ -495,9 +495,8 @@ def available_drained_bytes():
     decode arena, minus the admission reserve: what a lone request could
     hold with the batch drained. The arena is MLX-tracked, sized at install
     and never drained. Other MLX-tracked weight allocations are not
-    subtracted, which only admits more. In a process that maps a table
-    outside MLX's tracker (``capacity.cap_applies``), the wired cap takes
-    the working set's place: the buffer cache yields there, so it takes
+    subtracted, which only admits more. In a process under the wired cap
+    (``capacity.cap_applies``), the cap takes the working set's place: the buffer cache yields there, so it takes
     no share, and a cap of 0 is a known one that leaves no room. None when
     the device cannot be read."""
     from gmlx.device import metal_value
