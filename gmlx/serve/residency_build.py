@@ -266,7 +266,7 @@ class _ChatBuild:
         # Publish the resolved spec for this build so the load bridge can read its
         # profile overrides (e.g. chat_template). ``_stock_get`` blocks here while
         # the engine's generation worker thread runs the bridge, where the
-        # request-thread ``_active_spec`` ContextVar is invisible - this module
+        # request-thread ``_active_spec`` ContextVar is invisible. This module
         # global crosses that boundary. Safe because the build lock serialises
         # builds (one spec live at a time); cleared in the finally.
         _serving.set_build_spec(build_spec)

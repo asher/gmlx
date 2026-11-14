@@ -117,11 +117,11 @@ _OUTSIDE_WIRED: float | None = None
 
 
 def note_outside_wired() -> float:
-    """Read the memory wired outside this server, once per process: the
-    kernel's wired page count, taken at the first load or server start,
-    before the process wires anything (MLX wires nothing until a wired
-    limit is set). Later calls return the first reading. 0 when the
-    counters cannot be read."""
+    """Read the memory wired outside this process, once: the kernel's
+    wired page count, taken by ``decide_cap`` in a process it puts under
+    the wired cap, before its first load wires anything (MLX wires
+    nothing until a wired limit is set). Later calls return the first
+    reading. 0 when the counters cannot be read."""
     global _OUTSIDE_WIRED
     if _OUTSIDE_WIRED is None:
         from . import kernel_vm
@@ -174,10 +174,11 @@ def cap_applies() -> bool:
 
 def wired_cap_bytes(ws: float | None = None,
                     m: float | None = None) -> float | None:
-    """The ceiling this process plans under. In a process that maps a
-    table outside MLX's tracker (``cap_applies``), the wired cap: the
-    lower of the working set less the margin and the RAM less the reserve
-    and the memory wired outside the process at load (``ceiling_bytes``).
+    """The ceiling this process plans under. In a process under the wired
+    cap ``decide_cap`` decided (``cap_applies``), the cap: the lower of
+    the working set less the margin and the RAM less the reserve and the
+    memory wired outside the process before its first load
+    (``ceiling_bytes``).
     The governor plans under it, and
     ``stream.wired_limit.install_wired_cap`` clamps ``mx.set_wired_limit``
     to it and sets the MLX memory limit to it, so the buffer cache yields
