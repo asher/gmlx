@@ -72,6 +72,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cancelled, or shed to free memory, no longer fails every other request.
 - A request held for memory beside others decoding starts once memory frees.
   It could wait again after its hold, and the log said it had started.
+- With a drafter, a server short of memory frees the drafter's prefix cache,
+  up to 8 GiB, before it sheds a request or holds one for up to a minute.
+- After a model swap, a server short of memory frees the new model's prompt
+  cache. It freed only the first model's and shed requests instead.
 - With a drafter, requests that shared a long prompt prefix decoded slower
   once one of them had restored its prefix from the prompt cache.
 - With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long
