@@ -48,7 +48,7 @@ class _Manager:
     def __init__(self):
         self.exact = []
 
-    def store_exact_cache(self, ids, snap, extra_hash=0):
+    def store_exact_cache(self, ids, snap, extra_hash=0, materialize=None):
         self.exact.append((list(ids), snap))
         return True
 

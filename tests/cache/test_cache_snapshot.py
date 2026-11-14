@@ -268,6 +268,82 @@ def test_retirement_store_batched_row_exact():
         mgr.close()
 
 
+_XH, _XL, _XD, _XLAYERS = 8, 200, 64, 4   # 400 KB per K or V array
+
+
+def _x_row(salt):
+    c = KVCache()
+    k = mx.random.normal((1, _XH, _XL, _XD), key=mx.random.key(salt))
+    c.update_and_fetch(k, k + 1.0)
+    mx.eval(c.keys, c.values)
+    return c
+
+
+@pytest.mark.parametrize("kind", ["single row", "batch row", "truncated"])
+def test_an_exact_retirement_copies_the_row_once_after_the_room(
+        kind, monkeypatch):
+    """An exact retirement holds one copy of the row, made after the store
+    makes room: the tier's entries plus that copy stay within memory_max,
+    and the tier keeps the entries it kept before."""
+    from gmlx._vendor.mlx_vlm.apc import _cache_nbytes
+
+    row = 1 if kind == "batch row" else 0
+    rows = [_x_row(10 * i) for i in range(_XLAYERS)]
+    live = rows
+    if kind == "batch row":
+        live = [BatchKVCache.merge([_x_row(10 * i + 1), r])
+                for i, r in enumerate(rows)]
+        mx.eval(*[a for c in live for a in (c.keys, c.values)])
+    max_len = _XL // 2 if kind == "truncated" else None
+    n = max_len or _XL
+    entry = 2 * _XLAYERS * _XH * n * _XD * 4
+    mgr = _manager()
+    mgr._exact_cache_max = 3
+    mgr.memory_reserve_bytes = 0
+    mgr.memory_max_bytes = entry * 5 // 2      # room for two and a half
+    try:
+        mx.synchronize()
+        floor = mx.get_active_memory()         # the live row, empty tier
+        for first in (1000, 2000):
+            assert retirement_store(mgr, "exact", range(first, first + _XL),
+                                    live, row=row, max_len=max_len) == n
+        real_eval, evals = mx.eval, []
+
+        def spy(*a, **k):
+            held = sum(_cache_nbytes(e.prompt_cache)
+                       for e in mgr._exact_cache.values())
+            mx.synchronize()
+            before = mx.get_active_memory()
+            out = real_eval(*a, **k)
+            mx.synchronize()
+            evals.append((mx.get_active_memory() - before, held))
+            return out
+
+        monkeypatch.setattr(mx, "eval", spy)
+        mx.synchronize()
+        mx.reset_peak_memory()
+        assert retirement_store(mgr, "exact", range(3000, 3000 + _XL), live,
+                                row=row, max_len=max_len) == n
+        mx.synchronize()
+        peak = mx.get_peak_memory() - floor
+        monkeypatch.undo()
+        copies = [(got, held) for got, held in evals if got > entry // 2]
+        assert len(copies) == 1 and copies[0][0] < entry * 3 // 2, evals
+        assert copies[0][1] + entry <= mgr.memory_max_bytes
+        assert peak <= mgr.memory_max_bytes, (peak, entry)
+        kept = list(mgr._exact_cache.values())
+        assert [e.token_ids[0] for e in kept] == [2000, 3000]
+        assert _cache_nbytes(kept[-1].prompt_cache) == entry
+        for got, want in zip(kept[-1].prompt_cache, rows):
+            assert got.offset == n
+            assert mx.array_equal(got.keys[..., :n, :],
+                                  want.keys[..., :n, :]).item()
+            assert mx.array_equal(got.values[..., :n, :],
+                                  want.values[..., :n, :]).item()
+    finally:
+        mgr.close()
+
+
 def test_retirement_store_guards():
     mgr = _manager()
     try:

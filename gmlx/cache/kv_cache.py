@@ -672,6 +672,15 @@ class KVCache(_BaseCache):
         return n
 
     def extract(self, idx):
+        cache = self._row_view(idx)
+        if cache.keys is not None:
+            cache.keys = mx.contiguous(cache.keys)
+            cache.values = mx.contiguous(cache.values)
+        return cache
+
+    def _row_view(self, idx):
+        """Row ``idx`` over views of this cache's buffers: what ``extract``
+        copies, for a caller that makes its own copy of it."""
         cache = KVCache()
         if self.keys is None:
             if idx not in (0, -1):
@@ -686,8 +695,8 @@ class KVCache(_BaseCache):
                 f"KVCache row index {idx} out of range for batch size {batch_size}"
             )
 
-        cache.keys = mx.contiguous(self.keys[idx : idx + 1, :, : self.offset, :])
-        cache.values = mx.contiguous(self.values[idx : idx + 1, :, : self.offset, :])
+        cache.keys = self.keys[idx : idx + 1, :, : self.offset, :]
+        cache.values = self.values[idx : idx + 1, :, : self.offset, :]
         cache.offset = self.offset
         return cache
 
@@ -2256,11 +2265,19 @@ class BatchKVCache(_BaseCache):
             self._clear_row_ends()
 
     def extract(self, idx):
+        cache = self._row_view(idx)
+        cache.keys = mx.contiguous(cache.keys)
+        cache.values = mx.contiguous(cache.values)
+        return cache
+
+    def _row_view(self, idx):
+        """Row ``idx`` over views of this cache's buffers: what ``extract``
+        copies, for a caller that makes its own copy of it."""
         cache = KVCache()
         padding = self.left_padding[idx].item()
         end = self._idx if self._row_ends is None else self._row_ends[idx]
-        cache.keys = mx.contiguous(self.keys[idx : idx + 1, :, padding : end])
-        cache.values = mx.contiguous(self.values[idx : idx + 1, :, padding : end])
+        cache.keys = self.keys[idx : idx + 1, :, padding : end]
+        cache.values = self.values[idx : idx + 1, :, padding : end]
         cache.offset = cache.keys.shape[2]
         return cache
 

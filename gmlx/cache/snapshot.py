@@ -213,11 +213,33 @@ def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
     window) layers are snapshot-able even after they wrap: the window they retain
     is exactly what sliding-window attention re-attends to on continuation.
     """
+    return _row_snapshot(prompt_cache, row, lazy=False)
+
+
+def _row_view(cache: Any):
+    """The cache's ``_row_view`` when its ``extract`` is the copy of that
+    view (both defined on the same class), else None."""
+    for klass in type(cache).__mro__:
+        if "extract" in klass.__dict__:
+            if "_row_view" in klass.__dict__:
+                return cache._row_view
+            return None
+    return None
+
+
+def _row_snapshot(prompt_cache: list[Any], row: int, *,
+                  lazy: bool) -> list[Any] | None:
+    """``row_snapshot``; with ``lazy`` nothing is copied yet, for a caller
+    that copies the snapshot once and drops it before that copy
+    materializes. Plain KV layers then give views of the live row, and
+    the other layers their extract or clone unevaluated."""
     if not prompt_cache:
         return None
     snaps: list[Any] = []
     for cache in prompt_cache:
         extract = getattr(cache, "extract", None)
+        if lazy and callable(extract):
+            extract = _row_view(cache) or extract
         if callable(extract):
             try:
                 snap = extract(row)
@@ -228,11 +250,11 @@ def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
                 # the whole stack; any other row doesn't exist.
                 if row != 0:
                     return None
-                snap = _clone_row_faithful(cache)
+                snap = _clone_row_faithful(cache, [] if lazy else None)
         else:
             # Already single-row (B=1 without a batch wrapper); clone so the
             # stored copy is decoupled from the live decode cache.
-            snap = _clone_row_faithful(cache)
+            snap = _clone_row_faithful(cache, [] if lazy else None)
         if snap is None or not _layer_has_content(snap):
             return None
         snaps.append(snap)
@@ -2889,30 +2911,8 @@ def retirement_store(
         return 0
     try:
         if mode == "exact":
-            snap = row_snapshot(prompt_cache, row)
-            if snap is None:
-                return 0
-            covered = _cache_offset_max(snap)
-            if covered and covered != len(ids):
-                # An exact entry replays bitwise from its key; a row whose
-                # KV count disagrees with the key (a batch row with a
-                # pending or stale tail) must not be stored under it.
-                _log.warning("APC retirement skipped: row covers %d tokens, "
-                             "key %d", covered, len(ids))
-                return 0
-            if max_len is not None and max_len < len(ids):
-                if max_len < 2:
-                    return 0
-                snap = _truncate_kv_snapshot(snap, max_len)
-                if snap is None:
-                    _log.info(
-                        "APC retirement skipped: snapshot not truncatable "
-                        "to the replayable prefix %d", max_len)
-                    return 0
-                ids = ids[:max_len]
-            if manager.store_exact_cache(ids, snap, extra_hash=extra_hash):
-                return len(ids)
-            return 0
+            return _exact_retirement(manager, ids, prompt_cache, row=row,
+                                     extra_hash=extra_hash, max_len=max_len)
         from gmlx._vendor.mlx_vlm import apc as _apc
         blocks = _apc.harvest_blocks_from_batch_cache(
             manager, prompt_cache, ids, batch_idx=row, extra_hash=extra_hash)
@@ -2924,3 +2924,51 @@ def retirement_store(
     except Exception:
         _log.warning("APC retirement store failed; continuing", exc_info=True)
         return 0
+
+
+def _exact_retirement(manager: Any, ids: list[int], prompt_cache: list[Any],
+                      *, row: int, extra_hash: int,
+                      max_len: int | None) -> int:
+    """Store ``row`` in the exact tier as one copy of its KV.
+
+    The snapshot copies nothing yet (``_row_snapshot`` lazy), and it is
+    cloned the way the tier clones, unevaluated too. Once the snapshot is
+    dropped only the clone's graph holds it, so the store makes room for
+    the clone's bytes and then materializes the clone as the row's only
+    copy. A truncated plain KV row slices views, so the copy holds only
+    the kept prefix.
+    """
+    from gmlx._vendor.mlx_vlm import apc as _apc
+
+    snap = _row_snapshot(prompt_cache, row, lazy=True)
+    if snap is None:
+        return 0
+    covered = _cache_offset_max(snap)
+    if covered and covered != len(ids):
+        # An exact entry replays bitwise from its key; a row whose KV count
+        # disagrees with the key (a batch row with a pending or stale tail)
+        # must not be stored under it.
+        _log.warning("APC retirement skipped: row covers %d tokens, key %d",
+                     covered, len(ids))
+        return 0
+    if max_len is not None and max_len < len(ids):
+        if max_len < 2:
+            return 0
+        snap = _truncate_kv_snapshot(snap, max_len)
+        if snap is None:
+            _log.info("APC retirement skipped: snapshot not truncatable to "
+                      "the replayable prefix %d", max_len)
+            return 0
+        ids = ids[:max_len]
+    pending: list = []
+    entry = [_apc._clone_cache_entry_for_apc(
+        c, min_capacity_tokens=None, eval_targets=pending) for c in snap]
+    if any(c is None for c in entry):
+        # The tier's own clone declines the row too, and books the reject.
+        stored = manager.store_exact_cache(ids, snap, extra_hash=extra_hash)
+        return len(ids) if stored else 0
+    del snap
+    if manager.store_exact_cache(ids, entry, extra_hash=extra_hash,
+                                 materialize=pending):
+        return len(ids)
+    return 0

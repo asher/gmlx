@@ -582,10 +582,11 @@ class GmlxAPCManager(_apc.APCManager):
                 return got
         return None, 0
 
-    def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0):
+    def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0,
+                          materialize=None):
         salt = salt_at(extra_hash, len(token_ids)) ^ self._exact_extra_salt
         out = super().store_exact_cache(
-            token_ids, prompt_cache, extra_hash=salt)
+            token_ids, prompt_cache, extra_hash=salt, materialize=materialize)
         if out:
             self.kq_record("exact", _apc._sequence_hash(
                 tuple(int(t) for t in token_ids), salt, self.block_size))
