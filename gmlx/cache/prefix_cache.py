@@ -398,8 +398,9 @@ class SpecPrefixCache:
         Snapshots every cache entry in prompt_cache (architecture-agnostic:
         handles KVCache, RotatingKVCache, ArraysCache, CacheList) and the
         target hidden. Arrays are evaluated/materialized so they survive
-        subsequent in-place cache mutation during decode. Least recently
-        used entries make room first, so the layer holds at most its budget
+        subsequent in-place cache mutation during decode. An entry the
+        bounds would not keep returns before any copy, and least recently
+        used entries make room first, so the layer holds at most its bounds
         while the new entry materializes.
         """
         ids = _ids_tuple(token_ids)
@@ -407,18 +408,16 @@ class SpecPrefixCache:
         if len(ids) < self._min_prefix:
             return
 
+        # The snapshot is lazy until _eval_snapshot, and nbytes needs only
+        # shapes, so the whole keep decision runs before any copy.
         kv_snaps = [_snapshot_entry(c) for c in prompt_cache]
         entry = _PrefixEntry(_salt_at(salt, len(ids)), ids, kv_snaps, hidden)
         key = entry.key
 
-        # Budget check before materializing: nbytes needs only shapes, and
-        # skipping the eval avoids a doomed multi-GB copy of deep-context KV.
-        if entry.nbytes > self._max_bytes:
-            _log.info(
-                "APC store skipped: entry %.1f MB exceeds budget %.1f MB "
-                "(prefix len=%d)",
-                entry.nbytes / 2**20, self._max_bytes / 2**20, len(ids),
-            )
+        refused = self._refusal(entry)
+        if refused:
+            _log.info("APC store skipped: %s (prefix len=%d)", refused,
+                      len(ids))
             return
 
         # Make room before materializing, so the copy never lands on a full
@@ -431,14 +430,25 @@ class SpecPrefixCache:
         _eval_snapshot(kv_snaps)
         mx.eval(hidden)
 
+        # No trim after the insert: only this engine thread stores, and
+        # other threads only remove, so the room made above still holds.
         with self._lock:
             self._drop(key)
             self._entries[key] = entry
             self._total_bytes += entry.nbytes
             global _STORES
             _STORES += 1
-            # A layer bounded to no entries drops the new one here, as before.
-            self._evict_lru_for(0, 0)
+
+    def _refusal(self, entry: _PrefixEntry) -> str | None:
+        """Why the layer would keep nothing of ``entry``, or None to keep
+        it. Every bound that refuses a whole entry belongs here, so a store
+        never materializes a copy its bounds then drop."""
+        if self._max < 1:
+            return f"the layer keeps {self._max} entries"
+        if entry.nbytes > self._max_bytes:
+            return (f"entry {entry.nbytes / 2**20:.1f} MB exceeds budget "
+                    f"{self._max_bytes / 2**20:.1f} MB")
+        return None
 
     def _drop(self, key) -> None:
         """Pop ``key`` if held. Caller holds the lock."""

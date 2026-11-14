@@ -207,24 +207,34 @@ class TestByteBudget:
         assert cache.total_bytes == 0
         assert len(cache) == 0
 
-    @pytest.mark.parametrize("max_entries, max_bytes", [
-        (10, 9000), (2, 1 << 30),
-    ], ids=["bytes-full", "count-full"])
-    def test_a_store_into_a_full_layer_materializes_within_its_bounds(
-            self, monkeypatch, max_entries, max_bytes):
-        """The entries used longest ago make room before the new entry
-        materializes, so the layer never holds its budget plus one entry,
-        a peak inside one engine step that no governor band can act on.
-        The entries kept after the store are the same as before."""
+    @pytest.mark.parametrize("max_entries, max_bytes, held, new, kept", [
+        (10, 9000, [(0, 64), (100, 64)], (200, 64), [100, 200]),
+        (2, 1 << 30, [(0, 64), (100, 64)], (200, 64), [100, 200]),
+        (2, 9000, [(0, 64), (100, 64)], (0, 64), [0, 100]),
+        (0, 1 << 30, [], (200, 64), []),
+        (10, 4000, [(0, 32)], (200, 64), [0]),
+    ], ids=["bytes-full", "count-full", "same-key", "count-zero",
+            "over-budget"])
+    def test_a_store_materializes_only_an_entry_its_bounds_keep(
+            self, monkeypatch, max_entries, max_bytes, held, new, kept):
+        """Every bound decides before the copy. A store the bounds would
+        not keep never materializes, and one they keep makes room first,
+        so the held entries and the copy fit both bounds together, with
+        no peak inside an engine step that a governor band cannot reach.
+        The entries kept are the ones insert-then-trim kept."""
         import gmlx.cache.prefix_cache as pc
 
-        entry_bytes = 4096 + 16              # KV of 64 tokens, hidden
-        cache = SpecPrefixCache(max_entries=max_entries, max_bytes=max_bytes)
+        def entry_bytes(tokens):
+            return 64 * tokens + 16          # K and V of float32, hidden
+
+        def ids(start):
+            return mx.arange(start, start + 64)[None]
+
         hidden = mx.zeros((1, 1, 4))
-        for start in (0, 100):
-            cache.store(mx.arange(start, start + 64)[None], [_fill_kv(64)],
-                        hidden)
-        assert len(cache) == 2               # full: a third does not fit
+        cache = SpecPrefixCache(max_entries=max_entries, max_bytes=max_bytes)
+        for start, tokens in held:
+            cache.store(ids(start), [_fill_kv(tokens)], hidden)
+        assert len(cache) == len(held)
         seen = []
         real = pc._eval_snapshot
 
@@ -233,14 +243,18 @@ class TestByteBudget:
             real(snaps)
 
         monkeypatch.setattr(pc, "_eval_snapshot", spy)
-        cache.store(mx.arange(200, 264)[None], [_fill_kv(64)], hidden)
-        assert len(seen) == 1
-        held_n, held_bytes = seen[0]
-        assert held_n + 1 <= max_entries
-        assert held_bytes + entry_bytes <= max_bytes
-        assert cache.total_bytes == 2 * entry_bytes
-        assert [cache.lookup(mx.arange(s, s + 65)[None]) is not None
-                for s in (0, 100, 200)] == [False, True, True]
+        start, tokens = new
+        cache.store(ids(start), [_fill_kv(tokens)], hidden)
+        assert len(seen) == (1 if start in kept else 0)
+        for held_n, held_bytes in seen:
+            assert held_n + 1 <= max_entries
+            assert held_bytes + entry_bytes(tokens) <= max_bytes
+        sizes = dict(held)
+        sizes[start] = tokens
+        assert cache.total_bytes == sum(entry_bytes(sizes[s]) for s in kept)
+        hits = [s for s in (0, 100, 200)
+                if cache.lookup(mx.arange(s, s + 65)[None]) is not None]
+        assert hits == kept
 
 
 class TestSpecPrefixStats:
