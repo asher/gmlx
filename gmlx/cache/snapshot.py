@@ -1218,20 +1218,51 @@ def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
     return evicted
 
 
+def _ckpt_extends(o, r) -> bool:
+    """Whether record ``o`` continues record ``r``'s prompt. The pool
+    keeps one block per hashed span, the salt included, so sharing
+    ``r``'s last chain block proves the prefix up to ``r.b_full``; the
+    tail ids settle the rest. A record with no chain compares its ids."""
+    if o.p <= r.p:
+        return False
+    nb = len(r.main_blocks or ())
+    if nb:
+        ob = o.main_blocks or ()
+        return (len(ob) >= nb and ob[nb - 1] is r.main_blocks[nb - 1]
+                and o.ids[r.b_full:r.p] == r.ids[r.b_full:])
+    return o.ids[:r.p] == r.ids
+
+
+def _chain_heads(idx) -> set:
+    """Keys of the records the next turn of their conversation restores:
+    per chain, the deepest record no deeper one continues. A replay
+    serves only its identical resend and a decision record belongs to no
+    conversation, so neither is a head nor hides one."""
+    recs = [(k, r) for k, r in idx.items()
+            if r.kind not in ("replay", "decision")]
+    return {k for k, r in recs
+            if not any(_ckpt_extends(o, r) for _, o in recs)}
+
+
 def _lru_victim_key(idx, keep):
-    """Key of the eviction victim: the least-recently-used spared record,
-    else non-anchor record, else anchor, never the ``keep`` key (the
-    record being inserted always survives). Lookup hits move_to_end, so
-    anchor order is LRU by last hit: an anchor that never serves a
+    """Key of the eviction victim, never the ``keep`` key (the record
+    being inserted always survives). A chain's head (``_chain_heads``)
+    goes only when nothing else is left: under round robin the least
+    recently used conversation is the one due next, and its head is the
+    record that turn restores. Within each group: the least recently used
+    spared record, else non-anchor, else anchor. Lookup hits move_to_end,
+    so anchor order is LRU by last hit: an anchor that never serves a
     sibling ages out, one that does stays hot. Caller holds the lock and
     guarantees a non-keep record exists."""
-    key = next((k for k, r in idx.items() if r.spared and k != keep), None)
-    if key is None:
-        key = next((k for k, r in idx.items()
-                    if r.kind != "anchor" and k != keep), None)
-    if key is None:
-        key = next(k for k in idx if k != keep)
-    return key
+    heads = _chain_heads(idx)
+    for group in ([k for k in idx if k != keep and k not in heads],
+                  [k for k in idx if k != keep]):
+        for tier in (lambda r: r.spared, lambda r: r.kind != "anchor",
+                     lambda r: True):
+            key = next((k for k in group if tier(idx[k])), None)
+            if key is not None:
+                return key
+    raise KeyError("no eviction victim besides the record kept")
 
 
 def _evict_lru_record(manager, idx, keep):
@@ -1375,10 +1406,11 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
     manager, stay within the room (``_fit_record_room``).
 
     Against real memory pressure the exemptions pin little: the count
-    and byte bounds evict anchors after non-anchors (LRU by last hit),
-    and pool-pressure eviction (_evict_for_pool) gives anchors no
-    protection at all: position-salted window chains must never sit
-    pinned on an exhausted pool.
+    and byte bounds keep each chain's head to the last and evict anchors
+    after non-anchors among the rest (LRU by last hit), and
+    pool-pressure eviction (_evict_for_pool) gives anchors no protection
+    at all: position-salted window chains must never sit pinned on an
+    exhausted pool.
 
     ``keep``: the storing request's p_stable. Where a record past it would
     strip the deepest record at or below it, the one a next turn

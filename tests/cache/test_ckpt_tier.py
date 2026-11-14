@@ -1455,36 +1455,34 @@ def test_anchor_kind_exempt_from_strip_and_superseded():
 
 
 def test_anchor_evicts_after_non_anchors_lru_by_hit(monkeypatch):
-    """Entry-cap pressure: non-anchors go first even when an anchor is
-    older; among anchors the least-recently-hit goes first."""
+    """Entry-cap pressure among the records a deeper one on their chain
+    superseded (each chain's head goes last, test_ckpt_budget.py): a
+    non-anchor goes first even when both anchors are older; among
+    anchors the least recently hit goes first."""
     import gmlx.cache.snapshot as cs
 
-    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 3)
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 5)
     man = APCManager(num_blocks=96, block_size=16)
     a = list(range(100, 148))
     b = list(range(300, 364))
-    assert ckpt_store(man, a[:32], make_hybrid_cache(32, seed=1),
-                      extra_hash=0)                       # anchor A
-    assert ckpt_store(man, b[:32], make_hybrid_cache(32, seed=2),
-                      extra_hash=1)                       # anchor B
-    assert ckpt_store(man, b[:48], make_hybrid_cache(48, seed=3),
-                      extra_hash=1)                       # plain boundary
+    for ids, p, h in ((a, 32, 0), (a, 48, 0), (b, 32, 1), (b, 48, 1),
+                      (b, 64, 1)):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p + h),
+                          extra_hash=h)
     warm, got = ckpt_lookup(man, a[:40], extra_hash=0)    # hit refreshes A
     assert got == 32
+
+    def kept():
+        return sorted((r.extra_hash, r.p) for r in cs._ckpt_records(man).values())
+
     assert ckpt_store(man, list(range(500, 532)),
                       make_hybrid_cache(32, seed=4), extra_hash=2)
-    idx = cs._ckpt_records(man)
-    # The plain boundary (B:48) went first despite being newer than both
-    # anchors.
-    assert [(r.p, r.extra_hash) for r in idx.values() if r.kind != "anchor"] \
-        == []
-    assert {r.extra_hash for r in idx.values()} == {0, 1, 2}
+    # B:48, the one non-anchor B:64 superseded, went before both anchors.
+    assert kept() == [(0, 32), (0, 48), (1, 32), (1, 64), (2, 32)]
     assert ckpt_store(man, list(range(700, 732)),
                       make_hybrid_cache(32, seed=5), extra_hash=3)
-    idx = cs._ckpt_records(man)
-    # All anchors now: the least-recently-hit one (B) went; the hit A
-    # record stayed.
-    assert {r.extra_hash for r in idx.values()} == {0, 2, 3}
+    # Superseded anchors only: B's, hit least recently, went; A's stayed.
+    assert kept() == [(0, 32), (0, 48), (1, 64), (2, 32), (3, 32)]
 
 
 def test_first_boundary_promotion_skips_retire_chains():

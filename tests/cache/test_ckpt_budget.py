@@ -94,6 +94,39 @@ def test_round_robin_keeps_the_coldest_conversations_deep_record(monkeypatch):
     assert got == 112
 
 
+def _round_robin(man):
+    """Four conversations, each an anchor and a deep record; three are
+    served in turn and each stores a deeper record."""
+    for c in range(4):
+        assert ckpt_store(man, _ids(c, 32), make_hybrid_cache(32, seed=c),
+                          extra_hash=c)
+        assert ckpt_store(man, _ids(c, 112),
+                          make_hybrid_cache(112, seed=10 + c), extra_hash=c)
+    for c in range(3):
+        _, got = ckpt_lookup(man, _ids(c, 112) + [7], extra_hash=c)
+        assert got == 112
+        assert ckpt_store(man, _ids(c, 128),
+                          make_hybrid_cache(128, seed=20 + c), extra_hash=c)
+
+
+def test_room_keeps_each_conversations_newest_record():
+    """The room binds on the last store. The conversation served longest
+    ago keeps the record its next turn restores; least recently used
+    would drop exactly that record, since its conversation is due next.
+    A record its own conversation superseded goes instead."""
+    free = GmlxAPCManager(num_blocks=64, block_size=16)
+    _round_robin(free)
+    room = _records_bytes(free) + _block_bytes(free)
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    man._kq_ckpt_share_bytes = room - 1
+    _round_robin(man)
+    _, got = ckpt_lookup(man, _ids(3, 112) + [7], extra_hash=3)
+    assert got == 112
+    kept = {(r.extra_hash, r.p) for r in cs._ckpt_records(man).values()}
+    assert (0, 112) not in kept
+    assert man.stats_snapshot()["ckpt_budget_evictions"] == 1
+
+
 def test_over_the_share_idle_blocks_go_first_then_records_with_theirs(
         caplog):
     """Past the share, blocks no record holds are freed first and no
