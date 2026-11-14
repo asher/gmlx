@@ -232,6 +232,16 @@ _WIRED_LIMIT_FIELDS = {"_CAP_MEMORY_LIMIT": None, "_CLAMP_LOGGED": False,
                        "_ANNOUNCE": False}
 
 
+# A governor state's throttle fields: the limits it saved and the ones it
+# set in their place.
+_THROTTLE_FIELDS = ("saved_mem_limit", "saved_cache_limit",
+                    "throttle_mem_limit", "throttle_cache_limit")
+
+
+def _throttle_fields(st) -> tuple:
+    return tuple(getattr(st, name, None) for name in _THROTTLE_FIELDS)
+
+
 def _decay_registries(decay) -> dict | None:
     """A copy of the weight registries, one level deep, and the weights
     owner, or None before the module is imported."""
@@ -313,8 +323,8 @@ def capture() -> dict:
             (mod, getattr(mod, "_free_ram_bytes", _MISSING))
             for mod in [sys.modules.get(_APC_MODULE)] if mod],
         "vlm_bindings": vlm_bindings(),
-        "governor": {st: (st.saved_mem_limit, st.saved_cache_limit)
-                     for st in _governor_states},
+        "governor": {st: _throttle_fields(st) for st in _governor_states},
+        "throttle_holders": list(getattr(_governor(), "_HOLDERS", ())),
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
         "table_stream_latch": getattr(_table_stream(), "_FORCED", False),
         "table_install_follows": set(getattr(_table_stream(),
@@ -409,13 +419,17 @@ def restore(state: dict) -> list:
     changed += put_back(state["vlm_bindings"])
     governor = False
     for st in list(_governor_states):
-        saved = state["governor"].get(st, (None, None))
-        if (st.saved_mem_limit, st.saved_cache_limit) != saved:
+        saved = state["governor"].get(st, (None,) * len(_THROTTLE_FIELDS))
+        if _throttle_fields(st) != saved:
             governor = True
-            st.saved_mem_limit, st.saved_cache_limit = saved
+            for name, value in zip(_THROTTLE_FIELDS, saved):
+                setattr(st, name, value)
     if governor:
         changed.append("governor saved limits")
     gov = _governor()
+    if gov is not None and gov._HOLDERS != state["throttle_holders"]:
+        changed.append("governor throttle holders")
+        gov._HOLDERS[:] = state["throttle_holders"]
     if gov is not None and gov._ARMED_FLOOR != state["armed_floor"]:
         changed.append("governor armed floor")
         gov._ARMED_FLOOR = state["armed_floor"]

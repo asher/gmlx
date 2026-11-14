@@ -214,14 +214,17 @@ def note_untracked_tables(names, nbytes: float) -> None:
 def _restore_mlx_memory_limit() -> None:
     """Put back the MLX memory limit install_wired_cap replaced, while
     the cap it set still stands (a later owner, such as expert
-    streaming's allocator, keeps its own)."""
+    streaming's allocator, keeps its own). While another limit stands,
+    the record stays: the governor's throttle, disarmed, puts the cap
+    back over its own limit and calls this again."""
     global _CAP_MEMORY_LIMIT
     saved = _CAP_MEMORY_LIMIT
     if saved is None:
         return
     try:
-        if int(mx.get_memory_limit()) == saved[1]:
-            mx.set_memory_limit(saved[0])
+        if int(mx.get_memory_limit()) != saved[1]:
+            return
+        mx.set_memory_limit(saved[0])
     except Exception:
         return
     _CAP_MEMORY_LIMIT = None

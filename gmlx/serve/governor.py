@@ -127,6 +127,7 @@ from __future__ import annotations
 import enum
 import logging
 import os
+import threading
 import time
 import weakref
 
@@ -267,6 +268,9 @@ class _GovState:
         # yellow arm/restore
         self.saved_mem_limit = None
         self.saved_cache_limit = None
+        # the limits the throttle set in their place
+        self.throttle_mem_limit = None
+        self.throttle_cache_limit = None
         self.saved_prefill_step = None
         self.width_clamped = False
         # demand-rung measurement (peak rate per tick)
@@ -540,49 +544,109 @@ def _pause_admission(gen, st: _GovState) -> None:
     pass  # the hold is the band itself; admit_gate reads admission_hold_reason
 
 
+# The throttles that hold a memory or cache limit they set, oldest
+# first: only the newest that holds a limit puts its saved one back
+# (_disarm_throttle).
+_HOLDERS: list = []
+_HOLDERS_LOCK = threading.Lock()
+
+
 def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
     from gmlx.gen.prefill_decay import streamed_tracked_bytes, untracked_weight_bytes
 
-    if st.saved_mem_limit is None:
-        # The limit speaks allocator terms: allocator-tracked streamed
-        # expert bytes sit inside it without occupying working set, so a
-        # limit that ignores them would refuse every allocation on an
-        # over-RAM streaming model.
-        limit = int(_ceiling_bytes(ws, margin) + untracked_weight_bytes()
-                    + streamed_tracked_bytes())
-        try:
-            st.saved_mem_limit = mx.set_memory_limit(limit)
-        except Exception:
-            st.saved_mem_limit = None
-            _log.warning("[governor] set_memory_limit failed", exc_info=True)
-    if st.saved_cache_limit is None:
-        # Zero here turns every prefill transient into a fresh Metal
-        # allocation; the uncached traffic re-dips the kernel floor each
-        # tick and pins the band red at large prefill cost. A small cap
-        # keeps same-shape layer buffers reusable while overgrowth is
-        # still shed (floor breaches clear the cache directly).
-        cap = int(_env_f("GMLX_GOV_THROTTLE_CACHE_GB", 2.0) * 1e9)
-        try:
-            st.saved_cache_limit = mx.set_cache_limit(cap)
-        except Exception:
-            st.saved_cache_limit = None
+    with _HOLDERS_LOCK:
+        if st.saved_mem_limit is None:
+            # The limit speaks allocator terms: allocator-tracked streamed
+            # expert bytes sit inside it without occupying working set, so
+            # a limit that ignores them would refuse every allocation on
+            # an over-RAM streaming model.
+            limit = int(_ceiling_bytes(ws, margin) + untracked_weight_bytes()
+                        + streamed_tracked_bytes())
+            try:
+                st.saved_mem_limit = mx.set_memory_limit(limit)
+                st.throttle_mem_limit = limit
+            except Exception:
+                st.saved_mem_limit = None
+                _log.warning("[governor] set_memory_limit failed",
+                             exc_info=True)
+        if st.saved_cache_limit is None:
+            # Zero here turns every prefill transient into a fresh Metal
+            # allocation; the uncached traffic re-dips the kernel floor
+            # each tick and pins the band red at large prefill cost. A
+            # small cap keeps same-shape layer buffers reusable while
+            # overgrowth is still shed (floor breaches clear the cache
+            # directly).
+            cap = int(_env_f("GMLX_GOV_THROTTLE_CACHE_GB", 2.0) * 1e9)
+            try:
+                st.saved_cache_limit = mx.set_cache_limit(cap)
+                st.throttle_cache_limit = cap
+            except Exception:
+                st.saved_cache_limit = None
+        held = (st.saved_mem_limit is not None
+                or st.saved_cache_limit is not None)
+        if held and not any(h is st for h in _HOLDERS):
+            _HOLDERS.append(st)
+
+
+def _put_back(which: str, saved: int, ours: int) -> bool:
+    """Put the ``saved`` memory or cache limit back, over the throttle's
+    own limit ``ours`` only: a limit a later owner set (expert streaming's
+    allocator limits, a pin's MLX limit) stands. True when it went back.
+    MLX reads no cache limit back, so that one is swapped and, when the
+    limit it replaced was not ours, swapped back."""
+    if which == "mem":
+        if int(mx.get_memory_limit()) != int(ours):
+            return False
+        mx.set_memory_limit(int(saved))
+        return True
+    cur = int(mx.set_cache_limit(int(saved)))
+    if cur == int(ours):
+        return True
+    mx.set_cache_limit(cur)
+    return False
 
 
 def _disarm_throttle(gen, st: _GovState) -> None:
-    if st.saved_mem_limit is not None:
-        try:
-            mx.set_memory_limit(st.saved_mem_limit)
-        except Exception:
-            _log.warning("[governor] memory limit restore failed; the "
-                         "throttle limit stays", exc_info=True)
-        st.saved_mem_limit = None
-    if st.saved_cache_limit is not None:
-        try:
-            mx.set_cache_limit(st.saved_cache_limit)
-        except Exception:
-            _log.warning("[governor] cache limit restore failed; the "
-                         "throttle limit stays", exc_info=True)
-        st.saved_cache_limit = None
+    """Hand back the limits the throttle saved. The newest throttle that
+    holds a limit puts its saved one back over its own; an older one
+    hands its saved limit to the next holder that saved its throttle
+    limit, and drops it when a later owner set a limit in between."""
+    with _HOLDERS_LOCK:
+        i = next((k for k, h in enumerate(_HOLDERS) if h is st), None)
+        later = _HOLDERS[i + 1:] if i is not None else []
+        if i is not None:
+            del _HOLDERS[i]
+        for which in ("mem", "cache"):
+            saved = getattr(st, f"saved_{which}_limit")
+            ours = getattr(st, f"throttle_{which}_limit")
+            setattr(st, f"saved_{which}_limit", None)
+            setattr(st, f"throttle_{which}_limit", None)
+            if saved is None:
+                continue
+            nxt = next((h for h in later
+                        if getattr(h, f"saved_{which}_limit") is not None),
+                       None)
+            if nxt is not None:
+                if getattr(nxt, f"saved_{which}_limit") == ours:
+                    setattr(nxt, f"saved_{which}_limit", saved)
+                continue
+            if ours is None:
+                continue
+            try:
+                back = _put_back(which, saved, ours)
+            except Exception:
+                _log.warning("[governor] %s limit restore failed; the "
+                             "throttle limit stays",
+                             "memory" if which == "mem" else "cache",
+                             exc_info=True)
+                continue
+            if back and which == "mem" and wrapped_with(mx.set_wired_limit,
+                                                        "_kq_no_sweep"):
+                # The cap went back in a process pinned since: MLX's own
+                # limit is the pin's.
+                from gmlx.stream.wired_limit import _restore_mlx_memory_limit
+
+                _restore_mlx_memory_limit()
 
 
 def _arm_demand_rung(gen, st: _GovState) -> None:

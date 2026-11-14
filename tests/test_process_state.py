@@ -249,11 +249,13 @@ def test_i_a_server_notes_its_cache_limit_and_arms_the_governor(monkeypatch):
 
     monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
     _MIRRORS["noted_cache_limit"] = prefill_decay._NOTED_CACHE_LIMIT
+    _MIRRORS["throttle_holders"] = list(governor._HOLDERS)
     memory.apply_cache_limit(SimpleNamespace(cache_limit_gb=3, models={}))
     st = governor._state(_GEN)
     governor._arm_throttle(_GEN, st, 64e9, 0.1)
     assert st.saved_mem_limit is not None
     assert st.saved_cache_limit is not None
+    assert any(h is st for h in governor._HOLDERS)
     assert prefill_decay._NOTED_CACHE_LIMIT == 3 * (1 << 30)
 
 
@@ -267,6 +269,10 @@ def test_j_the_next_test_finds_the_governor_unarmed():
     # it saved would take its throttle for armed and never arm it again.
     st = governor._state(_GEN)
     assert (st.saved_mem_limit, st.saved_cache_limit) == (None, None)
+    assert (st.throttle_mem_limit, st.throttle_cache_limit) == (None, None)
+    # A throttle left among the holders would take every later disarm's
+    # saved limits.
+    assert governor._HOLDERS == _MIRRORS["throttle_holders"]
     assert prefill_decay._NOTED_CACHE_LIMIT == _MIRRORS["noted_cache_limit"]
 
 

@@ -69,12 +69,21 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov.mx, "get_peak_memory", lambda: box["peak"])
     monkeypatch.setattr(gov.mx, "reset_peak_memory", lambda: None)
     monkeypatch.setattr(gov.mx, "clear_cache", lambda: None)
-    monkeypatch.setattr(
-        gov.mx, "set_memory_limit",
-        lambda v: (box["mem_limits"].append(v), 0)[1])
-    monkeypatch.setattr(
-        gov.mx, "set_cache_limit",
-        lambda v: (box["cache_limits"].append(v), 7)[1])
+    # The limits in force, 0 and 7 to start; each setter returns the one
+    # it replaced, as MLX's do.
+    box["mem_limit"], box["cache_limit"] = 0, 7
+
+    def _setter(name):
+        def set_limit(v):
+            box[f"{name}s"].append(v)
+            prev, box[name] = box[name], v
+            return prev
+        return set_limit
+
+    monkeypatch.setattr(gov.mx, "set_memory_limit", _setter("mem_limit"))
+    monkeypatch.setattr(gov.mx, "set_cache_limit", _setter("cache_limit"))
+    monkeypatch.setattr(gov.mx, "get_memory_limit", lambda: box["mem_limit"])
+    monkeypatch.setattr(gov, "_HOLDERS", [])
     monkeypatch.setattr(gov, "_maybe_register_apc", lambda gen: None)
     box["kernel"] = 40e9
     monkeypatch.setattr(gov, "_kernel_unwired", lambda: box["kernel"])
@@ -194,6 +203,69 @@ def test_throttle_cache_env_zero_disables_caching(rig, monkeypatch):
     gov._governor_tick(gen)
     assert st.band == gov.YELLOW
     assert rig["cache_limits"] == [0]
+
+
+def test_disarm_leaves_the_limits_a_later_owner_set(rig):
+    """A model that loads while another's throttle is armed sets its own
+    limits (expert streaming's allocator sets the memory and the cache
+    limit). The throttle's disarm puts its saved limits back only over
+    its own, so the later owner's stand."""
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gov._arm_throttle(gen, st, 120e9, 0.05)
+    gov.mx.set_memory_limit(300_000_000_000)
+    gov.mx.set_cache_limit(5_000_000_000)
+    gov._disarm_throttle(gen, st)
+    assert (rig["mem_limit"], rig["cache_limit"]) == (300_000_000_000,
+                                                      5_000_000_000)
+    assert (st.saved_mem_limit, st.saved_cache_limit) == (None, None)
+    assert gov._HOLDERS == []
+
+
+@pytest.mark.parametrize("first", [0, 1])
+def test_two_throttles_put_back_the_limits_the_first_found(rig, first):
+    """Two models' throttles armed in turn, the second over the first's
+    limits. The first to disarm leaves the limits in force, and the last
+    puts back the ones the first throttle found, in either order."""
+    gens = [FakeGen(rows=2), FakeGen(rows=2)]
+    sts = [gov._state(g) for g in gens]
+    for g, st in zip(gens, sts):
+        gov._arm_throttle(g, st, 120e9, 0.05)
+    armed = (rig["mem_limit"], rig["cache_limit"])
+    assert armed != (0, 7)
+    gov._disarm_throttle(gens[first], sts[first])
+    assert (rig["mem_limit"], rig["cache_limit"]) == armed
+    gov._disarm_throttle(gens[1 - first], sts[1 - first])
+    assert (rig["mem_limit"], rig["cache_limit"]) == (0, 7)
+    assert gov._HOLDERS == []
+
+
+def test_disarm_in_a_process_pinned_since_puts_back_mlx_limit(
+        rig, monkeypatch):
+    """The throttle armed over the wired cap's memory limit, then a load
+    pinned the wired limit. The pin found the throttle's limit, not the
+    cap, and left it. Disarmed, the throttle puts the cap back, and the
+    pin's restore then puts back MLX's own limit, which a pinned process
+    keeps."""
+    from gmlx.stream import wired_limit
+
+    cap, mlx_own = 100_000_000_000, 180_000_000_000
+    rig["mem_limit"] = cap
+    monkeypatch.setattr(wired_limit, "_CAP_MEMORY_LIMIT", (mlx_own, cap))
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gov._arm_throttle(gen, st, 120e9, 0.05)
+
+    def pin(*_a, **_k):
+        return 0
+
+    pin._kq_no_sweep = True
+    monkeypatch.setattr(gov.mx, "set_wired_limit", pin)
+    wired_limit._restore_mlx_memory_limit()
+    assert rig["mem_limit"] == st.throttle_mem_limit
+    gov._disarm_throttle(gen, st)
+    assert rig["mem_limit"] == mlx_own
+    assert wired_limit._CAP_MEMORY_LIMIT is None
 
 
 def test_kernel_floor_default_is_4gb(rig, monkeypatch):
