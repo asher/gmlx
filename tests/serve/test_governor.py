@@ -1421,6 +1421,59 @@ def test_dead_arena_entry_is_replaced(rig, monkeypatch):
     assert "arena:fixed" not in gov._REG and "arena:fixed" not in gov._ARENA_REFS
 
 
+@pytest.fixture
+def spec_engine(monkeypatch):
+    """The engine that brings a drafter's prefix layer up, with an empty
+    governor registry and the layer's default switches."""
+    import gmlx.spec.engine as eng
+
+    monkeypatch.setattr(gov, "_REG", {})
+    monkeypatch.setattr(gov, "_SPEC_PREFIX_REFS", {})
+    monkeypatch.setattr(eng, "_SPEC_APC_DISABLED", False)
+    monkeypatch.delenv("GMLX_SPEC_APC_ENTRIES", raising=False)
+    monkeypatch.delenv("GMLX_SPEC_APC_BUDGET_MB", raising=False)
+    return eng
+
+
+def _store(cache, start, nbytes):
+    """Store a 64-token prompt from ``start`` whose entry pins ``nbytes``:
+    its hidden alone, with no KV layers."""
+    cache.store(mx.arange(start, start + 64)[None], [],
+                mx.zeros((1, nbytes // 4), mx.float32))
+
+
+def _held(cache, start) -> bool:
+    return cache.lookup(mx.arange(start, start + 65)[None]) is not None
+
+
+def test_the_drafters_prefix_layer_counts_with_the_governor_after_a_store(
+        spec_engine):
+    """The drafter's second cache holds a whole-prompt snapshot and hidden
+    a turn. Its bytes reach the governor from the store on, so the
+    kernel floor's share and the evictions see it."""
+    cache = spec_engine._get_spec_prefix_cache(types.SimpleNamespace())
+    assert gov._registered_bytes() == 0
+    _store(cache, 0, 4096)
+    assert gov._registered_bytes() == 4096
+
+
+def test_the_governor_evicts_the_prefix_layer_least_recently_used_first(
+        spec_engine):
+    """An eviction for a quarter of the bytes takes the entry used longest
+    ago, whole, and the governor's count falls by it. A full eviction
+    empties the layer."""
+    cache = spec_engine._get_spec_prefix_cache(types.SimpleNamespace())
+    for start in (0, 100, 200):
+        _store(cache, start, 4096)
+    assert _held(cache, 0)                  # the first turn is used again
+    assert gov._evict_registered(0.25) == 4096
+    assert gov._registered_bytes() == 8192
+    assert not _held(cache, 100)
+    assert _held(cache, 0) and _held(cache, 200)
+    assert gov._evict_registered(1.0) == 8192
+    assert gov._registered_bytes() == 0 and len(cache) == 0
+
+
 def test_kernel_floor_reads_every_16_ticks_above_the_floor(rig, monkeypatch):
     # The read is three sysctl calls on the decode step. Above the floor
     # it runs on the first tick and every 16th after; a tick in between

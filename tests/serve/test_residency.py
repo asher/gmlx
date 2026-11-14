@@ -142,6 +142,43 @@ def test_failed_build_after_eviction_drops_proxy_last_ref():
     assert ref() is None
 
 
+def test_unload_leaves_no_drafter_prefix_layer_with_the_governor(monkeypatch):
+    """A drafter's prefix layer registers with the governor when its model
+    serves a turn. The model's unload takes the registration with it; the
+    model that replaces it keeps its own."""
+    import gmlx.serve.governor as gov
+    import gmlx.spec.engine as eng
+
+    monkeypatch.setattr(gov, "_REG", {})
+    monkeypatch.setattr(gov, "_SPEC_PREFIX_REFS", {})
+    monkeypatch.setattr(eng, "_SPEC_APC_DISABLED", False)
+    proxy = _RuntimeProxy(_FakeOriginal())
+    layers = {}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        # The generator's model is the language model; a turn brings its
+        # prefix layer up.
+        lm = SimpleNamespace()
+        layers[model_path] = eng._get_spec_prefix_cache(lm)
+        proxy.apc_manager = f"APC:{model_path}"
+        proxy.response_generator = f"RG:{model_path}"
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": SimpleNamespace(language_model=lm),
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    acquire(pool, "A")
+    assert list(gov._REG) == [gov._spec_prefix_name(layers["A"])]
+    acquire(pool, "B")                      # A goes for B
+    assert list(gov._REG) == [gov._spec_prefix_name(layers["B"])]
+    assert list(gov._SPEC_PREFIX_REFS) == list(gov._REG)
+    _active_entry.set(None)
+
+
 def test_a_build_that_fails_in_its_set_up_leaves_nothing_behind(monkeypatch):
     """The untracked table check can raise (a native-fp table whose header
     scan fails). The model's env window, the APC env, the build spec, the

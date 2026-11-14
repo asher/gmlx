@@ -56,16 +56,20 @@ def _debug_note(msg: str) -> None:
 
 
 def _get_spec_prefix_cache(model):
-    """Lazy-create a SpecPrefixCache on the model, or return None if disabled."""
+    """Lazy-create a SpecPrefixCache on the model, or return None if disabled.
+    A new cache registers with the memory governor, which evicts it under
+    pressure; the model's teardown unregisters it."""
     if _SPEC_APC_DISABLED:
         return None
     cache = getattr(model, "_spec_prefix_cache", None)
     if cache is None:
         from gmlx.cache.prefix_cache import SpecPrefixCache
+        from gmlx.serve.governor import register_spec_prefix
         max_entries = env_int("GMLX_SPEC_APC_ENTRIES", 4)
         budget_mb = env_int("GMLX_SPEC_APC_BUDGET_MB", 8192)
         cache = SpecPrefixCache(max_entries=max_entries, max_bytes=budget_mb << 20)
         model._spec_prefix_cache = cache
+        register_spec_prefix(cache)
     return cache
 
 

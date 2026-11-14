@@ -119,6 +119,9 @@ class _Teardown:
             from .governor import unregister_arena
 
             unregister_arena(_decode_feeder)
+        from .governor import unregister_spec_prefix_of
+
+        unregister_spec_prefix_of(entry.model_cache.get("model"))
         # And the every-token weight pin: mlocked file-backed ranges, which
         # stay file-backed and so still read as reclaimable to vm_stat. The
         # next model's arena sizes against that snapshot, so an unreleased

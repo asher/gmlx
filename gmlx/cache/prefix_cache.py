@@ -13,6 +13,8 @@ KV+GDN sub-caches).
 from __future__ import annotations
 
 import logging
+import math
+import threading
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable
@@ -328,6 +330,10 @@ class SpecPrefixCache:
         budget is never stored. Full-attention KV at deep context is the
         dominant term (a 32k-prefix entry on a large model runs to GBs), so
         an entry count alone does not bound memory.
+
+    The serve path registers each cache with the memory governor
+    (``gmlx.serve.governor.register_spec_prefix``), which evicts entries
+    least recently used first under pressure (``governor_evict``).
     """
 
     def __init__(self, max_entries: int = 4, min_prefix: int = 32,
@@ -338,6 +344,9 @@ class SpecPrefixCache:
         self._min_prefix = min_prefix
         self._max_bytes = max_bytes
         self._total_bytes = 0
+        # The governor evicts from the engine thread and a cache reset
+        # clears from a request thread.
+        self._lock = threading.RLock()
         _LIVE_CACHES.add(self)
 
     def lookup(
@@ -356,21 +365,23 @@ class SpecPrefixCache:
 
         best: tuple[int, _PrefixEntry] | None = None
         best_len = 0
-        for entry in self._entries.values():
-            n = len(entry.token_ids)
-            if n >= len(ids) or n <= best_len or entry.salt != _salt_at(
-                    salt, n):
-                continue
-            if ids[:n] == entry.token_ids and (accept is None or accept(n)):
-                best = (n, entry)
-                best_len = n
+        with self._lock:
+            for entry in self._entries.values():
+                n = len(entry.token_ids)
+                if n >= len(ids) or n <= best_len or entry.salt != _salt_at(
+                        salt, n):
+                    continue
+                if ids[:n] == entry.token_ids and (accept is None
+                                                   or accept(n)):
+                    best = (n, entry)
+                    best_len = n
 
-        if best is not None and best_len >= self._min_prefix:
-            self._entries.move_to_end(best[1].key)
-            global _HITS, _HIT_TOKENS
-            _HITS += 1
-            _HIT_TOKENS += best_len
-            return best
+            if best is not None and best_len >= self._min_prefix:
+                self._entries.move_to_end(best[1].key)
+                global _HITS, _HIT_TOKENS
+                _HITS += 1
+                _HIT_TOKENS += best_len
+                return best
         return None
 
     def store(
@@ -410,25 +421,26 @@ class SpecPrefixCache:
         _eval_snapshot(kv_snaps)
         mx.eval(hidden)
 
-        if key in self._entries:
-            old = self._entries.pop(key)
-            self._total_bytes -= old.nbytes
-        self._entries[key] = entry
-        self._entries.move_to_end(key)
-        self._total_bytes += entry.nbytes
-        global _STORES
-        _STORES += 1
+        with self._lock:
+            if key in self._entries:
+                old = self._entries.pop(key)
+                self._total_bytes -= old.nbytes
+            self._entries[key] = entry
+            self._entries.move_to_end(key)
+            self._total_bytes += entry.nbytes
+            global _STORES
+            _STORES += 1
 
-        while self._entries and (
-            len(self._entries) > self._max
-            or self._total_bytes > self._max_bytes
-        ):
-            _, evicted = self._entries.popitem(last=False)
-            self._total_bytes -= evicted.nbytes
-            _log.debug(
-                "APC evict prefix len=%d (%.1f MB)",
-                len(evicted.token_ids), evicted.nbytes / 2**20,
-            )
+            while self._entries and (
+                len(self._entries) > self._max
+                or self._total_bytes > self._max_bytes
+            ):
+                _, evicted = self._entries.popitem(last=False)
+                self._total_bytes -= evicted.nbytes
+                _log.debug(
+                    "APC evict prefix len=%d (%.1f MB)",
+                    len(evicted.token_ids), evicted.nbytes / 2**20,
+                )
 
     def restore(self, entry: _PrefixEntry, prompt_cache: list) -> None:
         """Restore target KV from a cached entry into prompt_cache."""
@@ -436,18 +448,56 @@ class SpecPrefixCache:
             _restore_entry(c, snap)
 
     def clear(self) -> None:
-        self._entries.clear()
-        self._total_bytes = 0
+        with self._lock:
+            self._entries.clear()
+            self._total_bytes = 0
+
+    def governor_bytes(self) -> int:
+        """Bytes the entries pin, snapshots and hiddens together; the
+        governor samples this. Attribute math only, no device sync."""
+        with self._lock:
+            return int(self._total_bytes)
+
+    def evict_bytes(self, want: int) -> int:
+        """Evict entries least recently used first until ``want`` bytes are
+        freed, and return the bytes freed. An entry goes whole, so the last
+        one can free more than what was left to free."""
+        want = int(want)
+        if want <= 0:
+            return 0
+        freed = n = 0
+        with self._lock:
+            while self._entries and freed < want:
+                _, evicted = self._entries.popitem(last=False)
+                self._total_bytes -= evicted.nbytes
+                freed += evicted.nbytes
+                n += 1
+        if n:
+            _log.info("APC prefix layer: evicted %d entries, %.2f GB, for "
+                      "memory", n, freed / 1e9)
+        return freed
+
+    def governor_evict(self, fraction: float) -> int:
+        """Evict ``fraction`` of the bytes held, least recently used first,
+        for the governor (``evict_bytes``). Returns the bytes freed."""
+        fraction = min(1.0, max(0.0, float(fraction)))
+        if fraction <= 0.0:
+            return 0
+        with self._lock:
+            return self.evict_bytes(
+                max(1, math.ceil(self._total_bytes * fraction)))
 
     def __len__(self) -> int:
-        return len(self._entries)
+        with self._lock:
+            return len(self._entries)
 
     @property
     def total_bytes(self) -> int:
         return self._total_bytes
 
     def __repr__(self) -> str:
-        lens = [len(e.token_ids) for e in self._entries.values()]
-        return (f"SpecPrefixCache(entries={len(self._entries)}, "
-                f"prefix_lens={lens}, "
-                f"bytes={self._total_bytes / 2**20:.1f}MB)")
+        with self._lock:
+            lens = [len(e.token_ids) for e in self._entries.values()]
+            n, nbytes = len(self._entries), self._total_bytes
+        return (f"SpecPrefixCache(entries={n}, prefix_lens={lens}, "
+                f"bytes={nbytes / 2**20:.1f}MB)")

@@ -69,7 +69,10 @@ beyond the counters. The serve APC manager self-registers at first
 governed tick, and so does a streaming model's decode arena
 (DecodeFeeder.governor_evict shrinks it toward its pressure floor;
 it regrows only into headroom the governor is not using), so orange
-and red reclaim decode speed before they fail a row. Registered
+and red reclaim decode speed before they fail a row. A drafter's
+prefix layer (SpecPrefixCache, whole-prompt snapshots and hiddens)
+registers when it comes up (register_spec_prefix) and evicts least
+recently used first. Registered
 bytes are sampled on a slow cadence (every 16 ticks and at band
 transitions), and so is the kernel's unwired count while it sits above
 twice the floor with no prompt step near; the per-tick trajectory rides
@@ -1344,6 +1347,53 @@ def unregister_arena(feeder) -> None:
     name = _arena_name(feeder)
     unregister_cache(name)
     _ARENA_REFS.pop(name, None)
+
+
+_SPEC_PREFIX_REFS: dict = {}   # registry name -> weakref of the cache
+
+
+def _spec_prefix_name(cache) -> str:
+    return f"spec_prefix:{id(cache)}"
+
+
+def register_spec_prefix(cache) -> None:
+    """Register a drafter's prefix layer (``SpecPrefixCache``, its
+    whole-prompt snapshots and hiddens) when it comes up, so orange, red,
+    the kernel floor and the admit-ceiling handoff evict it, least
+    recently used first. Idempotent; a dead cache at the same address is
+    replaced."""
+    name = _spec_prefix_name(cache)
+    live = _SPEC_PREFIX_REFS.get(name)
+    if name in _REG and live is not None and live() is cache:
+        return
+    ref = weakref.ref(cache)
+    _SPEC_PREFIX_REFS[name] = ref
+
+    def _bytes():
+        c = ref()
+        return c.governor_bytes() if c is not None else 0
+
+    def _evict(fraction):
+        c = ref()
+        return c.governor_evict(fraction) if c is not None else 0
+
+    register_cache(name, _bytes, _evict)
+
+
+def unregister_spec_prefix(cache) -> None:
+    name = _spec_prefix_name(cache)
+    unregister_cache(name)
+    _SPEC_PREFIX_REFS.pop(name, None)
+
+
+def unregister_spec_prefix_of(model) -> None:
+    """Unregister the drafter's prefix layer of a model at its teardown.
+    It rides the generator's model, the language model on the serve
+    path."""
+    for holder in (model, getattr(model, "language_model", None)):
+        cache = getattr(holder, "_spec_prefix_cache", None)
+        if cache is not None:
+            unregister_spec_prefix(cache)
 
 
 def install_governor() -> bool:
