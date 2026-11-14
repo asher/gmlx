@@ -561,6 +561,27 @@ def test_a_forked_parents_record_is_kept_like_a_head(monkeypatch):
     assert got == 64
 
 
+def test_a_shared_anchor_goes_before_any_conversations_head(monkeypatch):
+    """Two conversations continue a shared system-prompt anchor. It is a
+    fork point but not a head, as the heads rule decided: under the count
+    bound it goes before either conversation's newest record."""
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 3)
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    shared = _ids(0, 32)
+    assert ckpt_store(man, shared, make_hybrid_cache(32, seed=1))
+    for k in range(2):
+        kid = shared + list(range(5000 + 100 * k, 5032 + 100 * k))
+        assert ckpt_store(man, kid, make_hybrid_cache(64, seed=3 + k))
+    recs = cs._ckpt_records(man)
+    assert [r.kind for r in recs.values() if r.p == 32] == ["anchor"]
+    assert cs._chain_heads(recs) == {(r.ids, r.extra_hash)
+                                     for r in recs.values() if r.p == 64}
+    assert ckpt_store(man, _ids(1, 64), make_hybrid_cache(64, seed=9),
+                      extra_hash=1)
+    kept = sorted((r.extra_hash, r.p) for r in recs.values())
+    assert kept == [(0, 64), (0, 64), (1, 64)]
+
+
 def test_blockless_records_compare_the_last_id_first():
     """Kvarn records carry no chain, so the heads scan compares ids. Two
     different prompts differ at the parent's last id in one compare, with

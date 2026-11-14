@@ -61,8 +61,9 @@ save would pass it, blocks that no checkpoint holds go first. Then
 checkpoints go, each with the blocks only it held. Each conversation keeps
 its newest checkpoint, the one its next turn restores, until no other is
 left. So does a checkpoint that two or more conversations continue, such
-as a parent whose context a client forked into children. Among the rest
-the least recently used goes first, and system-prompt checkpoints go last.
+as a parent whose context a client forked into children, unless it is a
+system-prompt checkpoint. Among the rest the least recently used goes
+first, and system-prompt checkpoints go last.
 Any checkpoint that leaves the cache takes the blocks only it held with
 it. `GMLX_APC_CKPT_BUDGET_MB` replaces the share with a budget for
 checkpoints alone.

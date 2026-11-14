@@ -1273,13 +1273,16 @@ def _ckpt_extends(o, r) -> bool:
 def _chain_heads(idx) -> set:
     """Keys of the records a next turn restores: per chain, the deepest
     record no deeper one continues, and each fork point, a record that
-    two or more branches continue. A client that forks a parent's context
-    into children leaves the parent's record continued by every child,
-    and the parent's next turn restores it; so does a sibling of a shared
-    prefix. Records on one line below a deeper record (the anchor, the
-    record the last turn restored from) are not heads. A replay serves
-    only its identical resend and a decision record belongs to no
-    conversation, so neither is a head nor hides one."""
+    two or more branches continue, unless it is the anchor. A client that
+    forks a parent's context into children leaves the parent's record
+    continued by every child, and the parent's next turn restores it. A
+    shared anchor stays a non-head, as decided with the heads rule: it
+    goes before any conversation's head, last among the rest, trading a
+    future sibling's restore for a running conversation's next turn.
+    Records on one line below a deeper record (the anchor, the record the
+    last turn restored from) are not heads. A replay serves only its
+    identical resend and a decision record belongs to no conversation, so
+    neither is a head nor hides one."""
     recs = [(k, r) for k, r in idx.items()
             if r.kind not in ("replay", "decision")]
     n = len(recs)
@@ -1291,7 +1294,8 @@ def _chain_heads(idx) -> set:
         kids = [j for j in range(n) if ext[i][j]]
         # A branch's first record continues no other record of i's.
         firsts = [j for j in kids if not any(ext[c][j] for c in kids)]
-        if len(firsts) != 1:
+        if not firsts or (len(firsts) > 1
+                          and recs[i][1].kind != "anchor"):
             heads.add(recs[i][0])
     return heads
 
