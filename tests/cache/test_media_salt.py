@@ -842,7 +842,8 @@ def test_turn_two_restores_the_prefix_before_its_new_image(serve,
     _run(rig, m, [_request(rig, turn1, [_pix(1)])])
     before = _matched(m)
     warm = _run(rig, m, [_request(rig, turn2, [_pix(1), _pix(2)])])
-    assert _matched(m) - before == len(turn1)
+    # Turn one's whole-prompt record is its n-1 replay record.
+    assert _matched(m) - before == len(turn1) - 1
     cold = _run(rig, _manager(), [_request(rig, turn2, [_pix(1), _pix(2)])])
     _assert_same(warm[0], cold[0])
 
@@ -899,7 +900,7 @@ def test_turn_two_with_images_of_different_sizes_restores_turn_one(serve):
     _run(rig, m, [_request(rig, turn1, [_pix(1)])])
     before = _matched(m)
     warm = _run(rig, m, [_request(rig, turn2, _listed(1, 2))])
-    assert _matched(m) - before == len(turn1)
+    assert _matched(m) - before == len(turn1) - 1
     cold = _run(rig, _manager(), [_request(rig, turn2, _listed(1, 2))])
     _assert_same(warm[0], cold[0])
 
