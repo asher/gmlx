@@ -142,6 +142,51 @@ def test_failed_build_after_eviction_drops_proxy_last_ref():
     assert ref() is None
 
 
+def test_a_build_that_fails_in_its_set_up_leaves_nothing_behind(monkeypatch):
+    """The untracked table check can raise (a native-fp table whose header
+    scan fails). The model's env window, the APC env, the build spec, the
+    owner window, the table declaration and the scratch the set-up had
+    opened by then are all undone, as for a load that fails."""
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.bridge_vlm as bridge
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setenv("APC_ENABLED", "1")
+    monkeypatch.delenv("GMLX_APC_ENABLED", raising=False)
+    monkeypatch.delenv("GMLX_TEST_BUILD_WINDOW", raising=False)
+    monkeypatch.setattr(pd, "_WEIGHTS_OWNER", None)
+    monkeypatch.setattr(bridge, "_current_build_spec", None)
+    monkeypatch.setattr(ts, "_INSTALL_FOLLOWS", set())
+    opened = {}
+
+    def header_scan_fails(path, env=None):
+        opened.update(
+            window=os.environ.get("GMLX_TEST_BUILD_WINDOW"),
+            apc=os.environ.get("APC_ENABLED"),
+            spec=bridge.get_build_spec(),
+            owner=pd.untracked_weights_owner() is not None,
+            declared=ts.install_follows(path),
+            scratch=_build_scratch.get(None) is not None)
+        raise RuntimeError("header scan failed")
+
+    monkeypatch.setattr(ts, "tables_load_untracked", header_scan_fails)
+    spec = SimpleNamespace(stream=None)
+    _, pool, teardowns = make_pool(25, {"A": 10})
+    with pytest.raises(RuntimeError, match="header scan failed"):
+        pool.acquire("A", None, "auto", env={"GMLX_TEST_BUILD_WINDOW": "1"},
+                     build_spec=spec)
+    assert opened == {"window": "1", "apc": "0", "spec": spec, "owner": True,
+                      "declared": True, "scratch": True}
+    assert "GMLX_TEST_BUILD_WINDOW" not in os.environ
+    assert os.environ.get("APC_ENABLED") == "1"
+    assert "GMLX_APC_ENABLED" not in os.environ
+    assert bridge.get_build_spec() is None
+    assert pd.untracked_weights_owner() is None
+    assert not ts.install_follows("A")
+    assert _build_scratch.get(None) is None
+    assert resident(pool) == set() and teardowns == []
+
+
 def test_a_plain_entry_is_priced_without_the_tables_read_from_the_file(
         tmp_path, monkeypatch):
     """A model loaded without a stream placement maps its file less the

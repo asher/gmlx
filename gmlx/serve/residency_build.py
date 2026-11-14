@@ -257,74 +257,84 @@ class _ChatBuild:
         # the expert stacks decode through the disk arena, not the KV budget.
         install_boot_table(str(model_path), resident_bytes, str(model_path),
                            env=env)
-        scratch = _Scratch()
-        token = _build_scratch.set(scratch)
-        # Per-model load-param + APC/SSD-KV env window: set this model's vars
-        # around the stock load, then restore. Builds are serialized by
-        # ``_build_lock``, so this os.environ mutation never races a sibling load.
-        saved_env = self._apply_env(env)
-        # Publish the resolved spec for this build so the load bridge can read its
-        # profile overrides (e.g. chat_template). ``_stock_get`` blocks here while
-        # the engine's generation worker thread runs the bridge, where the
-        # request-thread ``_active_spec`` ContextVar is invisible. This module
-        # global crosses that boundary. Safe because the build lock serialises
-        # builds (one spec live at a time); cleared in the finally.
-        _serving.set_build_spec(build_spec)
-        # The stock loader's ``apc.from_env`` stays unpatched and unused:
-        # capture the effective APC enablement (this model's window value over
-        # any ambient shell var - the stock precedence) into GMLX_APC_ENABLED
-        # for the bridge's gmlx-owned manager build, then pin APC_ENABLED=0 so
-        # from_env returns None instead of building a stock manager (and its
-        # disk worker threads) that the bridge's manager would orphan.
-        apc_saved = {k: os.environ.get(k)
-                     for k in ("GMLX_APC_ENABLED", "APC_ENABLED")}
-        enabled = os.environ.get("APC_ENABLED", "0") in (
-            "1", "true", "True", "yes")
-        os.environ["GMLX_APC_ENABLED"] = "1" if enabled else "0"
-        os.environ["APC_ENABLED"] = "0"
-        # Untracked-weights ownership window: every registration the stock
-        # load performs on this entry's behalf (the model walk, a drafter
-        # reload, the MTP stash build) attributes its key to this entry, so
-        # _teardown can forget exactly those keys. Same cross-thread module-
-        # global pattern as set_build_spec, serialized by the build lock.
+        # Imported before the try: the handlers and the finally below
+        # call them.
         from gmlx.gen.prefill_decay import (
             forget_untracked_weights,
             note_build_credit,
             set_untracked_weights_owner,
         )
-        set_untracked_weights_owner(cache_key)
-        # Tables the load maps outside MLX's tracker are never wired and
-        # add to no MLX count (table_stream.untracked_table_names). The
-        # bridge installs the stream placement on the model this build
-        # loads, so its tables may load that way, in a process under the
-        # wired cap; the cpu placement too, which prices no shares.
         from gmlx.stream.table_stream import (table_install_follows,
                                               tables_load_untracked)
 
-        table_install_follows(str(model_path))
-        untracked_tables = tables_load_untracked(str(model_path), env)
-        # With the experts in memory and every streamed table untracked,
-        # nothing the build streams is in a residency set: the limit stays
-        # free, and MLX keeps the weights, KV and transients wired.
-        free_limit = untracked_tables and streamed > 0 and not shares[1]
-        if streamed > 0 and not free_limit:
-            # Before the walk, not at the install after it: a resident
-            # model's generator left the wired limit raised, and the walk
-            # under it wires the file's pages (see the loader).
-            from gmlx.stream.wired_limit import _neutralize_wired_limit_sweep
-            _neutralize_wired_limit_sweep()
-            # The walk wraps the routed experts as tracked MLX views. They
-            # are page cache, but the install credits them only at the
-            # first request. A governor tick in between reads the file as
-            # live memory and sheds another model's rows. Credit what the
-            # load adds, up to the streamed bytes, until the install's own
-            # credit or deduction takes over. A table no array can hold is
-            # read from the file and never adds any, nor does one mapped
-            # untracked.
-            tables = (0 if untracked_tables else shares[0] - min(
-                shares[0], held_table_bytes(str(model_path))))
-            note_build_credit(cache_key, tables + shares[1])
+        scratch = _Scratch()
+        token = _build_scratch.set(scratch)
+        saved_env = apc_saved = None
+        # The set-up runs inside the try, so the finally undoes whatever of
+        # it ran when a step raises.
         try:
+            # Per-model load-param + APC/SSD-KV env window: set this model's
+            # vars around the stock load, then restore. Builds are serialized
+            # by ``_build_lock``, so this os.environ mutation never races a
+            # sibling load.
+            saved_env = self._apply_env(env)
+            # Publish the resolved spec for this build so the load bridge can
+            # read its profile overrides (e.g. chat_template). ``_stock_get``
+            # blocks here while the engine's generation worker thread runs the
+            # bridge, where the request-thread ``_active_spec`` ContextVar is
+            # invisible. This module global crosses that boundary. Safe because
+            # the build lock serialises builds (one spec live at a time);
+            # cleared in the finally.
+            _serving.set_build_spec(build_spec)
+            # The stock loader's ``apc.from_env`` stays unpatched and unused:
+            # capture the effective APC enablement (this model's window value
+            # over any ambient shell var, the stock precedence) into
+            # GMLX_APC_ENABLED for the bridge's gmlx-owned manager build, then
+            # pin APC_ENABLED=0 so from_env returns None instead of building a
+            # stock manager (and its disk worker threads) that the bridge's
+            # manager would orphan.
+            apc_saved = {k: os.environ.get(k)
+                         for k in ("GMLX_APC_ENABLED", "APC_ENABLED")}
+            enabled = os.environ.get("APC_ENABLED", "0") in (
+                "1", "true", "True", "yes")
+            os.environ["GMLX_APC_ENABLED"] = "1" if enabled else "0"
+            os.environ["APC_ENABLED"] = "0"
+            # Untracked-weights ownership window: every registration the stock
+            # load performs on this entry's behalf (the model walk, a drafter
+            # reload, the MTP stash build) attributes its key to this entry, so
+            # _teardown can forget exactly those keys. Same cross-thread
+            # module-global pattern as set_build_spec, serialized by the
+            # build lock.
+            set_untracked_weights_owner(cache_key)
+            # Tables the load maps outside MLX's tracker are never wired and
+            # add to no MLX count (table_stream.untracked_table_names). The
+            # bridge installs the stream placement on the model this build
+            # loads, so its tables may load that way, in a process under the
+            # wired cap; the cpu placement too, which prices no shares.
+            table_install_follows(str(model_path))
+            untracked_tables = tables_load_untracked(str(model_path), env)
+            # With the experts in memory and every streamed table untracked,
+            # nothing the build streams is in a residency set: the limit stays
+            # free, and MLX keeps the weights, KV and transients wired.
+            free_limit = untracked_tables and streamed > 0 and not shares[1]
+            if streamed > 0 and not free_limit:
+                # Before the walk, not at the install after it: a resident
+                # model's generator left the wired limit raised, and the walk
+                # under it wires the file's pages (see the loader).
+                from gmlx.stream.wired_limit import (
+                    _neutralize_wired_limit_sweep)
+                _neutralize_wired_limit_sweep()
+                # The walk wraps the routed experts as tracked MLX views. They
+                # are page cache, but the install credits them only at the
+                # first request. A governor tick in between reads the file as
+                # live memory and sheds another model's rows. Credit what the
+                # load adds, up to the streamed bytes, until the install's own
+                # credit or deduction takes over. A table no array can hold is
+                # read from the file and never adds any, nor does one mapped
+                # untracked.
+                tables = (0 if untracked_tables else shares[0] - min(
+                    shares[0], held_table_bytes(str(model_path))))
+                note_build_credit(cache_key, tables + shares[1])
             # A raised wired limit would wire the walk's buffers in one
             # burst, ahead of the install's chunk guard. A build that
             # leaves the limit free walks under the hold too: a load that
