@@ -269,6 +269,7 @@ def test_retirement_store_batched_row_exact():
 
 
 _XH, _XL, _XD, _XLAYERS = 8, 200, 64, 4   # 400 KB per K or V array
+_XW = 64                                   # a sliding layer's window
 
 
 def _x_row(salt):
@@ -279,24 +280,48 @@ def _x_row(salt):
     return c
 
 
-@pytest.mark.parametrize("kind", ["single row", "batch row", "truncated"])
+def _x_rot(salt):
+    c = RotatingKVCache(_XW)
+    k = mx.random.normal((1, _XH, _XL, _XD), key=mx.random.key(salt))
+    c.update_and_fetch(k, k + 1.0)
+    mx.eval(c.keys, c.values)
+    return c
+
+
+def _x_window(c, name):
+    """The tokens a stored row keeps of ``c``: a sliding layer's window in
+    temporal order, else every token."""
+    a = getattr(c, name)
+    if isinstance(c, RotatingKVCache):
+        return c._temporal_order(a)[..., -c.size():, :]
+    return a[..., :c.offset, :]
+
+
+@pytest.mark.parametrize("kind",
+                         ["single row", "batch row", "truncated", "rotating"])
 def test_an_exact_retirement_copies_the_row_once_after_the_room(
         kind, monkeypatch):
     """An exact retirement holds one copy of the row, made after the store
     makes room: the tier's entries plus that copy stay within memory_max,
-    and the tier keeps the entries it kept before."""
+    and the tier keeps the entries it kept before. The rotating row puts a
+    sliding layer beside the KV layers, as Gemma-style models do."""
     from gmlx._vendor.mlx_vlm.apc import _cache_nbytes
 
-    row = 1 if kind == "batch row" else 0
-    rows = [_x_row(10 * i) for i in range(_XLAYERS)]
+    row = 1 if kind in ("batch row", "rotating") else 0
+    make = [_x_row] * _XLAYERS
+    if kind == "rotating":
+        make[-1] = _x_rot
+    rows = [mk(10 * i) for i, mk in enumerate(make)]
     live = rows
-    if kind == "batch row":
-        live = [BatchKVCache.merge([_x_row(10 * i + 1), r])
-                for i, r in enumerate(rows)]
+    if row:
+        live = [(BatchRotatingKVCache if mk is _x_rot else BatchKVCache)
+                .merge([mk(10 * i + 1), r])
+                for i, (mk, r) in enumerate(zip(make, rows))]
         mx.eval(*[a for c in live for a in (c.keys, c.values)])
     max_len = _XL // 2 if kind == "truncated" else None
     n = max_len or _XL
-    entry = 2 * _XLAYERS * _XH * n * _XD * 4
+    entry = sum(2 * _XH * (_XW if mk is _x_rot else n) * _XD * 4
+                for mk in make)
     mgr = _manager()
     mgr._exact_cache_max = 3
     mgr.memory_reserve_bytes = 0
@@ -336,10 +361,10 @@ def test_an_exact_retirement_copies_the_row_once_after_the_room(
         assert _cache_nbytes(kept[-1].prompt_cache) == entry
         for got, want in zip(kept[-1].prompt_cache, rows):
             assert got.offset == n
-            assert mx.array_equal(got.keys[..., :n, :],
-                                  want.keys[..., :n, :]).item()
-            assert mx.array_equal(got.values[..., :n, :],
-                                  want.values[..., :n, :]).item()
+            for name in ("keys", "values"):
+                w = _x_window(want, name)[..., :n, :]
+                g = getattr(got, name)[..., :w.shape[2], :]
+                assert mx.array_equal(g, w).item(), name
     finally:
         mgr.close()
 
