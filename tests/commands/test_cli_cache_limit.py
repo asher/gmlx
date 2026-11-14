@@ -18,8 +18,8 @@ import gmlx.serve.capacity as capacity
 import gmlx.serve.memory as memory
 
 GIB = memory.GIB
-WS = 100 * GIB
-AUTO = pytest.approx(5 * GIB, abs=1)     # 5 percent of the working set
+CAP = 100 * GIB
+AUTO = pytest.approx(5 * GIB, abs=1)     # 5 percent of the wired cap
 
 
 @pytest.fixture(autouse=True)
@@ -37,10 +37,11 @@ def gguf(tmp_path):
 
 @pytest.fixture
 def events(monkeypatch):
-    """A fixed working set; records each cache limit set and each model
+    """A fixed wired cap; records each cache limit set and each model
     load, in order. The process limit itself is left alone."""
     monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
-    monkeypatch.setattr(capacity, "working_set_bytes", lambda: float(WS))
+    monkeypatch.setattr(capacity, "wired_cap_bytes",
+                        lambda ws=None, m=None: float(CAP))
     monkeypatch.setattr(prefill_decay, "_NOTED_CACHE_LIMIT", None)
     seen: list = []
 

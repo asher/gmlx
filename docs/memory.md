@@ -100,6 +100,13 @@ If one dense model and its cache sit right at that limit on a Mac with a
 lot of RAM, `sudo sysctl iogpu.wired_limit_mb=<MB>` raises the limit until
 the next restart, at your own risk. Leave several GB for macOS.
 
+gmlx itself wires at most its wired cap, one figure per Mac: the GPU
+working set less 5%, never closer to RAM than a reserve (the larger of
+2 GB and 10% of RAM), less the memory wired outside gmlx when it starts.
+The server plans the models, the KV cache and the MLX buffer cache under
+the same figure. `GMLX_GOV_RESERVE_GB` sets the reserve, as
+[Debug switches](internals/debug-switches.md) lists.
+
 ## The MLX buffer cache
 
 MLX keeps freed GPU buffers in a pool for reuse. This buffer cache is

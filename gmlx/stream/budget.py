@@ -185,8 +185,8 @@ def outside_ceiling_bytes(ram: int | None, ceiling: float,
 
 
 def governor_headroom_bytes() -> float | None:
-    """What the governor reads at its tick: ``prefill_decay.headroom_bytes``
-    shifted from the full working set down to the governor ceiling."""
+    """What the governor reads at its tick: ``prefill_decay.headroom_bytes``,
+    the free memory under the wired cap."""
     from gmlx.serve.capacity import margin
     from gmlx.serve.governor import _headroom_and_ws
 

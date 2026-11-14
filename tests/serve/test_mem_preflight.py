@@ -644,6 +644,9 @@ class _Arena:
 
 
 def test_available_drained_charges_live_arena(monkeypatch):
+    """The wired cap (95 GB of a 100 GB working set) less the zero-copy
+    weights, the admission reserve, the cache limit the buffer cache is
+    wired up to, and a live decode arena."""
     import mlx.core as mx
 
     import gmlx.gen.prefill_decay as pd
@@ -653,12 +656,13 @@ def test_available_drained_charges_live_arena(monkeypatch):
     monkeypatch.setattr(mx, "device_info", lambda: {
         "max_recommended_working_set_size": 100e9})
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 10e9)
+    monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", int(4e9))
     monkeypatch.setattr(sm, "admit_reserve_bytes", lambda ws, gen=None: 2e9)
     monkeypatch.setattr(installs, "_ARENAS", [])
-    assert mp.available_drained_bytes() == pytest.approx(88e9)
+    assert mp.available_drained_bytes() == pytest.approx(79e9)
     arena = _Arena(30e9)
     installs.record_arena(arena)
-    assert mp.available_drained_bytes() == pytest.approx(58e9)
+    assert mp.available_drained_bytes() == pytest.approx(49e9)
 
 
 def test_an_id_prompt_is_priced_by_its_length(tight):
@@ -677,7 +681,8 @@ SCORED = _model(num_hidden_layers=32, num_attention_heads=16,
 
 @pytest.fixture
 def small_mac(monkeypatch):
-    """A 5.7 GB working set with 2.5 GB of weights: 1.2 GB of room."""
+    """A 6 GB working set (a 5.7 GB wired cap) with 2.5 GB of weights:
+    1.2 GB of room."""
     import mlx.core as mx
 
     import gmlx.gen.prefill_decay as pd
@@ -686,7 +691,8 @@ def small_mac(monkeypatch):
     monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
     monkeypatch.delenv("GMLX_PREFLIGHT_MEM", raising=False)
     monkeypatch.setattr(mx, "device_info", lambda: {
-        "max_recommended_working_set_size": 5.7e9})
+        "max_recommended_working_set_size": 6e9})
+    monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", None)
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 2.5e9)
     monkeypatch.setattr(installs, "_ARENAS", [])
     monkeypatch.setattr("gmlx.stream.expert_streaming.experts_streamed",

@@ -38,9 +38,11 @@ def wired_limit_held():
     if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
         yield
         return
-    real = mx.set_wired_limit
+    # The function the block puts back, in a cell: the wired cap installed
+    # inside the block goes under the hold (install_wired_cap).
+    real = [mx.set_wired_limit]
     try:
-        want = [int(real(0) or 0)]
+        want = [int(real[0](0) or 0)]
     except Exception:
         yield
         return
@@ -49,14 +51,53 @@ def wired_limit_held():
         prev, want[0] = want[0], int(limit)
         return prev
 
-    mx.set_wired_limit = link(_held, real)
+    _held._kq_wired_real = real
+    mx.set_wired_limit = link(_held, real[0])
     try:
         yield
     finally:
         if mx.set_wired_limit is _held:
-            mx.set_wired_limit = real
+            mx.set_wired_limit = real[0]
             if want[0]:
-                real(want[0])
+                real[0](want[0])
+
+
+def install_wired_cap() -> None:
+    """Clamp every ``mx.set_wired_limit`` call to the wired cap
+    (``capacity.wired_cap_bytes``), once per process, at the first load
+    or server start: it reads the memory wired outside the server first,
+    before the process wires anything. gmlx sets the limit in many places
+    (the generation contexts of the copied mlx-lm and mlx-vlm, the MTP
+    sticky wire, the trainers, the CLI verbs), all through ``mx.`` at call
+    time, so this one wrapper owns the figure each gets: min(request,
+    cap). A pinned process (``_neutralize_wired_limit_sweep``) stays at 0,
+    and ``wired_limit_held`` holds and restores through the clamp. A
+    no-op without Metal."""
+    if (wrapped_with(mx.set_wired_limit, "_kq_wired_cap")
+            or wrapped_with(mx.set_wired_limit, "_kq_no_sweep")):
+        return
+    from gmlx.serve import capacity
+
+    capacity.note_outside_wired()
+    if capacity.wired_cap_bytes() is None:
+        return
+    # Inside a hold, the clamp goes under it, on what the hold puts back.
+    held, real = None, mx.set_wired_limit
+    while hasattr(real, "_kq_wired_real"):
+        held, real = real, real._kq_wired_real[0]
+
+    def _capped(limit, *a, **k):
+        cap = capacity.wired_cap_bytes()
+        if cap is not None:
+            limit = min(int(limit), int(cap))
+        return real(limit, *a, **k)
+
+    capped = link(_capped, real, "_kq_wired_cap")
+    if held is None:
+        mx.set_wired_limit = capped
+    else:
+        held._kq_wired_real[0] = capped
+        link(held, capped)
 
 
 def _neutralize_wired_limit_sweep():

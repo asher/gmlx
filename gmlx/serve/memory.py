@@ -15,10 +15,11 @@ Explicit values: GiB float; ``0`` disables the cache entirely (MLX semantics);
 ``off``/``none``/``unlimited`` (or any negative number) force unlimited and
 suppress the auto policy.
 
-Auto policy: always bounded. When the largest configured model's weight
-bytes exceed ``_AUTO_PRESSURE`` of the recommended working set, cap the
-cache at a quarter of the remaining slack, clamped to [4, 12] GiB.
-Otherwise cap it at ``_AUTO_SLACK_SHARE`` of the working set, same clamp.
+Auto policy: always bounded, sized under the wired cap
+(``capacity.wired_cap_bytes``). When the largest configured model's weight
+bytes exceed ``_AUTO_PRESSURE`` of the cap, cap the cache at a quarter of
+the remaining slack, clamped to [4, 12] GiB. Otherwise cap it at
+``_AUTO_SLACK_SHARE`` of the cap, same clamp.
 MLX's own default is the memory limit (1.5x the working set), so an
 uncapped cache can hold tens of GB of wired freed buffers; the kernel
 counts those against its free pages while the process reads them as
@@ -99,7 +100,7 @@ def resolve_cache_limit(cfg_gb, model_paths, ws_bytes) -> tuple[int | None, str]
     auto = auto_cache_limit_bytes(ws_bytes, weights)
     if auto is not None:
         return auto, (f"auto: weights {weights / GIB:.1f} GiB of "
-                      f"{ws_bytes / GIB:.1f} GiB working set")
+                      f"{ws_bytes / GIB:.1f} GiB wired cap")
     return None, "unlimited (working set unknown)"
 
 
@@ -440,7 +441,6 @@ def project_admission(gen, candidates):
     is measured.
     ``candidates`` are pending-queue tuples (uid, prompt, max_tokens, ...).
     """
-    from gmlx.device import metal_value
     from gmlx.gen.prefill_decay import headroom_bytes, score_transient_bytes
 
     update_kv_rates(gen)
@@ -497,10 +497,9 @@ def project_admission(gen, candidates):
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
         max(cand_tokens), prefill_rows=len(cand_tokens),
         base_step=getattr(gen, "prefill_step_size", None))
-    try:
-        ws = float(metal_value("max_recommended_working_set_size"))
-    except Exception:
-        ws = 0.0
+    from .capacity import wired_cap_bytes
+
+    ws = wired_cap_bytes() or 0.0
     reserve = join_reserve_bytes(gen, ws, len(cand_tokens), max(prompts),
                                  tokens, width, scale)
     projected = kv_new + transient + reserve
@@ -530,13 +529,17 @@ def admission_slack_bytes(gen, n_candidates: int) -> float:
 
 
 def apply_cache_limit(cfg) -> None:
-    """Resolve and apply the server's cache limit; called once at startup.
-    Working-set source: capacity (the one accounting, U4)."""
+    """Resolve and apply the server's cache limit; called once at startup,
+    before any load. Sized under the wired cap (capacity, the one
+    accounting, U4), which it installs first."""
     import mlx.core as mx
 
-    from .capacity import working_set_bytes
+    from gmlx.stream.wired_limit import install_wired_cap
 
-    ws = working_set_bytes() or 0.0
+    from .capacity import wired_cap_bytes
+
+    install_wired_cap()
+    ws = wired_cap_bytes() or 0.0
     paths = [str(mc.path) for mc in getattr(cfg, "models", {}).values()]
     limit, source = resolve_cache_limit(
         getattr(cfg, "cache_limit_gb", None), paths, ws)
@@ -554,12 +557,16 @@ def apply_cache_limit(cfg) -> None:
 def apply_local_cache_limit(model_paths, verbose: bool = False) -> None:
     """The serve policy for the in-process verbs (run, chat), set before
     the load: GMLX_CACHE_LIMIT_GB, else the auto policy. A later owner
-    (expert streaming's allocator) replaces it."""
+    (expert streaming's allocator) replaces it. Sized under the wired
+    cap, which it installs first."""
     import mlx.core as mx
 
-    from .capacity import working_set_bytes
+    from gmlx.stream.wired_limit import install_wired_cap
 
-    ws = working_set_bytes() or 0.0
+    from .capacity import wired_cap_bytes
+
+    install_wired_cap()
+    ws = wired_cap_bytes() or 0.0
     paths = [str(p) for p in model_paths if p]
     limit, source = resolve_cache_limit(None, paths, ws)
     if limit is None:

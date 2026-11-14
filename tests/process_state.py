@@ -19,8 +19,9 @@ copied ``apc``, which the APC manager build rebinds to the mach counters
 the render functions and input builders of the copied mlx-vlm, which
 ``load_vlm_model`` and the serve patches wrap (each test module hands
 these back too, for the module fixtures that load a VLM), the limits the
-serve governor saved when it armed its throttle, and the cache limit the
-server noted for the prefill decay. A governor state that outlives the
+serve governor saved when it armed its throttle, the cache limit the
+server noted for the prefill decay, and the reading of the memory wired
+outside the process that the first load takes for the wired cap. A governor state that outlives the
 test goes back to the saved limits it held when the test started, and
 one the test created goes back to unarmed, as the MLX limits go back to
 their values from before the test.
@@ -209,6 +210,11 @@ def _governor():
     return sys.modules.get("gmlx.serve.governor")
 
 
+def _capacity():
+    """gmlx.serve.capacity, or None before it is imported."""
+    return sys.modules.get("gmlx.serve.capacity")
+
+
 def vlm_bindings() -> list:
     """(module, name, function) for each of _VLM_BINDINGS in an imported
     module."""
@@ -259,6 +265,7 @@ def capture() -> dict:
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
         "table_stream_latch": getattr(_table_stream(), "_FORCED", False),
         "armed_floor": getattr(_governor(), "_ARMED_FLOOR", 0.0),
+        "outside_wired": getattr(_capacity(), "_OUTSIDE_WIRED", None),
     }
     devices = [mx.cpu] + ([mx.gpu] if _gpu() else [])
     for d in devices:
@@ -363,6 +370,11 @@ def restore(state: dict) -> list:
     if tables is not None and tables._FORCED != state["table_stream_latch"]:
         changed.append("table stream latch")
         tables._FORCED = state["table_stream_latch"]
+    capacity = _capacity()
+    if capacity is not None and \
+            capacity._OUTSIDE_WIRED != state["outside_wired"]:
+        changed.append("outside wired reading")
+        capacity._OUTSIDE_WIRED = state["outside_wired"]
     for d, stream in state["streams"].items():
         if mx.default_stream(d) != stream:
             changed.append(f"stream {getattr(d, 'name', d)}")

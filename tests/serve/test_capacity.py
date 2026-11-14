@@ -345,19 +345,27 @@ def test_preload_gate(rig, monkeypatch):
     cap.preload_gate(25.0 * GB, "huge")       # override skips
 
 
-def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
-    # headroom_bytes() is measured against the full working set; the gate
-    # takes the margin + reserve off it (the ceiling everything else uses).
-    # 2026-08-25: judged raw, 86.7 GB was admitted next to a pinned 31.5 GB
-    # resident on a 112 GB wire limit and Metal OOM'd.
+def test_preload_gate_judges_the_wired_cap(rig, monkeypatch):
+    # The gate reads the free memory under the wired cap, the budget the
+    # boot table and admission use, not under the full working set.
+    # 2026-08-25: judged against the working set, 86.7 GB was admitted
+    # next to a pinned 31.5 GB resident on a 112 GB wire limit and Metal
+    # OOM'd.
     rig(weights_gb=10.0, ws_gb=20.0)
     import gmlx.gen.prefill_decay as pd
-    monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
-    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 18.0 * GB)
+    monkeypatch.delenv("GMLX_GOV_MARGIN", raising=False)
+    for name in ("_UNTRACKED_WEIGHTS", "_STREAMED_TRACKED", "_STREAMED_CAP",
+                 "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 1.0 * GB)
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 14.0 * GB)
+    monkeypatch.setattr(pd.mx, "get_cache_memory", lambda: 0)
     monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
-    cap.preload_gate(3.0 * GB, "fits")                   # 5 - (20 - 18) = 3
-    with pytest.raises(cap.LoadDeferred, match="free working set 3.0 GB"):
-        cap.preload_gate(3.5 * GB, "edge")
+    # The cap: 20 GB x 0.95 less 1 GB wired outside the server, 18 GB,
+    # of which 14 GB is held.
+    cap.preload_gate(3.9 * GB, "fits")
+    with pytest.raises(cap.LoadDeferred, match="free working set 4.0 GB"):
+        cap.preload_gate(4.5 * GB, "edge")
 
 
 def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):

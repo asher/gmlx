@@ -755,8 +755,10 @@ def _serve_build(monkeypatch, tracked_parts, table_rows=8, ws=1 << 40):
     size["N"] = total - size["T"] - size["E"]
     box = {"active": 0.0}
     monkeypatch.setattr(mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
     monkeypatch.setattr(mx, "device_info",
                         lambda: {"max_recommended_working_set_size": ws})
+    monkeypatch.setattr("gmlx.serve.capacity._OUTSIDE_WIRED", 0.0)
     pd.set_untracked_weights_owner("entry")
     pd.note_build_credit("entry", float(size["T"] + size["E"]))
     tracked = sum(size[p] for p in tracked_parts)
@@ -772,9 +774,11 @@ def _serve_build(monkeypatch, tracked_parts, table_rows=8, ws=1 << 40):
 ])
 def test_a_compose_install_reads_the_real_free(monkeypatch, tracked_parts,
                                                table_rows):
-    """The real installer and unmap release on each regime: free is ws
-    minus the resident weights across the walk, after the install and
-    after the stacks unmap, and the serve build credit is gone."""
+    """The real installer and unmap release on each regime: free is the
+    wired cap minus the resident weights across the walk, after the
+    install and after the stacks unmap, and the serve build credit is
+    gone."""
+    from gmlx.serve.capacity import wired_cap_bytes
     from gmlx.stream.expert_streaming import _release_unmapped_credit
 
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
@@ -789,18 +793,21 @@ def test_a_compose_install_reads_the_real_free(monkeypatch, tracked_parts,
     install_expert_streaming(model, explicit=True)
     assert ts.table_streaming_active(model)
     assert getattr(glu, "_kq_cpu_only", False)
-    assert walk == [ws - size["N"]]
+    cap = wired_cap_bytes()
+    assert walk == [cap - size["N"]]
     assert pd.build_credit_bytes() == 0
-    assert pd.headroom_bytes() == ws - size["N"]
+    assert pd.headroom_bytes() == cap - size["N"]
     freed = size["E"] if "E" in tracked_parts else 0
     box["active"] -= freed
     _release_unmapped_credit(model, freed)
-    assert pd.headroom_bytes() == ws - size["N"]
+    assert pd.headroom_bytes() == cap - size["N"]
 
 
 @pytest.mark.parametrize("tracked_parts", [set(), {"N", "T", "E"}, {"E"}])
 def test_a_table_only_install_reads_the_real_free(monkeypatch, tracked_parts):
     from mlx.utils import tree_flatten
+
+    from gmlx.serve.capacity import wired_cap_bytes
 
     monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
     monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
@@ -814,7 +821,8 @@ def test_a_table_only_install_reads_the_real_free(monkeypatch, tracked_parts):
     assert ts.table_streaming_active(model)
     assert not getattr(glu, "_kq_cpu_only", False)
     assert pd.build_credit_bytes() == 0
-    assert pd.headroom_bytes() == ws - size["N"] - size["E"]
+    assert pd.headroom_bytes() == (wired_cap_bytes()
+                                   - size["N"] - size["E"])
 
 
 def test_unmapped_stacks_give_back_their_credit(monkeypatch):

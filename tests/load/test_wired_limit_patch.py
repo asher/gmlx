@@ -211,3 +211,38 @@ def test_a_held_load_that_streams_keeps_the_limit_at_0(monkeypatch,
     assert calls == [0]
     assert getattr(mx.set_wired_limit, "_kq_no_sweep", False)
 
+
+
+@pytest.mark.host_gb(128)
+def test_a_caller_asking_for_the_working_set_gets_the_wired_cap(
+        restore_wired_limit, monkeypatch):
+    """mlx-lm's generation context asks for Metal's whole recommended
+    working set. Under the clamp it gets the wired cap: the ceiling less
+    the memory wired outside the server, read once when the clamp
+    installs. A process the streaming install pinned stays at 0."""
+    import host_box
+
+    from gmlx.serve import capacity
+    from gmlx.stream.wired_limit import (_neutralize_wired_limit_sweep,
+                                         install_wired_cap)
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(mx, "default_device", lambda: mx.Device(mx.gpu))
+    monkeypatch.setattr(mx, "synchronize", lambda *a, **k: None)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", None)
+    calls = _recorded_limit(monkeypatch, 0)
+    _install_wired_limit_warn_once()
+    install_wired_cap()
+    box, vm = host_box.mac(128)
+    mem = box["memory_size"]
+    cap = (min(box["max_recommended_working_set_size"]
+               * (1 - capacity.margin()),
+               mem - capacity.reserve_bytes(mem)) - vm["wired"])
+    model = {"w": mx.zeros((4,), dtype=mx.float32)}
+    with _gen.wired_limit(model):
+        pass
+    assert calls == [pytest.approx(cap, abs=1), 0]
+    _neutralize_wired_limit_sweep()
+    with _gen.wired_limit(model):
+        pass
+    assert calls[2:] == [0]

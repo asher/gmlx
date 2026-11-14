@@ -1695,18 +1695,12 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
 
 
 def free_bytes() -> float | None:
-    """Room for new work now: the measured free working set, with the
-    buffer cache counted as free, held to the serve ceiling. None when
-    the device does not report it."""
+    """Room for new work now: the measured free memory under the wired
+    cap (``prefill_decay.headroom_bytes``). None when the device does not
+    report it."""
     from gmlx.gen.prefill_decay import headroom_bytes
-    from gmlx.serve.capacity import working_budget_bytes, working_set_bytes
 
-    head = headroom_bytes()
-    budget = working_budget_bytes()
-    ws = working_set_bytes()
-    if head is not None and budget is not None and ws is not None:
-        head -= max(0.0, ws - budget)
-    return head
+    return headroom_bytes()
 
 
 def vae_tiling(op: str, height: int, width: int, *, family: str,

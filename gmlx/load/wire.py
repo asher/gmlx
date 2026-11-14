@@ -57,6 +57,11 @@ def load_gguf_wire_bytes(
     (``stream.table_pread``), and the loader attaches the sources with
     ``install_deferred_tables``.
     """
+    from gmlx.stream.wired_limit import install_wired_cap
+
+    # Before the first array: the cap reads the memory wired outside the
+    # process once, before the process wires any of its own.
+    install_wired_cap()
     if shards is None:
         shards = find_split_shards(gguf_path)
     skip = _deferred_table_names(shards, arch)

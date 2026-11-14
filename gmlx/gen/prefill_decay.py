@@ -927,22 +927,30 @@ def streamed_tracked_bytes() -> float:
         return total
 
 
-def headroom_bytes() -> float | None:
-    """Estimated live free working set: recommended working set minus
-    zero-copy weights minus MLX-tracked allocations, plus the streamed
-    expert bytes the tracker counts but the pager can reclaim. The buffer
-    cache counts as free (the allocator evicts it under pressure). Sampled
-    fresh per call, never memoized. The one shared accounting: the prefill
-    caps, the serve memory trace, and the admission gate all read this."""
+def headroom_bytes(m: float | None = None) -> float | None:
+    """Estimated live free memory under the wired cap
+    (``capacity.wired_cap_bytes``, ``m`` its margin): the cap minus
+    zero-copy weights, MLX-tracked allocations and the buffer cache, plus
+    the streamed bytes the tracker counts but the pager can reclaim and
+    the open build credit. Sampled fresh per call, never memoized. The
+    one shared accounting: the governor, the prefill caps, the serve
+    memory trace, the load gate and the admission gate all read this."""
+    from gmlx.serve.capacity import wired_cap_bytes
+
     try:
-        ws = float(metal_value("max_recommended_working_set_size"))
+        cap = wired_cap_bytes(m=m)
         active = float(mx.get_active_memory())
+        cache = float(mx.get_cache_memory())
     except Exception:
+        return None
+    if cap is None:
         return None
     with _UNTRACKED_LOCK:
         build = _build_credit_locked(active)
-    return (ws - untracked_weight_bytes() + streamed_tracked_bytes()
-            + build - active)
+    # Under a raised wired limit, MLX wires its active bytes plus its
+    # buffer cache, so the cache is not free room under the cap.
+    return (cap - untracked_weight_bytes() + streamed_tracked_bytes()
+            + build - active - cache)
 
 
 _headroom_bytes = headroom_bytes
@@ -1386,8 +1394,8 @@ def forget_resident_model(key: int) -> None:
 
 
 def prefill_room_bytes() -> float | None:
-    """The ceiling less the resident models' weights, or None before any
-    model registers or without Metal."""
+    """The wired cap less the resident models' weights, or None before
+    any model registers or without Metal."""
     with _RESIDENT_LOCK:
         if _ROOM:
             return _ROOM[0]
@@ -1398,10 +1406,10 @@ def prefill_room_bytes() -> float | None:
             union.update(arrays)
         resident = sum(union.values())
         seen = _RESIDENCY[0]
-    from gmlx.serve.capacity import ceiling_bytes, working_set_bytes
+    from gmlx.serve.capacity import wired_cap_bytes
 
-    ws = working_set_bytes()
-    room = None if ws is None else ceiling_bytes(ws) - resident
+    cap = wired_cap_bytes()
+    room = None if cap is None else cap - resident
     with _RESIDENT_LOCK:
         # A load or unload since the sum makes this room stale: keep it
         # out of the cache.

@@ -1139,16 +1139,27 @@ def test_ceiling_reserve_binds_when_ws_is_close_to_ram(monkeypatch):
     assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(97e9)
 
 
-def test_headroom_shifts_by_ceiling_gap(monkeypatch):
+def test_the_governor_plans_under_the_wired_cap(monkeypatch):
+    """The governed ceiling is the wired cap: the ceiling less the memory
+    wired outside the server at load. The headroom is free memory under
+    that cap, the buffer cache counted as wired beside the active bytes."""
     import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda: {
         "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
-    monkeypatch.setattr(pd, "headroom_bytes", lambda: 50e9)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
+    for name in ("_UNTRACKED_WEIGHTS", "_STREAMED_TRACKED", "_STREAMED_CAP",
+                 "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
+    monkeypatch.setattr(gov.mx, "get_active_memory", lambda: 30e9)
+    monkeypatch.setattr(gov.mx, "get_cache_memory", lambda: 2e9)
+    # The 97 GB ceiling less 6 GB wired outside the server.
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(91e9)
     head, ws = gov._headroom_and_ws(0.05)
     assert ws == 120e9
-    # ceiling 97 GB: headroom drops by the 23 GB the WS sits above it
-    assert head == pytest.approx(50e9 - 23e9)
+    assert head == pytest.approx(91e9 - 30e9 - 2e9)
 
 
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
