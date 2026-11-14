@@ -180,3 +180,20 @@ def test_thread_stream_ownership_matrix():
         assert got.get(case, "").startswith(expect), (
             f"case {case}: want {expect}, got {got.get(case)!r}\n{r.stdout}"
         )
+
+
+def test_the_buffer_cache_yields_at_the_memory_limit():
+    """The wired cap sets the memory limit, so the cache yields there
+    instead of holding a fixed share of the plan: active plus cache
+    stays under the limit across allocations and frees, which the same
+    steps under MLX's own limit do not, and an allocation past the
+    limit is made rather than thrown."""
+    got = {}
+    for arm in ("limited", "default"):
+        r = run_probe("cache_yields.py", arm)
+        assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+        got[arm] = dict(re.findall(r"(\w+)=(\S+)", r.stdout))
+    limited, default = got["limited"], got["default"]
+    assert int(limited["peak"]) <= int(limited["limit"])
+    assert limited["over"] == "made"
+    assert int(default["peak"]) > int(default["limit"])
