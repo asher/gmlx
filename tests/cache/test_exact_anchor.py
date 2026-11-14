@@ -11,6 +11,7 @@ checkpoint_done latch fire exactly as unarmed.
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
 from gmlx._vendor.mlx_vlm.apc import APCManager
 from gmlx._vendor.mlx_vlm.models.cache import CacheList, KVCache
 
@@ -99,6 +100,48 @@ def test_anchor_byte_budget_newest_survives(monkeypatch):
     anchor_exact_store(man, b[:64], make_kv_cache(64))
     assert anchor_exact_lookup(man, a) == (None, 0)
     assert anchor_exact_lookup(man, b)[1] == 64
+
+
+# One anchor of 64 tokens: K and V of float16 at (1, 2, 64, 8), 2 layers.
+_ANCHOR_BYTES = 2 * 2 * (2 * 64 * 8 * 2)
+
+
+@pytest.mark.parametrize("entries, budget, new, kept", [
+    (4, 2 * _ANCHOR_BYTES + _ANCHOR_BYTES // 2, 3, [2, 3]),
+    (2, 1 << 30, 3, [2, 3]),
+    (2, 2 * _ANCHOR_BYTES + _ANCHOR_BYTES // 2, 1, [2, 1]),
+], ids=["bytes-full", "count-full", "same-key"])
+def test_an_anchor_store_materializes_within_the_index_bounds(
+        monkeypatch, entries, budget, new, kept):
+    """The least recently used anchors make room before the new
+    whole-prefix clone materializes, so the index and the copy fit both
+    bounds together. The anchors kept are the ones insert-then-trim
+    kept."""
+    monkeypatch.setattr(cs, "_ANCHOR_ENTRIES", entries)
+    monkeypatch.setattr(cs, "_ANCHOR_BUDGET_BYTES", budget)
+    man = APCManager(num_blocks=8, block_size=16)
+    for first in (1, 2):
+        assert anchor_exact_store(man, ([first] + IDS)[:64],
+                                  make_kv_cache(64, seed=first))
+    src = make_kv_cache(64, seed=new)
+    mx.eval([a for c in src for a in c.state])
+    idx = cs._anchor_index(man)
+    seen = []
+    real = mx.eval
+
+    def spy(*arrays):
+        seen.append((len(idx), sum(n for _, n in idx.values())))
+        real(*arrays)
+
+    monkeypatch.setattr(mx, "eval", spy)
+    assert anchor_exact_store(man, ([new] + IDS)[:64], src)
+    monkeypatch.setattr(mx, "eval", real)
+    assert len(seen) == 1
+    held_n, held_bytes = seen[0]
+    assert held_n + 1 <= entries
+    assert held_bytes + _ANCHOR_BYTES <= budget
+    assert [k[0][0] for k in idx] == kept
+    assert all(n == _ANCHOR_BYTES for _, n in idx.values())
 
 
 def test_anchor_cleared_by_ckpt_reset():

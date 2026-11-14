@@ -479,22 +479,29 @@ def anchor_exact_store(
         if not ids:
             return False
         from gmlx._vendor.mlx_vlm import apc as _apc
-        clones = _apc._clone_prompt_cache_for_apc(prompt_cache)
-        if clones is None:
-            _ckpt_decline(manager, "anchor_clone")
-            return False
+        # The upstream exact clone, with its one eval held back until the
+        # index has made room for the copy.
+        pending: list[Any] = []
+        clones = []
+        for c in prompt_cache:
+            copied = _apc._clone_cache_entry_for_apc(
+                c, min_capacity_tokens=None, eval_targets=pending)
+            if copied is None:
+                _ckpt_decline(manager, "anchor_clone")
+                return False
+            clones.append(copied)
         nbytes = _caches_nbytes(clones)
         key = (ids, int(salt_at(extra_hash, len(ids))))
         idx = _anchor_index(manager)
         with manager.lock:
+            _side_room(idx, key, nbytes, _ANCHOR_ENTRIES,
+                       _ANCHOR_BUDGET_BYTES, lambda v: v[1])
+        if pending:
+            import mlx.core as mx
+            mx.eval(pending)
+        with manager.lock:
             idx[key] = (clones, nbytes)
             idx.move_to_end(key)
-            while len(idx) > _ANCHOR_ENTRIES:
-                idx.popitem(last=False)
-            total = sum(n for _, n in idx.values())
-            while total > _ANCHOR_BUDGET_BYTES and len(idx) > 1:
-                _, (_, n) = idx.popitem(last=False)
-                total -= n
         _ckpt_bump(manager, "anchor_stores")
         _log.info("APC anchor store: tokens=%d", len(ids))
         return True
