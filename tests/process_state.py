@@ -331,6 +331,8 @@ def capture() -> dict:
                                              "_INSTALL_FOLLOWS", ())),
         "armed_floor": getattr(_governor(), "_ARMED_FLOOR", 0.0),
         "outside_wired": getattr(_capacity(), "_OUTSIDE_WIRED", None),
+        "outside_live": (getattr(_capacity(), "_OUTSIDE_LIVE", None),
+                         getattr(_capacity(), "_WIRED_SEEN", None)),
         "cap_decision": getattr(_capacity(), "_CAP", None),
         "wired_limit_fields": {
             name: getattr(_wired_limit(), name)
@@ -454,6 +456,11 @@ def restore(state: dict) -> list:
             capacity._OUTSIDE_WIRED != state["outside_wired"]:
         changed.append("outside wired reading")
         capacity._OUTSIDE_WIRED = state["outside_wired"]
+    if capacity is not None and (
+            capacity._OUTSIDE_LIVE, capacity._WIRED_SEEN) \
+            != state["outside_live"]:
+        changed.append("live outside wired reading")
+        capacity._OUTSIDE_LIVE, capacity._WIRED_SEEN = state["outside_live"]
     if capacity is not None and capacity._CAP != state["cap_decision"]:
         changed.append("wired cap decision")
         capacity._CAP = state["cap_decision"]

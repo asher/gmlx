@@ -174,6 +174,7 @@ _STATS = {
     "kernel_floor_reds": 0,
     "kernel_floor": None,
     "shortfall_evictions": 0,
+    "outside_wired_bytes": None,
 }
 
 
@@ -447,6 +448,31 @@ def _ceiling_bytes(ws: float, margin: float) -> float:
     from .capacity import wired_cap_bytes
 
     return wired_cap_bytes(ws, margin) or 0.0
+
+
+def _read_outside_wired() -> None:
+    """Read the memory wired outside the server, live, once a tick, in a
+    process under the wired cap: the kernel's wired count (one
+    host_statistics64 call) less what the server holds wired
+    (``prefill_decay.own_wired_bytes``), booked in
+    ``capacity.note_live_outside_wired``. The wired cap, and with it the
+    headroom every reader admits against, is priced from it while it sits
+    above the startup reading."""
+    from .capacity import (cap_applies, note_live_outside_wired,
+                           priced_outside_wired_bytes)
+
+    if not cap_applies():
+        return
+    from gmlx.gen.prefill_decay import own_wired_bytes
+
+    from .kernel_vm import wired_bytes
+
+    wired = wired_bytes()
+    own = None if wired is None else own_wired_bytes()
+    if own is None:
+        return
+    note_live_outside_wired(wired, own)
+    _STATS["outside_wired_bytes"] = int(priced_outside_wired_bytes())
 
 
 def _headroom_and_ws(margin: float):
@@ -1056,6 +1082,7 @@ def _governor_tick(gen) -> None:
 
     _maybe_register_apc(gen)
     _maybe_register_arena(gen)
+    _read_outside_wired()
     head, ws = _headroom_and_ws(margin)
     if head is None:
         return

@@ -136,6 +136,40 @@ def outside_wired_bytes() -> float:
     return _OUTSIDE_WIRED or 0.0
 
 
+# The memory wired outside this process as the governor's tick last read it
+# live, and the kernel wired count that reading came from
+# (note_live_outside_wired); None until the first read.
+_OUTSIDE_LIVE: float | None = None
+_WIRED_SEEN: float | None = None
+
+
+def note_live_outside_wired(wired: float, own: float) -> None:
+    """Book the memory wired outside this process, read live: the kernel's
+    wired bytes ``wired`` less ``own``, the bytes the process holds wired
+    (``prefill_decay.own_wired_bytes``). The governor's tick calls it in a
+    process under the wired cap, with one host_statistics64 read and no
+    device sync. That counter refreshes about once a second, so a count
+    equal to the last one is a stale read and keeps the last figure: a
+    fresh ``own`` against a stale count would read the process's own
+    frees as memory wired outside it."""
+    global _OUTSIDE_LIVE, _WIRED_SEEN
+    if wired == _WIRED_SEEN:
+        return
+    _WIRED_SEEN = wired
+    _OUTSIDE_LIVE = max(0.0, float(wired) - float(own))
+
+
+def priced_outside_wired_bytes() -> float:
+    """The memory wired outside this process that the wired cap is priced
+    from: the startup reading (``note_outside_wired``), or the governor's
+    live one (``note_live_outside_wired``) while it is higher. A rise
+    outside lowers the cap; a fall lifts it back no further than the
+    startup figure."""
+    start = outside_wired_bytes()
+    live = _OUTSIDE_LIVE
+    return start if live is None else max(start, live)
+
+
 # Whether this process plans and limits under the wired cap, decided once
 # before its first load (decide_cap); None until then.
 _CAP: bool | None = None
@@ -177,8 +211,10 @@ def wired_cap_bytes(ws: float | None = None,
     """The ceiling this process plans under. In a process under the wired
     cap ``decide_cap`` decided (``cap_applies``), the cap: the lower of
     the working set less the margin and the RAM less the reserve and the
-    memory wired outside the process before its first load
-    (``ceiling_bytes``).
+    memory wired outside the process (``ceiling_bytes``), read before its
+    first load and live on the governor's tick, whichever is higher
+    (``priced_outside_wired_bytes``), so the cap never rises past its
+    startup figure.
     The governor plans under it, and
     ``stream.wired_limit.install_wired_cap`` clamps ``mx.set_wired_limit``
     to it and sets the MLX memory limit to it, so the buffer cache yields
@@ -190,7 +226,7 @@ def wired_cap_bytes(ws: float | None = None,
         return None
     if not cap_applies():
         return ceiling_bytes(ws, m)
-    return max(0.0, ceiling_bytes(ws, m, outside_wired_bytes()))
+    return max(0.0, ceiling_bytes(ws, m, priced_outside_wired_bytes()))
 
 
 def working_budget_bytes() -> float | None:

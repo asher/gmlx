@@ -14,6 +14,8 @@ from gmlx.serve.patches.row_failed import RowShedError
 
 # The kernel readers the rig scripts, kept to run against kernel_vm.
 _READERS = (gov._kernel_unwired,)
+# The headroom read the rig scripts, kept for the tests that price it.
+_HEADROOM_AND_WS = gov._headroom_and_ws
 
 
 class FakeGB:
@@ -1330,6 +1332,65 @@ def test_the_governor_plans_under_the_wired_cap(monkeypatch):
     head, ws = gov._headroom_and_ws(0.05)
     assert ws == 120e9
     assert head == pytest.approx(91e9 - 30e9 - 2e9)
+
+
+def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
+        rig, monkeypatch):
+    """Under the wired cap, each tick reads the memory wired outside the
+    server live: the kernel's wired count less what the server holds
+    wired (active, cache and the mapped weights outside MLX's tracker).
+    A rise lowers the headroom the governor admits against by the rise.
+    A fall lifts the cap back no further than its startup figure. A
+    count the kernel has not refreshed keeps the last reading, so the
+    server's own frees never read as memory wired outside it."""
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.kernel_vm as kvm
+
+    monkeypatch.setattr(gov, "_headroom_and_ws", _HEADROOM_AND_WS)
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
+    monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None, raising=False)
+    monkeypatch.setattr(cap, "_WIRED_SEEN", None, raising=False)
+    monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
+    monkeypatch.setattr(gov.mx, "device_info", lambda *a, **k: {
+        "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
+    box = {"wired": 0.0, "cache": 2e9}
+    monkeypatch.setattr(kvm, "wired_bytes", lambda: box["wired"])
+    monkeypatch.setattr(gov.mx, "get_cache_memory", lambda: box["cache"])
+    rig["active"] = 30e9
+    gen = FakeGen(rows=2, rate=1e6)
+    st = gov._state(gen)
+
+    def tick(outside):
+        # The server holds 30 GB active, its cache and the rig's 50 GB of
+        # mapped weights wired.
+        box["wired"] = 30e9 + box["cache"] + 50e9 + outside
+        gov._governor_tick(gen)
+        return (gov._ceiling_bytes(120e9, 0.05),
+                gov._headroom_and_ws(0.05)[0],
+                gov._admission_shortfall(gen, st, 1e9))
+
+    # 137 GB of RAM less the 40 GB reserve and the 6 GB read at startup.
+    ceiling, head, short = tick(6e9)
+    assert ceiling == pytest.approx(91e9)
+    assert head == pytest.approx(91e9 - 50e9 - 30e9 - 2e9)
+    # 2 GB more wired outside: the join is 2 GB further over.
+    ceiling2, head2, short2 = tick(8e9)
+    assert ceiling2 == pytest.approx(89e9)
+    assert head2 == pytest.approx(head - 2e9)
+    assert short2 == pytest.approx(short + 2e9)
+    assert gov._STATS["outside_wired_bytes"] == int(8e9)
+    # The server frees its 2 GB of cache before the kernel's count
+    # refreshes: the reading stands.
+    box["cache"] = 0.0
+    gov._governor_tick(gen)
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(89e9)
+    box["cache"] = 2e9
+    # Less wired outside than at startup: the cap stops at 91 GB.
+    ceiling3, head3, _ = tick(3e9)
+    assert ceiling3 == pytest.approx(91e9)
+    assert head3 == pytest.approx(head)
 
 
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):

@@ -982,6 +982,21 @@ def headroom_bytes(m: float | None = None) -> float | None:
 _headroom_bytes = headroom_bytes
 
 
+def own_wired_bytes() -> float | None:
+    """The bytes this process holds wired, by the same accounting as
+    ``headroom_bytes``: MLX's active bytes and buffer cache, and the
+    mapped weights outside MLX's tracker, less the streamed expert bytes
+    the tracker counts but the pager can reclaim. Host counters only, no
+    device sync. None when MLX's counters cannot be read."""
+    try:
+        active = float(mx.get_active_memory())
+        cache = float(mx.get_cache_memory())
+    except Exception:
+        return None
+    return (active + cache + untracked_weight_bytes()
+            - streamed_tracked_bytes())
+
+
 def score_transient_bytes(model, prompt_cache, depth: int,
                           prefill_rows: int | None = None,
                           base_step: int | None = None) -> float:
