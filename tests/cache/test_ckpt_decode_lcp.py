@@ -11,6 +11,7 @@ Boundaries anchor to the prompt end on the chunk grid.
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
 from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.cache.snapshot as cs
@@ -322,6 +323,46 @@ def test_record_byte_budget_evicts_lru(monkeypatch):
     recs = list(cs._ckpt_records(man).values())
     assert len(recs) == 1 and recs[0].ids == tuple(ids_c)
     assert recs[0].nbytes > 1
+
+
+@pytest.mark.parametrize("bound", ["bytes-full", "count-full"])
+def test_a_record_payload_materializes_within_the_record_bounds(
+        monkeypatch, bound):
+    """A checkpoint's recurrent states and attention tail make room among
+    the records before they materialize, so the records and the new
+    payload fit both bounds together. The records kept are the ones
+    insert-then-trim kept."""
+    from gmlx.eval_guard import guard
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = {"a": (list(range(100, 132)), 0), "b": (list(range(700, 732)), 5),
+           "c": (list(range(300, 332)), 9)}
+    for seed, name in enumerate(("a", "b"), 1):
+        assert ckpt_store(man, ids[name][0], make_hybrid_cache(32, seed=seed),
+                          extra_hash=ids[name][1])
+    idx = cs._ckpt_records(man)
+    each = next(iter(idx.values())).nbytes
+    entries, budget = ((cs._CKPT_RECORD_ENTRIES, 2 * each + each // 2)
+                       if bound == "bytes-full" else (2, 1 << 30))
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", entries)
+    monkeypatch.setattr(cs, "_CKPT_BUDGET_BYTES", budget)
+    seen = []
+    real = guard.eval
+
+    def spy(*arrays, **kw):
+        if kw.get("site") == "ckpt-store-clones":
+            seen.append((len(idx), sum(r.nbytes for r in idx.values())))
+        return real(*arrays, **kw)
+
+    monkeypatch.setattr(guard, "eval", spy)
+    assert ckpt_store(man, ids["c"][0], make_hybrid_cache(32, seed=3),
+                      extra_hash=ids["c"][1])
+    assert len(seen) == 1
+    held_n, held_bytes = seen[0]
+    assert held_n + 1 <= entries
+    assert held_bytes + each <= budget
+    assert [r.ids[0] for r in idx.values()] == [700, 300]
+    assert all(r.nbytes == each for r in idx.values())
 
 
 def test_sidecar_byte_budget(monkeypatch):

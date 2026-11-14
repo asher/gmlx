@@ -1481,7 +1481,8 @@ def _note_budget_evictions(manager, rec, victims, note) -> None:
         if note["idle"] else "")
 
 
-def _record_insert(manager, rec, keep: int | None = None) -> None:
+def _record_insert(manager, rec, keep: int | None = None,
+                   materialize=None) -> None:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
     second-newest on a just-grown chain is among the most recently touched),
@@ -1519,7 +1520,13 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
     ``keep``: the storing request's p_stable. Where a record past it would
     strip the deepest record at or below it, the one a next turn
     restores, that record stays, marked spared: the count and byte
-    bounds evict it first, so it never costs another chain a record."""
+    bounds evict it first, so it never costs another chain a record.
+
+    ``materialize``: the eval of a new record's payload. The bounds run
+    first with the record counted, from its shapes, so the payload lands
+    in the room they made. The record sits out of the index while it
+    materializes, so no lookup adopts arrays not yet evaluated, and comes
+    back as the newest."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
@@ -1581,8 +1588,15 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         while len(idx) > _CKPT_RECORD_ENTRIES:
             _evict_lru_record(manager, idx, key)
         victims, note = _fit_record_room(manager, idx, key)
+        if materialize is not None:
+            idx.pop(key)
     if victims:
         _note_budget_evictions(manager, rec, victims, note)
+    if materialize is not None:
+        materialize()
+        with manager.lock:
+            idx[key] = rec
+            idx.move_to_end(key)
 
 
 def ckpt_store(
@@ -1839,7 +1853,8 @@ def ckpt_store(
                 return 0
             bounded_blocks = got_win
 
-        # The clones sync once, before the record takes them.
+        # The payload clones stay lazy and sync once, inside the insert,
+        # after the bounds have made room for the record.
         pending: list[Any] = []
         states = [_clone_single_row(c, pending) for c in inline_caches]
         if any(s is None for s in states):
@@ -1869,10 +1884,8 @@ def ckpt_store(
                 manager.release(main_blocks)
                 manager.release(bounded_blocks)
                 return 0
-            from gmlx.eval_guard import guard
-            guard.eval(*[a for t in qsa_streams for a in t[:2]
-                         if a is not None],
-                       site="ckpt-store-qsa", owner="owned")
+            pending.extend(a for t in qsa_streams for a in t[:2]
+                           if a is not None)
         tails = None
         if tail_len and kv_caches:
             tails = []
@@ -1887,18 +1900,21 @@ def ckpt_store(
                     manager.release(bounded_blocks)
                     return 0
                 tails.append(t)
-        if pending:
-            # Owned survivors, as on the main chain: the clones read the
-            # live prompt cache and its pending graph.
-            from gmlx.eval_guard import guard
-            guard.eval(*pending, site="ckpt-store-clones", owner="owned")
+
+        def materialize():
+            if pending:
+                # Owned survivors, as on the main chain: the clones read
+                # the live prompt cache and its pending graph.
+                from gmlx.eval_guard import guard
+                guard.eval(*pending, site="ckpt-store-clones",
+                           owner="owned")
 
         rec = _CkptRecord(
             ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,
             layout=tuple(layout), main_blocks=main_blocks,
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
             states=states, tails=tails, qsa=qsa_streams, kind=str(kind))
-        _record_insert(manager, rec, keep)
+        _record_insert(manager, rec, keep, materialize)
         # Ownership moved to the record; the except path must not release.
         main_blocks = bounded_blocks = []
 
