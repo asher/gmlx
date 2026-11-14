@@ -1,10 +1,10 @@
 """A streamable table the wire load maps outside MLX's tracker: MLX never
 counts or wires it, and its install leaves the wired limit free. Only a
 load whose caller installs the table stream maps it that way; any other
-loads it tracked. An mlx-kquant that cannot map it that way loads it
-tracked, and the install pins the limit as for any tracked table. The
-first map puts the process under the wired cap; a process that maps
-none keeps MLX's limits."""
+loads it tracked, and so does a table the loader casts. An mlx-kquant
+that cannot map it that way loads it tracked, and the install pins the
+limit as for any tracked table. The first map puts the process under the
+wired cap; a process that maps none keeps MLX's limits."""
 from __future__ import annotations
 
 import ast
@@ -57,18 +57,23 @@ def _own_limits(monkeypatch):
 
 
 @pytest.fixture
-def flash_next_gguf(tmp_path):
+def flash_next_gguf(tmp_path, request):
     """A qwen4exp GGUF whose PLE table is iq4_nl, as in Flash-Next, at
-    4096 rows of 512 weights (1.2 MB). Returns its path and wire bytes."""
+    4096 rows of 512 weights (1.2 MB), or F16 when the test asks for it
+    (4.2 MB). Returns its path and wire bytes."""
+    kind = getattr(request, "param", "IQ4_NL")
     rng = np.random.default_rng(5)
     blocks = DIMS // 32
     wire = np.zeros((ROWS, blocks, 18), dtype=np.uint8)
     wire[:, :, 1] = 0x3C          # fp16 1.0 scale, little-endian
     wire[:, :, 2:] = rng.integers(0, 256, (ROWS, blocks, 16), dtype=np.uint8)
     wire = wire.reshape(ROWS, blocks * 18)
-    path = str(tmp_path / "Flash-Next-Q4.gguf")
+    if kind == "F16":
+        wire = rng.standard_normal((ROWS, DIMS)).astype(np.float16)
+    path = str(tmp_path / f"Flash-Next-{kind}.gguf")
     w = gguf.GGUFWriter(path, "qwen4exp")
-    w.add_tensor(TABLE, wire, raw_dtype=gguf.GGMLQuantizationType.IQ4_NL)
+    w.add_tensor(TABLE, wire,
+                 raw_dtype=getattr(gguf.GGMLQuantizationType, kind))
     w.add_tensor("token_embd.weight", np.zeros((4, 8), np.float32),
                  raw_dtype=gguf.GGMLQuantizationType.F32)
     w.write_header_to_file()
@@ -205,6 +210,46 @@ def test_a_load_no_caller_follows_with_the_install_maps_the_table_tracked(
     ts.table_install_follows(path, False)
     load_gguf_wire_bytes(path, zero_copy=True, shards=[path])
     assert calls == [[], [TABLE], []]
+
+
+@pytest.mark.parametrize("flash_next_gguf", ["F16"], indirect=True)
+def test_a_table_the_loader_casts_loads_tracked_and_pins(flash_next_gguf,
+                                                         monkeypatch):
+    """The loader casts an F16 table to the activation dtype, into a
+    buffer of its own that no view of the file holds, so it loads
+    tracked: kq is not asked to map it untracked, the prediction says so
+    before the load, the loader flags nothing, and the install pins the
+    wired limit. The process maps nothing untracked and keeps MLX's
+    limits. The same declaration on the iq4_nl table predicts the map."""
+    from gmlx.load.wire import load_gguf_wire_bytes
+
+    path, wire = flash_next_gguf
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: True)
+    ts.table_install_follows(path)
+    assert not ts.tables_load_untracked(path)
+    calls = _spy_kq_load(monkeypatch)
+    arrays = load_gguf_wire_bytes(path, zero_copy=True, shards=[path])[0]
+    assert calls == [[]]
+    assert not capacity.cap_applies()
+    emb = nn.Embedding(ROWS, DIMS)
+    emb.weight = arrays[TABLE].astype(mx.float32).astype(mx.bfloat16)
+    model = _Node()
+    model.model_type = "qwen4_exp"
+    model.model = _Node()
+    model.model.ple_embed = emb
+    assert ts.mark_untracked_tables(model, [path]) == 0
+    ts.install_table_streaming(model)
+    assert wrapped_with(mx.set_wired_limit, "_kq_no_sweep")
+
+
+def test_the_iq4_nl_table_is_predicted_to_map_untracked(flash_next_gguf,
+                                                        monkeypatch):
+    """The control for the F16 table: the same declaration on the iq4_nl
+    table, which no step copies, predicts the map."""
+    path, _ = flash_next_gguf
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: True)
+    ts.table_install_follows(path)
+    assert ts.tables_load_untracked(path)
 
 
 class _Stop(Exception):

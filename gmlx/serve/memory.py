@@ -52,9 +52,11 @@ def model_weight_bytes(path: str) -> int:
     """On-disk bytes of a GGUF (all shards) its load can wire: the file,
     less the streamable tables a served load maps outside MLX's tracker
     (``table_stream.untracked_tables_supported`` and
-    ``tables_stream_for_sure``), which MLX never wires. 0 when
-    unresolvable (hf: refs not yet pulled, missing files) - auto policy
-    then treats the model as weightless rather than guessing."""
+    ``tables_stream_for_sure``) or reads from the file, which MLX never
+    wires. A table the load writes into a buffer of its own
+    (``table_stream.copied_table_bytes``) counts. 0 when unresolvable
+    (hf: refs not yet pulled, missing files) - auto policy then treats
+    the model as weightless rather than guessing."""
     if not path or str(path).startswith("hf:"):
         return 0
     try:
@@ -63,14 +65,16 @@ def model_weight_bytes(path: str) -> int:
         total = sum(os.path.getsize(p) for p in find_split_shards(str(path)))
     except Exception:
         return 0
-    from gmlx.stream.table_stream import (tables_stream_for_sure,
+    from gmlx.stream.table_stream import (copied_table_bytes,
+                                          tables_stream_for_sure,
                                           untracked_tables_supported)
 
     try:
         if untracked_tables_supported() and tables_stream_for_sure(str(path)):
             from .capacity import streamed_table_bytes
 
-            total -= streamed_table_bytes(str(path))
+            total -= (streamed_table_bytes(str(path))
+                      - copied_table_bytes(str(path)))
     except Exception:
         _log.debug("untracked table bytes unread; the whole file counts",
                    exc_info=True)

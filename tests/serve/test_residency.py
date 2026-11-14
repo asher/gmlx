@@ -521,6 +521,10 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     box = {"active": 10e9}
     monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
     monkeypatch.setattr(ts, "untracked_tables_supported", lambda: untracked)
+    # The header the load maps: the iq4_nl table, which no cast copies.
+    monkeypatch.setattr(ts, "_mapped_tables", lambda p, env=None: [
+        SimpleNamespace(name="per_layer_token_embd.weight",
+                        type_name="IQ4_NL", nbytes=int(table))])
     monkeypatch.setattr(cap, "_CAP_ENGAGED", False)
     monkeypatch.setattr(cap, "_CAP_PLANNED", set())
     monkeypatch.setattr(cap, "gathered_table_bytes",

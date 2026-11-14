@@ -1,5 +1,8 @@
 """MLX buffer-cache policy: precedence, auto engagement, shard sizing."""
 
+import os
+
+import numpy as np
 import pytest
 
 import gmlx.serve.memory as sm
@@ -82,23 +85,39 @@ def test_weight_bytes_sums_shards(monkeypatch, tmp_path):
     assert sm.model_weight_bytes(str(a)) == 150
 
 
-@pytest.mark.parametrize("untracked", [True, False])
+@pytest.mark.parametrize("untracked, table_type", [
+    (True, "IQ4_NL"), (False, "IQ4_NL"), (True, "F16")])
 def test_weight_bytes_leave_out_a_table_mlx_never_wires(
-        monkeypatch, tmp_path, untracked):
+        monkeypatch, tmp_path, untracked, table_type):
     """The auto cache limit sizes against the bytes a load can wire. A
     table a served load maps outside MLX's tracker is never wired, so it
     comes off the file; with an mlx-kquant that maps it tracked, it
-    counts."""
-    import gmlx.serve.capacity as capacity
+    counts, and so does an F16 table, which the loader casts into a
+    buffer of its own."""
+    gguf = pytest.importorskip("gguf")
     import gmlx.stream.table_stream as ts
 
-    a = tmp_path / "m.gguf"
-    a.write_bytes(b"x" * 150)
+    a = str(tmp_path / "m.gguf")
+    w = gguf.GGUFWriter(a, "qwen4exp")
+    if table_type == "F16":
+        w.add_tensor("per_layer_token_embd.weight",
+                     np.zeros((64, 32), np.float16),
+                     raw_dtype=gguf.GGMLQuantizationType.F16)
+    else:
+        w.add_tensor("per_layer_token_embd.weight",
+                     np.zeros((64, 18), np.uint8),
+                     raw_dtype=gguf.GGMLQuantizationType.IQ4_NL)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    table = 64 * (64 if table_type == "F16" else 18)
+    whole = os.path.getsize(a)
     monkeypatch.setattr(ts, "untracked_tables_supported", lambda: untracked)
     monkeypatch.setattr(ts, "tables_stream_for_sure",
                         lambda p, env=None: True)
-    monkeypatch.setattr(capacity, "streamed_table_bytes", lambda p: 40)
-    assert sm.model_weight_bytes(str(a)) == (110 if untracked else 150)
+    left_out = untracked and table_type != "F16"
+    assert sm.model_weight_bytes(a) == whole - (table if left_out else 0)
 
 
 def test_a_wired_cap_of_zero_keeps_the_cache_bounded(monkeypatch):

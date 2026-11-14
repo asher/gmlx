@@ -446,16 +446,101 @@ def tables_stream_for_sure(path: str | None, env=None) -> bool:
     return gathered_table_bytes(path, env=env) > 0
 
 
+# GGUF types of a float table the loader casts to the activation dtype.
+_CAST_TYPES = frozenset({"F32", "F16"})
+
+
+def _native_fp_codecs(path: str | None) -> set[str]:
+    """The native-fp codecs (mxfp4, nvfp4) any tensor of ``path`` holds:
+    the loader packs all of them or none."""
+    from gmlx.load.headerscan import scan_gguf
+    from gmlx.load.native_fp import NATIVE_FP_CODECS
+    from gmlx.load.preflight import find_split_shards
+
+    out: set[str] = set()
+    for shard in find_split_shards(str(path)) if path else ():
+        out |= {t.type_name.lower() for t in
+                scan_gguf(shard, array_limit=0).tensors
+                if t.type_name.lower() in NATIVE_FP_CODECS}
+    return out
+
+
+def table_load_copies(type_name: str, path: str | None = None,
+                      env=None) -> bool:
+    """Whether the load of ``path`` writes a table stored as GGUF
+    ``type_name`` into a buffer of its own, so no view of the file holds
+    it: an F32 or F16 table the loader casts, or an MXFP4 or NVFP4 table
+    the packed native-fp mode repacks (``GMLX_NATIVE_FP=packed``, or auto
+    on an mlx-kquant without one of the model's native-fp codecs). Such
+    a table loads MLX-tracked."""
+    name = str(type_name).upper()
+    if name in _CAST_TYPES:
+        return True
+    from gmlx.envflags import env_value
+    from gmlx.load.native_fp import NATIVE_FP_CODECS
+
+    codec = name.lower()
+    if codec not in NATIVE_FP_CODECS:
+        return False
+    mode = (env_value("GMLX_NATIVE_FP", env) or "auto").strip().lower()
+    if mode == "packed":
+        return True
+    if mode == "wire":
+        return False
+    import mlx_kquant as kq
+
+    return not ({codec} | _native_fp_codecs(path)) <= set(kq.codecs())
+
+
+def _mapped_tables(path: str | None, env=None) -> list:
+    """Header records of the streamable tables a load of ``path`` maps:
+    those it does not read from the file (``table_pread.deferred_tables``).
+    Empty when the header cannot be read or the arch declares none."""
+    try:
+        from gmlx.load.headerscan import scan_gguf
+        from gmlx.load.preflight import find_split_shards
+
+        from .table_pread import deferred_tables
+
+        shards = find_split_shards(str(path)) if path else []
+        if not shards:
+            return []
+        arch = scan_gguf(shards[0], include_tensors=False,
+                         array_limit=0).kv.get("general.architecture")
+        pattern = streamable_table_names(arch)
+        if pattern is None:
+            return []
+        skip = set(deferred_tables(shards, arch, env=env))
+        return [t for s in shards for t in scan_gguf(s, array_limit=0).tensors
+                if pattern.fullmatch(t.name) and t.name not in skip]
+    except Exception:
+        return []
+
+
+def copied_table_bytes(path: str | None, env=None) -> int:
+    """Bytes of the streamable tables a load of ``path`` maps MLX-tracked
+    because it writes one of them into a buffer of its own
+    (``table_load_copies``): every table it maps then, else 0."""
+    mapped = _mapped_tables(path, env)
+    if any(table_load_copies(t.type_name, path, env) for t in mapped):
+        return sum(int(t.nbytes) for t in mapped)
+    return 0
+
+
 def tables_load_untracked(path: str | None, env=None) -> bool:
-    """Whether a load of ``path`` maps every streamable table it streams
-    outside MLX's tracker, or reads it from the file, decided before the
-    load as the wire load decides per shard (``untracked_table_names``):
-    the caller installs the table stream on the model
-    (``table_install_follows``), and the load streams its tables for
-    sure. The load can still fall back to tracked buffers; its install
-    then pins the wired limit."""
-    return (install_follows(path) and untracked_tables_supported()
-            and tables_stream_for_sure(path, env))
+    """Whether a load of ``path`` maps a streamable table outside MLX's
+    tracker, decided before the load as the wire load decides per shard
+    (``untracked_table_names``): the caller installs the table stream on
+    the model (``table_install_follows``), the load streams its tables
+    for sure and maps at least one, and it writes none into a buffer of
+    its own (``table_load_copies``). The load can still fall back to
+    tracked buffers; its install then pins the wired limit."""
+    if not (install_follows(path) and untracked_tables_supported()
+            and tables_stream_for_sure(path, env)):
+        return False
+    mapped = _mapped_tables(path, env)
+    return bool(mapped) and not any(
+        table_load_copies(t.type_name, path, env) for t in mapped)
 
 
 def untracked_table_names(path: str | None, shard: str, arch: str | None,
@@ -465,10 +550,15 @@ def untracked_table_names(path: str | None, shard: str, arch: str | None,
     table stream on the model (``table_install_follows``), those it
     streams for sure (``tables_stream_for_sure``), less the ones it reads
     from the file (``skip``). MLX never counts or wires such a buffer, so
-    its install leaves the wired limit free. Empty for any other load."""
+    its install leaves the wired limit free. Empty for any other load,
+    and for one that writes any table it maps into a buffer of its own
+    (``table_load_copies``): every table of that load loads tracked, as
+    ``tables_load_untracked`` predicts."""
     pattern = streamable_table_names(arch)
     if (pattern is None or not install_follows(path)
-            or not tables_stream_for_sure(path, env)):
+            or not tables_stream_for_sure(path, env)
+            or any(table_load_copies(t.type_name, path, env)
+                   for t in _mapped_tables(path, env))):
         return []
     from gmlx.load.headerscan import scan_gguf
 
