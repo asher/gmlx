@@ -270,6 +270,31 @@ def test_j_the_next_test_finds_the_governor_unarmed():
     assert prefill_decay._NOTED_CACHE_LIMIT == _MIRRORS["noted_cache_limit"]
 
 
+def test_k_a_build_leaves_its_credit_owner_and_table_declaration():
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.stream import table_stream as ts
+
+    _MIRRORS["build_credit"] = dict(pd._BUILD_CREDIT)
+    _MIRRORS["weights_owner"] = pd._WEIGHTS_OWNER
+    _MIRRORS["install_follows"] = set(ts._INSTALL_FOLLOWS)
+    owner = ("a", None, "auto")
+    pd.set_untracked_weights_owner(owner)
+    pd.note_build_credit(owner, 3.5e11)
+    ts.table_install_follows("/m/a.gguf")
+    assert owner in pd._BUILD_CREDIT
+
+
+def test_l_the_next_test_finds_none_of_them():
+    if "build_credit" not in _MIRRORS:
+        pytest.skip("runs after test_k")
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.stream import table_stream as ts
+
+    # A stale credit would lift every later test's headroom by its bytes.
+    assert pd._BUILD_CREDIT == _MIRRORS["build_credit"]
+    assert pd._WEIGHTS_OWNER == _MIRRORS["weights_owner"]
+    assert ts._INSTALL_FOLLOWS == _MIRRORS["install_follows"]
+
 
 # The harness itself, run in a fresh pytest process on the CPU device over
 # copies of the conftest, this file and the modules of this folder they

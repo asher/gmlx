@@ -20,11 +20,15 @@ the render functions and input builders of the copied mlx-vlm, which
 ``load_vlm_model`` and the serve patches wrap (each test module hands
 these back too, for the module fixtures that load a VLM), the limits the
 serve governor saved when it armed its throttle, the cache limit the
-server noted for the prefill decay, and the reading of the memory wired
-outside the process that the first load takes for the wired cap. A governor state that outlives the
-test goes back to the saved limits it held when the test started, and
-one the test created goes back to unarmed, as the MLX limits go back to
-their values from before the test.
+server noted for the prefill decay, the table stream's latch and its
+declared installs, the reading of the memory wired outside the process
+that the first load takes for the wired cap, the MLX memory limit the
+cap replaced, and the prefill decay's weight registries (untracked and
+streamed bytes, their owners, the open build credits), which a build
+leaves keyed to a model the next test never holds. A governor state
+that outlives the test goes back to the saved limits it held when the
+test started, and one the test created goes back to unarmed, as the MLX
+limits go back to their values from before the test.
 
 Known exclusion: the rest of a governor state (its band, the halved
 prefill step and the clamped width) stays as the test left it. The next
@@ -215,6 +219,55 @@ def _capacity():
     return sys.modules.get("gmlx.serve.capacity")
 
 
+def _wired_limit():
+    """gmlx.stream.wired_limit, or None before it is imported."""
+    return sys.modules.get("gmlx.stream.wired_limit")
+
+
+# The prefill decay's weight registries: dicts handed back in place, so a
+# reference a module took stays live.
+_DECAY_REGISTRIES = ("_UNTRACKED_WEIGHTS", "_UNTRACKED_OWNERS",
+                     "_STREAMED_TRACKED", "_STREAMED_CAP", "_BUILD_CREDIT")
+_WIRED_LIMIT_FIELDS = {"_CAP_MEMORY_LIMIT": None, "_CLAMP_LOGGED": False,
+                       "_ANNOUNCE": False}
+
+
+def _decay_registries(decay) -> dict | None:
+    """A copy of the weight registries, one level deep, and the weights
+    owner, or None before the module is imported."""
+    if decay is None:
+        return None
+    out = {name: {k: (set(v) if isinstance(v, set) else
+                      dict(v) if isinstance(v, dict) else v)
+                  for k, v in getattr(decay, name).items()}
+           for name in _DECAY_REGISTRIES}
+    out["_WEIGHTS_OWNER"] = decay._WEIGHTS_OWNER
+    return out
+
+
+def _put_back_decay_registries(decay, saved: dict | None) -> bool:
+    """Hand the weight registries back as ``saved`` holds them (empty
+    when the module was imported during the test). True when any had
+    changed."""
+    if decay is None:
+        return False
+    if saved is None:
+        saved = {name: {} for name in _DECAY_REGISTRIES}
+        saved["_WEIGHTS_OWNER"] = None
+    changed = False
+    with decay._UNTRACKED_LOCK:
+        for name in _DECAY_REGISTRIES:
+            reg = getattr(decay, name)
+            if reg != saved[name]:
+                changed = True
+                reg.clear()
+                reg.update(saved[name])
+        if decay._WEIGHTS_OWNER is not saved["_WEIGHTS_OWNER"]:
+            changed = True
+            decay._WEIGHTS_OWNER = saved["_WEIGHTS_OWNER"]
+    return changed
+
+
 def vlm_bindings() -> list:
     """(module, name, function) for each of _VLM_BINDINGS in an imported
     module."""
@@ -264,8 +317,14 @@ def capture() -> dict:
                      for st in _governor_states},
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
         "table_stream_latch": getattr(_table_stream(), "_FORCED", False),
+        "table_install_follows": set(getattr(_table_stream(),
+                                             "_INSTALL_FOLLOWS", ())),
         "armed_floor": getattr(_governor(), "_ARMED_FLOOR", 0.0),
         "outside_wired": getattr(_capacity(), "_OUTSIDE_WIRED", None),
+        "wired_limit_fields": {
+            name: getattr(_wired_limit(), name)
+            for name in _WIRED_LIMIT_FIELDS if _wired_limit() is not None},
+        "decay_registries": _decay_registries(decay),
     }
     devices = [mx.cpu] + ([mx.gpu] if _gpu() else [])
     for d in devices:
@@ -370,11 +429,25 @@ def restore(state: dict) -> list:
     if tables is not None and tables._FORCED != state["table_stream_latch"]:
         changed.append("table stream latch")
         tables._FORCED = state["table_stream_latch"]
+    if tables is not None and \
+            tables._INSTALL_FOLLOWS != state["table_install_follows"]:
+        changed.append("table install declarations")
+        tables._INSTALL_FOLLOWS.clear()
+        tables._INSTALL_FOLLOWS.update(state["table_install_follows"])
     capacity = _capacity()
     if capacity is not None and \
             capacity._OUTSIDE_WIRED != state["outside_wired"]:
         changed.append("outside wired reading")
         capacity._OUTSIDE_WIRED = state["outside_wired"]
+    wired = _wired_limit()
+    if wired is not None:
+        for name, fresh in _WIRED_LIMIT_FIELDS.items():
+            want = state["wired_limit_fields"].get(name, fresh)
+            if getattr(wired, name) != want:
+                changed.append(f"wired_limit.{name}")
+                setattr(wired, name, want)
+    if _put_back_decay_registries(decay, state["decay_registries"]):
+        changed.append("prefill decay weight registries")
     for d, stream in state["streams"].items():
         if mx.default_stream(d) != stream:
             changed.append(f"stream {getattr(d, 'name', d)}")
