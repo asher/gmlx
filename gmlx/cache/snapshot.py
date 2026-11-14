@@ -1222,7 +1222,9 @@ def _ckpt_extends(o, r) -> bool:
     """Whether record ``o`` continues record ``r``'s prompt. The pool
     keeps one block per hashed span, the salt included, so sharing
     ``r``'s last chain block proves the prefix up to ``r.b_full``; the
-    tail ids settle the rest. A record with no chain compares its ids."""
+    tail ids settle the rest. A record with no chain (kvarn) compares its
+    ids, the last one first, so a pair of different prompts costs one
+    compare and not a slice of the whole prompt."""
     if o.p <= r.p:
         return False
     nb = len(r.main_blocks or ())
@@ -1230,18 +1232,35 @@ def _ckpt_extends(o, r) -> bool:
         ob = o.main_blocks or ()
         return (len(ob) >= nb and ob[nb - 1] is r.main_blocks[nb - 1]
                 and o.ids[r.b_full:r.p] == r.ids[r.b_full:])
+    if o.ids[r.p - 1] != r.ids[-1]:
+        return False
     return o.ids[:r.p] == r.ids
 
 
 def _chain_heads(idx) -> set:
-    """Keys of the records the next turn of their conversation restores:
-    per chain, the deepest record no deeper one continues. A replay
-    serves only its identical resend and a decision record belongs to no
+    """Keys of the records a next turn restores: per chain, the deepest
+    record no deeper one continues, and each fork point, a record that
+    two or more branches continue. A client that forks a parent's context
+    into children leaves the parent's record continued by every child,
+    and the parent's next turn restores it; so does a sibling of a shared
+    prefix. Records on one line below a deeper record (the anchor, the
+    record the last turn restored from) are not heads. A replay serves
+    only its identical resend and a decision record belongs to no
     conversation, so neither is a head nor hides one."""
     recs = [(k, r) for k, r in idx.items()
             if r.kind not in ("replay", "decision")]
-    return {k for k, r in recs
-            if not any(_ckpt_extends(o, r) for _, o in recs)}
+    n = len(recs)
+    # ext[i][j]: record j continues record i.
+    ext = [[_ckpt_extends(recs[j][1], recs[i][1]) for j in range(n)]
+           for i in range(n)]
+    heads = set()
+    for i in range(n):
+        kids = [j for j in range(n) if ext[i][j]]
+        # A branch's first record continues no other record of i's.
+        firsts = [j for j in kids if not any(ext[c][j] for c in kids)]
+        if len(firsts) != 1:
+            heads.add(recs[i][0])
+    return heads
 
 
 def _lru_victim_key(idx, keep):

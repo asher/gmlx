@@ -373,3 +373,48 @@ def test_strip_on_extend_frees_the_window_chain_its_victim_held():
     assert sorted(r.p for r in cs._ckpt_records(man).values()) == [32, 96, 128]
     assert _held_by_none(man) == []
 
+
+def test_a_forked_parents_record_is_kept_like_a_head(monkeypatch):
+    """A client forks a parent's context into two children, so each child's
+    record continues the parent's. The parent's record is a fork point and
+    stays like a head, for the parent's next turn; the anchor below it,
+    on one line with it, goes first."""
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 5)
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    parent = _ids(0, 64)
+    assert ckpt_store(man, parent[:32], make_hybrid_cache(32, seed=1))
+    assert ckpt_store(man, parent, make_hybrid_cache(64, seed=2))
+    for k in range(2):
+        child = parent + list(range(5000 + 100 * k, 5032 + 100 * k))
+        assert ckpt_store(man, child, make_hybrid_cache(96, seed=3 + k))
+    assert cs._chain_heads(cs._ckpt_records(man)) == {
+        (r.ids, r.extra_hash) for r in cs._ckpt_records(man).values()
+        if r.p != 32}
+    for c in (1, 2):
+        assert ckpt_store(man, _ids(c, 64), make_hybrid_cache(64, seed=9 + c),
+                          extra_hash=c)
+    kept = {(r.extra_hash, r.p) for r in cs._ckpt_records(man).values()}
+    assert (0, 64) in kept and (0, 32) not in kept
+    _, got = ckpt_lookup(man, parent + [7])
+    assert got == 64
+
+
+def test_blockless_records_compare_the_last_id_first():
+    """Kvarn records carry no chain, so the heads scan compares ids. Two
+    different prompts differ at the parent's last id in one compare, with
+    no slice of the whole prompt."""
+    from types import SimpleNamespace
+
+    class NoSlice(tuple):
+        def __getitem__(self, i):
+            if isinstance(i, slice):
+                raise AssertionError("sliced the prompt")
+            return tuple.__getitem__(self, i)
+
+    r = SimpleNamespace(p=10, ids=tuple(range(10)), main_blocks=(), b_full=0)
+    other = SimpleNamespace(p=20, ids=NoSlice([*range(9), 99, *range(10)]),
+                            main_blocks=(), b_full=0)
+    assert not cs._ckpt_extends(other, r)
+    same = SimpleNamespace(p=20, ids=tuple(range(20)), main_blocks=(),
+                           b_full=0)
+    assert cs._ckpt_extends(same, r)
