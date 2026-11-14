@@ -118,6 +118,9 @@ def _load_shard(gguf_path: str, shard: str, arch: str | None,
     args = (shard, zero_copy, skip) if skip else (shard, zero_copy)
     untracked = (untracked_table_names(gguf_path, shard, arch, skip)
                  if zero_copy else [])
+    # A backstop no load reaches today: untracked_table_names names no
+    # table outside the cap, and the decision never goes back once made.
+    # It stays for a future step that asks for the map by another route.
     if untracked and not cap_applies():
         raise RuntimeError(
             f"{', '.join(untracked)}: a table maps outside MLX's tracker "
