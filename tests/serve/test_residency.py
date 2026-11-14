@@ -488,6 +488,83 @@ def test_a_build_credits_no_table_it_reads_from_the_file(
     assert seen == [pytest.approx(credit, abs=1)]
 
 
+# Flash-Next built plain on a 128 GB M5 Max: its 28.8 GB PLE table brings
+# it under the budget, so the load maps the table, the install streams it
+# on the CPU stream and the experts stay in memory.
+@pytest.mark.parametrize("untracked", [True, False])
+def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
+        monkeypatch, untracked):
+    """With an mlx-kquant that maps the table outside MLX's tracker, the
+    build puts nothing it streams in a residency set: no pin before the
+    walk, and no build credit, as the table adds to no MLX count. The walk
+    runs under the hold, so a load that falls back to a tracked table
+    wires nothing before its install pins. Without it, the build pins
+    before the walk and credits the table."""
+    import contextlib
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency_build as rb
+    import gmlx.stream.table_stream as ts
+    import gmlx.stream.wired_limit as wired_limit
+
+    path, table, rest = "/m/Flash-Next-Q4.gguf", 28.8e9, 52.0e9
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE", raising=False)
+    for attr in ("_STREAMED_TRACKED", "_STREAMED_CAP", "_UNTRACKED_OWNERS",
+                 "_UNTRACKED_WEIGHTS", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, attr, {})
+    box = {"active": 10e9}
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: untracked)
+    monkeypatch.setattr(cap, "gathered_table_bytes",
+                        lambda p, budget=None, env=None: int(table))
+    monkeypatch.setattr(cap, "held_table_bytes", lambda p: 0)
+    monkeypatch.setattr(rb, "_plain_footprint",
+                        lambda p, footprint, env=None: int(rest))
+    monkeypatch.setattr(rb, "_latch_guarded_wire", lambda *a, **k: False)
+    monkeypatch.setattr(rb, "_say_tables_offloaded", lambda *a: None)
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    seen = []
+    monkeypatch.setattr(wired_limit, "_neutralize_wired_limit_sweep",
+                        lambda: seen.append("pinned"))
+
+    @contextlib.contextmanager
+    def held():
+        seen.append("held")
+        yield
+        seen.append("released")
+
+    monkeypatch.setattr(wired_limit, "wired_limit_held", held)
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        # The walk maps the experts and every-token weights tracked, and
+        # the table too unless it is untracked.
+        box["active"] += rest + (0 if untracked else table)
+        seen.append(pd.build_credit_bytes())
+        proxy.response_generator = SimpleNamespace(model=None)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(400e9), (),
+        footprint_fn=lambda p: int(rest + table))
+    monkeypatch.setattr(pool, "_keep_check", lambda *a, **k: None)
+    monkeypatch.setattr(pool, "_tables_for_memory", lambda *a, **k: False)
+    entry = pool.acquire(path, None, "auto")
+    pool.release(entry)
+    if untracked:
+        assert seen == ["held", 0, "released"]
+    else:
+        assert seen == ["pinned", pytest.approx(table, abs=1)]
+
+
 def test_release_returns_refcount_to_zero_and_entry_evictable():
     proxy, pool, teardowns = make_pool(15, {"A": 10, "B": 10})
     ea = pool.acquire("A", None, "auto")
@@ -1161,7 +1238,9 @@ def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
     110 GB budget it composes, as a stream build always does. No decode
     arena or prefill ring is priced. The check before a plain build reads
     ``unwired`` bytes of memory not wired and a KV room of ``room``, with
-    no kernel floor, or from ``unwired()`` when it is callable."""
+    no kernel floor, or from ``unwired()`` when it is callable. The
+    load maps the table MLX-tracked, as an mlx-kquant without untracked
+    views does, so the build credits it."""
     import gmlx.device as dev
     import gmlx.load.discovery as disc
     import gmlx.serve.capacity as cap
@@ -1178,6 +1257,7 @@ def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
         bmod, "kv_room_bytes", lambda *a, resident=False, **k: SimpleNamespace(
             bytes=room if resident else room + 50 * GB, priced=False, depth=0))
     monkeypatch.setattr(ts, "_EXPERTS_FOR_MEMORY", {})
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: False)
 
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
     monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 30 * GB)

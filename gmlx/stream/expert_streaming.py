@@ -728,6 +728,15 @@ def install_expert_streaming(
     # (casts or repacks tracked, views untracked) frees each byte once.
     untracked0 = untracked_weight_bytes_for(
         getattr(model, "_kq_weights_key", None))
+    # A table its load mapped outside MLX's tracker is in neither the
+    # active bytes nor the untracked registration: it is neither tracked
+    # weight nor credited. Credited, it would read as reclaimable memory
+    # the tracker never held and lift the headroom by its size.
+    from gmlx.stream.table_stream import untracked_table_bytes
+
+    table_untracked = untracked_table_bytes(model)
+    tracked_total = max(0.0, total_bytes - table_untracked - untracked0)
+    table_tracked = max(0, table_offloaded - table_untracked)
     table_credit = 0.0
     if table_offloaded and compose:
         loadlog.info(
@@ -737,8 +746,8 @@ def install_expert_streaming(
             "AND experts streamed"
         )
         table_credit = credit_streamed(
-            getattr(model, "_kq_weights_key", None), table_offloaded,
-            max(0.0, total_bytes - untracked0), "table")
+            getattr(model, "_kq_weights_key", None), table_tracked,
+            tracked_total, "table")
     elif table_only:
         # The selection test admits the table only when the remainder
         # clears the budget (or streaming is forced on a fits model),
@@ -755,8 +764,8 @@ def install_expert_streaming(
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
         table_credit = credit_streamed(
-            getattr(model, "_kq_weights_key", None), table_offloaded,
-            max(0.0, total_bytes - untracked0), "table")
+            getattr(model, "_kq_weights_key", None), table_tracked,
+            tracked_total, "table")
         # The experts stay resident, so this was the last streamed share.
         end_build_credit(getattr(model, "_kq_weights_key", None))
 
@@ -1424,7 +1433,7 @@ def install_expert_streaming(
         # Same 0.9 x working-set budget test as _warm_touch_pass.
         credit = credit_streamed(
             getattr(model, "_kq_weights_key", None), offloaded,
-            max(0.0, total_bytes - untracked0), "experts",
+            tracked_total, "experts",
             prior=table_credit)
         if credit > 0:
             print(

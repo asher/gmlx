@@ -293,7 +293,17 @@ class _ChatBuild:
             set_untracked_weights_owner,
         )
         set_untracked_weights_owner(cache_key)
-        if streamed > 0:
+        # Tables the load maps outside MLX's tracker are never wired and
+        # add to no MLX count (table_stream.untracked_table_names).
+        from gmlx.stream.table_stream import tables_load_untracked
+
+        untracked_tables = streamed > 0 and tables_load_untracked(
+            str(model_path), env)
+        # With the experts in memory and every streamed table untracked,
+        # nothing the build streams is in a residency set: the limit stays
+        # free, and MLX keeps the weights, KV and transients wired.
+        free_limit = untracked_tables and not shares[1]
+        if streamed > 0 and not free_limit:
             # Before the walk, not at the install after it: a resident
             # model's generator left the wired limit raised, and the walk
             # under it wires the file's pages (see the loader).
@@ -305,15 +315,20 @@ class _ChatBuild:
             # live memory and sheds another model's rows. Credit what the
             # load adds, up to the streamed bytes, until the install's own
             # credit or deduction takes over. A table no array can hold is
-            # read from the file and never adds any.
-            note_build_credit(cache_key, streamed - min(
+            # read from the file and never adds any, nor does one mapped
+            # untracked.
+            tables = (0 if untracked_tables else shares[0] - min(
                 shares[0], held_table_bytes(str(model_path))))
+            note_build_credit(cache_key, tables + shares[1])
         try:
             # A raised wired limit would wire the walk's buffers in one
-            # burst, ahead of the install's chunk guard.
+            # burst, ahead of the install's chunk guard. A build that
+            # leaves the limit free walks under the hold too: a load that
+            # falls back to tracked tables is pinned at its install.
             from gmlx.stream.wired_limit import wired_limit_held
 
-            with wired_limit_held() if guarded else contextlib.nullcontext():
+            with (wired_limit_held() if guarded or free_limit
+                  else contextlib.nullcontext()):
                 self._stock_get(model_path, adapter_path,
                                 model_kind=model_kind)
             # One policy resolve per load, inside the env window. An

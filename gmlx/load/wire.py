@@ -64,6 +64,7 @@ def load_gguf_wire_bytes(
     install_wired_cap()
     if shards is None:
         shards = find_split_shards(gguf_path)
+    arch = _arch_of(shards, arch)
     skip = _deferred_table_names(shards, arch)
     arrays: dict[str, mx.array] = {}
     kquant_meta: dict[str, str] = {}
@@ -71,12 +72,8 @@ def load_gguf_wire_bytes(
     tensor_shapes: dict = {}
     for i, shard in enumerate(shards):
         try:
-            if skip:
-                s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(
-                    shard, zero_copy, skip)
-            else:
-                s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(
-                    shard, zero_copy)
+            s_arrays, s_codecs, s_meta, s_shapes = _load_shard(
+                gguf_path, shard, arch, zero_copy, skip)
         except TypeError as e:
             if not skip:
                 raise
@@ -106,6 +103,49 @@ def load_gguf_wire_bytes(
 
     arch = meta.get("general.architecture")
     return arrays, kquant_meta, arch, meta, tensor_shapes
+
+
+def _load_shard(gguf_path: str, shard: str, arch: str | None,
+                zero_copy: bool, skip):
+    """``kq.load_gguf`` on one shard. The streamable tables the load
+    streams for sure map outside MLX's tracker
+    (``table_stream.untracked_table_names``), so MLX neither counts nor
+    wires them. An mlx-kquant without ``load_gguf(untracked=...)``, or a
+    table it cannot view that way, reloads the shard tracked; the install
+    then pins the wired limit as for any tracked table."""
+    from gmlx.stream.table_stream import (note_untracked_load,
+                                          untracked_table_names)
+
+    args = (shard, zero_copy, skip) if skip else (shard, zero_copy)
+    untracked = (untracked_table_names(gguf_path, shard, arch, skip)
+                 if zero_copy else [])
+    if untracked:
+        try:
+            out = kq.load_gguf(*args, untracked=untracked)
+        except TypeError:
+            loadlog.verbose_print(
+                f"[stream] {', '.join(untracked)} loads MLX-tracked: this "
+                "mlx-kquant has no load_gguf(untracked=...)")
+        except RuntimeError as e:
+            if "untracked" not in str(e):
+                raise
+            loadlog.warn(f"[stream] {', '.join(untracked)} loads "
+                         f"MLX-tracked: {e}")
+        else:
+            note_untracked_load(shard, untracked)
+            return out
+    note_untracked_load(shard, ())
+    return kq.load_gguf(*args)
+
+
+def _arch_of(shards: list[str], arch: str | None) -> str | None:
+    """``arch``, or ``general.architecture`` from the first shard."""
+    if arch is not None or not shards:
+        return arch
+    from .headerscan import scan_gguf
+
+    return scan_gguf(shards[0], include_tensors=False,
+                     array_limit=0).kv.get("general.architecture")
 
 
 def _check_type43(shard: str, codecs: dict[str, str], skip) -> None:

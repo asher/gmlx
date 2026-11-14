@@ -825,6 +825,57 @@ def test_a_table_only_install_reads_the_real_free(monkeypatch, tracked_parts):
                                    - size["N"] - size["E"])
 
 
+# Flash-Next on a 128 GB M5 Max: the 28.8 GB PLE table brings the model
+# under the budget, so a plain load streams it and keeps the experts.
+@pytest.mark.parametrize("untracked", [False, True])
+def test_the_free_memory_is_the_same_with_the_table_tracked_or_not(
+        monkeypatch, untracked):
+    """The loader's registration and the table-only install leave the
+    same free memory whether the load mapped the table MLX-tracked or
+    outside MLX's tracker: the wired cap less the resident weights. A
+    tracked table is in active memory and the install credits it back; an
+    untracked one is in no count, so nothing registers or credits it."""
+    from mlx.utils import tree_flatten
+
+    from gmlx.load.loader import _warm_mmap_residency
+    from gmlx.serve.capacity import wired_cap_bytes
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setenv("GMLX_RESIDENCY_WARM", "0")
+    monkeypatch.setattr(ts, "_UNTRACKED", {})
+    pd = _fresh_accounting(monkeypatch)
+    model, glu = _moe_table_model()
+    rest = mx.zeros((4096,), dtype=mx.float32)
+    params = model.parameters
+    model.parameters = lambda: {**params(), "rest": rest}
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    size = {"T": ts.table_bytes(model),
+            "E": sum(a.nbytes for _, a in tree_flatten(glu.parameters()))}
+    size["N"] = total - size["T"] - size["E"]
+    ws = int((total - size["T"] // 2) / 0.9) + 1  # over, but not post-table
+    monkeypatch.setattr(mx, "device_info",
+                        lambda: {"max_recommended_working_set_size": ws})
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr("gmlx.serve.capacity._OUTSIDE_WIRED", 0.0)
+    path = "/models/Flash-Next-Q4.gguf"
+    if untracked:
+        ts.note_untracked_load(path, ["per_layer_token_embd.weight"])
+    # The load's arrays in active memory: all of them, or all but the
+    # untracked table.
+    active = float(total - (size["T"] if untracked else 0))
+    monkeypatch.setattr(mx, "get_active_memory", lambda: active)
+    _warm_mmap_residency(model, log=lambda *a, **k: None, paths=[path],
+                         active_before=0.0)
+    install_expert_streaming(model, gguf_path=path)
+    assert ts.table_streaming_active(model)
+    assert not getattr(glu, "_kq_cpu_only", False)
+    assert pd.untracked_weight_bytes() == 0
+    assert pd.streamed_tracked_bytes() == (0 if untracked else size["T"])
+    assert pd.headroom_bytes() == (wired_cap_bytes()
+                                   - size["N"] - size["E"])
+
+
 def test_unmapped_stacks_give_back_their_credit(monkeypatch):
     from gmlx.stream.expert_streaming import _release_unmapped_credit
 
