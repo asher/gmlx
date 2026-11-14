@@ -18,6 +18,7 @@ import logging
 import os
 from collections import OrderedDict
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
 from gmlx.envflags import env_int
@@ -1490,6 +1491,80 @@ def _fit_record_room(manager, idx, keep) -> tuple[list, dict]:
     return victims, note
 
 
+def _chain_fresh_bytes(manager, chain, block_bytes: int) -> int:
+    """The bytes a chain's block store adds to the pool's committed
+    blocks. ``chain`` is the chain's ``(chunk, hash)`` pairs
+    (``apc_manager.block_chain``). A block the pool holds already dedups
+    and adds nothing; each other block takes the next block of the free
+    queue, in order, and adds ``block_bytes`` less what that block held,
+    all of it for an empty block. Caller holds the lock."""
+    table = getattr(manager, "hash_table", None) or {}
+    held: set[int] = set()
+    new = 0
+    for chunk, h in chain:
+        b = table.get(h)
+        if b is not None and b.token_ids == chunk:
+            held.add(id(b))
+        else:
+            new += 1
+    fresh = 0
+    b = getattr(manager, "_free_head", None)
+    while b is not None and new > 0:
+        if id(b) not in held:
+            new -= 1
+            fresh += max(0, int(block_bytes) - int(b.resident_bytes()))
+        b = b.next
+    return fresh
+
+
+def _fit_chain_room(manager, span_ids, ks, vs, extra, n_blocks: int,
+                    keep) -> tuple[list, dict | None]:
+    """Before a checkpoint chain's block copy, bring the records and the
+    pool's committed blocks, with the bytes the chain adds
+    (``_chain_fresh_bytes``), within the shared room (``_record_room``),
+    in ``_fit_record_room``'s order: blocks no record holds, then records
+    in eviction order, each with the blocks only it held. Blocks the
+    chain dedups are not priced, so no record goes for them. The record
+    ``keep`` stays; the new record's own payload is priced at its insert.
+    Caller holds the lock. Returns the dropped records with the bytes
+    each freed, and the figures the log line reports (None when the room
+    is not shared)."""
+    room, shared = _record_room(manager)
+    if not shared or n_blocks <= 0 or not ks:
+        return [], None
+    from .apc_manager import block_chain
+
+    bs = int(manager.block_size)
+    tokens = max(1, int(ks[0].shape[-2]))
+    block = int(sum(int(a.nbytes) for a in list(ks) + list(vs))
+                * bs // tokens)
+    chain = list(block_chain(span_ids, extra, n_blocks, bs))
+    idx = _ckpt_records(manager)
+
+    def size() -> int:
+        return (sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
+                + _committed_block_bytes(manager)
+                + _chain_fresh_bytes(manager, chain, block))
+
+    total = size()
+    note = {"room": room, "shared": True, "before": total, "idle": 0}
+    victims: list = []
+    evict_idle = getattr(manager, "_evict_idle_blocks", None)
+    while total > room:
+        idle = int(evict_idle(total - room)) if evict_idle else 0
+        if idle:
+            note["idle"] += idle
+        elif any(k != keep for k in idx):
+            victim = idx.pop(_lru_victim_key(idx, keep))
+            own = int(getattr(victim, "nbytes", 0) or 0)
+            victims.append((victim, own + _drop_record(manager, victim)))
+        else:
+            break
+        total = size()
+    note["after"] = total
+    return victims, note
+
+
 def _note_budget_evictions(manager, rec, victims, note) -> None:
     """The budget's counters and its one log line for an insert that
     dropped records."""
@@ -1817,11 +1892,23 @@ def ckpt_store(
                 return None
 
             def _once():
-                if store_blocks is not None:
-                    return store_blocks(
-                        span_ids, ks, vs, extra_hash=extra, disk=disk)
-                return manager.store_kv_blocks(
-                    span_ids, ks, vs, extra_hash=extra)
+                # The chain's new blocks are priced against the shared
+                # room before the copy, under the lock the copy runs in.
+                with manager.lock:
+                    victims, note = _fit_chain_room(
+                        manager, span_ids, ks, vs, extra, need,
+                        (tuple(ids), int(extra_hash)))
+                    if store_blocks is not None:
+                        got = store_blocks(
+                            span_ids, ks, vs, extra_hash=extra, disk=disk)
+                    else:
+                        got = manager.store_kv_blocks(
+                            span_ids, ks, vs, extra_hash=extra)
+                if victims:
+                    _note_budget_evictions(
+                        manager, SimpleNamespace(p=p, kind=kind), victims,
+                        note)
+                return got
 
             blocks = _once()
             evicted_total = 0

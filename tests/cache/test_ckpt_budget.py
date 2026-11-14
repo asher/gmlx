@@ -196,6 +196,63 @@ def test_over_the_share_idle_blocks_go_first_then_records_with_theirs(
     assert "records and pool blocks" in lines[0]
 
 
+def test_a_chain_prices_its_new_blocks_in_the_shared_room_before_the_copy(
+        monkeypatch):
+    """A chain's blocks taken from empty pool blocks add to the pool's
+    committed bytes, which share the room with the records. They are
+    priced before the copy: at every block copied, the records and the
+    committed blocks sit within the room. The same records go as when
+    the room was made after the copy."""
+    from gmlx._vendor.mlx_vlm import apc_storage
+
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for c in range(3):
+        assert _store(man, c)
+    fresh = 512 // 16 * _BLOCK_BYTES
+    share = _records_bytes(man) + _block_bytes(man) + fresh // 2
+    man._kq_ckpt_share_bytes = share
+    seen = []
+    real = apc_storage.APCNode.set_kv
+
+    def spy(self, keys, values):
+        real(self, keys, values)
+        seen.append(_records_bytes(man) + _block_bytes(man))
+
+    monkeypatch.setattr(apc_storage.APCNode, "set_kv", spy)
+    assert _store(man, 3, p=512) == 512
+    assert len(seen) == 512 // 16
+    assert max(seen) <= share
+    assert _records_bytes(man) + _block_bytes(man) <= share
+    assert _chains(man) == [2, 3]
+    assert man.stats_snapshot()["ckpt_budget_evictions"] == 2
+    _, got = ckpt_lookup(man, _ids(3, 512) + [7], extra_hash=3)
+    assert got == 512
+
+
+def test_a_chain_prices_no_block_it_dedups():
+    """A deeper store on a conversation reuses the blocks its record
+    holds, and only its new blocks are priced before the copy. A room
+    with space for those and the new record drops nothing, though it has
+    no space for the whole chain again."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for c in range(2):
+        assert ckpt_store(man, _ids(c, 64), make_hybrid_cache(64, seed=c),
+                          extra_hash=c)
+    record = _records_bytes(man) // 2
+    new = 4 * _BLOCK_BYTES
+    share = (_records_bytes(man) + _block_bytes(man) + new + record
+             + _BLOCK_BYTES // 2)
+    # The whole chain again, 8 blocks, would not fit before the copy.
+    assert _records_bytes(man) + _block_bytes(man) + 2 * new > share
+    man._kq_ckpt_share_bytes = share
+    assert ckpt_store(man, _ids(1, 128), make_hybrid_cache(128, seed=1),
+                      extra_hash=1) == 128
+    kept = {(r.extra_hash, r.p) for r in cs._ckpt_records(man).values()}
+    assert kept == {(0, 64), (1, 64), (1, 128)}
+    assert man.stats_snapshot()["ckpt_budget_evictions"] == 0
+    assert _records_bytes(man) + _block_bytes(man) <= share
+
+
 def test_the_override_is_a_records_only_budget_and_wins(monkeypatch):
     """GMLX_APC_CKPT_BUDGET_MB set: records alone count against it, and
     a share the blocks already fill drops nothing."""
