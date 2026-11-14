@@ -76,8 +76,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   up to 8 GiB, before it sheds a request or holds one for up to a minute.
 - After a model swap, a server short of memory frees the new model's prompt
   cache. It freed only the first model's and shed requests instead.
-- With a drafter, a long prompt saved to the drafter's prefix cache could take
-  the cache one prompt past its size limit and the server past its memory cap.
+- Saving or restoring a long prompt could take a prompt cache past its size
+  limit, and the server past its memory cap.
 - With a drafter, requests that shared a long prompt prefix decoded slower
   once one of them had restored its prefix from the prompt cache.
 - With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long

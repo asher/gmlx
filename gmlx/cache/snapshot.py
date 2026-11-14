@@ -75,22 +75,24 @@ def _clone_single_row(cache: Any, eval_targets: list | None = None) -> Any | Non
     window and a future request can never reproduce this stream's ring
     phase. Same-stream resumes must use ``_clone_row_faithful`` instead.
 
-    With ``eval_targets``, the copies of a plain row go into that list and
-    the caller evaluates them, so a many-layer clone syncs once.
+    With ``eval_targets``, the copies go into that list and the caller
+    evaluates them, so a many-layer clone syncs once and a store can make
+    room before its copy materializes.
     """
     return _clone_row(cache, rot_canonical=True, eval_targets=eval_targets)
 
 
-def _clone_row_faithful(cache: Any) -> Any | None:
+def _clone_row_faithful(cache: Any,
+                        eval_targets: list | None = None) -> Any | None:
     """Deep-copy a single-row cache bitwise, rotating rings included.
 
     For SAME-STREAM consumers (exact retirement, the rung ring, drafter
     KV sidecars): the restored state must replay bitwise against the live
     row. The canonical rotating reorder holds the same window but permutes
     fp16 summation order inside it, which MoE routing amplifies into
-    visible logit swings.
+    visible logit swings. ``eval_targets`` as in ``_clone_single_row``.
     """
-    return _clone_row(cache, rot_canonical=False)
+    return _clone_row(cache, rot_canonical=False, eval_targets=eval_targets)
 
 
 def _clone_row(cache: Any, *, rot_canonical: bool,
@@ -100,9 +102,9 @@ def _clone_row(cache: Any, *, rot_canonical: bool,
     from .kv_cache import RotatingKVCache
 
     if isinstance(cache, _buffered_types()):
-        return _clone_buffered_window(cache)
+        return _clone_buffered_window(cache, eval_targets)
     if rot_canonical and isinstance(cache, RotatingKVCache):
-        return _clone_rot_canonical(cache)
+        return _clone_rot_canonical(cache, eval_targets)
     targets: list[Any] = [] if eval_targets is None else eval_targets
     out = _apc._clone_cache_entry_for_apc(
         cache, min_capacity_tokens=None, eval_targets=targets)
@@ -112,10 +114,10 @@ def _clone_row(cache: Any, *, rot_canonical: bool,
     return out
 
 
-def _clone_rot_canonical(cache: Any) -> Any | None:
+def _clone_rot_canonical(cache: Any,
+                         eval_targets: list | None = None) -> Any | None:
     """Canonical rotating clone: same concrete class, buffer trimmed to
     the canonical window, ring pointer at its end (the restored form)."""
-    import mlx.core as mx
     from gmlx._vendor.mlx_vlm import apc as _apc
 
     out = type(cache)(max_size=int(cache.max_size),
@@ -137,11 +139,12 @@ def _clone_rot_canonical(cache: Any) -> Any | None:
     out.values = copy(tv)
     out.offset = int(offset)
     out._idx = int(length)
-    mx.eval(out.keys, out.values)
+    _eval_or_defer([out.keys, out.values], eval_targets)
     return out
 
 
-def _clone_buffered_window(cache: Any) -> Any | None:
+def _clone_buffered_window(cache: Any,
+                           eval_targets: list | None = None) -> Any | None:
     """Clone of a BufferedRotatingKVCache (the spec-path swap-in) as the
     plain RotatingKVCache the model's make_cache produces.
 
@@ -152,7 +155,6 @@ def _clone_buffered_window(cache: Any) -> Any | None:
     both consumers. The result is what a stored entry restores into (the
     spec path re-swaps on its next prefill). ``keep > 0`` never reaches
     the swap; declined."""
-    import mlx.core as mx
     from gmlx._vendor.mlx_vlm import apc as _apc
 
     from .kv_cache import RotatingKVCache
@@ -188,8 +190,17 @@ def _clone_buffered_window(cache: Any) -> Any | None:
     out.keys = copy(cache.keys[..., idx - L:idx, :])
     out.values = copy(cache.values[..., idx - L:idx, :])
     out._idx = L
-    mx.eval(out.keys, out.values)
+    _eval_or_defer([out.keys, out.values], eval_targets)
     return out
+
+
+def _eval_or_defer(arrays: list, eval_targets: list | None) -> None:
+    """Evaluate ``arrays`` now, or hand them to the caller's list."""
+    if eval_targets is None:
+        import mlx.core as mx
+        mx.eval(*arrays)
+    else:
+        eval_targets.extend(arrays)
 
 
 def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
@@ -259,6 +270,21 @@ def _sidecar_index(manager: Any) -> "OrderedDict":
         return idx
 
 
+def _side_room(idx: "OrderedDict", key: Any, nbytes: int, entries: int,
+               budget: int, size_of) -> None:
+    """Make room in a side index (drafter sidecars, anchors) for one entry
+    of ``nbytes`` under ``key`` before its copy materializes: drop ``key``,
+    then the least recently used entries until the new one fits
+    ``entries`` and ``budget``. The newest always survives, so an entry
+    over the whole budget empties the index and is still kept. The entries
+    kept are the ones insert-then-trim kept. Caller holds the lock."""
+    idx.pop(key, None)
+    total = sum(size_of(v) for v in idx.values())
+    while idx and (len(idx) + 1 > entries or total + nbytes > budget):
+        _, victim = idx.popitem(last=False)
+        total -= size_of(victim)
+
+
 def drafter_sidecar_store(
     manager: Any,
     drafter: Any,
@@ -285,7 +311,9 @@ def drafter_sidecar_store(
         caches = drafter.export_kv()
         if not caches:
             return False
+        # The clones stay lazy until the index has made room for them.
         clones: list[Any] = []
+        pending: list[Any] = []
         for c in caches:
             offset = int(getattr(c, "offset", 0) or 0)
             if offset < store_len:
@@ -293,7 +321,7 @@ def drafter_sidecar_store(
                     "APC sidecar store skipped: head offset %d < %d",
                     offset, store_len)
                 return False
-            clone = _clone_row_faithful(c)
+            clone = _clone_row_faithful(c, pending)
             if clone is None:
                 return False
             excess = offset - store_len
@@ -306,19 +334,20 @@ def drafter_sidecar_store(
                 return False
             clones.append(clone)
         ids = tuple(int(t) for t in token_ids)[:store_len]
+        key = (ids, int(extra_hash))
         idx = _sidecar_index(manager)
         record = getattr(manager, "kq_record", None)
         with manager.lock:
-            idx[(ids, int(extra_hash))] = clones
+            _side_room(idx, key, _caches_nbytes(clones), _SIDECAR_ENTRIES,
+                       _SIDECAR_BUDGET_BYTES, _caches_nbytes)
+        if pending:
+            import mlx.core as mx
+            mx.eval(*pending)
+        with manager.lock:
+            idx[key] = clones
             if record is not None:
-                record("sidecar", (ids, int(extra_hash)))
-            idx.move_to_end((ids, int(extra_hash)))
-            while len(idx) > _SIDECAR_ENTRIES:
-                idx.popitem(last=False)
-            total = sum(_caches_nbytes(v) for v in idx.values())
-            while total > _SIDECAR_BUDGET_BYTES and len(idx) > 1:
-                _, victim = idx.popitem(last=False)
-                total -= _caches_nbytes(victim)
+                record("sidecar", key)
+            idx.move_to_end(key)
         disk = getattr(manager, "disk", None)
         if disk is not None:
             try:
@@ -397,11 +426,12 @@ def drafter_sidecar_lookup(
         if (stored_extra != salted or len(stored_tokens) != prefix_len
                 or stored_tokens != ids[:prefix_len]):
             return None
+        # The load serves this restore either way; the index keeps it
+        # within both of its bounds.
         with manager.lock:
+            _side_room(idx, key, _caches_nbytes(caches), _SIDECAR_ENTRIES,
+                       _SIDECAR_BUDGET_BYTES, _caches_nbytes)
             idx[key] = caches
-            idx.move_to_end(key)
-            while len(idx) > _SIDECAR_ENTRIES:
-                idx.popitem(last=False)
         return [_clone_row_faithful(c) for c in caches]
     except Exception:
         _log.warning("APC sidecar lookup failed; continuing", exc_info=True)

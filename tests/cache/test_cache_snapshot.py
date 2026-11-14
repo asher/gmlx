@@ -695,6 +695,88 @@ def test_sidecar_disk_restart(tmp_path):
         mgr2.close()
 
 
+# One sidecar of 10 rows: K and V of float32 across H heads of D.
+_SIDE_BYTES = 2 * H * 10 * D * 4
+_SIDE_IDS = {"a": list(range(1, 13)), "b": list(range(101, 113)),
+             "c": list(range(201, 213))}
+
+
+def _side_keys(mgr):
+    from gmlx.cache.snapshot import _sidecar_index
+    return [k[0][0] for k in _sidecar_index(mgr)]
+
+
+@pytest.mark.parametrize("entries, budget, new, kept", [
+    (12, 2 * _SIDE_BYTES + _SIDE_BYTES // 2, "c", ["b", "c"]),
+    (2, 1 << 30, "c", ["b", "c"]),
+    (2, 2 * _SIDE_BYTES + _SIDE_BYTES // 2, "a", ["b", "a"]),
+], ids=["bytes-full", "count-full", "same-key"])
+def test_a_sidecar_store_materializes_within_the_index_bounds(
+        monkeypatch, entries, budget, new, kept):
+    """The least recently used sidecars make room before the new one
+    materializes, so the index and the copy fit both bounds together. The
+    sidecars kept are the ones insert-then-trim kept."""
+    import gmlx.cache.snapshot as cs
+    from gmlx.cache.snapshot import _caches_nbytes, _sidecar_index
+
+    monkeypatch.setattr(cs, "_SIDECAR_ENTRIES", entries)
+    monkeypatch.setattr(cs, "_SIDECAR_BUDGET_BYTES", budget)
+    mgr = _manager()
+    try:
+        for name in ("a", "b"):
+            drafter = _FakeDrafter([_kv_row(12, ord(name))])
+            assert drafter_sidecar_store(mgr, drafter, _SIDE_IDS[name], 10)
+        drafter = _FakeDrafter([_kv_row(12, 7)])
+        idx = _sidecar_index(mgr)
+        seen = []
+        real = mx.eval
+
+        def spy(*arrays):
+            seen.append((len(idx), sum(_caches_nbytes(v)
+                                       for v in idx.values())))
+            real(*arrays)
+
+        monkeypatch.setattr(mx, "eval", spy)
+        assert drafter_sidecar_store(mgr, drafter, _SIDE_IDS[new], 10)
+        monkeypatch.setattr(mx, "eval", real)
+        assert len(seen) == 1
+        held_n, held_bytes = seen[0]
+        assert held_n + 1 <= entries
+        assert held_bytes + _SIDE_BYTES <= budget
+        assert _side_keys(mgr) == [_SIDE_IDS[k][0] for k in kept]
+    finally:
+        mgr.close()
+
+
+def test_a_sidecar_loaded_from_disk_keeps_the_index_within_its_budget(
+        tmp_path, monkeypatch):
+    """A sidecar the memory budget evicted still serves from disk. Its
+    load enters the index within the byte budget, as a store does, rather
+    than past it until the next store."""
+    import gmlx.cache.snapshot as cs
+    from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
+    from gmlx.cache.snapshot import _caches_nbytes, _sidecar_index
+    from test_ckpt_tier import drain_disk
+
+    budget = 2 * _SIDE_BYTES + _SIDE_BYTES // 2
+    monkeypatch.setattr(cs, "_SIDECAR_BUDGET_BYTES", budget)
+    mgr = APCManager(num_blocks=64, block_size=16,
+                     disk=DiskBlockStore(tmp_path / "apc", namespace="t"))
+    try:
+        for name in ("a", "b", "c"):
+            drafter = _FakeDrafter([_kv_row(12, ord(name))])
+            assert drafter_sidecar_store(mgr, drafter, _SIDE_IDS[name], 10)
+        drain_disk(mgr.disk)
+        assert _side_keys(mgr) == [101, 201]     # a left memory, not disk
+        side = drafter_sidecar_lookup(mgr, _SIDE_IDS["a"] + [99], 10)
+        assert side is not None and side[0].offset == 10
+        idx = _sidecar_index(mgr)
+        assert sum(_caches_nbytes(v) for v in idx.values()) <= budget
+        assert _side_keys(mgr) == [201, 1]
+    finally:
+        mgr.close()
+
+
 def test_sidecar_store_guards():
     mgr = _manager()
     try:
