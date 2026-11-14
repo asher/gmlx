@@ -82,6 +82,25 @@ def test_weight_bytes_sums_shards(monkeypatch, tmp_path):
     assert sm.model_weight_bytes(str(a)) == 150
 
 
+@pytest.mark.parametrize("untracked", [True, False])
+def test_weight_bytes_leave_out_a_table_mlx_never_wires(
+        monkeypatch, tmp_path, untracked):
+    """The auto cache limit sizes against the bytes a load can wire. A
+    table a served load maps outside MLX's tracker is never wired, so it
+    comes off the file; with an mlx-kquant that maps it tracked, it
+    counts."""
+    import gmlx.serve.capacity as capacity
+    import gmlx.stream.table_stream as ts
+
+    a = tmp_path / "m.gguf"
+    a.write_bytes(b"x" * 150)
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: untracked)
+    monkeypatch.setattr(ts, "tables_stream_for_sure",
+                        lambda p, env=None: True)
+    monkeypatch.setattr(capacity, "streamed_table_bytes", lambda p: 40)
+    assert sm.model_weight_bytes(str(a)) == (110 if untracked else 150)
+
+
 def test_a_wired_cap_of_zero_keeps_the_cache_bounded(monkeypatch):
     """A cap of 0 (the memory wired outside the server leaves the RAM
     term nothing) is a known cap, not an unknown working set. The auto
