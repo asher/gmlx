@@ -26,7 +26,11 @@ _ANNOUNCE = False
 # Held by each writer that reads the MLX memory limit and then sets it
 # (the cap, its restore at a pin, the governor's throttle, expert
 # streaming's allocator limits), so none sets a limit over one another
-# thread set between its read and its write.
+# thread set between its read and its write. The throttle and expert
+# streaming set the cache limit under it too. The image cache bound
+# (image/memfit.py) and the image command swap the cache limit outside
+# it: each puts back the limit it saw on entry, and a lock would not
+# order those swaps against a throttle that arms and disarms between.
 LIMIT_LOCK = threading.RLock()
 
 
