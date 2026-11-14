@@ -78,6 +78,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache. It freed only the first model's and shed requests instead.
 - Saving or restoring a long prompt could take a prompt cache past its size
   limit, and the server past its memory cap.
+- A cache reset while a long prompt was being saved could make a later reply
+  restore the wrong context.
 - With a drafter, requests that shared a long prompt prefix decoded slower
   once one of them had restored its prefix from the prompt cache.
 - With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long

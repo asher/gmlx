@@ -365,6 +365,47 @@ def test_a_record_payload_materializes_within_the_record_bounds(
     assert all(r.nbytes == each for r in idx.values())
 
 
+@pytest.mark.parametrize("at", ["payload copy", "clone decline"])
+def test_a_reset_during_a_checkpoint_store_leaves_the_pool_free(
+        monkeypatch, at):
+    """A cache reset that lands while a checkpoint store holds its chains:
+    the store inserts no record over the freed blocks and releases none of
+    them, so the free list holds every block once and a later lookup
+    restores nothing."""
+    from gmlx.cache.apc_manager import GmlxAPCManager
+    from gmlx.eval_guard import guard
+
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 132))
+    if at == "payload copy":
+        real = guard.eval
+
+        def spy(*arrays, **kw):
+            if kw.get("site") == "ckpt-store-clones":
+                man.clear()
+            return real(*arrays, **kw)
+
+        monkeypatch.setattr(guard, "eval", spy)
+    else:
+        def clone(cache, eval_targets=None):
+            man.clear()
+            return None
+
+        monkeypatch.setattr(cs, "_clone_single_row", clone)
+    try:
+        assert ckpt_store(man, ids, make_hybrid_cache(32, seed=1)) == 0
+        assert not cs._ckpt_records(man)
+        free, b = [], man._free_head
+        while b is not None and len(free) <= len(man.pool):
+            free.append(id(b))
+            b = b.next
+        assert sorted(free) == sorted(id(b) for b in man.pool)
+        assert all(b.ref_cnt == 0 for b in man.pool)
+        assert ckpt_lookup(man, ids + [1], extra_hash=0)[1] == 0
+    finally:
+        man.close()
+
+
 def test_a_decode_snapshot_materializes_within_the_ring(monkeypatch):
     """The ring holds two decode snapshots. The oldest makes room before
     the third materializes, so a row never holds three, and the ring keeps

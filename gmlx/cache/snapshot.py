@@ -1166,6 +1166,17 @@ def _window_to_disk(manager, rec, held, gen) -> None:
                 manager.release(held)
 
 
+def _release_if_current(manager, blocks, gen: int | None) -> None:
+    """Release ``blocks`` taken at clear generation ``gen``. After a
+    clear() the pool rebuilt its free list under them, so they stay
+    unreleased: a release would push free blocks twice."""
+    if not blocks:
+        return
+    with manager.lock:
+        if gen is None or int(getattr(manager, "_kq_ckpt_gen", 0)) == gen:
+            manager.release(blocks)
+
+
 def _release_record(manager, rec) -> None:
     for blocks in (rec.main_blocks, rec.bounded_blocks):
         if blocks:
@@ -1504,7 +1515,7 @@ def _note_budget_evictions(manager, rec, victims, note) -> None:
 
 
 def _record_insert(manager, rec, keep: int | None = None,
-                   materialize=None) -> None:
+                   materialize=None, gen: int | None = None) -> bool:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
     second-newest on a just-grown chain is among the most recently touched),
@@ -1548,11 +1559,22 @@ def _record_insert(manager, rec, keep: int | None = None,
     first with the record counted, from its shapes, so the payload lands
     in the room they made. The record sits out of the index while it
     materializes, so no lookup adopts arrays not yet evaluated, and comes
-    back as the newest."""
+    back as the newest.
+
+    ``gen``: the clear generation the record's blocks were taken at. Once
+    a clear() has run since, the pool holds them as free: nothing goes in,
+    nothing is released, and the call returns False."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
+
+    def cleared() -> bool:
+        return (gen is not None
+                and int(getattr(manager, "_kq_ckpt_gen", 0)) != gen)
+
     with manager.lock:
+        if cleared():
+            return False
         old = idx.pop(key, None)
         if old is not None:
             if old.kind == "anchor" and rec.kind == "boundary":
@@ -1617,8 +1639,11 @@ def _record_insert(manager, rec, keep: int | None = None,
     if materialize is not None:
         materialize()
         with manager.lock:
+            if cleared():
+                return False
             idx[key] = rec
             idx.move_to_end(key)
+    return True
 
 
 def ckpt_store(
@@ -1659,6 +1684,7 @@ def ckpt_store(
 
     main_blocks: list[Any] = []
     bounded_blocks: list[Any] = []
+    gen = None
     try:
         ids = [int(t) for t in token_ids]
         p = len(ids)
@@ -1801,7 +1827,7 @@ def ckpt_store(
             evicted_total = 0
             while len(blocks) < need:
                 got = len(blocks)
-                manager.release(blocks)
+                _release_if_current(manager, blocks, gen)
                 evicted = _evict_for_pool(manager, need - got,
                                           store_ids=ids)
                 if not evicted:
@@ -1819,6 +1845,10 @@ def ckpt_store(
                     "%s chain store", evicted_total, what)
             return blocks
 
+        # The clear generation the chains are taken at: a clear() before
+        # the insert frees them under the record (_record_insert).
+        with manager.lock:
+            gen = int(getattr(manager, "_kq_ckpt_gen", 0))
         if b_full > 0 and kv_caches:
             lk = [c.keys[..., :b_full, :] for c in kv_caches]
             lv = [c.values[..., :b_full, :] for c in kv_caches]
@@ -1850,12 +1880,12 @@ def ckpt_store(
                          for cw in canon]
             if any(cw is None for cw in canon):
                 _ckpt_decline(manager, "canon")
-                manager.release(main_blocks)
+                _release_if_current(manager, main_blocks, gen)
                 return 0
             metas = {cw[2] for cw in canon}
             if len(metas) != 1:
                 _ckpt_decline(manager, "canon")
-                manager.release(main_blocks)
+                _release_if_current(manager, main_blocks, gen)
                 return 0
             rot_meta = canon[0][2]
             sink, _w, _off, L = rot_meta
@@ -1871,7 +1901,7 @@ def ckpt_store(
                 canon_ids, canon_k, canon_v, extra=bsalt, disk=rot_disk,
                 need=L // bs, what="window")
             if got_win is None:
-                manager.release(main_blocks)
+                _release_if_current(manager, main_blocks, gen)
                 return 0
             bounded_blocks = got_win
 
@@ -1881,8 +1911,8 @@ def ckpt_store(
         states = [_clone_single_row(c, pending) for c in inline_caches]
         if any(s is None for s in states):
             _ckpt_decline(manager, "clone")
-            manager.release(main_blocks)
-            manager.release(bounded_blocks)
+            _release_if_current(manager, main_blocks, gen)
+            _release_if_current(manager, bounded_blocks, gen)
             return 0
         # QSA layers: the chain carries only k/v, so the indexer key
         # stream (and mrope positions) ride the record whole. ik is one
@@ -1903,8 +1933,8 @@ def ckpt_store(
                 qsa_streams.append((ik, qpos, int(c.ratio)))
             if qsa_streams is None:
                 _ckpt_decline(manager, "clone")
-                manager.release(main_blocks)
-                manager.release(bounded_blocks)
+                _release_if_current(manager, main_blocks, gen)
+                _release_if_current(manager, bounded_blocks, gen)
                 return 0
             pending.extend(a for t in qsa_streams for a in t[:2]
                            if a is not None)
@@ -1918,8 +1948,8 @@ def ckpt_store(
                 t = _clone_single_row(t, pending)
                 if t is None:
                     _ckpt_decline(manager, "clone")
-                    manager.release(main_blocks)
-                    manager.release(bounded_blocks)
+                    _release_if_current(manager, main_blocks, gen)
+                    _release_if_current(manager, bounded_blocks, gen)
                     return 0
                 tails.append(t)
 
@@ -1936,9 +1966,16 @@ def ckpt_store(
             layout=tuple(layout), main_blocks=main_blocks,
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
             states=states, tails=tails, qsa=qsa_streams, kind=str(kind))
-        _record_insert(manager, rec, keep, materialize)
+        inserted = _record_insert(manager, rec, keep, materialize, gen)
         # Ownership moved to the record; the except path must not release.
         main_blocks = bounded_blocks = []
+        if not inserted:
+            # A clear() ran since the chains were taken; the pool holds
+            # their blocks as free and the reset dropped what was cached.
+            _ckpt_decline(manager, "reset")
+            _log.info("APC ckpt store dropped: the cache was reset during "
+                      "the store (p=%d)", p)
+            return 0
 
         if skeleton_disk:
             _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
@@ -1960,7 +1997,7 @@ def ckpt_store(
             pass
         for blks in (main_blocks, bounded_blocks):
             try:
-                manager.release(blks)
+                _release_if_current(manager, blks, gen)
             except Exception:  # noqa: S110 - best-effort release on the failure path
                 pass
         _log.warning("APC ckpt store failed; continuing", exc_info=True)
