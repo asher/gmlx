@@ -1215,6 +1215,9 @@ class QSAKVCache(KVCache):
     """
 
     kv_quant_unsupported = True
+    # The indexer keys and the block keys grow beside K and V; the config
+    # prices them as this layer's pools (mem_preflight.pool_bytes_per_token).
+    holds_config_pools = True
     # Kept out of batching and the stock KV quant arms (gmlx.cache.refusals).
     to_batch = refusals.refuse_batch
     preserve_auxiliary_kv_state = True

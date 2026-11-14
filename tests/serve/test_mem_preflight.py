@@ -714,3 +714,37 @@ def test_a_scoring_job_prices_fp16_kv_under_a_quantized_policy(
     assert mp.prompt_kv_bytes(quarter(rg, SCORED), 6000) < 0.3e9
     with pytest.raises(PromptTooLongError):
         mp.preflight_scoring(rg, 6000)
+
+
+def test_qwen4exp_prices_the_indexer_and_block_keys_it_holds():
+    """A qwen4exp attention layer with a compress ratio holds, per token,
+    its K and V, one raw indexer key, and one finished block key per
+    ratio tokens. Flash-Next's 12 such layers hold 28,416 B a token where
+    K and V alone are 24,576 B. The price read off the config and the one
+    read off the cache stack both cover all of it."""
+    import mlx.core as mx
+
+    from gmlx.cache.kv_cache import ArraysCache
+    from gmlx.models.qwen4_exp.model import ModelArgs, QSAKVCache
+
+    args = ModelArgs(num_hidden_layers=4, full_attention_interval=2,
+                     num_key_value_heads=2, head_dim=16,
+                     indexer_head_dim=8, compress_ratios=[0, 4, 0, 4])
+    model = SimpleNamespace(config=args)
+    stack = [ArraysCache(size=2), QSAKVCache(4), ArraysCache(size=2),
+             QSAKVCache(4)]
+    tokens, held = 64, 0
+    for c in stack[1::2]:
+        rows = mx.zeros((1, 2, tokens, 16), mx.bfloat16)
+        c.append_qsa(rows, rows, mx.zeros((1, tokens, 8), mx.bfloat16))
+        c.finished_blocks(tokens // 4,
+                          lambda raw, start: raw.reshape(1, -1, 4, 8).mean(2))
+        held += sum(a.nbytes for a in c.state) + c.blocks.nbytes
+    per_token = held / tokens
+
+    def growing(costs):
+        return sum(b for w, b in costs if w is None)
+
+    assert growing(mp.kv_layer_costs(model)) == per_token
+    geometry = mp.stack_geometry(model, stack)
+    assert growing(mp.kv_layer_costs(model, geometry=geometry)) == per_token

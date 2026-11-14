@@ -224,7 +224,10 @@ def pool_bytes_per_token(c, layers):
     them. glm5_next keeps an indexer pool on each attention layer, one row
     per ``index_kpool`` tokens. The DSA models (deepseek_v32, glm_moe_dsa,
     hy_v4) keep their indexer keys one row per token on each layer that
-    owns an indexer. Zero for any other layout."""
+    owns an indexer. qwen4_exp keeps, on each layer with a compress
+    ratio, its QSA indexer keys ``indexer_head_dim`` wide, one row per
+    token, and their finished block keys, one row per ``compress_ratio``
+    tokens. Zero for any other layout."""
     out = [0.0] * layers
     mt = _get(c, "model_type")
     width = _get(c, "head_dim") or 0
@@ -233,6 +236,13 @@ def pool_bytes_per_token(c, layers):
     if indexed is not None:
         return [index * _POOL_BYTES if i in indexed else 0.0
                 for i in range(layers)]
+    if mt == "qwen4_exp":
+        ratios = _get(c, "compress_ratios")
+        dim = _get(c, "indexer_head_dim") or 0
+        if not isinstance(ratios, (list, tuple)) or len(ratios) < layers:
+            return out
+        return [dim * _POOL_BYTES * (1 + 1 / int(r)) if int(r) > 0 else 0.0
+                for r in ratios[:layers]]
     if mt == "glm5_next":
         kpool = _get(c, "index_kpool")
         if isinstance(kpool, int) and kpool > 0 and index:
@@ -337,8 +347,12 @@ def stack_geometry(model, stack):
         has_state = (state is not None
                      and any(isinstance(m, types["state"]) for m in members))
         # The config prices a layer's pools when the stack holds them: a
-        # pooling cache, or a second growing cache (a DSA indexer's keys).
-        pooled = any(hasattr(m, "quantize_storage") for m in members)
+        # pooling cache, a cache that keeps its pools beside its KV
+        # (``holds_config_pools``), or a second growing cache (a DSA
+        # indexer's keys).
+        pooled = any(hasattr(m, "quantize_storage")
+                     or getattr(m, "holds_config_pools", False)
+                     for m in members)
         growing = sum(k in ("kv", "optout") for k in kinds)
         pool = pools[i] if pools[i] and (pooled or growing > 1) else 0.0
         # The rotating window caps the layer whatever rides beside it, as
