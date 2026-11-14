@@ -12,15 +12,27 @@ post-prefill store.
 """
 
 import logging
+from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
 
 import gmlx.cache.apc_manager as am
+import gmlx.cache.retire_key as retire_key
 import gmlx.cache.snapshot as cs
+import gmlx.spec.ckpt as ckpt
+import gmlx.spec.engine as engine
 from gmlx.cache.apc_manager import GmlxAPCManager
 from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
-from test_ckpt_tier import H, LAYOUT, _trim_kv, make_hybrid_cache
+from test_ckpt_plain_path import _plain_batch
+from test_ckpt_tier import (
+    D,
+    H,
+    LAYOUT,
+    _qsa_hybrid_cache,
+    _trim_kv,
+    make_hybrid_cache,
+)
 
 pytestmark = pytest.mark.host_gb(16)
 
@@ -284,34 +296,157 @@ def test_the_replay_stands_in_for_the_post_prefill_store():
     assert not cs.ckpt_replay_stands_in(man, ids + [7, 8], cache)
 
 
-def test_the_plain_post_prefill_skips_the_store_its_replay_covers():
-    """The plain path's p=N store, driven as generation drives it, from
-    the stash the arming left on the cache: it runs for a prompt with no
-    replay and is skipped for one whose replay landed."""
-    from types import SimpleNamespace
+def _plain_armed(man, ids, make, seed):
+    """A stock prompt batch armed by _plain_ckpt_init over a live cache
+    from ``make``. The stash it leaves on the cache is the request's."""
+    engine._bind_l1_view()
+    b = _plain_batch(man, ids)
+    b.prompt_cache = make(len(ids), seed=seed)
+    ckpt._plain_ckpt_init(b)
+    return b
 
+
+def _mtp_armed(man, ids, make, seed):
+    """An MTP prompt batch armed by _mtp_prefill_init, and the retirement
+    context the B=1 rounds pop off its cache."""
+    from gmlx.spec import mtp_prefill
+    from gmlx.spec.speculative import _pop_retire_ctx
+
+    engine._bind_l1_view()
+    model = SimpleNamespace(_kq_apc_manager=man, _kq_apc_mode="exact",
+                            config=SimpleNamespace(),
+                            make_cache=lambda: make(0))
+    cache = make(len(ids), seed=seed)
+    batch = SimpleNamespace(
+        model=model, _input_ids=mx.array([ids]),
+        _inputs_embeds=mx.zeros((1, len(ids), 4)), prompt_cache=cache,
+        _prompt_kwargs={}, prefill_step_size=16,
+        _prompt_length_aware_keys=())
+    mtp_prefill._mtp_prefill_init(batch)
+    return model, cache, _pop_retire_ctx(cache)
+
+
+def _replay(man, stash, cache):
+    """The N-1 replay record the prefill stores for the stash's prompt."""
+    ids = stash["full_ids"]
+    assert ckpt_store(man, ids[:-1], _trim_kv(cache, len(ids) - 1),
+                      extra_hash=stash["extra_hash"], kind="replay")
+
+
+def _plain_post_prefill(man, ids, seed, replay):
     from gmlx.spec.mtp_prefill import _ckpt_plain_post_prefill
 
+    b = _plain_armed(man, ids, make_hybrid_cache, seed)
+    if replay:
+        _replay(man, b.prompt_cache[0]._kq_apc_retire, b.prompt_cache)
+    _ckpt_plain_post_prefill(b)
+    return b._apc_meta[0]
+
+
+def _mtp_post_prefill(man, ids, seed, replay):
+    from gmlx.spec.speculative import _ckpt_post_prefill
+
+    model, cache, ctx = _mtp_armed(man, ids, make_hybrid_cache, seed)
+    if replay:
+        _replay(man, ctx, cache)
+    _ckpt_post_prefill(model, cache, ctx)
+    return ctx["apc_meta"]
+
+
+@pytest.mark.parametrize("post", [_plain_post_prefill, _mtp_post_prefill],
+                         ids=["plain", "mtp"])
+def test_the_post_prefill_skips_the_store_its_replay_covers(post):
+    """The p=N store of the stock path and of the B=1 MTP rounds, each
+    driven from the stash its arming left: it runs for a prompt with no
+    replay and is skipped for one whose replay landed, which stands in."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     n = 52
-
-    def run(chain):
-        cache = make_hybrid_cache(n, seed=chain)
-        meta = {}
-        cache[0]._kq_apc_retire = {"mode": "ckpt", "manager": man,
-                                   "full_ids": _ids(chain, n),
-                                   "extra_hash": chain, "apc_meta": meta}
-        _ckpt_plain_post_prefill(SimpleNamespace(prompt_cache=cache))
-        return meta
-
-    assert run(1) == {"ckpt_stored_boundaries": [n]}
-    assert ckpt_store(man, _ids(2, n - 1),
-                      _trim_kv(make_hybrid_cache(n, seed=2), n - 1),
-                      extra_hash=2, kind="replay")
-    assert run(2) == {}
-    by_chain = {r.extra_hash: r.p for r in cs._ckpt_records(man).values()}
-    assert by_chain == {1: n, 2: n - 1}
+    a, b = _ids(1, n), _ids(2, n)
+    assert post(man, a, 1, replay=False)["ckpt_stored_boundaries"] == [n]
+    assert post(man, b, 2, replay=True)["ckpt_stored_boundaries"] == []
+    # The first restorable boundary on a chain is its anchor.
+    recs = {r.ids[0]: (r.p, r.kind) for r in cs._ckpt_records(man).values()}
+    assert recs == {a[0]: (n, "anchor"), b[0]: (n - 1, "anchor")}
     assert man.stats_snapshot()["ckpt_stores"] == 2
+
+
+def _decode_qsa(cache, tok):
+    """One decode step on a QSA hybrid row: a key, value and indexer key
+    row on each QSA layer, new recurrent states on the rest."""
+    mx.random.seed(tok)
+    for c in cache:
+        if hasattr(c, "update_and_fetch_qsa"):
+            c.update_and_fetch_qsa(mx.random.normal((1, H, 1, D)),
+                                   mx.random.normal((1, H, 1, D)),
+                                   mx.random.normal((1, 1, D)))
+        else:
+            c.cache = [mx.random.normal(a.shape) for a in c.cache]
+
+
+def _render(monkeypatch, final):
+    """A server render context at arming. The next-turn LCP does not
+    diverge while decoding and is ``final(seq)`` at retirement."""
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "16")
+    monkeypatch.setattr(retire_key, "lookup_render_ctx",
+                        lambda ids: {"stub": True})
+    monkeypatch.setattr(
+        retire_key, "next_turn_lcp",
+        lambda ctx, seq, gen, partial=False:
+            len(seq) if partial else final(seq))
+
+
+def _plain_turn(man, ids, steps):
+    """Arm, decode and retire a stock-path row: the step tick takes the
+    decode snapshots and the batch filter retires through _plain_retire."""
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+
+    ckpt._install_plain_ckpt_decode()
+    b = _plain_armed(man, ids, _qsa_hybrid_cache, ids[0])
+    gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    gb.uids = [ids[0]]
+    gb.prompt_cache = b.prompt_cache
+    for tok in steps:
+        _decode_qsa(gb.prompt_cache, tok)
+        ckpt._plain_step_tick(gb, ([tok], None, None, None))
+    stash = gb._kq_apc_retire_rows[ids[0]]
+    gb.filter([])
+    return stash
+
+
+def _mtp_turn(man, ids, steps):
+    """The same through the B=1 MTP rounds: their decode tick, then
+    _retire_b1."""
+    from gmlx.cache.snapshot import decode_ckpt_tick
+    from gmlx.spec.speculative import _retire_b1
+
+    model, cache, ctx = _mtp_armed(man, ids, _qsa_hybrid_cache, ids[0])
+    gen = []
+    for tok in steps:
+        _decode_qsa(cache, tok)
+        gen.append(tok)
+        decode_ckpt_tick(ctx, cache, gen)
+    _retire_b1(model, cache, gen, ctx)
+    return ctx
+
+
+@pytest.mark.parametrize("turn", [_plain_turn, _mtp_turn],
+                         ids=["plain", "mtp"])
+def test_a_retirement_checks_the_layout_its_arming_signed(monkeypatch, turn):
+    """Driven from the arming: it signs the live QSA layout, a decode
+    snapshot lands at 48, and the row retires at 56. The whole sequence
+    stores. A render that diverges at 52 falls to the snapshot, whose QSA
+    layers come back as plain KV: one retire_layout decline, no record."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    steps = range(9000, 9024)
+    _render(monkeypatch, len)
+    stash = turn(man, _ids(0, 32), steps)
+    assert [p for p, _ in stash["snaps"]] == [48]
+    assert [r.p for r in cs._ckpt_records(man).values()] == [56]
+    _render(monkeypatch, lambda seq: 52)
+    stash = turn(man, _ids(1, 32), steps)
+    assert [p for p, _ in stash["snaps"]] == [48]
+    assert [r.p for r in cs._ckpt_records(man).values()] == [56]
+    assert man.stats_snapshot()["ckpt_declines"] == {"retire_layout": 1}
 
 
 def test_the_counters_reach_the_stats_and_the_metrics_payload(monkeypatch):
