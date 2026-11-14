@@ -293,3 +293,38 @@ def test_a_load_with_an_untracked_table_prints_the_limits_it_leaves(
     assert line == ("[memory] per_layer_token_embd.weight untracked, 28.8 GB: "
                     "the wired limit is pinned at 0, MLX memory limit "
                     f"{mlx_limit / 1e9:.1f} GB")
+
+
+@pytest.mark.host_gb(128)
+def test_a_process_that_maps_no_table_untracked_keeps_mlx_limits(
+        restore_wired_limit, monkeypatch):
+    """The server start and the CLI's cache-limit step read the memory
+    wired outside the process, and install nothing: a process whose loads
+    map no table untracked plans under the serve ceiling, and keeps MLX's
+    own mx.set_wired_limit and memory limit, as before the wired cap. A
+    generation then gets the whole working set it asks for."""
+    from types import SimpleNamespace
+
+    from gmlx.serve import capacity, memory
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(mx, "default_device", lambda: mx.Device(mx.gpu))
+    monkeypatch.setattr(mx, "synchronize", lambda *a, **k: None)
+    monkeypatch.setattr(mx, "set_cache_limit", lambda n: 0)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", None)
+    monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
+    calls = _recorded_limit(monkeypatch, 0)
+    stock = mx.set_wired_limit
+    mlx_limit = mx.get_memory_limit()
+    memory.apply_cache_limit(SimpleNamespace(cache_limit_gb=None, models={}))
+    memory.apply_local_cache_limit([])
+    assert capacity._OUTSIDE_WIRED is not None
+    assert not capacity.cap_applies()
+    assert mx.set_wired_limit is stock
+    assert mx.get_memory_limit() == mlx_limit
+    ws = capacity.working_set_bytes()
+    assert capacity.wired_cap_bytes() == capacity.ceiling_bytes(ws)
+    _install_wired_limit_warn_once()
+    with _gen.wired_limit({"w": mx.zeros((4,), dtype=mx.float32)}):
+        pass
+    assert calls == [pytest.approx(ws, abs=1), 0]

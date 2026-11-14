@@ -318,8 +318,10 @@ def test_streamed_credit_raises_headroom(monkeypatch):
     # over-RAM streaming model reads ~-150 GB headroom and every request
     # sheds from red (the 153 GB DSv4 verify)
     _fresh_streamed(monkeypatch)
-    box = _active(monkeypatch)
-    box["active"] = 237 * GB
+    monkeypatch.setattr(
+        pd.mx, "device_info",
+        lambda: {"max_recommended_working_set_size": 120 * GB})
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 237 * GB)
     assert pd.headroom_bytes() == -117 * GB
     pd.note_streamed_tracked_bytes(156 * GB, key=("/models/moe.gguf",))
     assert pd.headroom_bytes() == 39 * GB
@@ -350,15 +352,41 @@ def test_streamed_credit_sources_sum_under_union_cap(monkeypatch):
     assert pd.streamed_tracked_bytes() == 163 * GB
 
 
-def _active(monkeypatch, cap_gb=120):
-    """Active memory read from a box, under a wired cap of ``cap_gb``,
-    with an empty buffer cache."""
+def _active(monkeypatch, ws_gb=120):
     box = {"active": 10 * GB}
-    monkeypatch.setattr("gmlx.serve.capacity.wired_cap_bytes",
-                        lambda ws=None, m=None: cap_gb * GB)
-    monkeypatch.setattr(pd.mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr(
+        pd.mx, "device_info",
+        lambda: {"max_recommended_working_set_size": ws_gb * GB})
     monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
     return box
+
+
+@pytest.mark.parametrize("engaged", [False, True])
+def test_headroom_reads_the_wired_cap_only_where_it_applies(monkeypatch,
+                                                            engaged):
+    # A process measures the headroom against the working set and counts
+    # the buffer cache as free. One that maps a table untracked measures
+    # it under the wired cap, at the margin passed, and counts the cache
+    # as used: MLX wires it beside the active bytes.
+    import gmlx.serve.capacity as capacity
+
+    _fresh_streamed(monkeypatch)
+    _active(monkeypatch)                  # 120 GB working set, 10 GB active
+    monkeypatch.setattr(pd.mx, "get_cache_memory", lambda: 3 * GB)
+    margins = []
+
+    def cap(ws=None, m=None):
+        margins.append(m)
+        return 100 * GB
+
+    monkeypatch.setattr(capacity, "wired_cap_bytes", cap)
+    monkeypatch.setattr(capacity, "_CAP_ENGAGED", engaged)
+    if engaged:
+        assert pd.headroom_bytes(0.07) == 100 * GB - 10 * GB - 3 * GB
+        assert margins == [0.07]
+    else:
+        assert pd.headroom_bytes(0.07) == 120 * GB - 10 * GB
+        assert margins == []
 
 
 def test_build_credit_follows_active_growth_up_to_the_cap(monkeypatch):
@@ -452,10 +480,9 @@ def test_release_takes_back_credit_and_cap(monkeypatch):
 # streamable table) and E (the routed experts); each part loads either
 # allocator-tracked (in get_active_memory) or zero-copy (in the untracked
 # registry). The arena and the KV are tracked allocations. At every stage
-# the free figure must be the real one, the wired cap minus the resident
-# weights, the arena and the KV, and the install must end the serve build
-# credit.
-_N, _E, _ARENA, _KV, _CAP = 20 * GB, 100 * GB, 8 * GB, 4 * GB, 120 * GB
+# the free figure must be the real one, ws minus the resident weights,
+# the arena and the KV, and the install must end the serve build credit.
+_N, _E, _ARENA, _KV, _WS = 20 * GB, 100 * GB, 8 * GB, 4 * GB, 120 * GB
 _TABLES = {"small-table": 27 * GB, "large-table": 130 * GB}   # T < E, T >= E
 _REGIMES = {                    # the parts that load allocator-tracked
     "zero-copy": set(),
@@ -479,7 +506,7 @@ _CASES = [(r, i, t, serve, unmap)
 def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
                                               table, serve, unmap):
     _fresh_streamed(monkeypatch)
-    box = _active(monkeypatch, cap_gb=_CAP // GB)
+    box = _active(monkeypatch, ws_gb=_WS // GB)
     size = {"N": _N, "T": _TABLES[table], "E": _E}
     parts, streamed = _INSTALLS[install]
     tracked_parts = _REGIMES[regime] & parts
@@ -488,7 +515,7 @@ def test_free_is_the_real_free_at_every_stage(monkeypatch, regime, install,
     key = ("/models/moe.gguf",)
 
     def real(resident, extra=0.0):
-        return _CAP - resident - extra
+        return _WS - resident - extra
 
     # The build: serve opens a window and credits the bytes the header
     # predicts the install will stream (capacity.predicted_stream_bytes)

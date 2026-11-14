@@ -1016,10 +1016,8 @@ def _max_pool_tensors() -> int:
 
 
 def _cache_room_bytes(budget: float) -> float:
-    """The working budget (the wired cap) left to the prompt cache:
-    ``budget`` less the weights held now. The MLX buffer cache yields at
-    the cap, so it takes no share. The pool's share is
-    _POOL_BUDGET_FRACTION of this."""
+    """The working budget left to the prompt cache: ``budget`` less the
+    weights held now. The pool's share is _POOL_BUDGET_FRACTION of this."""
     import mlx.core as mx
 
     from gmlx.gen.prefill_decay import (

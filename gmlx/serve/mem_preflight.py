@@ -491,23 +491,35 @@ def prompt_kv_bytes(costs, tokens: int) -> float:
 
 
 def available_drained_bytes():
-    """The wired cap minus zero-copy weights, minus a streaming model's
-    decode arena and the admission reserve: what a lone request could hold
-    with the batch drained. The arena is MLX-tracked, sized at install and
-    never drained. The buffer cache yields at the cap, so it takes no
-    share. Other MLX-tracked weight allocations are not subtracted, which
-    only admits more. None when the device cannot be read; a cap of 0 is
-    a known one, and leaves no room."""
+    """Working set minus zero-copy weights, minus a streaming model's
+    decode arena, minus the admission reserve: what a lone request could
+    hold with the batch drained. The arena is MLX-tracked, sized at install
+    and never drained. Other MLX-tracked weight allocations are not
+    subtracted, which only admits more. In a process that maps a table
+    outside MLX's tracker (``capacity.cap_applies``), the wired cap takes
+    the working set's place: the buffer cache yields there, so it takes
+    no share, and a cap of 0 is a known one that leaves no room. None when
+    the device cannot be read."""
+    from gmlx.device import metal_value
     from gmlx.gen.prefill_decay import untracked_weight_bytes
     from gmlx.stream.installs import live_arena_bytes
-    from .capacity import wired_cap_bytes
+    from .capacity import cap_applies, wired_cap_bytes
     from .memory import admit_reserve_bytes
 
-    cap = wired_cap_bytes()
-    if cap is None:
+    if cap_applies():
+        cap = wired_cap_bytes()
+        if cap is None:
+            return None
+        return (cap - untracked_weight_bytes() - live_arena_bytes()
+                - admit_reserve_bytes(cap))
+    try:
+        ws = float(metal_value("max_recommended_working_set_size"))
+    except Exception:
         return None
-    return (cap - untracked_weight_bytes() - live_arena_bytes()
-            - admit_reserve_bytes(cap))
+    if ws <= 0:
+        return None
+    return (ws - untracked_weight_bytes() - live_arena_bytes()
+            - admit_reserve_bytes(ws))
 
 
 def _need_bytes(model, costs, prompt_tokens: int, gen_tokens: int = 0):

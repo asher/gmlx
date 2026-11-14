@@ -149,6 +149,32 @@ def test_flash_next_stays_in_memory_beside_apps_and_streams_beside_a_model():
         f"other apps. {budget.OVERCOMMIT_LEVER}")
 
 
+@pytest.mark.parametrize("engaged", [True, False])
+def test_a_set_and_its_room_past_the_wired_cap_streams_under_the_cap(
+        monkeypatch, engaged):
+    # In a process that maps a table untracked, the resident set and its
+    # KV room must fit under the wired cap, where the MLX memory limit
+    # sits: past it, every eval waits for the GPU work in flight. Any
+    # other process judges the set as before, with no cap leg.
+    import gmlx.serve.capacity as capacity
+
+    box, _ = host_box.mac(128)
+    _box(box, unwired=125.1e9)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", 0.0)
+    monkeypatch.setattr(capacity, "_CAP_ENGAGED", engaged)
+    room = budget.KvRoom(int(14.4e9), 32768, 1, 0, 0, 0, priced=True)
+    cap = int(capacity.wired_cap_bytes())
+    assert _check(cap - room.bytes, room=room.bytes).fits
+    check = _check(cap - room.bytes + 1, room=room.bytes)
+    if not engaged:
+        assert check.fits and check.cap_bytes is None
+        return
+    assert check.reason == "cap" and check.cap_bytes == cap
+    assert check.line(room, None).startswith(
+        f"{budget.STREAM_OVER_BUDGET}: holding them takes ")
+    assert f"past the {cap / 1e9:.1f} GB wired cap." in check.line(room, None)
+
+
 def test_the_budget_leg_judges_every_wire():
     box, vm = host_box.runner()
     host_box.use(box, vm)

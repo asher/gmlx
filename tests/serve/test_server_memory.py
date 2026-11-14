@@ -115,16 +115,23 @@ def test_a_wired_cap_of_zero_keeps_the_cache_bounded(monkeypatch):
     import gmlx.serve.mem_preflight as mp
     from gmlx.stream import installs
 
+    from gmlx.stream.wired_limit import install_wired_cap
+
     monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
     monkeypatch.setattr(capacity, "working_set_bytes", lambda: 48e9)
     monkeypatch.setattr(capacity, "wired_cap_bytes",
                         lambda ws=None, m=None: 0.0)
     monkeypatch.setattr(capacity, "note_outside_wired", lambda: 0.0)
+    # The clamp the install wraps around it goes when the test ends.
+    monkeypatch.setattr(mx, "set_wired_limit", mx.set_wired_limit)
     limits: list = []
     monkeypatch.setattr(mx, "set_cache_limit", limits.append)
     mlx_limit = mx.get_memory_limit()
     sm.apply_local_cache_limit([])
     assert limits == [sm.auto_cache_limit_bytes(48e9, 0)]
+    # The first untracked map installs the cap.
+    install_wired_cap()
+    assert capacity.cap_applies()
     assert mx.get_memory_limit() == mlx_limit
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 0.0)
     monkeypatch.setattr(installs, "_ARENAS", [])

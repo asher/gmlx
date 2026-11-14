@@ -183,11 +183,11 @@ def test_thread_stream_ownership_matrix():
 
 
 def test_the_buffer_cache_yields_at_the_memory_limit():
-    """The wired cap sets the memory limit, so the cache yields there
-    instead of holding a fixed share of the plan: active plus cache
-    stays under the limit across allocations and frees, which the same
-    steps under MLX's own limit do not, and an allocation past the
-    limit is made rather than thrown."""
+    """The wired cap of a process that maps a table untracked sets the
+    memory limit, so the cache yields there instead of holding a fixed
+    share of the plan: active plus cache stays under the limit across
+    allocations and frees, which the same steps under MLX's own limit do
+    not, and an allocation past the limit is made rather than thrown."""
     got = {}
     for arm in ("limited", "default"):
         r = run_probe("cache_yields.py", arm)

@@ -19,7 +19,8 @@ Auto policy: always bounded. When the largest configured model's weight
 bytes its load can wire (``model_weight_bytes``) exceed ``_AUTO_PRESSURE``
 of the recommended working set, cap the cache at a quarter of the
 remaining slack, clamped to [4, 12] GiB. Otherwise cap it at
-``_AUTO_SLACK_SHARE`` of the working set, same clamp. The wired cap
+``_AUTO_SLACK_SHARE`` of the working set, same clamp. In a process that
+maps a table outside MLX's tracker, the wired cap
 (``capacity.wired_cap_bytes``) sets the MLX memory limit too, so the
 cache also yields there.
 MLX's own default is the memory limit (1.5x the working set), so an
@@ -550,15 +551,15 @@ def admission_slack_bytes(gen, n_candidates: int) -> float:
 def apply_cache_limit(cfg) -> None:
     """Resolve and apply the server's cache limit; called once at startup,
     before any load. Working-set source: capacity (the one accounting,
-    U4). Installs the wired cap first, which sets the MLX memory limit
-    the cache yields at."""
+    U4). Reads the memory wired outside the server first, for the wired
+    cap of a load that maps a table outside MLX's tracker."""
     import mlx.core as mx
 
-    from gmlx.stream.wired_limit import install_wired_cap
+    from gmlx.stream.wired_limit import read_outside_wired
 
     from .capacity import working_set_bytes
 
-    install_wired_cap(announce=True)
+    read_outside_wired(announce=True)
     ws = working_set_bytes() or 0.0
     paths = [str(mc.path) for mc in getattr(cfg, "models", {}).values()]
     limit, source = resolve_cache_limit(
@@ -577,15 +578,16 @@ def apply_cache_limit(cfg) -> None:
 def apply_local_cache_limit(model_paths, verbose: bool = False) -> None:
     """The serve policy for the in-process verbs (run, chat), set before
     the load: GMLX_CACHE_LIMIT_GB, else the auto policy. A later owner
-    (expert streaming's allocator) replaces it. Installs the wired cap
-    first, which sets the MLX memory limit the cache yields at."""
+    (expert streaming's allocator) replaces it. Reads the memory wired
+    outside the process first, for the wired cap of a load that maps a
+    table outside MLX's tracker."""
     import mlx.core as mx
 
-    from gmlx.stream.wired_limit import install_wired_cap
+    from gmlx.stream.wired_limit import read_outside_wired
 
     from .capacity import working_set_bytes
 
-    install_wired_cap()
+    read_outside_wired()
     ws = working_set_bytes() or 0.0
     paths = [str(p) for p in model_paths if p]
     limit, source = resolve_cache_limit(None, paths, ws)

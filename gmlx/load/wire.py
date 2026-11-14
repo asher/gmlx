@@ -57,11 +57,12 @@ def load_gguf_wire_bytes(
     (``stream.table_pread``), and the loader attaches the sources with
     ``install_deferred_tables``.
     """
-    from gmlx.stream.wired_limit import install_wired_cap
+    from gmlx.stream.wired_limit import read_outside_wired
 
-    # Before the first array: the cap reads the memory wired outside the
-    # process once, before the process wires any of its own.
-    install_wired_cap()
+    # Before the first array: the memory wired outside the process, read
+    # once, before the process wires any of its own, for the wired cap a
+    # table mapped untracked brings in (_load_shard).
+    read_outside_wired()
     if shards is None:
         shards = find_split_shards(gguf_path)
     arch = _arch_of(shards, arch)
@@ -95,6 +96,12 @@ def load_gguf_wire_bytes(
         loadlog.verbose_print(
             f"[gguf] loaded {len(shards)} shards, {len(arrays)} total tensors"
         )
+    from gmlx.serve.capacity import plan_cap
+
+    # The prediction that this load maps a table untracked ends with the
+    # map: a map installed the cap for good, and a load that fell back
+    # to tracked tables plans as any other.
+    plan_cap(gguf_path, False)
 
     if expect_quant and not kquant_meta:
         loadlog.warn(
@@ -111,7 +118,9 @@ def _load_shard(gguf_path: str, shard: str, arch: str | None,
     streams for sure, when the caller installs the table stream on the
     model, map outside MLX's tracker
     (``table_stream.untracked_table_names``), so MLX neither counts nor
-    wires them. An mlx-kquant without ``load_gguf(untracked=...)``, or a
+    wires them. The first such map puts the process under the wired cap
+    (``wired_limit.install_wired_cap``); a process that maps none keeps
+    MLX's limits. An mlx-kquant without ``load_gguf(untracked=...)``, or a
     table it cannot view that way, reloads the shard tracked; the install
     then pins the wired limit as for any tracked table."""
     from gmlx.stream.table_stream import (note_untracked_load,
@@ -133,7 +142,10 @@ def _load_shard(gguf_path: str, shard: str, arch: str | None,
             loadlog.warn(f"[stream] {', '.join(untracked)} loads "
                          f"MLX-tracked: {e}")
         else:
+            from gmlx.stream.wired_limit import install_wired_cap
+
             note_untracked_load(shard, untracked)
+            install_wired_cap()
             loadlog.note(
                 f"[stream] {', '.join(untracked)} mapped untracked, "
                 f"{_table_bytes(out[0], untracked) / 1e9:.1f} GB: MLX "

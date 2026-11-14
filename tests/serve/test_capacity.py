@@ -88,35 +88,82 @@ def _a_mac(monkeypatch, mem: float, ws: float) -> None:
         "max_recommended_working_set_size": ws, "memory_size": mem})
 
 
-@pytest.mark.parametrize("gib", [16, 24, 32, 64, 128])
+# The share of RAM wired outside the server up to which a stock Mac's
+# wired cap is the ceiling it had: RAM less the reserve and the working
+# set term, over RAM.
+_STOCK_EDGES = {16: 0.250, 24: 0.267, 32: 0.267, 64: 0.1875, 128: 0.1875}
+
+
+@pytest.mark.parametrize("gib", sorted(_STOCK_EDGES))
 def test_a_stock_mac_plans_under_the_ceiling_it_had(monkeypatch, gib):
     """The memory wired outside the server comes off the RAM term of the
-    cap only. macOS's own working set (2/3 of RAM under 64 GiB, 3/4 from
-    it) already leaves room for the system and sits under that term, so
-    with up to 10% of RAM wired outside, a stock Mac's cap and working
-    budget are the ceiling it planned under before."""
+    wired cap only. macOS's own working set (2/3 of RAM under 64 GiB, 3/4
+    from it) already leaves room for the system and sits under that term:
+    in a process that maps a table untracked, a stock Mac's cap is the
+    ceiling it planned under before until the memory wired outside passes
+    18.75% of RAM at 64 and 128 GiB, 25.0% at 16 GiB and 26.7% at 24 and
+    32 GiB, and lower past it. Any other process plans under that ceiling
+    at any share."""
     mem = gib * (1 << 30)
     ws = cap.working_set_for_ram(mem)
     _a_mac(monkeypatch, mem, ws)
     before = _ceiling_before(ws, mem)
-    for share in (0.0, 0.05, 0.10):
+    edge = (mem - cap.reserve_bytes(mem) - ws * (1.0 - cap.margin())) / mem
+    assert edge == pytest.approx(_STOCK_EDGES[gib], abs=5e-4)
+    for share in (0.0, 0.10, edge - 1e-3, edge + 1e-3, 0.5):
         monkeypatch.setattr(cap, "_OUTSIDE_WIRED", share * mem)
         assert cap.wired_cap_bytes() == pytest.approx(before)
         assert cap.working_budget_bytes() == pytest.approx(before)
+    monkeypatch.setattr(cap, "_CAP_ENGAGED", True)
+    for share in (0.0, 0.10, edge - 1e-3):
+        monkeypatch.setattr(cap, "_OUTSIDE_WIRED", share * mem)
+        assert cap.wired_cap_bytes() == pytest.approx(before)
+        assert cap.working_budget_bytes() == pytest.approx(before)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", (edge + 1e-3) * mem)
+    assert cap.wired_cap_bytes() == pytest.approx(before - 1e-3 * mem)
+    assert cap.wired_cap_bytes() < before
 
 
-def test_a_raised_working_set_meets_the_memory_wired_outside(monkeypatch):
+@pytest.mark.parametrize("engaged", [True, False])
+def test_a_raised_working_set_meets_the_memory_wired_outside(
+        monkeypatch, engaged):
     """A 128 GiB Mac whose GPU limit was raised to 112 GiB: its working
     set term (114 GB) sits above RAM less the reserve and the 10% of RAM
-    wired outside the server (110 GB), so the cap is the RAM term, lower
-    than the ceiling it had."""
+    wired outside the server (110 GB). In a process that maps a table
+    untracked the cap is the RAM term, lower than the ceiling it had; any
+    other process plans under that ceiling."""
     mem = 128 * (1 << 30)
     ws = 112 * (1 << 30)
     _a_mac(monkeypatch, mem, ws)
     monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 0.10 * mem)
+    monkeypatch.setattr(cap, "_CAP_ENGAGED", engaged)
     want = mem - cap.reserve_bytes(mem) - 0.10 * mem
     assert want < _ceiling_before(ws, mem)
-    assert cap.wired_cap_bytes() == pytest.approx(want)
+    assert cap.wired_cap_bytes() == pytest.approx(
+        want if engaged else _ceiling_before(ws, mem))
+
+
+def test_a_load_predicted_untracked_plans_under_the_cap_until_it_ends(
+        monkeypatch, tmp_path):
+    """A load predicted to map a table untracked plans under the cap from
+    its declaration (plan_cap); when it ends without a map, the process
+    plans as before. A map engages the cap for the life of the process."""
+    mem = 128 * (1 << 30)
+    ws = 112 * (1 << 30)
+    _a_mac(monkeypatch, mem, ws)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 0.10 * mem)
+    monkeypatch.setattr(cap, "_CAP_ENGAGED", False)
+    monkeypatch.setattr(cap, "_CAP_PLANNED", set())
+    path = str(tmp_path / "m.gguf")
+    before = _ceiling_before(ws, mem)
+    assert not cap.cap_applies()
+    cap.plan_cap(path)
+    assert cap.cap_applies() and cap.wired_cap_bytes() < before
+    cap.plan_cap(path, False)
+    assert not cap.cap_applies()
+    assert cap.wired_cap_bytes() == pytest.approx(before)
+    cap.engage_cap()
+    assert cap.cap_applies() and cap.wired_cap_bytes() < before
 
 
 def test_table_math_and_monotone_frontier(rig):
@@ -393,12 +440,27 @@ def test_preload_gate(rig, monkeypatch):
     cap.preload_gate(25.0 * GB, "huge")       # override skips
 
 
-def test_preload_gate_judges_the_wired_cap(rig, monkeypatch):
-    # The gate reads the free memory under the wired cap, the budget the
-    # boot table and admission use, not under the full working set.
-    # 2026-08-25: judged against the working set, 86.7 GB was admitted
-    # next to a pinned 31.5 GB resident on a 112 GB wire limit and Metal
-    # OOM'd.
+def test_preload_gate_judges_the_serve_ceiling(rig, monkeypatch):
+    # headroom_bytes() is measured against the full working set; the gate
+    # takes the margin + reserve off it (the ceiling everything else uses).
+    # 2026-08-25: judged raw, 86.7 GB was admitted next to a pinned 31.5 GB
+    # resident on a 112 GB wire limit and Metal OOM'd.
+    rig(weights_gb=10.0, ws_gb=20.0)
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 5.0 * GB)
+    monkeypatch.setattr(cap, "working_budget_bytes", lambda: 18.0 * GB)
+    monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
+    cap.preload_gate(3.0 * GB, "fits")                   # 5 - (20 - 18) = 3
+    with pytest.raises(cap.LoadDeferred, match="free working set 3.0 GB"):
+        cap.preload_gate(3.5 * GB, "edge")
+
+
+@pytest.mark.parametrize("engaged", [True, False])
+def test_preload_gate_judges_the_wired_cap(rig, monkeypatch, engaged):
+    # In a process that maps a table untracked, the gate reads the free
+    # memory under the wired cap, the budget the boot table and admission
+    # use, with the memory wired outside the server off its RAM term. Any
+    # other process reads it under the serve ceiling, as before.
     rig(weights_gb=10.0, ws_gb=20.0)
     import mlx.core as mx
 
@@ -412,15 +474,23 @@ def test_preload_gate_judges_the_wired_cap(rig, monkeypatch):
                  "_BUILD_CREDIT"):
         monkeypatch.setattr(pd, name, {})
     monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 1.0 * GB)
+    monkeypatch.setattr(cap, "_CAP_ENGAGED", engaged)
     monkeypatch.setattr(pd.mx, "get_active_memory", lambda: 14.0 * GB)
     monkeypatch.setattr(pd.mx, "get_cache_memory", lambda: 0)
     monkeypatch.setattr(cap, "_kernel_gate", lambda *a, **k: None)
-    # The cap: 22 GB of RAM less the 2.2 GB reserve and 1 GB wired
-    # outside the server, 18.8 GB, under the 19 GB of the working set
-    # term; 14 GB is held.
-    cap.preload_gate(4.7 * GB, "fits")
-    with pytest.raises(cap.LoadDeferred, match="free working set 4.8 GB"):
-        cap.preload_gate(5.0 * GB, "edge")
+    if engaged:
+        # The cap: 22 GB of RAM less the 2.2 GB reserve and 1 GB wired
+        # outside the server, 18.8 GB, under the 19 GB of the working set
+        # term; 14 GB is held.
+        fits, free = 4.7, 4.8
+    else:
+        # The 20 GB working set less the 14 GB held, less the 1 GB the
+        # ceiling (19 GB, the working set term) keeps back.
+        fits, free = 4.9, 5.0
+    cap.preload_gate(fits * GB, "fits")
+    with pytest.raises(cap.LoadDeferred,
+                       match=f"free working set {free:.1f} GB"):
+        cap.preload_gate((free + 0.2) * GB, "edge")
 
 
 def test_preload_gate_keeps_a_streamed_residents_room(rig, monkeypatch):

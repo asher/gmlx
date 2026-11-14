@@ -946,28 +946,37 @@ def streamed_tracked_bytes() -> float:
 
 
 def headroom_bytes(m: float | None = None) -> float | None:
-    """Estimated live free memory under the wired cap
-    (``capacity.wired_cap_bytes``, ``m`` its margin): the cap minus
-    zero-copy weights, MLX-tracked allocations and the buffer cache, plus
-    the streamed bytes the tracker counts but the pager can reclaim and
-    the open build credit. Sampled fresh per call, never memoized. The
-    one shared accounting: the governor, the prefill caps, the serve
-    memory trace, the load gate and the admission gate all read this."""
-    from gmlx.serve.capacity import wired_cap_bytes
+    """Estimated live free working set: recommended working set minus
+    zero-copy weights minus MLX-tracked allocations, plus the streamed
+    expert bytes the tracker counts but the pager can reclaim and the
+    open build credit. The buffer cache counts as free (the allocator
+    evicts it under pressure). In a process that maps a table outside
+    MLX's tracker (``capacity.cap_applies``), it is measured under the
+    wired cap instead (``capacity.wired_cap_bytes``, ``m`` its margin),
+    and the buffer cache counts as used. Sampled fresh per call, never
+    memoized. The one shared accounting: the governor, the prefill caps,
+    the serve memory trace, the load gate and the admission gate all read
+    this."""
+    from gmlx.serve.capacity import cap_applies, wired_cap_bytes
 
     try:
-        cap = wired_cap_bytes(m=m)
+        if cap_applies():
+            base = wired_cap_bytes(m=m)
+            # Under a raised wired limit, MLX wires its active bytes plus
+            # its buffer cache, so the cache is not free room under the
+            # cap.
+            cache = float(mx.get_cache_memory())
+        else:
+            base = float(metal_value("max_recommended_working_set_size"))
+            cache = 0.0
         active = float(mx.get_active_memory())
-        cache = float(mx.get_cache_memory())
     except Exception:
         return None
-    if cap is None:
+    if base is None:
         return None
     with _UNTRACKED_LOCK:
         build = _build_credit_locked(active)
-    # Under a raised wired limit, MLX wires its active bytes plus its
-    # buffer cache, so the cache is not free room under the cap.
-    return (cap - untracked_weight_bytes() + streamed_tracked_bytes()
+    return (base - untracked_weight_bytes() + streamed_tracked_bytes()
             + build - active - cache)
 
 
@@ -1412,8 +1421,9 @@ def forget_resident_model(key: int) -> None:
 
 
 def prefill_room_bytes() -> float | None:
-    """The wired cap less the resident models' weights, or None before
-    any model registers or without Metal."""
+    """The ceiling this process plans under
+    (``capacity.wired_cap_bytes``) less the resident models' weights, or
+    None before any model registers or without Metal."""
     with _RESIDENT_LOCK:
         if _ROOM:
             return _ROOM[0]

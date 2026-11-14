@@ -643,13 +643,16 @@ class _Arena:
         self.arena_bytes = nbytes
 
 
-def test_available_drained_charges_live_arena(monkeypatch):
-    """The wired cap (95 GB of a 100 GB working set) less the zero-copy
-    weights, the admission reserve and a live decode arena. The buffer
-    cache yields at the cap, so its limit takes no share."""
+@pytest.mark.parametrize("engaged", [False, True])
+def test_available_drained_charges_live_arena(monkeypatch, engaged):
+    """The working set (100 GB) less the zero-copy weights, the admission
+    reserve and a live decode arena. In a process that maps a table
+    untracked, the wired cap (95 GB of it) takes the working set's place;
+    the buffer cache yields at the cap, so its limit takes no share."""
     import mlx.core as mx
 
     import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as capacity
     import gmlx.serve.memory as sm
     from gmlx.stream import installs
 
@@ -659,10 +662,12 @@ def test_available_drained_charges_live_arena(monkeypatch):
     monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", int(4e9))
     monkeypatch.setattr(sm, "admit_reserve_bytes", lambda ws, gen=None: 2e9)
     monkeypatch.setattr(installs, "_ARENAS", [])
-    assert mp.available_drained_bytes() == pytest.approx(83e9)
+    monkeypatch.setattr(capacity, "_CAP_ENGAGED", engaged)
+    base = 83e9 if engaged else 88e9
+    assert mp.available_drained_bytes() == pytest.approx(base)
     arena = _Arena(30e9)
     installs.record_arena(arena)
-    assert mp.available_drained_bytes() == pytest.approx(53e9)
+    assert mp.available_drained_bytes() == pytest.approx(base - 30e9)
 
 
 def test_an_id_prompt_is_priced_by_its_length(tight):
@@ -681,8 +686,7 @@ SCORED = _model(num_hidden_layers=32, num_attention_heads=16,
 
 @pytest.fixture
 def small_mac(monkeypatch):
-    """A 6 GB working set (a 5.7 GB wired cap) with 2.5 GB of weights:
-    1.2 GB of room."""
+    """A 5.7 GB working set with 2.5 GB of weights: 1.2 GB of room."""
     import mlx.core as mx
 
     import gmlx.gen.prefill_decay as pd
@@ -691,8 +695,7 @@ def small_mac(monkeypatch):
     monkeypatch.delenv("GMLX_ADMIT_RESERVE_GB", raising=False)
     monkeypatch.delenv("GMLX_PREFLIGHT_MEM", raising=False)
     monkeypatch.setattr(mx, "device_info", lambda: {
-        "max_recommended_working_set_size": 6e9})
-    monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", None)
+        "max_recommended_working_set_size": 5.7e9})
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 2.5e9)
     monkeypatch.setattr(installs, "_ARENAS", [])
     monkeypatch.setattr("gmlx.stream.expert_streaming.experts_streamed",

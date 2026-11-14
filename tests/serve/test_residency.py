@@ -500,7 +500,10 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     runs under the hold, so a load that falls back to a tracked table
     wires nothing before its install pins. Without it, the build pins
     before the walk and credits the table. Either way the build declares
-    the table stream's install for its load only."""
+    the table stream's install for its load only. A build predicted to
+    map its table untracked plans under the wired cap from its gate to
+    the end of its walk; the cap stands after it only if a map installed
+    it."""
     import contextlib
 
     import gmlx.gen.prefill_decay as pd
@@ -518,6 +521,8 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     box = {"active": 10e9}
     monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
     monkeypatch.setattr(ts, "untracked_tables_supported", lambda: untracked)
+    monkeypatch.setattr(cap, "_CAP_ENGAGED", False)
+    monkeypatch.setattr(cap, "_CAP_PLANNED", set())
     monkeypatch.setattr(cap, "gathered_table_bytes",
                         lambda p, budget=None, env=None: int(table))
     monkeypatch.setattr(cap, "held_table_bytes", lambda p: 0)
@@ -527,8 +532,9 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     monkeypatch.setattr(rb, "_say_tables_offloaded", lambda *a: None)
     monkeypatch.setattr(cap, "install_boot_table",
                         lambda path, b, label, env=None: None)
-    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     seen = []
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: seen.append(
+        ("gate", cap.cap_applies())))
     monkeypatch.setattr(wired_limit, "_neutralize_wired_limit_sweep",
                         lambda: seen.append("pinned"))
 
@@ -547,6 +553,7 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
         box["active"] += rest + (0 if untracked else table)
         # The bridge installs the stream on what this build loads.
         seen.append(ts.install_follows(model_path))
+        seen.append(cap.cap_applies())
         seen.append(pd.build_credit_bytes())
         proxy.response_generator = SimpleNamespace(model=None)
         proxy.model_cache = {
@@ -563,10 +570,12 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     entry = pool.acquire(path, None, "auto")
     pool.release(entry)
     if untracked:
-        assert seen == ["held", True, 0, "released"]
+        assert seen == [("gate", True), "held", True, True, 0, "released"]
     else:
-        assert seen == ["pinned", True, pytest.approx(table, abs=1)]
+        assert seen == [("gate", False), "pinned", True, False,
+                        pytest.approx(table, abs=1)]
     assert not ts.install_follows(path)
+    assert not cap.cap_applies()
 
 
 def test_release_returns_refcount_to_zero_and_entry_evictable():

@@ -136,24 +136,85 @@ def outside_wired_bytes() -> float:
     return _OUTSIDE_WIRED or 0.0
 
 
+# True once a load in this process mapped a streamable table outside MLX's
+# tracker (engage_cap); it stays for the life of the process.
+_CAP_ENGAGED = False
+# Real paths of the GGUFs whose loads in progress are predicted to map a
+# table that way (plan_cap).
+_CAP_PLANNED: set[str] = set()
+
+
+def engage_cap() -> None:
+    """Plan under the wired cap for the rest of the process: a load mapped
+    a streamable table outside MLX's tracker
+    (``stream.wired_limit.install_wired_cap``, at the map)."""
+    global _CAP_ENGAGED
+    note_outside_wired()
+    _CAP_ENGAGED = True
+
+
+def plan_cap(path: str | None, on: bool = True) -> None:
+    """Plan under the wired cap while the load of ``path`` is predicted to
+    map a table outside MLX's tracker
+    (``table_stream.tables_load_untracked``), from before its first fit;
+    ``on=False`` ends the prediction, as the wire load does once its maps
+    are done (``load.wire.load_gguf_wire_bytes``). The cap then stands
+    only if the load mapped one (``engage_cap``)."""
+    if not path:
+        return
+    key = os.path.realpath(os.path.expanduser(str(path)))
+    if on:
+        note_outside_wired()
+        _CAP_PLANNED.add(key)
+    else:
+        _CAP_PLANNED.discard(key)
+
+
+def cap_applies() -> bool:
+    """Whether this process plans and limits under the wired cap: a load
+    mapped a table outside MLX's tracker, or one in progress is predicted
+    to. Every other process plans under ``ceiling_bytes`` and keeps MLX's
+    own memory limit."""
+    return _CAP_ENGAGED or bool(_CAP_PLANNED)
+
+
+def in_one_regime(read):
+    """``read(engaged)`` under one reading of ``cap_applies``, and that
+    reading. A serve build's plan can start or end on its own thread
+    during the read, and ``prefill_decay.headroom_bytes`` reads the
+    regime again inside it; when the regime moved, the read runs once
+    more, so a figure measured in one regime is not shifted as the
+    other's."""
+    engaged = cap_applies()
+    out = read(engaged)
+    if cap_applies() != engaged:
+        engaged = cap_applies()
+        out = read(engaged)
+    return out, engaged
+
+
 def wired_cap_bytes(ws: float | None = None,
                     m: float | None = None) -> float | None:
-    """The wired cap, one figure per machine: the lower of the working
-    set less the margin and the RAM less the reserve and the memory wired
-    outside the server at load (``ceiling_bytes``). The governor plans
-    under it, and ``stream.wired_limit.install_wired_cap`` clamps
-    ``mx.set_wired_limit`` to it and sets the MLX memory limit to it, so
-    the buffer cache yields there instead of taking a fixed share. None
-    when the device cannot be read."""
+    """The ceiling this process plans under. In a process that maps a
+    table outside MLX's tracker (``cap_applies``), the wired cap: the
+    lower of the working set less the margin and the RAM less the reserve
+    and the memory wired outside the process at load (``ceiling_bytes``).
+    The governor plans under it, and
+    ``stream.wired_limit.install_wired_cap`` clamps ``mx.set_wired_limit``
+    to it and sets the MLX memory limit to it, so the buffer cache yields
+    there instead of taking a fixed share. In any other process,
+    ``ceiling_bytes``. None when the device cannot be read."""
     if ws is None:
         ws = working_set_bytes()
     if ws is None:
         return None
+    if not cap_applies():
+        return ceiling_bytes(ws, m)
     return max(0.0, ceiling_bytes(ws, m, outside_wired_bytes()))
 
 
 def working_budget_bytes() -> float | None:
-    """The serve working budget: the wired cap."""
+    """The serve working budget: ``wired_cap_bytes``."""
     return wired_cap_bytes()
 
 
@@ -793,25 +854,32 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         fix = "for MoE models --stream-experts serves the experts from disk."
     from gmlx.gen.prefill_decay import headroom_bytes
 
-    # headroom_bytes() is measured against the wired cap, the budget the
-    # boot table and request admission use. Judged against the full
-    # working set, the gate admitted an 86.7 GB load next to a pinned
-    # 31.5 GB resident (118 GB on a 112 GB wire limit) and Metal OOM'd in
-    # the mmap warm (2026-08-25).
-    head = headroom_bytes()
+    head, engaged = in_one_regime(lambda capped: headroom_bytes())
     budget = working_budget_bytes()
+    ws = working_set_bytes()
+    if (not engaged and head is not None and budget is not None
+            and ws is not None):
+        # headroom_bytes() is measured against Metal's full recommended
+        # working set; a load is judged against the serve ceiling (margin
+        # and kernel reserve, ceiling_bytes), the same ceiling the boot
+        # table and request admission use. Judged raw, the gate admitted
+        # an 86.7 GB load next to a pinned 31.5 GB resident (118 GB on a
+        # 112 GB wire limit) and Metal OOM'd in the mmap warm (2026-08-25).
+        # Under the wired cap, the headroom is measured against the cap.
+        head -= max(0.0, ws - budget)
     if head is not None and reserved_bytes > 0:
         head -= reserved_bytes
     kept = (f" less the {reserved_bytes / GB:.1f} GB ring and KV room a "
             "resident streamed model keeps"
             if reserved_bytes > 0 else "")
     if budget is not None and weight_bytes > budget:
+        lower = (", or RAM less the reserve and the memory wired outside "
+                 "the server when lower" if engaged else "")
         raise RuntimeError(
             f"model does not fit: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed this box's working "
             f"budget {budget / GB:.1f} GB (working set x "
-            f"{1 - margin():.2f}, or RAM less the reserve and the memory "
-            f"wired outside the server when lower). GMLX_OVERCOMMIT=1 "
+            f"{1 - margin():.2f}{lower}). GMLX_OVERCOMMIT=1 "
             f"overrides; {fix}")
     if head is not None and weight_bytes > head:
         _defer(

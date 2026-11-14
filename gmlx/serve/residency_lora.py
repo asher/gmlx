@@ -514,14 +514,24 @@ class _LoraTurn:
         return e.loaded_as or os.path.basename(str(e.model_path))
 
     def _measured_lora_room(self):
-        """The free memory measured now, under the wired cap, or None
-        where it cannot be measured. Read with no pool lock."""
+        """The free working set measured now, against the serve ceiling,
+        or None where it cannot be measured. Read with no pool lock."""
         self._hit("measure")
         if self._headroom_fn is not None:
             return self._headroom_fn()
         from gmlx.gen.prefill_decay import headroom_bytes
 
-        return headroom_bytes()
+        from .capacity import (in_one_regime, working_budget_bytes,
+                               working_set_bytes)
+
+        head, engaged = in_one_regime(lambda capped: headroom_bytes())
+        if head is None or engaged:
+            # Under the wired cap the headroom is measured against it.
+            return head
+        budget, ws = working_budget_bytes(), working_set_bytes()
+        if budget is not None and ws is not None:
+            head -= max(0.0, ws - budget)
+        return head
 
     def _lora_busy(self, own=(), pinned: bool = True) -> list:
         """Under _lock: the names of the models in use beside the entries

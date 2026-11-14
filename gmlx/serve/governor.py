@@ -410,25 +410,31 @@ def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
 # ---------------------------------------------------------------- sampling
 
 def _ceiling_bytes(ws: float, margin: float) -> float:
-    """The governed ceiling: the wired cap (``capacity.wired_cap_bytes``)."""
+    """The governed ceiling (``capacity.wired_cap_bytes``)."""
     from .capacity import wired_cap_bytes
 
     return wired_cap_bytes(ws, margin) or 0.0
 
 
 def _headroom_and_ws(margin: float):
-    """The headroom under the wired cap, and the working set."""
+    """The headroom under the governed ceiling, and the working set."""
     from gmlx.gen.prefill_decay import headroom_bytes
 
-    from .capacity import working_set_bytes
+    from .capacity import in_one_regime, working_set_bytes
 
-    head = headroom_bytes(margin)
+    head, engaged = in_one_regime(
+        lambda capped: headroom_bytes(margin) if capped else headroom_bytes())
     if head is None:
         return None, 0.0
     ws = working_set_bytes()
     if ws is None:
         return None, 0.0
-    return head, ws
+    if engaged:
+        # Measured under the wired cap already.
+        return head, ws
+    # headroom_bytes is measured against the full WS; shift it down to
+    # the governed ceiling
+    return head - (ws - _ceiling_bytes(ws, margin)), ws
 
 
 def _floor_collapsing(cur: float, prev, floor: float) -> bool:

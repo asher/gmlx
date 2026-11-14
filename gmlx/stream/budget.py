@@ -185,8 +185,9 @@ def outside_ceiling_bytes(ram: int | None, ceiling: float,
 
 
 def governor_headroom_bytes() -> float | None:
-    """What the governor reads at its tick: ``prefill_decay.headroom_bytes``,
-    the free memory under the wired cap."""
+    """What the governor reads at its tick: ``prefill_decay.headroom_bytes``
+    shifted from the full working set down to the governor ceiling, or
+    measured under the wired cap where it applies."""
     from gmlx.serve.capacity import margin
     from gmlx.serve.governor import _headroom_and_ws
 
@@ -779,7 +780,9 @@ def _kept(room: KvRoom | None, depth: int | None) -> str:
 @dataclass(frozen=True)
 class WireCheck:
     """A resident wire judged against live memory. ``reason`` names the
-    first leg it fails: ``budget`` (past the resident budget) or
+    first leg it fails: ``budget`` (past the resident budget), ``cap``
+    (the set and its KV room of ``room_bytes`` pass ``cap_bytes``, the
+    wired cap of a process that maps a table outside MLX's tracker) or
     ``unwired`` (unwired RAM less ``keep`` is short); empty when
     it fits, the memory cannot be read, or GMLX_OVERCOMMIT=1 on a set
     that fits in RAM. ``ram_bytes`` is physical RAM, None when unread.
@@ -800,6 +803,8 @@ class WireCheck:
     ram_bytes: int | None = None
     table_bytes: int = 0
     settle_bytes: int = 0
+    cap_bytes: int | None = None
+    room_bytes: int = 0
 
     @property
     def past_ram(self) -> bool:
@@ -834,6 +839,11 @@ class WireCheck:
             return (f"{STREAM_OVER_BUDGET}: holding them takes "
                     f"{_gb(self.wire_bytes)}, past the "
                     f"{_gb(self.budget_bytes or 0)} budget{past}.{lever}")
+        if self.reason == "cap":
+            return (f"{STREAM_OVER_BUDGET}: holding them takes "
+                    f"{_gb(self.wire_bytes)} and the KV room "
+                    f"{_gb(self.room_bytes)}, past the "
+                    f"{_gb(self.cap_bytes or 0)} wired cap.{lever}")
         tail = ("They are more than RAM." if self.past_ram
                 else f"To keep them in memory, {FREE_WIRED}.")
         return (f"{STREAM_FREE_NOW}: holding them takes "
@@ -871,25 +881,36 @@ def check_resident_wire(wire_bytes: int, *, room_bytes: int,
     (``unwired_ram_bytes``). Only wired memory is out of reach: the kernel
     compresses or swaps other apps' memory, and drops file pages, to make
     room. The model's own cached pages are unwired until the wire takes
-    them, so they count once. A wire of at most ``WIRE_EXEMPT_BYTES`` is
-    judged on the budget only. GMLX_OVERCOMMIT=1 or an unreadable box
-    admits, except a set larger than RAM, which fails on the budget
-    leg."""
+    them, so they count once. In a process that plans under the wired cap
+    (``capacity.cap_applies``), the set and ``room_bytes`` must also fit
+    under the cap, where its MLX memory limit sits: past it, every eval
+    waits for the GPU work in flight. A wire of at most
+    ``WIRE_EXEMPT_BYTES`` is judged on the budget and the cap only.
+    GMLX_OVERCOMMIT=1 or an unreadable box admits, except a set larger
+    than RAM, which fails on the budget leg."""
+    from gmlx.serve.capacity import cap_applies, wired_cap_bytes
+
     ram = ram_bytes()
     keep = wire_keep_bytes(room_bytes)
     w = max(0, int(wire_bytes))
     free = unwired_ram_bytes() if w > WIRE_EXEMPT_BYTES else None
+    cap = wired_cap_bytes() if cap_applies() else None
+    room = max(0, int(room_bytes))
     reason = ""
     if not overcommit():
         if budget is not None and w > budget:
             reason = "budget"
+        elif cap is not None and w + room > cap:
+            reason = "cap"
         elif free is not None and w > free - keep:
             reason = "unwired"
     elif ram is not None and w > ram:
         # Overcommit keeps no set larger than RAM: it streams.
         reason = "budget"
     return WireCheck(w, free, keep, budget, reason, ram_bytes=ram,
-                     settle_bytes=w + keep if reason == "unwired" else 0)
+                     settle_bytes=w + keep if reason == "unwired" else 0,
+                     cap_bytes=None if cap is None else int(cap),
+                     room_bytes=room)
 
 
 def check_wire_beside_drafter(set_bytes: int, drafter_bytes: int, *,

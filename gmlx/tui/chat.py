@@ -3713,6 +3713,7 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
         # an on-disk file is resolved against the server config by id/alias, applying that
         # model's path + sampling/template/load settings.
         from gmlx.commands.cli import (
+            _declare_table_install,
             _ensure_stream_cb_caps,
             apply_family_defaults,
             maybe_load_from_config,
@@ -3734,7 +3735,9 @@ def cmd_chat(argv: list[str] | None = None, prog: str = "gmlx chat") -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
         # Chat holds the conversation, so its KV room is the serve
-        # context's, or the speech model's trained context.
+        # context's, or the speech model's trained context. Declared
+        # before that first fit, as run declares it.
+        _declare_table_install(args)
         preload_wire_check(args, depth=_speech_context(args))
         _ensure_stream_cb_caps(args)
         from gmlx.serve.cb_phase import install_cb_phase_steps

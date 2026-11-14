@@ -1139,14 +1139,28 @@ def test_ceiling_reserve_binds_when_ws_is_close_to_ram(monkeypatch):
     assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(97e9)
 
 
+def test_headroom_shifts_by_ceiling_gap(monkeypatch):
+    import gmlx.gen.prefill_decay as pd
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
+    monkeypatch.setattr(gov.mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 50e9)
+    head, ws = gov._headroom_and_ws(0.05)
+    assert ws == 120e9
+    # ceiling 97 GB: headroom drops by the 23 GB the WS sits above it
+    assert head == pytest.approx(50e9 - 23e9)
+
+
 def test_the_governor_plans_under_the_wired_cap(monkeypatch):
-    """The governed ceiling is the wired cap: the working set less the
-    margin, or RAM less the reserve and the memory wired outside the
-    server at load, whichever is lower. The headroom is free memory under
-    that cap, the buffer cache counted as wired beside the active bytes."""
+    """In a process that maps a table untracked, the governed ceiling is
+    the wired cap: the working set less the margin, or RAM less the
+    reserve and the memory wired outside the server at load, whichever is
+    lower. The headroom is free memory under that cap, the buffer cache
+    counted as wired beside the active bytes."""
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
 
+    monkeypatch.setattr(cap, "_CAP_ENGAGED", True)
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda: {
         "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
