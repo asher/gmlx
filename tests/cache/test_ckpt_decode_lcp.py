@@ -369,9 +369,9 @@ def test_a_record_payload_materializes_within_the_record_bounds(
 def test_a_reset_during_a_checkpoint_store_leaves_the_pool_free(
         monkeypatch, at):
     """A cache reset that lands while a checkpoint store holds its chains:
-    the store inserts no record over the freed blocks and releases none of
-    them, so the free list holds every block once and a later lookup
-    restores nothing."""
+    the reset leaves the chains to the store, which inserts no record and
+    releases them, so the free list holds every block once and a later
+    lookup restores nothing."""
     from gmlx.cache.apc_manager import GmlxAPCManager
     from gmlx.eval_guard import guard
 

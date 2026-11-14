@@ -572,10 +572,10 @@ def test_lookup_skips_record_released_after_selection(monkeypatch):
 
 
 def test_lookup_survives_concurrent_clear(monkeypatch):
-    """clear() while a lookup holds assembly pins: the pool free list is
-    rebuilt under the held refs, so releasing them afterwards would push
-    already-free blocks twice and corrupt the list. The generation check
-    drops the refs instead and discards the pre-clear warm result."""
+    """clear() while a lookup holds assembly pins: the clear leaves the
+    pinned blocks to the lookup, whose release frees them, so the free
+    list holds every block once. The generation check discards the
+    pre-clear warm result."""
     import gmlx.cache.snapshot as cs
     from gmlx.cache.apc_manager import GmlxAPCManager
 
@@ -602,6 +602,52 @@ def test_lookup_survives_concurrent_clear(monkeypatch):
         b = b.next
     assert len(seen) == len(man.pool)
     assert all(blk.ref_cnt == 0 for blk in man.pool)
+
+
+def _free_list(man):
+    out, b = [], man._free_head
+    while b is not None and len(out) <= len(man.pool):
+        out.append(b)
+        b = b.next
+    return out
+
+
+def test_a_reset_leaves_a_leased_block_to_its_holder():
+    """A cache reset while a request leases pool blocks, as a prompt batch
+    holds the prefix it restored: the reset frees what no one holds and
+    leaves the leased blocks to their holder. A store after the reset
+    never takes them, the holder's release frees each once, and after the
+    last release every block is on the free list exactly once."""
+    from gmlx.cache.apc_manager import GmlxAPCManager
+
+    def kv(seed):
+        k = mx.random.normal((1, 2, 64, 8), key=mx.random.key(seed))
+        return [k], [k + 1]
+
+    man = GmlxAPCManager(num_blocks=8, block_size=16)
+    a, b = list(range(100, 164)), list(range(500, 564))
+    try:
+        man.release(man.store_ckpt_blocks(a, *kv(1), disk=False))
+        lease, n = man.lookup_prefix(a)
+        assert n == 64
+        man.clear()
+        assert man.lookup_prefix(a) == ([], 0)
+        other = man.store_ckpt_blocks(b, *kv(2), disk=False)
+        assert len(other) == 4
+        assert not {id(x) for x in other} & {id(x) for x in lease}
+        man.release(lease)
+        assert all(x.ref_cnt == 1 for x in other)
+        assert not {id(x) for x in other} & {id(x) for x in _free_list(man)}
+        assert all(x.resident_bytes() == 0 for x in lease)
+        man.release(other)
+        free = _free_list(man)
+        assert sorted(map(id, free)) == sorted(map(id, man.pool))
+        assert all(x.ref_cnt == 0 for x in man.pool)
+        got, n = man.lookup_prefix(b)
+        assert n == 64
+        man.release(got)
+    finally:
+        man.close()
 
 
 def test_store_exception_after_insert_keeps_record_pinned(monkeypatch):

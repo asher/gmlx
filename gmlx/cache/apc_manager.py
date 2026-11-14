@@ -403,18 +403,35 @@ class GmlxAPCManager(_apc.APCManager):
         spec_prefix_stats_clear()
 
     def clear(self) -> None:
-        """Stock clear plus the ckpt tier: the pool wipe zeroes the block
-        tensors pinned records reference, so records/sidecars/counters
-        must not survive it. One lock span (RLock) so a concurrent
-        lookup can never pin a record between the pool wipe and the
-        record drop."""
+        """Drop everything cached: the checkpoint tier first (records give
+        their chains back, ``ckpt_reset``), then the pool and the exact
+        tier. A block no one holds is freed at once. A block a holder
+        still leases (a prompt batch, a lookup, a store in flight) leaves
+        the hash table and is marked dropped, as ``_kq_take_back`` does:
+        it keeps its tensors for that holder, and the holder's last
+        release frees it. The stock clear zeroed every refcount instead,
+        so a holder's release pushed a free block twice, or freed one a
+        new owner had taken since. One lock span (RLock) so a concurrent
+        lookup can never pin a record between the record drop and the
+        pool wipe."""
         from .snapshot import ckpt_reset
         from .prefix_cache import clear_all_spec_prefix_caches
         with self.lock:
-            super().clear()
             ckpt_reset(self)
+            self._free_head = self._free_tail = None
+            for b in self.pool:
+                if b.ref_cnt > 0:
+                    self._kq_dropped[id(b)] = b
+                    continue
+                self._kq_dropped.pop(id(b), None)
+                b.ref_cnt = 0
+                self._kq_free(b)
+                b.prev = b.next = None
+                self._free_push(b)
+            self.hash_table.clear()
+            self._exact_cache.clear()
+            self.stats = _apc.APCStats()
             self._kq_stores = []
-            self._kq_dropped = {}
         # Outside the manager lock: the spec prefix cache has its own
         # lifetime and its pinned snapshots must not survive a reset.
         clear_all_spec_prefix_caches()
