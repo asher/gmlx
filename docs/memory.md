@@ -112,7 +112,10 @@ only on a Mac with a raised limit. gmlx wires at most the cap, plans every
 model it holds and their KV caches under it, and MLX frees buffers from
 its buffer cache before they together pass it. A server or command
 started without such a model plans and limits as before, and a model
-added to that server later loads its table counted by MLX.
+added to that server later loads its table counted by MLX. The same holds
+for `gmlx run` or `gmlx chat` given no stream flag on a Mac where the rest
+of the model does not fit: gmlx decides before the check that falls back
+to streaming the experts, and that load counts its table.
 `GMLX_GOV_RESERVE_GB` sets the reserve, as
 [Debug switches](internals/debug-switches.md) lists.
 

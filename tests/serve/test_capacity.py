@@ -176,6 +176,64 @@ def test_the_cap_is_decided_once_before_the_first_load(monkeypatch):
     assert cap.wired_cap_bytes() < before
 
 
+@pytest.mark.parametrize("entry", ["model_dirs", "hf", "var"])
+def test_serve_decides_from_the_paths_its_builds_load(
+        monkeypatch, tmp_path, request, entry):
+    """A config server decides from the resolved (path, stream) each build
+    loads. The config gmlx writes names a model relative to a model_dirs
+    root; an hf: ref names a file in the Hugging Face cache and a $VAR path
+    one under an environment variable. Read as written, none of them
+    names a file, the table is predicted tracked, and the server never
+    goes under the cap."""
+    import huggingface_hub
+
+    import gmlx.serve.bridge_vlm as serving
+    import gmlx.serve.memory as sm
+    import gmlx.stream.table_stream as ts
+    import gmlx.stream.wired_limit as wl
+    from gmlx.config import build_config
+    from gmlx.serve.server import _serve
+
+    root = tmp_path / "models"
+    (root / "sub").mkdir(parents=True)
+    flash = root / "sub" / "flash.gguf"
+    flash.write_bytes(b"x")
+    dense = root / "dense.gguf"
+    dense.write_bytes(b"x")
+    monkeypatch.setenv("GMLX_TEST_MODELS", str(root))
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache",
+                        lambda repo, filename, revision=None: str(flash))
+    path = {"model_dirs": "sub/flash.gguf", "hf": "hf:org/repo/flash.gguf",
+            "var": "$GMLX_TEST_MODELS/sub/flash.gguf"}[entry]
+    cfg = build_config({
+        "server": {"model_dirs": [str(root)], "family_defaults": False},
+        "models": {"dense": {"path": "dense.gguf"},
+                   "flash": {"path": path, "stream": "experts"}}})
+    request.addfinalizer(serving.clear_resolved_models)
+
+    asked = []
+
+    def predicts(p, stream=None, env=None):
+        asked.append((p, stream))
+        return p == str(flash)
+
+    class Decided(Exception):
+        pass
+
+    def stop(cfg):
+        raise Decided
+
+    monkeypatch.setattr(ts, "predicts_untracked", predicts)
+    monkeypatch.setattr(cap, "note_outside_wired", lambda: 0.0)
+    monkeypatch.setattr(wl, "install_wired_cap", lambda announce=False: None)
+    monkeypatch.setattr(sm, "apply_cache_limit", stop)
+    monkeypatch.setattr(cap, "_CAP", None)
+    with pytest.raises(Decided):
+        _serve(cfg, None, None)
+    assert asked == [(str(dense), None), (str(flash), "experts")]
+    assert cap.cap_applies()
+
+
 def test_table_math_and_monotone_frontier(rig):
     path = rig(weights_gb=10.0, ws_gb=20.0)
     t = cap.derive_table(path)
