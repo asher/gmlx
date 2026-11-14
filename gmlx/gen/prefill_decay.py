@@ -885,6 +885,24 @@ def note_build_credit(owner: object, streamed_bytes: float) -> None:
         _BUILD_CREDIT[owner] = (active, float(streamed_bytes))
 
 
+def add_build_credit(owner: object, nbytes: float,
+                     active0: float | None = None) -> None:
+    """Widen ``owner``'s build credit by ``nbytes`` of streamed bytes its
+    load tracks although the build did not expect it to: a table that
+    fell back to a tracked buffer. Opens a credit from ``active0``, the
+    active bytes before those were added, when the build had none."""
+    if owner is None or nbytes <= 0:
+        return
+    if active0 is None:
+        try:
+            active0 = float(mx.get_active_memory())
+        except Exception:
+            return
+    with _UNTRACKED_LOCK:
+        start, cap = _BUILD_CREDIT.get(owner, (float(active0), 0.0))
+        _BUILD_CREDIT[owner] = (start, cap + float(nbytes))
+
+
 def _build_owners_locked(key: object) -> list:
     """The owners with an open build credit that ``key``'s install ends:
     the key's owners and the open window's owner."""

@@ -499,7 +499,8 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     walk, and no build credit, as the table adds to no MLX count. The walk
     runs under the hold, so a load that falls back to a tracked table
     wires nothing before its install pins. Without it, the build pins
-    before the walk and credits the table."""
+    before the walk and credits the table. Either way the build declares
+    the table stream's install for its load only."""
     import contextlib
 
     import gmlx.gen.prefill_decay as pd
@@ -544,6 +545,8 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
         # The walk maps the experts and every-token weights tracked, and
         # the table too unless it is untracked.
         box["active"] += rest + (0 if untracked else table)
+        # The bridge installs the stream on what this build loads.
+        seen.append(ts.install_follows(model_path))
         seen.append(pd.build_credit_bytes())
         proxy.response_generator = SimpleNamespace(model=None)
         proxy.model_cache = {
@@ -560,9 +563,10 @@ def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
     entry = pool.acquire(path, None, "auto")
     pool.release(entry)
     if untracked:
-        assert seen == ["held", 0, "released"]
+        assert seen == ["held", True, 0, "released"]
     else:
-        assert seen == ["pinned", pytest.approx(table, abs=1)]
+        assert seen == ["pinned", True, pytest.approx(table, abs=1)]
+    assert not ts.install_follows(path)
 
 
 def test_release_returns_refcount_to_zero_and_entry_evictable():

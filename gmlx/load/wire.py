@@ -108,7 +108,8 @@ def load_gguf_wire_bytes(
 def _load_shard(gguf_path: str, shard: str, arch: str | None,
                 zero_copy: bool, skip):
     """``kq.load_gguf`` on one shard. The streamable tables the load
-    streams for sure map outside MLX's tracker
+    streams for sure, when the caller installs the table stream on the
+    model, map outside MLX's tracker
     (``table_stream.untracked_table_names``), so MLX neither counts nor
     wires them. An mlx-kquant without ``load_gguf(untracked=...)``, or a
     table it cannot view that way, reloads the shard tracked; the install
@@ -133,9 +134,36 @@ def _load_shard(gguf_path: str, shard: str, arch: str | None,
                          f"MLX-tracked: {e}")
         else:
             note_untracked_load(shard, untracked)
+            loadlog.note(
+                f"[stream] {', '.join(untracked)} mapped untracked, "
+                f"{_table_bytes(out[0], untracked) / 1e9:.1f} GB: MLX "
+                "neither counts nor wires it")
             return out
     note_untracked_load(shard, ())
-    return kq.load_gguf(*args)
+    if not untracked:
+        return kq.load_gguf(*args)
+    active0 = float(mx.get_active_memory())
+    out = kq.load_gguf(*args)
+    _credit_tracked_tables(_table_bytes(out[0], untracked), active0)
+    return out
+
+
+def _table_bytes(arrays: dict, names) -> int:
+    return sum(arrays[n].nbytes for n in names if n in arrays)
+
+
+def _credit_tracked_tables(nbytes: int, active0: float) -> None:
+    """A serve build that expected its tables untracked
+    (``table_stream.tables_load_untracked``) gave them no build credit:
+    the tables that fell back to tracked buffers would read as live
+    memory until their install credits them. Credit them to the build's
+    owner from here."""
+    from gmlx.gen.prefill_decay import (add_build_credit,
+                                        untracked_weights_owner)
+    from gmlx.stream.table_stream import untracked_tables_supported
+
+    if untracked_tables_supported():
+        add_build_credit(untracked_weights_owner(), nbytes, active0)
 
 
 def _arch_of(shards: list[str], arch: str | None) -> str | None:

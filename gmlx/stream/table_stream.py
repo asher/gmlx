@@ -392,6 +392,30 @@ def latched() -> bool:
     return _FORCED
 
 
+# Real paths of the GGUFs whose loads the caller follows with the table
+# stream's install (table_install_follows).
+_INSTALL_FOLLOWS: set[str] = set()
+
+
+def table_install_follows(path: str | None, on: bool = True) -> None:
+    """Declare that the caller installs the table stream on the model it
+    loads from ``path`` (the serve build, and ``gmlx run``, ``chat``,
+    ``capture`` and ``kld`` through their placement), before the load;
+    ``on=False`` ends the declaration. Only such a load maps a table
+    outside MLX's tracker (``tables_load_untracked``): any other caller
+    would gather the whole table on the GPU, made resident by every
+    command buffer that reads it with nothing counting it, so its table
+    loads MLX-tracked."""
+    if path:
+        (_INSTALL_FOLLOWS.add if on else _INSTALL_FOLLOWS.discard)(_key(path))
+
+
+def install_follows(path: str | None) -> bool:
+    """Whether the caller declared the table stream's install on the
+    model it loads from ``path`` (``table_install_follows``)."""
+    return bool(path) and _key(path) in _INSTALL_FOLLOWS
+
+
 def untracked_tables_supported() -> bool:
     """Whether the installed mlx-kquant maps a tensor outside MLX's
     tracker (``load_gguf(untracked=...)``)."""
@@ -425,21 +449,26 @@ def tables_stream_for_sure(path: str | None, env=None) -> bool:
 def tables_load_untracked(path: str | None, env=None) -> bool:
     """Whether a load of ``path`` maps every streamable table it streams
     outside MLX's tracker, or reads it from the file, decided before the
-    load as the wire load decides per shard (``untracked_table_names``).
-    The load can still fall back to tracked buffers; its install then
-    pins the wired limit."""
-    return untracked_tables_supported() and tables_stream_for_sure(path, env)
+    load as the wire load decides per shard (``untracked_table_names``):
+    the caller installs the table stream on the model
+    (``table_install_follows``), and the load streams its tables for
+    sure. The load can still fall back to tracked buffers; its install
+    then pins the wired limit."""
+    return (install_follows(path) and untracked_tables_supported()
+            and tables_stream_for_sure(path, env))
 
 
 def untracked_table_names(path: str | None, shard: str, arch: str | None,
                           skip=(), env=None) -> list[str]:
     """Wire names of the streamable tables in ``shard`` that a load of
-    ``path`` maps outside MLX's tracker: those it streams for sure
-    (``tables_stream_for_sure``), less the ones it reads from the file
-    (``skip``). MLX never counts or wires such a buffer, so its install
-    leaves the wired limit free. Empty for any other load."""
+    ``path`` maps outside MLX's tracker: when the caller installs the
+    table stream on the model (``table_install_follows``), those it
+    streams for sure (``tables_stream_for_sure``), less the ones it reads
+    from the file (``skip``). MLX never counts or wires such a buffer, so
+    its install leaves the wired limit free. Empty for any other load."""
     pattern = streamable_table_names(arch)
-    if pattern is None or not tables_stream_for_sure(path, env):
+    if (pattern is None or not install_follows(path)
+            or not tables_stream_for_sure(path, env)):
         return []
     from gmlx.load.headerscan import scan_gguf
 

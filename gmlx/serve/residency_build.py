@@ -294,9 +294,13 @@ class _ChatBuild:
         )
         set_untracked_weights_owner(cache_key)
         # Tables the load maps outside MLX's tracker are never wired and
-        # add to no MLX count (table_stream.untracked_table_names).
-        from gmlx.stream.table_stream import tables_load_untracked
+        # add to no MLX count (table_stream.untracked_table_names). The
+        # bridge installs the stream placement on the model this build
+        # loads, so its tables may load that way.
+        from gmlx.stream.table_stream import (table_install_follows,
+                                              tables_load_untracked)
 
+        table_install_follows(str(model_path))
         untracked_tables = streamed > 0 and tables_load_untracked(
             str(model_path), env)
         # With the experts in memory and every streamed table untracked,
@@ -444,6 +448,7 @@ class _ChatBuild:
             e.__traceback__ = None
             raise e
         finally:
+            table_install_follows(str(model_path), False)
             set_untracked_weights_owner(None)
             _serving.set_build_spec(None)
             _serving.pop_built_apc_manager()

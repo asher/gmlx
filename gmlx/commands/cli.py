@@ -2529,12 +2529,18 @@ def _ensure_stream_cb_caps(args) -> None:
     install sets back the caps it found. Also latches the
     stream flags before the load, for `run` and `chat` alike: the warm
     touch reads the latch to leave the streamable tables and the expert
-    stacks untouched."""
-    from gmlx.stream.table_stream import force_table_stream
+    stacks untouched. And it declares that the placement installs the
+    table stream on the model of ``args.gguf``, so a table that streams
+    may load outside MLX's tracker; `run --report-only` builds no model
+    and installs nothing."""
+    from gmlx.stream.table_stream import (force_table_stream,
+                                          table_install_follows)
 
     stream = bool(getattr(args, "stream_experts", False)
                   or getattr(args, "stream_cpu", False))
     force_table_stream(stream)
+    if not getattr(args, "report_only", False):
+        table_install_follows(getattr(args, "gguf", None))
     if stream:
         _lift_live_cb_caps()
 

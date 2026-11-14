@@ -1,8 +1,12 @@
 """A streamable table the wire load maps outside MLX's tracker: MLX never
-counts or wires it, and its install leaves the wired limit free. An
-mlx-kquant that cannot map it that way loads it tracked, and the install
-pins the limit as for any tracked table."""
+counts or wires it, and its install leaves the wired limit free. Only a
+load whose caller installs the table stream maps it that way; any other
+loads it tracked. An mlx-kquant that cannot map it that way loads it
+tracked, and the install pins the limit as for any tracked table."""
 from __future__ import annotations
+
+import ast
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -89,6 +93,7 @@ def test_a_streamed_table_loads_untracked_and_leaves_the_limit_free(
     from gmlx.load.wire import load_gguf_wire_bytes
 
     path, wire = flash_next_gguf
+    ts.table_install_follows(path)
     ref = _model(kq.load_gguf(path, zero_copy=False)[0])
     mx.eval(ref.model.ple_embed.parameters())
     before = _settled()
@@ -107,6 +112,24 @@ def test_a_streamed_table_loads_untracked_and_leaves_the_limit_free(
     assert bool(mx.all(got == want))
 
 
+def _spy_kq_load(monkeypatch, error=None) -> list:
+    """Record the ``untracked`` names of each ``kq.load_gguf`` call of the
+    wire load; raise ``error`` on a call that asks for any."""
+    import gmlx.load.wire as wire_mod
+
+    real = wire_mod.kq.load_gguf
+    calls: list = []
+
+    def kq_load(*args, **kwargs):
+        calls.append(sorted(kwargs.get("untracked", ())))
+        if "untracked" in kwargs and error is not None:
+            raise error
+        return real(*args)
+
+    monkeypatch.setattr(wire_mod.kq, "load_gguf", kq_load)
+    return calls
+
+
 @pytest.mark.parametrize("error", [
     TypeError("load_gguf() got an unexpected keyword argument 'untracked'"),
     RuntimeError("untracked: no Metal buffer view for this tensor"),
@@ -116,23 +139,118 @@ def test_a_table_that_cannot_load_untracked_loads_tracked_and_pins(
     """An mlx-kquant without load_gguf(untracked=...), or one that cannot
     view the table that way, reloads the shard tracked. The loader flags
     nothing, and the install pins the wired limit."""
-    import gmlx.load.wire as wire_mod
+    from gmlx.load.wire import load_gguf_wire_bytes
 
     path, wire = flash_next_gguf
-    real = wire_mod.kq.load_gguf
-    calls = []
-
-    def kq_load(*args, **kwargs):
-        calls.append(sorted(kwargs.get("untracked", ())))
-        if "untracked" in kwargs:
-            raise error
-        return real(*args)
-
-    monkeypatch.setattr(wire_mod.kq, "load_gguf", kq_load)
-    arrays = wire_mod.load_gguf_wire_bytes(path, zero_copy=True,
-                                           shards=[path])[0]
+    ts.table_install_follows(path)
+    calls = _spy_kq_load(monkeypatch, error)
+    arrays = load_gguf_wire_bytes(path, zero_copy=True, shards=[path])[0]
     assert calls == [[TABLE], []]
     model = _model(arrays)
     assert ts.mark_untracked_tables(model, [path]) == 0
     ts.install_table_streaming(model)
     assert wrapped_with(mx.set_wired_limit, "_kq_no_sweep")
+
+
+def test_a_load_no_caller_follows_with_the_install_maps_the_table_tracked(
+        flash_next_gguf, monkeypatch):
+    """The table streams for sure, but only a caller that declared the
+    table stream's install on the model (the serve build, and run, chat,
+    capture and kld through their placement) gets it untracked. Any other
+    load, as gmlx train, the distill teacher and student, and a Python
+    load_model make, maps it tracked: unwrapped, an untracked table would
+    be gathered whole on the GPU with nothing counting it. A declared load
+    asks for it untracked."""
+    from gmlx.load.wire import load_gguf_wire_bytes
+
+    path, wire = flash_next_gguf
+    calls = _spy_kq_load(monkeypatch)
+    arrays = load_gguf_wire_bytes(path, zero_copy=True, shards=[path])[0]
+    assert calls == [[]]
+    assert not ts.tables_load_untracked(path)
+    assert ts.mark_untracked_tables(_model(arrays), [path]) == 0
+    ts.table_install_follows(path)
+    load_gguf_wire_bytes(path, zero_copy=True, shards=[path])
+    assert calls == [[], [TABLE]]
+    ts.table_install_follows(path, False)
+    load_gguf_wire_bytes(path, zero_copy=True, shards=[path])
+    assert calls == [[], [TABLE], []]
+
+
+# The functions in gmlx that call table_install_follows, as (file,
+# function), and those that call the CLI's declaration, with the install
+# their file applies to the model the declared load builds.
+_DECLARERS = {("serve/residency_build.py", "_build_chat"),
+              ("commands/cli.py", "_ensure_stream_cb_caps")}
+_CLI_DECLARERS = {
+    ("commands/cli.py", "_main"): "_apply_placement",
+    ("tui/chat.py", "cmd_chat"): "_apply_placement",
+    ("commands/capture.py", "cmd_capture"): "load_serveable_model",
+    ("commands/kld.py", "_load"): "_apply_placement",
+}
+
+
+def _gmlx_files():
+    import gmlx
+
+    root = Path(gmlx.__file__).parent
+    for f in sorted(root.rglob("*.py")):
+        if "_vendor" not in f.parts:
+            yield f.relative_to(root).as_posix(), ast.parse(f.read_text())
+
+
+def _called(node) -> set:
+    return {getattr(c.func, "id", None) or getattr(c.func, "attr", None)
+            for c in ast.walk(node) if isinstance(c, ast.Call)}
+
+
+def _callers_of(name: str) -> set:
+    """(file under gmlx/, function) for each top-level function, or method
+    of a top-level class, in gmlx that calls ``name``."""
+    out = set()
+    for rel, tree in _gmlx_files():
+        for node in tree.body:
+            fns = (node.body if isinstance(node, ast.ClassDef) else [node])
+            for fn in fns:
+                if (isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and name in _called(fn)):
+                    out.add((rel, fn.name))
+    return out
+
+
+def test_only_loads_the_table_install_follows_declare_it():
+    """The declaration is made in two places: the serve build, whose
+    bridge installs the stream placement on what it loads (serve and its
+    batch path), and the CLI's stream setup, which run, chat, capture and
+    kld call before a load whose model their file then places
+    (``_apply_placement``, or serve's load with its install). Every other
+    entry point (train, the distill teacher and student, the Python
+    load_model, the image, video, speech and drafter loads) never
+    declares, so its table loads tracked
+    (``test_a_load_no_caller_follows_with_the_install_maps_the_table_tracked``).
+    A new declaration must name its install here."""
+    assert _callers_of("table_install_follows") == _DECLARERS
+    cli = _callers_of("_ensure_stream_cb_caps")
+    assert cli == set(_CLI_DECLARERS)
+    files = dict(_gmlx_files())
+    for (rel, _fn), install in _CLI_DECLARERS.items():
+        assert install in _called(files[rel]), rel
+
+
+def test_a_serve_build_credits_a_table_that_fell_back_to_tracked(
+        flash_next_gguf, monkeypatch):
+    """A serve build that expected its table untracked gave it no build
+    credit. When the load falls back to a tracked buffer, the table is
+    credited to the build's owner from there, so the headroom does not
+    read it as live memory before its install credits it."""
+    import gmlx.gen.prefill_decay as pd
+    from gmlx.load.wire import load_gguf_wire_bytes
+
+    path, wire = flash_next_gguf
+    ts.table_install_follows(path)
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: True)
+    monkeypatch.setattr(pd, "_WEIGHTS_OWNER", "entry")
+    monkeypatch.setattr(pd, "_BUILD_CREDIT", {})
+    _spy_kq_load(monkeypatch, RuntimeError("untracked: no buffer view"))
+    load_gguf_wire_bytes(path, zero_copy=True, shards=[path])
+    assert pd._BUILD_CREDIT["entry"][1] == wire.nbytes
