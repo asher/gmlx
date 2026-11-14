@@ -60,9 +60,10 @@ Checkpoints and the pool's blocks share the pool's memory share. When a
 save would pass it, blocks that no checkpoint holds go first. Then
 checkpoints go, each with the blocks only it held. Each conversation keeps
 its newest checkpoint, the one its next turn restores, until no other is
-left. Among the rest the least recently used goes first, and system-prompt
-checkpoints go last. `GMLX_APC_CKPT_BUDGET_MB` replaces the share with a
-budget for checkpoints alone.
+left. Among the rest the least recently used goes first, and
+system-prompt checkpoints go last. Any checkpoint that leaves the cache
+takes the blocks only it held with it. `GMLX_APC_CKPT_BUDGET_MB` replaces
+the share with a budget for checkpoints alone.
 
 Each layer's switches are listed in the prompt cache section of
 [Debug switches](debug-switches.md#prompt-cache).

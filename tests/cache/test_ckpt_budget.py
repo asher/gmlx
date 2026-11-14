@@ -342,3 +342,34 @@ def test_the_counters_reach_the_stats_and_the_metrics_payload(monkeypatch):
     assert apc["enabled"] is True
     assert apc["ckpt_budget_evictions"] == 2
     assert apc["ckpt_budget_evicted_mb"] == 3
+
+
+def _held_by_none(man):
+    return [b for b in man.pool if b.resident_bytes() and b.ref_cnt == 0]
+
+
+def test_the_count_bound_frees_the_blocks_only_its_victim_held(monkeypatch):
+    """A record the count bound drops goes with the blocks only it held,
+    as a room victim does: no block stays committed without a record."""
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 2)
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    for c in range(3):
+        assert ckpt_store(man, _ids(c, 64), make_hybrid_cache(64, seed=c),
+                          extra_hash=c)
+    assert _chains(man) == [1, 2]
+    assert _held_by_none(man) == []
+
+
+def test_strip_on_extend_frees_the_window_chain_its_victim_held():
+    """A record strip-on-extend drops shares its main chain with the
+    deeper record, but its window chain is salted by its own length: those
+    blocks go with it."""
+    from test_ckpt_tier import make_swa_cache
+
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    ids = _ids(0, 128)
+    for p in (32, 64, 96, 128):
+        assert ckpt_store(man, ids[:p], make_swa_cache(p, seed=1))
+    assert sorted(r.p for r in cs._ckpt_records(man).values()) == [32, 96, 128]
+    assert _held_by_none(man) == []
+

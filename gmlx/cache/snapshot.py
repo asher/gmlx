@@ -1266,9 +1266,10 @@ def _lru_victim_key(idx, keep):
 
 
 def _evict_lru_record(manager, idx, keep):
-    """Release and return the eviction victim (``_lru_victim_key``)."""
+    """Drop and return the eviction victim (``_lru_victim_key``), with the
+    blocks only it held (``_drop_record``)."""
     victim = idx.pop(_lru_victim_key(idx, keep))
-    _release_record(manager, victim)
+    _drop_record(manager, victim)
     return victim
 
 
@@ -1318,6 +1319,18 @@ def _free_unheld(manager, blocks) -> int:
     return freed
 
 
+def _drop_record(manager, rec) -> int:
+    """Release a record leaving the index and free the blocks only it
+    held: a record is never dropped while its blocks stay, and blocks
+    whose record is gone are freed, on every path that drops one. The
+    pool path (``_evict_for_pool``) and the governor release only, since
+    their callers take or free those blocks at once. Returns the bytes
+    freed. Caller holds the lock."""
+    held = list(rec.main_blocks or ()) + list(rec.bounded_blocks or ())
+    _release_record(manager, rec)
+    return _free_unheld(manager, held)
+
+
 def _fit_record_room(manager, idx, keep) -> tuple[list, dict]:
     """Bring the records, and the pool's committed blocks when they share
     the room, within the room (``_record_room``). What goes first: blocks
@@ -1340,11 +1353,8 @@ def _fit_record_room(manager, idx, keep) -> tuple[list, dict]:
         blocks -= note["idle"]
     while total + blocks > room and len(idx) > 1:
         victim = idx.pop(_lru_victim_key(idx, keep))
-        held = list(victim.main_blocks or ()) + list(
-            victim.bounded_blocks or ())
         own = int(getattr(victim, "nbytes", 0) or 0)
-        _release_record(manager, victim)
-        freed = _free_unheld(manager, held)
+        freed = _drop_record(manager, victim)
         total -= own
         if shared:
             blocks -= freed
@@ -1424,7 +1434,7 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         if old is not None:
             if old.kind == "anchor" and rec.kind == "boundary":
                 rec.kind = "anchor"     # a re-store keeps the anchor tag
-            _release_record(manager, old)
+            _drop_record(manager, old)
         # chain = records whose ids are a strict prefix of this one
         chain = [k for k, r in idx.items()
                  if r.extra_hash == rec.extra_hash and r.p < rec.p
@@ -1432,10 +1442,10 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         if rec.kind == "replay":
             # One replay per chain: the newer one supersedes outright.
             for k in [k for k in chain if idx[k].kind == "replay"]:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
         elif rec.kind == "anchor":
             for k in [k for k in chain if idx[k].kind == "anchor"]:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
         elif rec.kind == "boundary" and not any(
                 idx[k].kind not in ("replay", "decision")
                 for k in chain if k in idx):
@@ -1465,7 +1475,7 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             if k != held:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
             else:
                 idx[k].spared = True
         idx[key] = rec
@@ -1473,7 +1483,7 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         if rec.kind == "decision":
             decisions = [k for k, r in idx.items() if r.kind == "decision"]
             for k in decisions[:-_CKPT_DECISION_ENTRIES]:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
         while len(idx) > _CKPT_RECORD_ENTRIES:
             _evict_lru_record(manager, idx, key)
         victims, note = _fit_record_room(manager, idx, key)
