@@ -82,8 +82,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   restore the wrong context.
 - With a drafter, Qwen3.8-Flash-Next read a long prompt in chunks twice as
   wide as without one, and could pass the server's memory cap.
-- Memory wired after a server that streams a lookup table started could take
-  the Mac past its wired limit. The server's memory cap now follows it down.
+- On a server that streams a lookup table, memory other apps wired after it
+  started could take the Mac past its wired limit. The server's memory cap
+  now shrinks while that memory stays wired.
 - With a drafter, requests that shared a long prompt prefix decoded slower
   once one of them had restored its prefix from the prompt cache.
 - With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long
