@@ -29,10 +29,11 @@ for as long as the projection keeps failing.
 
 Before it declines, the gate has the governor evict what the join is
 over the governed budget from the prompt cache pool, the coldest blocks
-first (governor.cover_admission_shortfall), and admits on the same tick
-when that covers it. The pool is plain active memory to the budget, so a
-full pool would otherwise defer every join. A pool that cannot cover the
-whole shortfall is left alone and the deferral above stands.
+first, then from a drafter's prefix layer
+(governor.cover_admission_shortfall), and admits on the same tick when
+that covers it. Both are plain active memory to the budget, so full
+caches would otherwise defer every join. Caches that cannot cover the
+whole shortfall together are left alone and the deferral above stands.
 
 The projection is conservative in one direction by design: a finished
 batch that has not yet released its footprint makes measured headroom
@@ -211,7 +212,8 @@ def _should_decline(gen) -> bool:
 
 def _evict_shortfall(gen, cands, projected: float) -> bool:
     """Have the governor evict what the join is over budget from the
-    prompt cache pool. True when the join then fits."""
+    prompt cache pool and the drafter's prefix layer. True when the join
+    then fits."""
     from .governor import cover_admission_shortfall, shortfall_eviction_due
     from .memory import admission_slack_bytes
 

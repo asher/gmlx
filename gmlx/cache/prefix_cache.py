@@ -333,7 +333,8 @@ class SpecPrefixCache:
 
     The serve path registers each cache with the memory governor
     (``gmlx.serve.governor.register_spec_prefix``), which evicts entries
-    least recently used first under pressure (``governor_evict``).
+    least recently used first under pressure (``governor_evict``) and for
+    a join short of memory (``evict_bytes``).
     """
 
     def __init__(self, max_entries: int = 4, min_prefix: int = 32,

@@ -53,9 +53,10 @@ A join over the budget does not wait for the ladder. In green and
 yellow the admission gate asks cover_admission_shortfall to evict what
 the join is short of by yellow's own test (pending shed + projection +
 K_y x rate - headroom, plus the gate's slack) from the prompt cache pool
-by bytes, the coldest first, and admits when that covers it. A pool that
-cannot cover it is not touched. Orange and red keep the pool to their
-rungs.
+by bytes, the coldest first, then what the pool cannot give from the
+drafter's prefix layer, and admits when that covers it. Caches that
+cannot cover it together are not touched. Orange and red keep both to
+their rungs.
 
 Anti-thrash: minimum dwell per band and a cap on shed actions per
 minute, or orange fights a decode loop that immediately
@@ -364,16 +365,30 @@ def _admission_shortfall(gen, st: "_GovState", projected: float):
     return st.pending_shed_bytes + projected + ky * rate - head
 
 
+def _shortfall_pool(gen):
+    """The prompt cache pool a join's shortfall can take from, or None."""
+    mgr = getattr(gen, "apc_manager", None)
+    return mgr if hasattr(mgr, "evict_bytes") else None
+
+
+def _shortfall_spec(gen):
+    """The drafter's prefix layer a join's shortfall can take from, or
+    None."""
+    spec = spec_prefix_of(gen)
+    return spec if hasattr(spec, "evict_bytes") else None
+
+
 def shortfall_eviction_due(gen) -> bool:
     """Whether ``cover_admission_shortfall`` may evict for a join now:
-    a governed batch with a prompt cache pool, in green or yellow, that
-    has not just found the pool short. Orange and red own the pool with
-    their own rungs."""
+    a governed batch with a prompt cache pool or a drafter's prefix layer,
+    in green or yellow, that has not just found them short. Orange and red
+    own both with their own rungs."""
     if not governor_enabled():
         return False
     st = getattr(gen, "_kq_governor", None)
-    mgr = getattr(gen, "apc_manager", None)
-    if st is None or st.band > YELLOW or not hasattr(mgr, "evict_bytes"):
+    if st is None or st.band > YELLOW:
+        return False
+    if _shortfall_pool(gen) is None and _shortfall_spec(gen) is None:
         return False
     missed = st.shortfall_missed_at
     return (missed is None
@@ -382,26 +397,32 @@ def shortfall_eviction_due(gen) -> bool:
 
 def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
     """Evict what a pending join is over budget from the prompt cache
-    pool, the coldest first, so the gate admits it now and not after the
-    deferral. ``slack`` is the gate's price of what the batch grows by
-    before the join lands. True when the pool gave the shortfall and the
-    join then fits.
+    pool, the coldest first, and what the pool cannot give from the
+    drafter's prefix layer, least recently used first, so the gate admits
+    the join now and not after the deferral. ``slack`` is the gate's price
+    of what the batch grows by before the join lands. True when the
+    eviction gave the shortfall and the join then fits.
 
-    Nothing is evicted when the join fits already or when the pool cannot
+    Nothing is evicted when the join fits already or when the two cannot
     cover the whole shortfall: the deferral and its handoff stand."""
     if not shortfall_eviction_due(gen):
         return False
     st = gen._kq_governor
-    mgr = gen.apc_manager
+    mgr, spec = _shortfall_pool(gen), _shortfall_spec(gen)
     short = _admission_shortfall(gen, st, projected)
     if short is None or short < 0:
         return False
     now = time.perf_counter()
     want = short + max(0.0, slack)
-    if mgr.reclaimable_bytes() < want:
+    room = ((mgr.reclaimable_bytes() if mgr is not None else 0)
+            + (spec.governor_bytes() if spec is not None else 0))
+    if room < want:
         st.shortfall_missed_at = now
         return False
-    freed = mgr.evict_bytes(want)
+    pool_freed = mgr.evict_bytes(want) if mgr is not None else 0
+    spec_freed = (spec.evict_bytes(want - pool_freed)
+                  if spec is not None and pool_freed < want else 0)
+    freed = pool_freed + spec_freed
     mx.clear_cache()
     _STATS["shortfall_evictions"] += 1
     _STATS["last_action"] = (
@@ -410,8 +431,9 @@ def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
     fits = left is not None and left < 0
     st.shortfall_missed_at = None if fits else now
     _log.info("[governor] admission shortfall %.2f GB: evicted %.2f GB of "
-              "the prompt cache pool, coldest first; the join %s",
-              short / 1e9, freed / 1e9,
+              "the prompt cache pool, coldest first, and %.2f GB of the "
+              "drafter's prefix layer; the join %s",
+              short / 1e9, pool_freed / 1e9, spec_freed / 1e9,
               "fits" if fits else "is still over budget")
     return fits
 
@@ -1394,6 +1416,11 @@ def unregister_spec_prefix_of(model) -> None:
         cache = getattr(holder, "_spec_prefix_cache", None)
         if cache is not None:
             unregister_spec_prefix(cache)
+
+
+def spec_prefix_of(gen):
+    """The drafter's prefix layer on the generator's model, or None."""
+    return getattr(getattr(gen, "model", None), "_spec_prefix_cache", None)
 
 
 def install_governor() -> bool:
