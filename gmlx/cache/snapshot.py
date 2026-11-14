@@ -2667,6 +2667,7 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             return
         from .kv_cache import BatchKVCache, KVCache, RotatingKVCache
         states = []
+        pending: list[Any] = []
         for c in prompt_cache:
             # Plain KV is sliced from the row at retirement. A row that
             # was joined holds it in the batch class.
@@ -2674,16 +2675,21 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
                     isinstance(c, KVCache)
                     and not isinstance(c, RotatingKVCache)):
                 continue
-            clone = _clone_single_row(c)
+            clone = _clone_single_row(c, pending)
             if clone is None:
                 stash["snap_ok"] = False
                 _log.info("APC decode ckpt disabled: uncloneable cache %s",
                           type(c).__name__)
                 return
             states.append(clone)
+        # The ring holds two. The oldest makes room before the new
+        # snapshot materializes, so it never holds three.
         snaps = stash.setdefault("snaps", [])
+        del snaps[:-1]
+        if pending:
+            import mlx.core as mx
+            mx.eval(*pending)
         snaps.append((p, states))
-        del snaps[:-2]
         stash["snap_next"] = _grid_ceil(p + eff, grid)
         _log.info("APC decode ckpt snapshot: p=%d pred=%d", p, pred)
     except Exception:

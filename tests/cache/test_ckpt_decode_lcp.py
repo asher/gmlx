@@ -365,6 +365,33 @@ def test_a_record_payload_materializes_within_the_record_bounds(
     assert all(r.nbytes == each for r in idx.values())
 
 
+def test_a_decode_snapshot_materializes_within_the_ring(monkeypatch):
+    """The ring holds two decode snapshots. The oldest makes room before
+    the third materializes, so a row never holds three, and the ring keeps
+    the newest two as before."""
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "96")
+    stash = _stash(list(range(40)))
+    _tick_at(stash, 136, 96, 136, monkeypatch)
+    _tick_at(stash, 232, 192, 232, monkeypatch)
+    assert [p for p, _ in stash["snaps"]] == [136, 232]
+    seen = []
+    real = mx.eval
+
+    def spy(*arrays):
+        seen.append(len(stash["snaps"]))
+        real(*arrays)
+
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, gen, **kw: 328)
+    cache = make_hybrid_cache(328, seed=328)
+    gen = list(range(9000, 9288))
+    monkeypatch.setattr(mx, "eval", spy)
+    decode_ckpt_tick(stash, cache, gen)
+    monkeypatch.setattr(mx, "eval", real)
+    assert seen and max(seen) + 1 <= 2
+    assert [p for p, _ in stash["snaps"]] == [232, 328]
+
+
 def test_sidecar_byte_budget(monkeypatch):
     from gmlx.cache.snapshot import _sidecar_index, drafter_sidecar_store
     from test_ckpt_tier import KVCache
