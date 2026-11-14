@@ -263,31 +263,26 @@ def test_a_stream_placement_predicts_the_map(flash_next_gguf, monkeypatch):
 @pytest.mark.parametrize("flash_next_gguf", ["F16"], indirect=True)
 def test_a_table_the_loader_casts_loads_tracked_and_pins(flash_next_gguf,
                                                          monkeypatch):
-    """The loader casts an F16 table to the activation dtype, into a
-    buffer of its own that no view of the file holds, so it loads
+    """The loader casts an F16 table to a bfloat16 activation dtype, into
+    a buffer of its own that no view of the file holds, so it loads
     tracked. The start predicts no map for it, so it decides no cap. In a
     process another model put under the cap, kq is not asked to map it
-    untracked, the prediction says so before the load, the loader flags
-    nothing, and the install pins the wired limit. The same declaration
-    on the iq4_nl table predicts the map."""
-    from gmlx.load.wire import load_gguf_wire_bytes
-
-    path, wire = flash_next_gguf
+    untracked, the prediction says so before the load, the load installs
+    the cast copy and flags nothing, and the install pins the wired
+    limit. The same declaration on the iq4_nl table predicts the map."""
+    path, _ = flash_next_gguf
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "bfloat16")
     monkeypatch.setattr(ts, "untracked_tables_supported", lambda: True)
     assert not ts.predicts_untracked(path)
     monkeypatch.setattr(capacity, "_CAP", True)
     ts.table_install_follows(path)
     assert not ts.tables_load_untracked(path)
-    calls = _spy_kq_load(monkeypatch)
-    arrays = load_gguf_wire_bytes(path, zero_copy=True, shards=[path])[0]
-    assert calls == [[]]
-    emb = nn.Embedding(ROWS, DIMS)
-    emb.weight = arrays[TABLE].astype(mx.float32).astype(mx.bfloat16)
-    model = _Node()
-    model.model_type = "qwen4_exp"
-    model.model = _Node()
-    model.model.ple_embed = emb
-    assert ts.mark_untracked_tables(model, [path]) == 0
+    model, mapped, asked = _load_to_the_install(path, monkeypatch,
+                                                "load_model", decide=False)
+    assert asked == [[]]
+    emb = model.model.ple_embed
+    assert emb.weight is not mapped and emb.weight.dtype == mx.bfloat16
+    assert not emb._kq_table_untracked
     ts.install_table_streaming(model)
     assert wrapped_with(mx.set_wired_limit, "_kq_no_sweep")
 
@@ -319,26 +314,57 @@ class _Shell(nn.Module):
         self.model.ple_embed = nn.Embedding(ROWS, DIMS)
 
 
-def _load_to_the_install(path, monkeypatch, via):
-    """Run the declared load of ``path`` through ``via``: the whole of
-    ``load_model``, or the wire load, the remap and ``_install_and_load``
-    as the VLM loader drives them. Returns the model the load built and
-    the table array the map handed back. With an mlx-kquant that cannot
-    map a table untracked, the map hands back a tracked array the load
-    takes as untracked: the steps between are the same."""
+class _Container(nn.Module):
+    """The VLM model and the MTP target, which hold the text model as
+    ``language_model``."""
+
+    def __init__(self):
+        super().__init__()
+        self.model_type = "qwen4_exp"
+        self.language_model = _Shell()
+
+
+def _mmproj(path) -> str:
+    """A Qwen3-VL mmproj beside ``path``, for the qwen4exp VLM pair."""
+    out = str(Path(path).with_name("mmproj.gguf"))
+    w = gguf.GGUFWriter(out, "clip")
+    w.add_string("clip.vision.projector_type", "qwen3vl_merger")
+    w.add_tensor("v.post_ln.weight", np.ones(8, np.float32),
+                 raw_dtype=gguf.GGMLQuantizationType.F32)
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    return out
+
+
+def _load_to_the_install(path, monkeypatch, via, decide=True):
+    """Run the declared load of ``path`` through the loader ``via``:
+    ``load_model``, ``load_mtp_model`` or ``load_vlm_model``, each with its
+    own steps and sanitize, to the step after its install. Only the config
+    synthesis and the model build, which read no tensor, stand in. With
+    ``decide`` the process decides the wired cap from ``path`` first.
+    Returns the text model the load built, the table array the map handed
+    back and the untracked names of each map. With an mlx-kquant that
+    cannot map a table untracked, the map hands back a tracked array the
+    load takes as untracked: the steps between are the same."""
     import functools
 
     import gmlx.load.loader as loader
+    import gmlx.load.vlm as vlm
     import gmlx.load.wire as wire_mod
+    import gmlx.spec.mtp_load as mtp_load
 
-    mapped = {}
+    mapped, asked = {}, []
     real = wire_mod.kq.load_gguf
     supported = ts.untracked_tables_supported()
-    _under_the_cap(path, monkeypatch)
+    if decide:
+        _under_the_cap(path, monkeypatch)
 
     # Keeps the docstring the support check reads.
     @functools.wraps(real)
     def kq_load(*args, **kwargs):
+        asked.append(sorted(kwargs.get("untracked", ())))
         if not supported:
             kwargs.pop("untracked", None)
         out = real(*args, **kwargs)
@@ -349,27 +375,32 @@ def _load_to_the_install(path, monkeypatch, via):
     def stop(*_a, **_k):
         raise _Stop
 
-    model = _Shell()
+    model = _Shell() if via == "load_model" else _Container()
     monkeypatch.setattr(wire_mod.kq, "load_gguf", kq_load)
     monkeypatch.setattr("gmlx.load.config_synth.synthesize_config",
                         lambda *a, **k: {"model_type": "qwen4_exp"})
-    monkeypatch.setattr(loader, "build_model",
-                        lambda cfg, **k: (model, dict(cfg)))
+    built = lambda cfg, **k: (model, dict(cfg))  # noqa: E731
+    monkeypatch.setattr(loader, "build_model", built)
+    monkeypatch.setattr(mtp_load, "build_model", built)
+    monkeypatch.setattr(vlm, "build_vlm_model", built)
+    monkeypatch.setattr(vlm, "synthesize_vlm_config", lambda *a, **k: {
+        "model_type": "qwen4_exp", "text_config": {}})
+    # Flash-Next's drafter is a companion GGUF; the load stops before it.
+    monkeypatch.setattr(mtp_load, "_resolve_companion_drafter",
+                        lambda *a, **k: str(Path(path).with_name("mtp.gguf")))
     monkeypatch.setattr("gmlx.load.tokenizer.load_tokenizer_from_gguf", stop)
+    monkeypatch.setattr(mtp_load, "_arm_spec_target", stop)
+    monkeypatch.setattr(vlm, "install_view_rebinds", stop)
     ts.table_install_follows(path)
-    if via == "load_model":
-        with pytest.raises(_Stop):
+    with pytest.raises(_Stop):
+        if via == "load_model":
             loader.load_model(path)
-    else:
-        arrays, codecs = wire_mod.load_gguf_wire_bytes(
-            path, zero_copy=True, shards=[path])[:2]
-        hf_weights, hf_codecs, _ = wire_mod.remap_arrays(
-            arrays, codecs, "qwen4exp")
-        del arrays
-        loader._install_and_load(
-            model, hf_weights, hf_codecs, log=lambda *a, **k: None,
-            sanitize=False, source_key=loader.weights_source_key(path))
-    return model, mapped["table"]
+        elif via == "load_mtp_model":
+            mtp_load.load_mtp_model(path)
+        else:
+            vlm.load_vlm_model(path, _mmproj(path))
+    text = getattr(model, "language_model", model)
+    return text, mapped["table"], asked
 
 
 def _install_takes_the_map(model, mapped) -> None:
@@ -385,16 +416,21 @@ def _install_takes_the_map(model, mapped) -> None:
     assert not wrapped_with(mx.set_wired_limit, "_kq_no_sweep")
 
 
-@pytest.mark.parametrize("via", ["load_model", "_install_and_load"])
+_LOADERS = ["load_model", "load_mtp_model", "load_vlm_model"]
+
+
+@pytest.mark.parametrize("via", _LOADERS)
 def test_the_declared_load_hands_the_mapped_table_to_its_install(
         flash_next_gguf, monkeypatch, via):
-    """From the map to the install, every step of the model load passes
-    the table on as the array the map handed back."""
+    """From the map to the install, every step of the text, MTP target
+    and VLM loads passes the table on as the array the map handed back."""
     path, _ = flash_next_gguf
-    _install_takes_the_map(*_load_to_the_install(path, monkeypatch, via))
+    model, mapped, asked = _load_to_the_install(path, monkeypatch, via)
+    assert asked[0] == [TABLE]
+    _install_takes_the_map(model, mapped)
 
 
-@pytest.mark.parametrize("via", ["load_model", "_install_and_load"])
+@pytest.mark.parametrize("via", _LOADERS)
 def test_a_step_that_copies_the_table_fails_the_install_check(
         flash_next_gguf, monkeypatch, via):
     """The check catches a new step that reads the table into a copy
@@ -405,12 +441,13 @@ def test_a_step_that_copies_the_table_fails_the_install_check(
     real = loader.install_out_scales
 
     def copying(model, hf_weights, hf_kquant_meta=None):
-        key = "model.ple_embed.weight"
+        key = next(k for k in hf_weights
+                   if k.endswith("model.ple_embed.weight"))
         hf_weights[key] = mx.array(np.array(hf_weights[key]))
         return real(model, hf_weights, hf_kquant_meta)
 
     monkeypatch.setattr(loader, "install_out_scales", copying)
-    model, mapped = _load_to_the_install(path, monkeypatch, via)
+    model, mapped, _ = _load_to_the_install(path, monkeypatch, via)
     with pytest.raises(AssertionError, match="copied the table"):
         _install_takes_the_map(model, mapped)
 
