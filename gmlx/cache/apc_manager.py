@@ -279,9 +279,11 @@ class GmlxAPCManager(_apc.APCManager):
         if budget_fraction is None:
             budget_fraction = _POOL_BUDGET_FRACTION
         from gmlx.serve.capacity import working_budget_bytes
-        from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
+        from gmlx.serve.mem_preflight import block_costs, per_token_bytes
 
-        costs = kv_layer_costs(model)
+        # What a stored block holds per token, which can be less than the
+        # live cache: qwen4_exp's indexer keys ride the record whole.
+        costs = block_costs(model)
         budget = working_budget_bytes()
         if not costs or not budget:
             return

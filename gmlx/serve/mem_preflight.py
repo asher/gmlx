@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from gmlx.upstream.patching import link, wrapped_with
 
@@ -440,6 +440,25 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
         for rows, region_bpe in regions:
             costs.append((FixedRows(rows), elems * region_bpe))
     return costs
+
+
+# Model types whose prefix-pool block holds only the k and v of each
+# layer: their other streams ride the store's record whole (the QSA
+# indexer keys of qwen4_exp, cache.snapshot), so a block costs less per
+# token than the live cache.
+_BLOCK_KV_ONLY = ("qwen4_exp",)
+
+
+def block_costs(model):
+    """``kv_layer_costs`` for what one prefix-pool block holds per token:
+    the live price less the pools a block never stores. The pool's block
+    sizing reads this; the boot table and admission price the live cache
+    (``kv_layer_costs``)."""
+    c = _lm_config(model)
+    geometry = config_geometry(c)
+    if geometry and _get(c, "model_type") in _BLOCK_KV_ONLY:
+        geometry = [replace(g, pool=0.0) for g in geometry]
+    return kv_layer_costs(model, geometry=geometry)
 
 
 def _policy_costs(rg, model):
