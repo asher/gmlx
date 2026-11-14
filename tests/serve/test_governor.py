@@ -284,6 +284,44 @@ def test_a_model_unloaded_while_armed_leaves_the_throttles(
     assert gov._HOLDERS == []
 
 
+@pytest.mark.parametrize("then", ["unload", "tick"])
+def test_a_collected_generators_throttle_goes_with_no_other_disarm(
+        rig, monkeypatch, then):
+    """A single-model server in yellow: the generation loop drops its
+    failed generator without closing it, and the collection marks the
+    throttle. The limits it found come back at the model's unload, or at
+    the first tick of the next generator, which starts green and never
+    disarms."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from test_residency_config import _acq, make_pool
+
+    for name in ("_next", "close", "__del__"):
+        monkeypatch.setattr(ar.BatchGenerator, name,
+                            ar.BatchGenerator.__dict__[name])
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", gov._ARMED_FLOOR)
+    monkeypatch.setitem(gov._STATS, "kernel_floor",
+                        gov._STATS.get("kernel_floor"))
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
+    assert gov.install_governor()
+    _proxy, pool, _seen, teardowns = make_pool()
+    pool.release(_acq(pool, "/m/a.gguf"))
+    gen = FakeGen(rows=2)
+    gen._wire_stack = None
+    st = gov._state(gen)
+    gov._arm_throttle(gen, st, 120e9, 0.05)
+    assert (rig["mem_limit"], rig["cache_limit"]) != (0, 7)
+    ar.BatchGenerator.__del__(gen)
+    assert st.gone and gov._HOLDERS == [st]
+    if then == "unload":
+        assert pool.evict("/m/a.gguf") and teardowns == ["/m/a.gguf"]
+    else:
+        nxt = FakeGen(rows=1)
+        gov._governor_tick(nxt)
+        assert gov._state(nxt).band == gov.GREEN
+    assert (rig["mem_limit"], rig["cache_limit"]) == (0, 7)
+    assert gov._HOLDERS == []
+
+
 def test_disarm_in_a_process_pinned_since_puts_back_mlx_limit(
         rig, monkeypatch):
     """The throttle armed over the wired cap's memory limit, then a load

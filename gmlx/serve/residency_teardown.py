@@ -199,3 +199,8 @@ class _Teardown:
         del m, _resident_holders
         import gc
         gc.collect()
+        # A generator of this model the collection found unclosed marked
+        # its throttle; nothing of this model ticks again to drop it.
+        from .governor import drop_gone_throttles
+
+        drop_gone_throttles()

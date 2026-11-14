@@ -549,8 +549,9 @@ def _pause_admission(gen, st: _GovState) -> None:
 # The throttles that hold a memory or cache limit they set, oldest
 # first: only the newest that holds a limit puts its saved one back
 # (_disarm_throttle). A generator's close takes its throttle off
-# (release_throttle), and one collected unclosed goes at the next arm or
-# disarm (_drop_gone).
+# (release_throttle), and one collected unclosed goes at the next arm,
+# disarm or tick of any generator, or at a model's unload
+# (drop_gone_throttles).
 _HOLDERS: list = []
 _HOLDERS_LOCK = threading.Lock()
 
@@ -561,6 +562,18 @@ def _drop_gone() -> None:
     a lock; the caller holds _HOLDERS_LOCK."""
     for h in [h for h in _HOLDERS if h.gone]:
         _disarm_locked(h)
+
+
+def drop_gone_throttles() -> None:
+    """Put back the limits of the throttles whose generator was collected
+    unclosed (``_drop_gone``). Each tick calls it, so a new generator that
+    ticks green from its start still drops them, and a model's unload
+    calls it after its collection, when no generator may tick again. The
+    caller holds no limit lock."""
+    if not any(h.gone for h in list(_HOLDERS)):
+        return
+    with _HOLDERS_LOCK:
+        _drop_gone()
 
 
 def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
@@ -996,6 +1009,7 @@ def _kernel_sample(gen, st: "_GovState", floor: float):
 
 
 def _governor_tick(gen) -> None:
+    drop_gone_throttles()
     st = _state(gen)
     st.tick_no += 1
     margin = _env_f("GMLX_GOV_MARGIN", 0.05)
@@ -1376,7 +1390,8 @@ def install_governor() -> bool:
     def _collected(self):
         # A collection can run on a thread that holds a limit lock, so a
         # generator collected unclosed takes none: it marks its throttle,
-        # and the next arm or disarm drops it (_drop_gone).
+        # and the next arm, disarm or tick, or the model's unload, drops
+        # it (drop_gone_throttles).
         st = getattr(self, "_kq_governor", None)
         if st is not None:
             st.gone = True
