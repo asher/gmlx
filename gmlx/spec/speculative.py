@@ -2073,14 +2073,23 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
             return
-        from gmlx.cache.snapshot import ckpt_full_store_redundant, ckpt_store
+        from gmlx.cache.snapshot import (
+            ckpt_full_store_redundant,
+            ckpt_replay_stands_in,
+            ckpt_store,
+        )
         meta = retire_ctx.get("apc_meta")
+        extra_hash = as_salt(retire_ctx.get("extra_hash", 0))
         if ckpt_full_store_redundant(meta):
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
             return
+        if ckpt_replay_stands_in(manager, retire_ctx["full_ids"], prompt_cache,
+                                 extra_hash=extra_hash,
+                                 keep=(meta or {}).get("ckpt_p_stable")):
+            return
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
-                            extra_hash=as_salt(retire_ctx.get("extra_hash", 0)),
+                            extra_hash=extra_hash,
                             grid_truncate=True,
                             keep=(meta or {}).get("ckpt_p_stable"))
         if stored and meta is not None:

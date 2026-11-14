@@ -380,16 +380,24 @@ def _ckpt_plain_post_prefill(result) -> None:
         stash = getattr(cache[0], "_kq_apc_retire", None) if cache else None
         if stash is None or stash.get("mode") != "ckpt":
             return
-        from gmlx.cache.snapshot import ckpt_full_store_redundant, ckpt_store
+        from gmlx.cache.snapshot import (
+            ckpt_full_store_redundant,
+            ckpt_replay_stands_in,
+            ckpt_store,
+        )
 
         m = stash.get("apc_meta")
+        extra_hash = as_salt(stash.get("extra_hash", 0))
         if ckpt_full_store_redundant(m):
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
+        elif ckpt_replay_stands_in(stash["manager"], stash["full_ids"], cache,
+                                   extra_hash=extra_hash,
+                                   keep=(m or {}).get("ckpt_p_stable")):
+            pass
         elif ckpt_store(
                 stash["manager"], stash["full_ids"], cache,
-                extra_hash=as_salt(stash.get("extra_hash", 0)),
-                keep=(m or {}).get("ckpt_p_stable")):
+                extra_hash=extra_hash, keep=(m or {}).get("ckpt_p_stable")):
             if m is not None:
                 m.setdefault("ckpt_stored_boundaries", []).append(
                     len(stash["full_ids"]))

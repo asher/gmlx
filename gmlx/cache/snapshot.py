@@ -1016,6 +1016,64 @@ def ckpt_full_store_redundant(meta) -> bool:
     return any(b in stored for b in meta.get("ckpt_p_stable_bounds") or ())
 
 
+def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
+                          extra_hash: int = 0, keep: int | None = None) -> bool:
+    """Whether the request's N-1 replay record stands in for the p=N
+    post-prefill store, which then is skipped. The two sit one token
+    apart and differ only in the lookups they serve: the replay the
+    identical resend (a record at N cannot serve an N-token query), the
+    p=N record the next turn or a branch past the prompt. A replay on a
+    recurrent layout serves only the resend (the replay gate in
+    ``_ckpt_scan``), so it becomes a boundary here and serves both: the
+    p=N record is off the grid as well, so a next turn restored from
+    either chunks off the grid alike, and the resend still forwards one
+    token. It goes back in as the p=N record would have, strip-on-extend
+    and ``keep`` (the request's p_stable) included, so the boundaries of
+    earlier turns on its chain still go. It takes the disk skeleton the
+    p=N store would have written, on a layout with no window chain (an
+    arr replay's rotating or kvarn window chain never went to disk). A
+    replay on an attention-only layout already adopts on extension and
+    keeps its kind. False when no replay landed: the p=N store runs."""
+    if manager is None or token_ids is None:
+        return False
+    try:
+        ids = tuple(int(t) for t in token_ids)[:-1]
+        p = len(ids)
+        if p < 2:
+            return False
+        key = (ids, int(salt_at(extra_hash, p)))
+        idx = _ckpt_records(manager)
+        with manager.lock:
+            rec = idx.get(key)
+            if rec is None or rec.kind != "replay":
+                return False
+            promote = "arr" in rec.layout
+            if promote:
+                # Out of the index unreleased, then in again as a boundary.
+                idx.pop(key)
+                rec.kind = "boundary"
+                _record_insert(manager, rec, keep)
+            snap = _CkptRecord(
+                **{k: getattr(rec, k) for k in _CkptRecord.__slots__})
+        _log.info("APC ckpt post-prefill store skipped: the replay at %d "
+                  "stands in%s", p, " as a boundary" if promote else "")
+        # A window chain (rotating or kvarn) of an arr replay never went
+        # to disk, so a skeleton for it would restore nothing.
+        if (promote and prompt_cache is not None
+                and not any(_is_rot(t) or _is_kvarn(t) for t in snap.layout)
+                and snap.states is not None):
+            _ckpt_disk_write(manager, list(snap.ids), prompt_cache,
+                             snap.layout, snap.p, snap.b_full,
+                             snap.p - snap.b_full, snap.states, snap.tails,
+                             ckpt_extra_hash(snap.extra_hash),
+                             qsa_streams=snap.qsa)
+        return True
+    except Exception:
+        _log.warning("APC ckpt replay stand-in failed; storing p=N",
+                     exc_info=True)
+        return False
+
+
 def _release_record(manager, rec) -> None:
     for blocks in (rec.main_blocks, rec.bounded_blocks):
         if blocks:

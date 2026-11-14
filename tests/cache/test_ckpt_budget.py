@@ -7,7 +7,8 @@ its record as the other three stored theirs. Records and the pool's
 committed blocks now share one figure; a chain of blocks is useless
 without its record, so blocks no record holds go first, and a record goes
 with the blocks only it held. Beside it: a retirement no lookup can use
-stores nothing.
+stores nothing, and the request's N-1 replay stands in for the p=N
+post-prefill store.
 """
 
 import logging
@@ -19,7 +20,7 @@ import gmlx.cache.apc_manager as am
 import gmlx.cache.snapshot as cs
 from gmlx.cache.apc_manager import GmlxAPCManager
 from gmlx.cache.snapshot import ckpt_lookup, ckpt_store
-from test_ckpt_tier import H, LAYOUT, make_hybrid_cache
+from test_ckpt_tier import H, LAYOUT, _trim_kv, make_hybrid_cache
 
 pytestmark = pytest.mark.host_gb(16)
 
@@ -221,6 +222,63 @@ def test_a_retirement_no_lookup_can_use_stores_nothing():
     # No signature recorded (an unsupported live cache at arming): no check.
     assert cs.retirement_store(man, "ckpt", _ids(1, 52), cache,
                                layout=None) == 52
+
+
+def test_the_replay_stands_in_for_the_post_prefill_store():
+    """With the request's N-1 replay landed, the p=N store is skipped. On
+    a recurrent layout the replay becomes a boundary and serves both the
+    identical resend and an extension, as the p=N record would; with no
+    replay the p=N store runs."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    n = 52
+    ids = _ids(0, n)
+    cache = make_hybrid_cache(n, seed=3)
+    assert not cs.ckpt_replay_stands_in(man, ids, cache)
+    assert ckpt_store(man, ids[:32], _trim_kv(cache, 32))
+    assert ckpt_store(man, ids[:n - 1], _trim_kv(cache, n - 1),
+                      kind="replay")
+    # The replay gate leaves an extension the anchor below.
+    _, got = ckpt_lookup(man, ids + [7])
+    assert got == 32
+    assert cs.ckpt_replay_stands_in(man, ids, cache)
+    recs = [(r.p, r.kind) for r in cs._ckpt_records(man).values()]
+    assert recs == [(32, "anchor"), (n - 1, "boundary")]
+    _, got = ckpt_lookup(man, ids)
+    assert got == n - 1
+    _, got = ckpt_lookup(man, ids + [7, 8])
+    assert got == n - 1
+    # Another prompt on the chain has no replay at its N-1.
+    assert not cs.ckpt_replay_stands_in(man, ids + [7, 8], cache)
+
+
+def test_the_plain_post_prefill_skips_the_store_its_replay_covers():
+    """The plain path's p=N store, driven as generation drives it, from
+    the stash the arming left on the cache: it runs for a prompt with no
+    replay and is skipped for one whose replay landed."""
+    from types import SimpleNamespace
+
+    from gmlx.spec.mtp_prefill import _ckpt_plain_post_prefill
+
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    n = 52
+
+    def run(chain):
+        cache = make_hybrid_cache(n, seed=chain)
+        meta = {}
+        cache[0]._kq_apc_retire = {"mode": "ckpt", "manager": man,
+                                   "full_ids": _ids(chain, n),
+                                   "extra_hash": chain, "apc_meta": meta}
+        _ckpt_plain_post_prefill(SimpleNamespace(prompt_cache=cache))
+        return meta
+
+    assert run(1) == {"ckpt_stored_boundaries": [n]}
+    assert ckpt_store(man, _ids(2, n - 1),
+                      _trim_kv(make_hybrid_cache(n, seed=2), n - 1),
+                      extra_hash=2, kind="replay")
+    assert run(2) == {}
+    by_chain = {r.extra_hash: r.p for r in cs._ckpt_records(man).values()}
+    assert by_chain == {1: n, 2: n - 1}
+    assert man.stats_snapshot()["ckpt_stores"] == 2
 
 
 def test_the_counters_reach_the_stats_and_the_metrics_payload(monkeypatch):
