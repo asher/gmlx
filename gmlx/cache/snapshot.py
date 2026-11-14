@@ -2629,22 +2629,20 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     return out
 
 
-def _retire_usable(manager, caches, layout) -> bool:
+def _retire_usable(manager, caches, layout, refused) -> bool:
     """Whether a retirement record of ``caches`` can serve a lookup: its
     layout is the one the request's lookup signed with (``layout``; None
     when the arming recorded none). A batched row whose QSA layers left
     the merge without their indexer keys, or a decode snapshot assembled
     with plain KV in their place, tags "kv" where every lookup signs
     "qsa:R": such a record would cost the room and strip its chain for
-    nothing, so it is not stored."""
+    nothing, so it is not stored. A refused layout goes on ``refused``."""
     if layout is None:
         return True
     got = ckpt_layout(caches, int(manager.block_size))
     if got is None or tuple(got) == tuple(layout):
         return True
-    _ckpt_decline(manager, "retire_layout")
-    _log.info("APC retirement skipped: layout %s matches no lookup (%s)",
-              list(got), list(layout))
+    refused.append(list(got))
     return False
 
 
@@ -2654,13 +2652,17 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
     (a short rotating prompt truncates to the block grid), else the
     newest decode-time snapshot at or below the replayable prefix. Never spills to the exact tier -- on ckpt models the exact
     tier stays empty, so the stock warm path never bypasses arming.
-    Nothing a lookup signed ``layout`` cannot use (``_retire_usable``).
+    Nothing a lookup signed ``layout`` cannot use (``_retire_usable``):
+    one retire_layout decline and one line per retirement, however many
+    candidates it refused (every decode snapshot of a QSA model is one).
     Returns the stored length (0 = nothing)."""
+    refused: list = []
     try:
         cap = len(ids)
         if max_len is not None and max_len < len(ids):
             cap = max_len
-        elif len(ids) >= 2 and _retire_usable(manager, prompt_cache, layout):
+        elif len(ids) >= 2 and _retire_usable(manager, prompt_cache, layout,
+                                              refused):
             # A row still on its single-row caches is sliced directly:
             # the stores copy per block, with no clone of the row. A row
             # taken out of batch classes arrives as one copy of its KV. A
@@ -2672,13 +2674,16 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                                 grid_truncate=True, kind="retire")
             if stored:
                 return stored
+        snap_refused = False
         for p, states in sorted(decode_snaps or [],
                                 key=lambda s: s[0], reverse=True):
             if not 2 <= p <= cap:
                 continue
             assembled = _snap_assemble(prompt_cache, states, p)
-            if assembled is None or not _retire_usable(manager, assembled,
-                                                       layout):
+            if assembled is None:
+                continue
+            if not _retire_usable(manager, assembled, layout, refused):
+                snap_refused = True
                 continue
             # skeleton_disk stays on: this is the entry a post-restart
             # turn restores from, unlike interval boundaries.
@@ -2707,14 +2712,21 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                 "APC retirement: predicted-diverged fallback suppressed "
                 "(replayable prefix %d, full %d)", cap, len(ids))
             return 0
-        _log.info("APC retirement skipped: no decode snapshot at or "
-                  "below the replayable prefix %d (full %d)",
-                  cap, len(ids))
+        if not snap_refused:
+            _log.info("APC retirement skipped: no decode snapshot at or "
+                      "below the replayable prefix %d (full %d)",
+                      cap, len(ids))
         return 0
     except Exception:
         _log.warning("APC ckpt retirement failed; continuing",
                      exc_info=True)
         return 0
+    finally:
+        if refused:
+            _ckpt_decline(manager, "retire_layout")
+            _log.info("APC retirement: %d candidate(s) skipped, layout %s "
+                      "matches no lookup (%s)", len(refused), refused[0],
+                      list(layout))
 
 
 _RETIRE_BLOCKED = [0]

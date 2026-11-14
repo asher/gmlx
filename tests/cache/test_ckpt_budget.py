@@ -269,6 +269,33 @@ def test_a_retirement_no_lookup_can_use_stores_nothing():
                                layout=None) == 52
 
 
+@pytest.mark.parametrize("max_len,refused", [(70, 2), (None, 3)],
+                         ids=["diverged", "whole"])
+def test_a_retirement_counts_its_refused_layouts_once(caplog, max_len,
+                                                      refused):
+    """A QSA row that took decode snapshots alone, then joined a batch,
+    leaves as plain KV, and so does every snapshot assembled for it. Its
+    retirement counts one decline and logs one line however many
+    candidates it refused, and says nothing of missing snapshots."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    cache = make_hybrid_cache(72, seed=5)
+    signed = tuple("qsa:4" if t == "kv" else t
+                   for t in cs.ckpt_layout(cache, 16))
+    snaps = [(p, [c for c in make_hybrid_cache(p, seed=p)
+                  if not hasattr(c, "keys")]) for p in (48, 64)]
+    with caplog.at_level(logging.INFO, logger="gmlx.cache.snapshot"):
+        assert cs.retirement_store(man, "ckpt", _ids(0, 72), cache,
+                                   max_len=max_len, decode_snaps=snaps,
+                                   layout=signed) == 0
+    lines = [r.getMessage() for r in caplog.records
+             if "matches no lookup" in r.getMessage()]
+    assert len(lines) == 1 and f"{refused} candidate(s)" in lines[0]
+    assert not [r for r in caplog.records
+                if "no decode snapshot" in r.getMessage()]
+    assert man.stats_snapshot()["ckpt_declines"] == {"retire_layout": 1}
+    assert len(cs._ckpt_records(man)) == 0
+
+
 def test_the_replay_stands_in_for_the_post_prefill_store():
     """With the request's N-1 replay landed, the p=N store is skipped. On
     a recurrent layout the replay becomes a boundary and serves both the
