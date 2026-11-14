@@ -309,7 +309,7 @@ def _class_box(monkeypatch, cls: int) -> float:
     ws = cap.working_set_for_ram(ram)
     monkeypatch.setattr(cap, "working_set_bytes", lambda: ws)
     monkeypatch.setattr(cap, "ceiling_bytes",
-                        lambda w, m=None: ceiling_for(ram, w))
+                        lambda w, m=None, outside=0.0: ceiling_for(ram, w))
     monkeypatch.setattr(device, "metal_info", lambda: {})
     monkeypatch.setattr(pd, "_body_cap_bytes", lambda: pd.cap_bytes_for(ws))
     return ws
