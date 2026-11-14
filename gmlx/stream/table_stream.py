@@ -524,23 +524,29 @@ def mark_untracked_tables(model, paths) -> int:
 def _untracked_tables(model):
     seen: set[int] = set()
     for host in _table_hosts(model):
-        for _, mod in streamable_tables_for(host):
+        for tier, mod in streamable_tables_for(host):
             if id(mod) not in seen and getattr(mod, "_kq_table_untracked",
                                                 False):
                 seen.add(id(mod))
-                yield mod
+                yield tier, mod
 
 
 def untracked_table_bytes(model) -> int:
     """Array bytes of the tables on ``model`` its load mapped outside
     MLX's tracker (``mark_untracked_tables``)."""
-    return sum(resident_table_bytes(m) for m in _untracked_tables(model))
+    return sum(resident_table_bytes(m) for _, m in _untracked_tables(model))
+
+
+def untracked_table_gguf_names(model) -> list[str]:
+    """GGUF names of the tables on ``model`` its load mapped outside MLX's
+    tracker (``mark_untracked_tables``)."""
+    return [tier.gguf_name for tier, _ in _untracked_tables(model)]
 
 
 def untracked_table_array_ids(model) -> set[int]:
     """``id()``s of the table arrays ``model``'s load mapped outside MLX's
     tracker: a GPU touch would page them in for nothing."""
-    return {id(m.weight) for m in _untracked_tables(model)}
+    return {id(m.weight) for _, m in _untracked_tables(model)}
 
 
 def streamed_table_ranges(shards: list[str], budget: int | None,

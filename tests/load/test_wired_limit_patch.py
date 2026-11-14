@@ -251,3 +251,45 @@ def test_a_caller_asking_for_the_working_set_gets_the_wired_cap(
     with _gen.wired_limit(model):
         pass
     assert calls[2:] == [0]
+
+
+# The line a load prints when its table is untracked and the clamp and the
+# MLX memory limit both stand at the wired cap: what a server log shows.
+B2_LINE = (r"\[memory\] per_layer_token_embd\.weight untracked, [0-9.]+ GB: "
+           r"mx\.set_wired_limit clamped to the wired cap ([0-9.]+) GB, "
+           r"MLX memory limit \1 GB$")
+
+
+@pytest.mark.host_gb(128)
+def test_a_load_with_an_untracked_table_prints_the_limits_it_leaves(
+        restore_wired_limit, monkeypatch, capsys):
+    """After the install, a load whose table MLX never tracks prints the
+    limits it leaves, read back: the clamp owns mx.set_wired_limit at the
+    wired cap, and the MLX memory limit is the same figure. A pin shows
+    instead, with MLX's own memory limit back."""
+    import re
+
+    from gmlx.serve import capacity
+    from gmlx.stream.wired_limit import (_neutralize_wired_limit_sweep,
+                                         install_wired_cap,
+                                         note_untracked_tables)
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", None)
+    _recorded_limit(monkeypatch, 0)
+    mlx_limit = mx.get_memory_limit()
+    install_wired_cap()
+    capsys.readouterr()
+    note_untracked_tables(["per_layer_token_embd.weight"], 28.8e9)
+    line = capsys.readouterr().out.strip()
+    m = re.search(B2_LINE, line)
+    assert m, line
+    assert m.group(1) == f"{capacity.wired_cap_bytes() / 1e9:.1f}"
+    _neutralize_wired_limit_sweep()
+    capsys.readouterr()
+    note_untracked_tables(["per_layer_token_embd.weight"], 28.8e9)
+    line = capsys.readouterr().out.strip()
+    assert not re.search(B2_LINE, line)
+    assert line == ("[memory] per_layer_token_embd.weight untracked, 28.8 GB: "
+                    "the wired limit is pinned at 0, MLX memory limit "
+                    f"{mlx_limit / 1e9:.1f} GB")

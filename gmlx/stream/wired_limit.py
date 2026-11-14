@@ -167,6 +167,31 @@ def _limit_memory_to_cap(cap: float) -> None:
          f"{int(cap) / 1e9:.1f} GB (was {prev / 1e9:.1f} GB)")
 
 
+def note_untracked_tables(names, nbytes: float) -> None:
+    """Print, once a load's install is done, the limits its tables mapped
+    outside MLX's tracker leave, read back: who owns ``mx.set_wired_limit``
+    (the clamp at the wired cap, or a pin at 0) and the MLX memory limit.
+    With the clamp and the memory limit at the same figure, the load keeps
+    its weights and KV wired under the cap."""
+    from gmlx.load import loadlog
+    from gmlx.serve import capacity
+
+    try:
+        limit = f"{int(mx.get_memory_limit()) / 1e9:.1f} GB"
+    except Exception:
+        limit = "unread"
+    if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
+        wired = "the wired limit is pinned at 0"
+    elif wrapped_with(mx.set_wired_limit, "_kq_wired_cap"):
+        cap = capacity.wired_cap_bytes() or 0.0
+        wired = ("mx.set_wired_limit clamped to the wired cap "
+                 f"{cap / 1e9:.1f} GB")
+    else:
+        wired = "mx.set_wired_limit unclamped"
+    loadlog.note(f"[memory] {', '.join(names)} untracked, "
+                 f"{nbytes / 1e9:.1f} GB: {wired}, MLX memory limit {limit}")
+
+
 def _restore_mlx_memory_limit() -> None:
     """Put back the MLX memory limit install_wired_cap replaced, while
     the cap it set still stands (a later owner, such as expert

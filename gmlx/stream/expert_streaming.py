@@ -1875,6 +1875,12 @@ def install_expert_streaming(
                 f"layers ({offloaded / 1e9:.1f} GB stays file-backed; rest "
                 f"of the model + KV on {base_dev}; {staging})"
             )
+    if table_untracked:
+        from gmlx.stream.table_stream import untracked_table_gguf_names
+        from gmlx.stream.wired_limit import note_untracked_tables
+
+        note_untracked_tables(untracked_table_gguf_names(model),
+                              table_untracked)
     # The coarse caps of the CLI's streaming lift hold the load only.
     from gmlx.serve.cb_phase import end_lift
 

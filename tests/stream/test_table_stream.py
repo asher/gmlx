@@ -829,12 +829,14 @@ def test_a_table_only_install_reads_the_real_free(monkeypatch, tracked_parts):
 # under the budget, so a plain load streams it and keeps the experts.
 @pytest.mark.parametrize("untracked", [False, True])
 def test_the_free_memory_is_the_same_with_the_table_tracked_or_not(
-        monkeypatch, untracked):
+        monkeypatch, capsys, untracked):
     """The loader's registration and the table-only install leave the
     same free memory whether the load mapped the table MLX-tracked or
     outside MLX's tracker: the wired cap less the resident weights. A
     tracked table is in active memory and the install credits it back; an
-    untracked one is in no count, so nothing registers or credits it."""
+    untracked one is in no count, so nothing registers or credits it. The
+    install prints the limits an untracked table leaves
+    (``test_a_load_with_an_untracked_table_prints_the_limits_it_leaves``)."""
     from mlx.utils import tree_flatten
 
     from gmlx.load.loader import _warm_mmap_residency
@@ -867,7 +869,11 @@ def test_the_free_memory_is_the_same_with_the_table_tracked_or_not(
     monkeypatch.setattr(mx, "get_active_memory", lambda: active)
     _warm_mmap_residency(model, log=lambda *a, **k: None, paths=[path],
                          active_before=0.0)
+    capsys.readouterr()
     install_expert_streaming(model, gguf_path=path)
+    out = capsys.readouterr().out
+    assert out.count("[memory] per_layer_token_embd.weight untracked, ") == (
+        1 if untracked else 0)
     assert ts.table_streaming_active(model)
     assert not getattr(glu, "_kq_cpu_only", False)
     assert pd.untracked_weight_bytes() == 0
