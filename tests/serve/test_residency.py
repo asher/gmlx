@@ -179,6 +179,56 @@ def test_unload_leaves_no_drafter_prefix_layer_with_the_governor(monkeypatch):
     _active_entry.set(None)
 
 
+class _FakeCachePool:
+    """A prompt cache pool as the governor sees it."""
+
+    def __init__(self, nbytes):
+        self.nbytes = nbytes
+        self.evicts = []
+
+    def governor_bytes(self):
+        return self.nbytes
+
+    def governor_evict(self, fraction):
+        self.evicts.append(fraction)
+        return int(self.nbytes * fraction)
+
+
+def test_a_swap_hands_the_governor_the_next_models_prompt_cache_pool(
+        monkeypatch):
+    """Each model's prompt cache pool registers with the governor at its
+    first governed tick. The unload takes the registration with it and the
+    model that replaces it registers its own, so orange and red evict the
+    pool the server holds, not the one it unloaded."""
+    import gmlx.serve.governor as gov
+
+    monkeypatch.setattr(gov, "_REG", {})
+    monkeypatch.setattr(gov, "_APC_REFS", {})
+    proxy = _RuntimeProxy(_FakeOriginal())
+    pools = {}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        pools[model_path] = proxy.apc_manager = _FakeCachePool(
+            {"A": 1e9, "B": 2e9}[model_path])
+        proxy.response_generator = f"RG:{model_path}"
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": f"M:{model_path}",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    for path in ("A", "B"):                 # B's load unloads A
+        acquire(pool, path)
+        gov._maybe_register_apc(SimpleNamespace(apc_manager=pools[path]))
+    assert gov._registered_bytes() == 2e9
+    assert gov._evict_registered(0.5) == 1e9
+    assert pools["B"].evicts == [0.5] and pools["A"].evicts == []
+    _active_entry.set(None)
+
+
 def test_a_build_that_fails_in_its_set_up_leaves_nothing_behind(monkeypatch):
     """The untracked table check can raise (a native-fp table whose header
     scan fails). The model's env window, the APC env, the build spec, the

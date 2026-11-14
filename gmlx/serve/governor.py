@@ -1296,30 +1296,49 @@ def _harvest_tick(gen, st: _GovState, out) -> None:
     st.tok_ema = 0.8 * st.tok_ema + 0.2 * per_row if per_row else st.tok_ema
 
 
-_APC_REGISTERED = False
+def _register_weak(refs: dict, name: str, holder) -> None:
+    """Register ``holder``'s governor_bytes and governor_evict under
+    ``name`` through a weak reference, kept in ``refs``. Idempotent for a
+    live holder; a dead one at the same address is replaced."""
+    live = refs.get(name)
+    if name in _REG and live is not None and live() is holder:
+        return
+    ref = weakref.ref(holder)
+    refs[name] = ref
+
+    def _bytes():
+        h = ref()
+        return h.governor_bytes() if h is not None else 0
+
+    def _evict(fraction):
+        h = ref()
+        return h.governor_evict(fraction) if h is not None else 0
+
+    register_cache(name, _bytes, _evict)
+
+
+_APC_REFS: dict = {}       # registry name -> weakref of the manager
+
+
+def _apc_name(mgr) -> str:
+    return f"apc:{id(mgr)}"
 
 
 def _maybe_register_apc(gen) -> None:
     """Self-register the serve APC manager the first time a governed
-    tick sees one."""
-    global _APC_REGISTERED
-    if _APC_REGISTERED:
-        return
+    tick sees it: each model's own, so the pool of a model loaded after a
+    swap, or beside another, gives way too. The model's teardown
+    unregisters it (``unregister_apc``)."""
     mgr = getattr(gen, "apc_manager", None)
     if mgr is None or not hasattr(mgr, "governor_bytes"):
         return
-    ref = weakref.ref(mgr)
+    _register_weak(_APC_REFS, _apc_name(mgr), mgr)
 
-    def _bytes():
-        m = ref()
-        return m.governor_bytes() if m is not None else 0
 
-    def _evict(fraction):
-        m = ref()
-        return m.governor_evict(fraction) if m is not None else 0
-
-    register_cache("apc", _bytes, _evict)
-    _APC_REGISTERED = True
+def unregister_apc(mgr) -> None:
+    name = _apc_name(mgr)
+    unregister_cache(name)
+    _APC_REFS.pop(name, None)
 
 
 _ARENA_REFS: dict = {}     # registry name -> weakref of the feeder
@@ -1345,24 +1364,7 @@ def _maybe_register_arena(gen) -> None:
         return
     if feeder is None or not hasattr(feeder, "governor_evict"):
         return
-    name = _arena_name(feeder)
-    if name in _REG:
-        live = _ARENA_REFS.get(name)
-        if live is not None and live() is feeder:
-            return
-        unregister_cache(name)          # a dead feeder at the same address
-    ref = weakref.ref(feeder)
-    _ARENA_REFS[name] = ref
-
-    def _bytes():
-        f = ref()
-        return f.governor_bytes() if f is not None else 0
-
-    def _evict(fraction):
-        f = ref()
-        return f.governor_evict(fraction) if f is not None else 0
-
-    register_cache(name, _bytes, _evict)
+    _register_weak(_ARENA_REFS, _arena_name(feeder), feeder)
 
 
 def unregister_arena(feeder) -> None:
@@ -1384,22 +1386,7 @@ def register_spec_prefix(cache) -> None:
     the kernel floor and the admit-ceiling handoff evict it, least
     recently used first. Idempotent; a dead cache at the same address is
     replaced."""
-    name = _spec_prefix_name(cache)
-    live = _SPEC_PREFIX_REFS.get(name)
-    if name in _REG and live is not None and live() is cache:
-        return
-    ref = weakref.ref(cache)
-    _SPEC_PREFIX_REFS[name] = ref
-
-    def _bytes():
-        c = ref()
-        return c.governor_bytes() if c is not None else 0
-
-    def _evict(fraction):
-        c = ref()
-        return c.governor_evict(fraction) if c is not None else 0
-
-    register_cache(name, _bytes, _evict)
+    _register_weak(_SPEC_PREFIX_REFS, _spec_prefix_name(cache), cache)
 
 
 def unregister_spec_prefix(cache) -> None:
