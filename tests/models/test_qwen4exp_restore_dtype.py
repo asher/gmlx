@@ -190,7 +190,7 @@ def arms(model):
 
 # Logit bounds relative to the logit scale. Measured on the M5 Max: about
 # 7.5e-5 of the scale against fresh, 2.5e-7 between the two records.
-_VS_FRESH = 1e-2
+_VS_FRESH = 2e-3
 _VS_RECORD = 1e-4
 
 
@@ -210,7 +210,7 @@ def test_warm_grid_matches_fresh(arms):
 def test_warm_tail_matches_fresh(arms):
     """A record stored after decode, restored, then the follow-up
     prefilled: every cache leaf keeps the dtype, shape and bytes of a
-    fresh prefill, and the logits stay within 1e-2 of fresh's logit
+    fresh prefill, and the logits stay within 2e-3 of fresh's logit
     scale."""
     c = arms["warm_tail_vs_fresh"]
     assert c["meta"] == []
@@ -238,7 +238,7 @@ def test_warm_tail_decode_tails_keep_the_base_dtype(arms):
                                       ("n_1_vs_p_n", _VS_RECORD)])
 def test_turn_two_from_the_prompt_record(arms, pair, rel):
     """Turn 2 restored from the p=N record, from the N-1 replay standing in
-    for it, and fresh: one argmax. Each record's logits are within 1e-2
+    for it, and fresh: one argmax. Each record's logits are within 2e-3
     of fresh's logit scale (the warm path rounds through other chunks),
     and the two records within 1e-4 of the scale of each other, since
     both restore the same prompt state."""
