@@ -3,6 +3,10 @@ from typing import Any, Callable, Generator, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
+# gmlx: a failed verify eval drains through the eval guard before the round
+# aborts and re-raises.
+from gmlx.eval_guard import guard
+
 from .cache_state import abort_speculative_round, commit_speculative_round
 from .common import (
     _dflash_block_total,
@@ -395,9 +399,11 @@ def _dflash_rounds(
                     )
                     hidden = mx.concatenate(verify_out.hidden_states, axis=-1)
             if greedy_sampling:
-                mx.async_eval(target_tokens, hidden)
+                guard.async_eval(
+                    target_tokens, hidden, site="dflash-verify", owner="owned"
+                )
             else:
-                mx.async_eval(hidden)
+                guard.async_eval(hidden, site="dflash-verify", owner="owned")
 
             if greedy_sampling:
                 accepted, new_tokens = _speculative_walk(
@@ -582,9 +588,11 @@ def _dflash_rounds_batch(
                     )
                     hidden_full = mx.concatenate(verify_out.hidden_states, axis=-1)
             if greedy_sampling:
-                mx.async_eval(target_tokens, hidden_full)
+                guard.async_eval(
+                    target_tokens, hidden_full, site="dflash-verify-batch", owner="owned"
+                )
             else:
-                mx.async_eval(hidden_full)
+                guard.async_eval(hidden_full, site="dflash-verify-batch", owner="owned")
 
             budgets = [max_tokens - emitted[active_idx[j]] for j in range(n_active)]
             if greedy_sampling:

@@ -344,6 +344,36 @@ def test_an_exact_retirement_copies_the_row_once_after_the_room(
         mgr.close()
 
 
+def test_a_failed_exact_retirement_copy_drains_before_the_store_declines(
+        monkeypatch):
+    """The copy an exact retirement makes reads the live batch cache, whose
+    other rows outlive a failure there: the failed copy drains through the
+    eval guard before the retirement declines, and the row stays whole."""
+    import gmlx.eval_guard as eg
+
+    seq = list(range(1, 20))
+    merged = BatchKVCache.merge([_kv_row(len(seq), 0), _kv_row(len(seq), 500)])
+    mx.eval(merged.keys, merged.values)
+    drained = []
+
+    def fail(*a, **k):
+        raise RuntimeError("[metal::malloc] simulated")
+
+    mgr = _manager()
+    try:
+        monkeypatch.delenv("GMLX_EVAL_GUARD", raising=False)
+        monkeypatch.setattr(eg, "_drain", drained.append)
+        monkeypatch.setattr(mx, "eval", fail)
+        assert retirement_store(mgr, "exact", seq, [merged], row=1) == 0
+        monkeypatch.undo()
+        assert drained == ["exact-retirement"]
+        snap, prefix_len = mgr.lookup_exact_cache(seq + [7])
+        assert prefix_len == 0 and snap is None
+        assert retirement_store(mgr, "exact", seq, [merged], row=1) == len(seq)
+    finally:
+        mgr.close()
+
+
 def test_retirement_store_guards():
     mgr = _manager()
     try:

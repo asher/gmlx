@@ -3640,7 +3640,11 @@ class APCManager:
             return stored
         if materialize is not None:
             if materialize:
-                mx.eval(materialize)
+                from gmlx.eval_guard import guard
+
+                # gmlx: the arrays read views of a live batch cache, whose
+                # other rows survive a failure here.
+                guard.eval(*materialize, site="exact-retirement", owner="owned")
             copied = list(prompt_cache)
         else:
             copied = _clone_prompt_cache_for_apc(prompt_cache)
