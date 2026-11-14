@@ -12,8 +12,18 @@ Arms: fresh (B from an empty cache), warm grid (the 64 record restored),
 warm tail (the 74 record restored) and live (turn 1's own cache
 continued). Decode leaves the conv states float32, so the prefill after
 the warm tail restore runs float32; its rows must not widen the restored
-QSA streams. The hc prefill kernels are Metal only, so the file runs on a
-real Apple GPU."""
+QSA streams, nor the decode tails the last column opens.
+
+Turn 1's prompt record, two ways: the p=N store at 70 after the last
+column, and the N-1 replay at 69 standing in for it as a boundary. Turn 2
+restored from each must answer as fresh does.
+
+Batched decode: two rows merged into the batch caches decode off float32
+conv states too, and the merged QSA keys must keep their dtype through
+the batch cache's growth.
+
+The hc prefill kernels are Metal only, so the file runs on a real Apple
+GPU."""
 
 from __future__ import annotations
 
@@ -24,12 +34,14 @@ import pytest
 from helpers import _real_apple_gpu
 from test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
 
+from gmlx._vendor.mlx_lm.generate import _merge_caches
 from gmlx._vendor.mlx_vlm.apc import APCManager
 from gmlx.cache.snapshot import (
     _assemble_from_record,
     _ckpt_records,
     ckpt_layout,
     ckpt_lookup,
+    ckpt_replay_stands_in,
     ckpt_store,
 )
 from gmlx.load.config_synth import synthesize_config
@@ -97,8 +109,18 @@ def _cmp(a_cache, a_logit, b_cache, b_logit):
 
 
 @pytest.fixture(scope="module")
-def arms():
-    m = _model()
+def model():
+    return _model()
+
+
+def _qsa_layers(m):
+    return [i for i, layer in enumerate(m.layers)
+            if not layer.is_linear and layer.self_attn.ratio > 0]
+
+
+@pytest.fixture(scope="module")
+def arms(model):
+    m = model
     V = m.args.vocab_size
     mx.random.seed(7)
     A = mx.random.randint(3, V, (70,)).tolist()
@@ -108,12 +130,21 @@ def arms():
     n = len(B)
 
     man = APCManager(num_blocks=64, block_size=BS)
+    # Turn 1's prompt record: the p=N store (man_n) or the N-1 replay
+    # standing in for it (man_r).
+    man_n = APCManager(num_blocks=64, block_size=BS)
+    man_r = APCManager(num_blocks=64, block_size=BS)
     live = m.make_cache()
     _fwd(m, A[:64], live)
     assert ckpt_store(man, A[:64], live, kind="boundary",
                       skeleton_disk=False) == 64
     _fwd(m, A[64:69], live)
+    for mm in (man_n, man_r):
+        assert ckpt_store(mm, A[:69], live, kind="replay",
+                          skeleton_disk=False) == 69
     _fwd(m, A[69:70], live)
+    assert ckpt_store(man_n, A, live, skeleton_disk=False) == 70
+    assert ckpt_replay_stands_in(man_r, A, None)
     for t in G:
         _fwd(m, [t], live)
     assert ckpt_store(man, A + G, live, kind="retire",
@@ -125,6 +156,16 @@ def arms():
     assert p_tail == 74
     _fwd(m, B[74:n - 1], warm_tail)
     lt = _fwd(m, B[n - 1:], warm_tail)
+    tails = [(str(warm_tail[i]._kt.dtype), str(warm_tail[i]._kb.dtype),
+              str(warm_tail[i]._it.dtype), str(warm_tail[i]._ib.dtype))
+             for i in _qsa_layers(m)]
+
+    turn2 = {}
+    for name, mm, want in (("p_n", man_n, 70), ("n_1", man_r, 69)):
+        warm, got = ckpt_lookup(mm, B, layout=layout)
+        assert got == want, name
+        _fwd(m, B[got:n - 1], warm)
+        turn2[name] = (warm, _fwd(m, B[n - 1:], warm))
 
     warm_grid = _assemble_from_record(man, recs[64])
     _fwd(m, B[64:n - 1], warm_grid)
@@ -140,7 +181,11 @@ def arms():
 
     return {"warm_tail_vs_fresh": _cmp(warm_tail, lt, fresh, lf),
             "warm_grid_vs_fresh": _cmp(warm_grid, lg, fresh, lf),
-            "warm_tail_vs_live": _cmp(warm_tail, lt, live, ll)}
+            "warm_tail_vs_live": _cmp(warm_tail, lt, live, ll),
+            "warm_tail_tails": tails,
+            "p_n_vs_fresh": _cmp(*turn2["p_n"], fresh, lf),
+            "n_1_vs_fresh": _cmp(*turn2["n_1"], fresh, lf),
+            "n_1_vs_p_n": _cmp(*turn2["n_1"], *turn2["p_n"])}
 
 
 def test_warm_grid_matches_fresh(arms):
@@ -169,3 +214,58 @@ def test_warm_tail_matches_live(arms):
     c = arms["warm_tail_vs_live"]
     assert c["meta"] == []
     assert c["logits"]["max_abs"] == 0.0
+
+
+def test_warm_tail_decode_tails_keep_the_base_dtype(arms):
+    """The last column after the warm tail restore opens the decode tails
+    off float32 conv states. They take the base's dtype, so gather_kv's
+    fused kernel stays on for the turn."""
+    for kt, kb, it, ib in arms["warm_tail_tails"]:
+        assert (kt, it) == (kb, ib)
+
+
+def _within(lg):
+    return lg["argmax_eq"] and lg["max_abs"] <= 0.02 * max(lg["scale"], 1.0)
+
+
+@pytest.mark.parametrize("pair", ["p_n_vs_fresh", "n_1_vs_fresh",
+                                  "n_1_vs_p_n"])
+def test_turn_two_from_the_prompt_record(arms, pair):
+    """Turn 2 restored from the p=N record, from the N-1 replay standing in
+    for it, and fresh: one argmax, logits within bf16 noise."""
+    assert _within(arms[pair]["logits"]), arms[pair]["logits"]
+
+
+def test_turn_two_from_the_stand_in_matches_fresh_leaves(arms):
+    """The stand-in was stored mid-prefill, so turn 2 off it runs the
+    prefill dtype path: every cache leaf keeps the dtype, shape and bytes
+    of a fresh prefill."""
+    assert arms["n_1_vs_fresh"]["meta"] == []
+
+
+def test_batched_decode_keeps_the_qsa_dtype(model):
+    """Two rows merged into the batch caches, two decode steps off the
+    float32 conv states the last column leaves: the QSA layers' keys and
+    values keep the merged dtype through the batch cache's growth."""
+    m = model
+    V = m.args.vocab_size
+    mx.random.seed(11)
+    rows = []
+    for n in (40, 33):
+        P = mx.random.randint(3, V, (n,)).tolist()
+        c = m.make_cache()
+        _fwd(m, P[:-1], c)
+        _fwd(m, P[-1:], c)
+        rows.append(c)
+    batch = _merge_caches(rows)
+    qsa = _qsa_layers(m)
+    assert qsa
+    merged = {i: (batch[i].keys.dtype, batch[i].values.dtype) for i in qsa}
+    tok = mx.array([[3], [4]])
+    for _ in range(2):
+        out = m(tok, cache=batch)
+        mx.eval(out, [c.state for c in batch])
+        tok = mx.argmax(out[:, -1:, :], axis=-1)
+    for i in qsa:
+        assert batch[i].keys.shape[2] > 40, "the decode grew the buffer"
+        assert (batch[i].keys.dtype, batch[i].values.dtype) == merged[i]

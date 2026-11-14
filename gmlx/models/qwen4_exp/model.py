@@ -1329,12 +1329,18 @@ class QSAKVCache(KVCache):
         cap = self._tail_rows()
         tail = self._kb is not None and n <= min(8, cap)
         if tail:
-            if self._kt is None or self._kt.shape[0] != B:
+            # The tails take the base's dtype, as _write does, so rows a
+            # float32 step wrote after a restore keep gather_kv's kernel.
+            kdt = self._kb.dtype
+            if (self._kt is None or self._kt.shape[0] != B
+                    or self._kt.dtype != kdt):
+                self._fold()
+                idt = ik.dtype if self._ib is None else self._ib.dtype
                 self._kt = mx.zeros(keys.shape[:2] + (cap, keys.shape[3]),
-                                    keys.dtype)
+                                    kdt)
                 self._vt = mx.zeros(values.shape[:2] + (cap, values.shape[3]),
-                                    values.dtype)
-                self._it = mx.zeros((B, cap, ik.shape[2]), ik.dtype)
+                                    self._vb.dtype)
+                self._it = mx.zeros((B, cap, ik.shape[2]), idt)
             if self._tl + n > cap:
                 self._fold()
             tl = self._tl
@@ -1432,6 +1438,8 @@ class QSAKVCache(KVCache):
             held = [self.blocks[:, :nb]] if nb else []
             if nt:
                 held.append(self._bt[:, :nt])
+            if held and new.dtype != held[0].dtype:
+                new = new.astype(held[0].dtype)
             if nb and m <= 2 and nt + m <= self._tail_rows() // r:
                 self._bt = mx.concatenate(held[1:] + [new], axis=1)
             else:

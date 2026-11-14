@@ -328,8 +328,10 @@ class ConcatenateKVCache(_BaseCache):
             self.keys = keys
             self.values = values
         else:
-            self.keys = mx.concatenate([self.keys, keys], axis=-2)
-            self.values = mx.concatenate([self.values, values], axis=-2)
+            self.keys = mx.concatenate(
+                [self.keys, _keep_dtype(keys, self.keys)], axis=-2)
+            self.values = mx.concatenate(
+                [self.values, _keep_dtype(values, self.values)], axis=-2)
         self.offset = self.keys.shape[-2]
         return self.keys, self.values
 
@@ -402,24 +404,41 @@ def _packed_words(dim: int, bits: int) -> int:
     return dim * bits // 32
 
 
-def _zeros_rows(x, rows):
-    """Zeros shaped like the update ``x`` [B, H, n, D] with ``rows`` rows."""
-    return mx.zeros((*x.shape[:2], rows, x.shape[3]), x.dtype)
+def _zeros_rows(x, rows, dtype=None):
+    """Zeros shaped like the update ``x`` [B, H, n, D] with ``rows`` rows,
+    in ``dtype`` or ``x``'s."""
+    return mx.zeros((*x.shape[:2], rows, x.shape[3]),
+                    x.dtype if dtype is None else dtype)
 
 
 def _quant_zeros(group_size, bits):
-    """Packed zeros (wire, scales, biases) for a float update ``x``."""
+    """Packed zeros (wire, scales, biases) for a float update ``x``, the
+    scales and biases in ``dtype`` or ``x``'s."""
 
-    def make(x, rows):
+    def make(x, rows, dtype=None):
         shape = (*x.shape[:2], rows)
         dim = x.shape[3]
+        dt = x.dtype if dtype is None else dtype
         return (
             mx.zeros((*shape, _packed_words(dim, bits)), dtype=mx.uint32),
-            mx.zeros((*shape, dim // group_size), dtype=x.dtype),
-            mx.zeros((*shape, dim // group_size), dtype=x.dtype),
+            mx.zeros((*shape, dim // group_size), dtype=dt),
+            mx.zeros((*shape, dim // group_size), dtype=dt),
         )
 
     return make
+
+
+def _grow_dtype(base, x):
+    """The dtype a cache buffer grows in: its own, or the first rows' when
+    there is none yet. Rows of a wider dtype, such as a step run off
+    float32 conv states, must not widen the whole cache."""
+    return x.dtype if base is None else base.dtype
+
+
+def _keep_dtype(x, base):
+    """``x`` in the dtype of the buffer ``base`` it joins."""
+    dt = _grow_dtype(base, x)
+    return x if x.dtype == dt else x.astype(dt)
 
 
 class QuantizedKVCache(_BaseCache):
@@ -872,7 +891,7 @@ class RotatingKVCache(_BaseCache):
         else:
             to_cat = [v]
         if append is not None:
-            to_cat.append(append)
+            to_cat.append(_keep_dtype(append, v))
         return mx.concatenate(to_cat, axis=2)
 
     def _temporal_order(self, v):
@@ -929,8 +948,8 @@ class RotatingKVCache(_BaseCache):
             new_size = min(self.step, self.max_size - prev)
             k_shape = (B, n_kv_heads, new_size, k_head_dim)
             v_shape = (B, n_kv_heads, new_size, v_head_dim)
-            new_k = mx.zeros(k_shape, keys.dtype)
-            new_v = mx.zeros(v_shape, values.dtype)
+            new_k = mx.zeros(k_shape, _grow_dtype(self.keys, keys))
+            new_v = mx.zeros(v_shape, _grow_dtype(self.values, values))
             if self.keys is not None:
                 self.keys = mx.concatenate([self.keys, new_k], axis=2)
                 self.values = mx.concatenate([self.values, new_v], axis=2)
@@ -1704,8 +1723,8 @@ class ChunkedKVCache(_BaseCache):
             n_steps = (self.step + keys.shape[2] - 1) // self.step
             k_shape = (B, n_kv_heads, n_steps * self.step, k_head_dim)
             v_shape = (B, n_kv_heads, n_steps * self.step, v_head_dim)
-            new_k = mx.zeros(k_shape, keys.dtype)
-            new_v = mx.zeros(v_shape, values.dtype)
+            new_k = mx.zeros(k_shape, _grow_dtype(self.keys, keys))
+            new_v = mx.zeros(v_shape, _grow_dtype(self.values, values))
             if self.keys is not None:
                 if prev % self.step != 0:
                     self.keys = self.keys[..., :prev, :]
@@ -2189,14 +2208,20 @@ class BatchKVCache(_BaseCache):
         if max_size == max_idx and self._kv_grid:
             max_size = grid_capacity(max_idx + 1, self.step)
 
+        # gmlx: the joined buffers keep this cache's dtype, or the other's
+        # when this one has none.
+        kb = self.keys if self.keys is not None else other.keys
+        vb = self.values if self.values is not None else other.values
+
         # Pad the keys and values so they are right-justified
         # with the index and the same size
         def pad(c):
             k, v = c.keys, c.values
             if k is None:
                 Bc = c.offset.shape[0]
-                k = mx.array([]).reshape(Bc, H, 0, D)
-                v = mx.array([]).reshape(Bc, H, 0, M)
+                k = mx.zeros((Bc, H, 0, D), kb.dtype)
+                v = mx.zeros((Bc, H, 0, M), vb.dtype)
+            k, v = _keep_dtype(k, kb), _keep_dtype(v, vb)
             left = max_idx - c._idx
             right = max_size - k.shape[2] - left
             if right < 0:
@@ -2319,7 +2344,7 @@ class BatchRotatingKVCache(_BaseCache):
         if trim_size > 0:
             v = v[..., trim_size:, :]
         if append is not None:
-            return mx.concatenate([v, append], axis=2)
+            return mx.concatenate([v, _keep_dtype(append, v)], axis=2)
         return v
 
     def _temporal_order(self):
@@ -2388,8 +2413,8 @@ class BatchRotatingKVCache(_BaseCache):
             new_size = min(self.step, self.max_size - prev)
             k_shape = (B, n_kv_heads, new_size, k_head_dim)
             v_shape = (B, n_kv_heads, new_size, v_head_dim)
-            new_k = mx.zeros(k_shape, keys.dtype)
-            new_v = mx.zeros(v_shape, values.dtype)
+            new_k = mx.zeros(k_shape, _grow_dtype(self.keys, keys))
+            new_v = mx.zeros(v_shape, _grow_dtype(self.values, values))
             if self.keys is not None:
                 self.keys = mx.concatenate([self.keys, new_k], axis=2)
                 self.values = mx.concatenate([self.values, new_v], axis=2)
@@ -2589,14 +2614,18 @@ class BatchRotatingKVCache(_BaseCache):
             B, H, L2, D = other.keys.shape
             M = other.values.shape[3]
         max_size = max(L1, L2)
+        # gmlx: as BatchKVCache.extend, the join keeps this cache's dtype.
+        kb = self.keys if self.keys is not None else other.keys
+        vb = self.values if self.values is not None else other.values
 
         def pad(c):
             left = max_idx - c._idx
             k, v = c.keys, c.values
             if k is None:
                 Bc = c.offset.shape[0]
-                k = mx.array([]).reshape(Bc, H, 0, D)
-                v = mx.array([]).reshape(Bc, H, 0, M)
+                k = mx.zeros((Bc, H, 0, D), kb.dtype)
+                v = mx.zeros((Bc, H, 0, M), vb.dtype)
+            k, v = _keep_dtype(k, kb), _keep_dtype(v, vb)
             right = max_size - k.shape[2] - left
             if right < 0:
                 k = k[..., :right, :]
@@ -2788,8 +2817,8 @@ class BufferedRotatingKVCache(RotatingKVCache):
         capacity = self._capacity_for(needed)
         k_shape = (*keys.shape[:2], capacity, keys.shape[-1])
         v_shape = (*values.shape[:2], capacity, values.shape[-1])
-        new_keys = mx.zeros(k_shape, dtype=keys.dtype)
-        new_values = mx.zeros(v_shape, dtype=values.dtype)
+        new_keys = mx.zeros(k_shape, dtype=_grow_dtype(self.keys, keys))
+        new_values = mx.zeros(v_shape, dtype=_grow_dtype(self.values, values))
         if self.keys is not None and self._idx > 0:
             new_keys[..., : self._idx, :] = self.keys[..., : self._idx, :]
             new_values[..., : self._idx, :] = self.values[..., : self._idx, :]
@@ -3057,8 +3086,11 @@ class BatchQuantizedKVCache(_BaseCache):
                 keys = _empty_like(ref_keys, batch_size)
                 values = _empty_like(ref_values, batch_size)
             else:
-                keys = cache_obj.keys
-                values = cache_obj.values
+                # gmlx: the join keeps this cache's dtypes.
+                keys = tuple(_keep_dtype(a, r)
+                             for a, r in zip(cache_obj.keys, ref_keys))
+                values = tuple(_keep_dtype(a, r)
+                               for a, r in zip(cache_obj.values, ref_values))
             left = max_idx - cache_obj._idx
             right = max_size - keys[0].shape[-2] - left
             if right < 0:
@@ -3440,7 +3472,8 @@ class PoolingCache(_BaseCache):
         if self.pooled is None:
             self.pooled = px
         else:
-            self.pooled = mx.concatenate([self.pooled, px], axis=1)
+            self.pooled = mx.concatenate(
+                [self.pooled, _keep_dtype(px, self.pooled)], axis=1)
         return self.pooled
 
     def make_mask(self, L: int = 1, offset: int = 0):
@@ -3882,7 +3915,8 @@ class BatchPoolingCache(_BaseCache):
         if self.pooled is None:
             self.pooled = mx.zeros((B, max_pool, D), dtype=px.dtype)
         elif self.pooled.shape[1] < max_pool:
-            pad = mx.zeros((B, max_pool - self.pooled.shape[1], D), dtype=px.dtype)
+            pad = mx.zeros((B, max_pool - self.pooled.shape[1], D),
+                           dtype=self.pooled.dtype)
             self.pooled = mx.concatenate([self.pooled, pad], axis=1)
 
         for i in range(B):
@@ -4008,8 +4042,11 @@ class BatchPoolingCache(_BaseCache):
         if self.buf_kv is None and other.buf_kv is None:
             pass
         elif self.buf_kv is not None and other.buf_kv is not None:
-            self.buf_kv = mx.concatenate([self.buf_kv, other.buf_kv], axis=0)
-            self.buf_gate = mx.concatenate([self.buf_gate, other.buf_gate], axis=0)
+            self.buf_kv = mx.concatenate(
+                [self.buf_kv, _keep_dtype(other.buf_kv, self.buf_kv)], axis=0)
+            self.buf_gate = mx.concatenate(
+                [self.buf_gate, _keep_dtype(other.buf_gate, self.buf_gate)],
+                axis=0)
         elif self.buf_kv is None:
             B = len(self.remainder)
             D1 = other.buf_kv.shape[2]
@@ -4061,6 +4098,8 @@ class BatchPoolingCache(_BaseCache):
                 def pad_pool(pooled, B, P):
                     if pooled is None:
                         return mx.zeros((B, max_P, D), dtype=dt)
+                    if pooled.dtype != dt:
+                        pooled = pooled.astype(dt)
                     if P < max_P:
                         pad = mx.zeros((pooled.shape[0], max_P - P, D), dtype=dt)
                         return mx.concatenate([pooled, pad], axis=1)
@@ -4174,8 +4213,10 @@ class SimpleKVCache(_BaseCache):
             self.values = values
         else:
             # Concatenate with existing cache along sequence dimension
-            self.keys = mx.concatenate([self.keys, keys], axis=2)
-            self.values = mx.concatenate([self.values, values], axis=2)
+            self.keys = mx.concatenate(
+                [self.keys, _keep_dtype(keys, self.keys)], axis=2)
+            self.values = mx.concatenate(
+                [self.values, _keep_dtype(values, self.values)], axis=2)
 
         self.cache_length += keys.shape[2]
         return self.keys, self.values
@@ -4290,8 +4331,10 @@ class StaticPrefixKVCache(_BaseCache):
         B, n_kv_heads, _, k_head_dim = keys.shape
         v_head_dim = values.shape[-1]
         capacity = self._capacity_for(needed)
-        new_keys = mx.zeros((B, n_kv_heads, capacity, k_head_dim), dtype=keys.dtype)
-        new_values = mx.zeros((B, n_kv_heads, capacity, v_head_dim), dtype=values.dtype)
+        new_keys = mx.zeros((B, n_kv_heads, capacity, k_head_dim),
+                            dtype=_grow_dtype(self.keys, keys))
+        new_values = mx.zeros((B, n_kv_heads, capacity, v_head_dim),
+                              dtype=_grow_dtype(self.values, values))
         if self.keys is not None and self.offset > 0:
             new_keys[..., : self.offset, :] = self.keys[..., : self.offset, :]
             new_values[..., : self.offset, :] = self.values[..., : self.offset, :]

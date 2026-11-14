@@ -628,7 +628,9 @@ class MiniMaxM3KVCache:
             B, n_heads, _, head_dim = keys.shape
             n_steps = (self.step + incoming - 1) // self.step
             new_shape = (B, n_heads, n_steps * self.step, head_dim)
-            new_keys = mx.zeros(new_shape, keys.dtype)
+            # gmlx: a grown index stream keeps its dtype; the write casts.
+            dt = keys.dtype if self.index_keys is None else self.index_keys.dtype
+            new_keys = mx.zeros(new_shape, dt)
             if self.index_keys is not None:
                 if prev % self.step != 0:
                     self.index_keys = self.index_keys[..., :prev, :]
@@ -735,7 +737,9 @@ class MiniMaxM3BatchKVCache:
             B, n_heads, _, head_dim = keys.shape
             n_steps = (self.step + incoming - 1) // self.step
             new_shape = (B, n_heads, n_steps * self.step, head_dim)
-            new_keys = mx.zeros(new_shape, keys.dtype)
+            # gmlx: a grown index stream keeps its dtype; the write casts.
+            dt = keys.dtype if self.index_keys is None else self.index_keys.dtype
+            new_keys = mx.zeros(new_shape, dt)
             if self.index_keys is not None:
                 if prev % self.step != 0:
                     self.index_keys = self.index_keys[..., :prev, :]

@@ -230,10 +230,13 @@ def _like(side, parts):
 def grow(cache, keys, values, prev, need, make, grid=True, routed=True) -> None:
     """Allocate or regrow ``cache.keys`` and ``cache.values`` to hold
     ``need`` rows: the grid point at or above it, or the next multiple of
-    ``cache.step`` when ``grid`` is False. ``make(x, rows)`` returns zeros
-    shaped like one side ``x`` of the update with ``rows`` rows (an array,
-    or a tuple for the quantized caches). A buffer whose offset is not a
-    multiple of the step is cut to the offset first, as upstream does."""
+    ``cache.step`` when ``grid`` is False. ``make(x, rows, dtype)`` returns
+    zeros shaped like one side ``x`` of the update with ``rows`` rows (an
+    array, or a tuple for the quantized caches), its float parts in
+    ``dtype`` (``x``'s when None). A regrown buffer keeps its dtype, as the
+    slice write does: rows of a wider dtype must not widen the cache. A
+    buffer whose offset is not a multiple of the step is cut to the offset
+    first, as upstream does."""
     step = cache.step
     if cache.keys is None:
         rows = grid_capacity(need, step) if grid else _round_up(need, step)
@@ -248,7 +251,9 @@ def grow(cache, keys, values, prev, need, make, grid=True, routed=True) -> None:
                 rows = grid_capacity(need, step) - base
             else:
                 rows = _round_up(need - prev, step)
-            pads = _parts(make(new, rows))
+            # The last part is the float one: the array, or a packed
+            # side's biases.
+            pads = _parts(make(new, rows, parts[-1].dtype))
             # Past 2^31 elements the stock op misplaces rows on the GPU.
             return _like(side, tuple(
                 mlx_guards.concatenate([a, p], axis=2)

@@ -22,8 +22,11 @@ class HyV4KVCache(KVCache):
             else:
                 capacity = max(required, 2 * max(capacity, keys.shape[2]))
             capacity = ((capacity + self.step - 1) // self.step) * self.step
-            new_k = mx.zeros((B, n_kv_heads, capacity, k_head_dim), keys.dtype)
-            new_v = mx.zeros((B, n_kv_heads, capacity, v_head_dim), values.dtype)
+            # gmlx: a regrown buffer keeps its dtype; the write casts.
+            kdt = keys.dtype if self.keys is None else self.keys.dtype
+            vdt = values.dtype if self.values is None else self.values.dtype
+            new_k = mx.zeros((B, n_kv_heads, capacity, k_head_dim), kdt)
+            new_v = mx.zeros((B, n_kv_heads, capacity, v_head_dim), vdt)
             if self.keys is not None:
                 new_k[..., :previous, :] = self.keys[..., :previous, :]
                 new_v[..., :previous, :] = self.values[..., :previous, :]

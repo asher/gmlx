@@ -3822,6 +3822,14 @@ def _unpack_lowbit(packed: mx.array, bits: int, length: int) -> mx.array:
     return unpacked.reshape((*packed.shape[:-1], length))
 
 
+def _cat_kept(a, b, axis):
+    """gmlx: ``b`` joins ``a`` in ``a``'s dtype, so appended rows of a
+    wider dtype do not widen the stored state."""
+    if b.dtype != a.dtype:
+        b = b.astype(a.dtype)
+    return mx.concatenate([a, b], axis=axis)
+
+
 def _concat_state(lhs, rhs):
     if lhs is None:
         return rhs
@@ -3829,30 +3837,30 @@ def _concat_state(lhs, rhs):
         return lhs
     if isinstance(lhs, TurboQuantMSEState):
         return TurboQuantMSEState(
-            mx.concatenate([lhs.norms, rhs.norms], axis=2),
-            mx.concatenate([lhs.indices, rhs.indices], axis=2),
+            _cat_kept(lhs.norms, rhs.norms, 2),
+            _cat_kept(lhs.indices, rhs.indices, 2),
         )
     if isinstance(lhs, TurboQuantProdState):
         return TurboQuantProdState(
-            mx.concatenate([lhs.norms, rhs.norms], axis=2),
-            mx.concatenate([lhs.mse_indices, rhs.mse_indices], axis=2),
-            mx.concatenate([lhs.residual_norms, rhs.residual_norms], axis=2),
-            mx.concatenate([lhs.qjl_signs, rhs.qjl_signs], axis=2),
+            _cat_kept(lhs.norms, rhs.norms, 2),
+            _cat_kept(lhs.mse_indices, rhs.mse_indices, 2),
+            _cat_kept(lhs.residual_norms, rhs.residual_norms, 2),
+            _cat_kept(lhs.qjl_signs, rhs.qjl_signs, 2),
         )
     if isinstance(lhs, TurboQuantPolarState):
         return TurboQuantPolarState(
-            mx.concatenate([lhs.radii, rhs.radii], axis=2),
+            _cat_kept(lhs.radii, rhs.radii, 2),
             tuple(
-                mx.concatenate([lhs_idx, rhs_idx], axis=2)
+                _cat_kept(lhs_idx, rhs_idx, 2)
                 for lhs_idx, rhs_idx in zip(lhs.level_indices, rhs.level_indices)
             ),
         )
     if isinstance(lhs, TurboQuantPolarProdState):
         return TurboQuantPolarProdState(
-            mx.concatenate([lhs.norms, rhs.norms], axis=2),
+            _cat_kept(lhs.norms, rhs.norms, 2),
             _concat_state(lhs.polar_state, rhs.polar_state),
-            mx.concatenate([lhs.residual_norms, rhs.residual_norms], axis=2),
-            mx.concatenate([lhs.qjl_signs, rhs.qjl_signs], axis=2),
+            _cat_kept(lhs.residual_norms, rhs.residual_norms, 2),
+            _cat_kept(lhs.qjl_signs, rhs.qjl_signs, 2),
         )
     if isinstance(lhs, TurboQuantSplitState):
         return TurboQuantSplitState(
@@ -6908,7 +6916,8 @@ class _UniformTensorQuantizer:
             return rhs
         if rhs is None:
             return lhs
-        return tuple(mx.concatenate([a, b], axis=-2) for a, b in zip(lhs, rhs))
+        # gmlx: the stored scales and biases keep their dtype.
+        return tuple(_cat_kept(a, b, -2) for a, b in zip(lhs, rhs))
 
     @staticmethod
     def length(state) -> int:
