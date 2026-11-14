@@ -1291,12 +1291,16 @@ class QSAKVCache(KVCache):
     @classmethod
     def _write(cls, base, start: int, rows):
         """``base`` with ``rows`` at ``start`` on the token axis, grown
-        when it is short."""
+        when it is short. A grown base keeps its dtype, as the write in
+        place does: a prefill after a restore runs float32 off the conv
+        states decode leaves float32, and its rows must not widen the
+        whole stream."""
         n = rows.shape[-2]
         if base is None or start + n > base.shape[-2]:
+            dt = rows.dtype if base is None else base.dtype
             shape = list(rows.shape)
             shape[-2] = cls._cap_for(start + n) - (start + n)
-            parts = [rows, mx.zeros(shape, rows.dtype)]
+            parts = [rows.astype(dt), mx.zeros(shape, dt)]
             if base is not None and start:
                 parts.insert(0, base[..., :start, :])
             return mx.concatenate(parts, axis=-2)

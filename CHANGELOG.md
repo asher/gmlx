@@ -110,6 +110,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   grew, could push memory up by several gigabytes for the length of one step.
 - On Qwen3.5 and other hybrid models with a drafter, the last request left
   of a batch decoded slower than a request alone, more the longer its context.
+- After a turn restored from the prompt cache, Qwen3.8-Flash-Next held that
+  conversation's attention and indexer keys at twice their memory.
 
 ## [0.5.5] - 2026-11-08
 

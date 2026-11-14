@@ -109,6 +109,30 @@ def test_decode_appends_leave_the_base(monkeypatch):
     assert c._tl == 1 and c.offset == 57
 
 
+@pytest.mark.parametrize("n", [1, 12])
+def test_wider_rows_past_a_restored_base_keep_its_dtype(monkeypatch, n):
+    """A restore sets each stream to a bf16 base of exactly its rows. The
+    prefill after it can run float32 (decode leaves the conv states
+    float32), and its rows grow the base in the base's dtype, as a write
+    in place casts them: the stream keeps its bytes. One row goes through
+    the tail and its fold, twelve go to the base directly."""
+    monkeypatch.setenv("GMLX_Q4_KV_TAIL", "16")
+    base = [a.astype(mx.bfloat16) for a in _rows(32, 600)]
+    c = QSAKVCache(ratio=4)
+    c.state = tuple(base)
+    rows = _rows(n, 601)
+    assert all(a.dtype == mx.float32 for a in rows)
+    c.append_qsa(*rows)
+    got = c.state
+    assert [a.dtype for a in got] == [mx.bfloat16] * 3
+    for a, b, r, ax in zip(got, base, rows, (2, 2, 1)):
+        assert a.shape[ax] == 32 + n
+        head = a[:, :, :32] if ax == 2 else a[:, :32]
+        new = a[:, :, 32:] if ax == 2 else a[:, 32:]
+        assert mx.array_equal(head, b).item()
+        assert mx.array_equal(new, r.astype(mx.bfloat16)).item()
+
+
 def test_finished_blocks_span_segments(monkeypatch):
     """A block whose raw keys straddle the base and the tail pools the
     same rows as one buffer."""
