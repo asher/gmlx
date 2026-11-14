@@ -8,6 +8,7 @@ needs.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import re
@@ -2181,22 +2182,23 @@ def load_mtp_model(
     from gmlx.load.hadamard import hadamard_targets_for
     from gmlx.stream.table_pread import deferred_tables
 
-    _install_and_load(
-        model.language_model,
-        hf_weights,
-        hf_kquant_meta,
-        log=_log,
-        sanitize=(_mt in ("deepseek_v4", "deepseek_v4_vl", "hy_v3",
-                          "glm5_next")),
-        no_alias=owned_names,
-        fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
-        source_key=weights_source_key(*pf.shards),
-        active_before=active_before,
-        # The tables the wire load skipped: past the buffer ceiling, or
-        # read from the file to bring the load under the budget.
-        deferred_tables=deferred_tables(pf.shards, arch),
-        hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
-    )
+    with _touch_left_to_install(gguf_path, wire):
+        _install_and_load(
+            model.language_model,
+            hf_weights,
+            hf_kquant_meta,
+            log=_log,
+            sanitize=(_mt in ("deepseek_v4", "deepseek_v4_vl", "hy_v3",
+                              "glm5_next")),
+            no_alias=owned_names,
+            fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
+            source_key=weights_source_key(*pf.shards),
+            active_before=active_before,
+            # The tables the wire load skipped: past the buffer ceiling, or
+            # read from the file to bring the load under the budget.
+            deferred_tables=deferred_tables(pf.shards, arch),
+            hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
+        )
 
     # 2b. post-install arming: the tiled-V check + the fused gated-delta verify kernel
     #     (the MTP round's roofline; measured ~7% at M=5, ~15% at M=8 on the
@@ -2345,19 +2347,20 @@ def load_vlm_mtp_model(
 
     # 1. target VLM - .language_model is the hook-bearing text class.
     # return_tokenizer=True returns the raw tokenizer as a 4th element.
-    model, config, processor, raw_tokenizer = cast(
-        "tuple[Any, dict, Any, Any]",
-        load_vlm_model(
-            gguf_path,
-            mmproj_path,
-            arch=arch,
-            hf_source=hf_source,
-            zero_copy=zero_copy,
-            verbose=verbose,
-            return_tokenizer=True,
-            spec_target=True,
-        ),
-    )
+    with _touch_left_to_install(gguf_path, wire):
+        model, config, processor, raw_tokenizer = cast(
+            "tuple[Any, dict, Any, Any]",
+            load_vlm_model(
+                gguf_path,
+                mmproj_path,
+                arch=arch,
+                hf_source=hf_source,
+                zero_copy=zero_copy,
+                verbose=verbose,
+                return_tokenizer=True,
+                spec_target=True,
+            ),
+        )
     text_config = config.get("text_config") or {}
     text_model_type = text_config.get("model_type") or config.get("model_type")
 
@@ -2453,6 +2456,32 @@ def load_vlm_mtp_model(
     note_resident_model(drafter)
     note_drafter_held(model, drafter)
     return model, drafter, config, tokenizer, processor
+
+
+@contextlib.contextmanager
+def _touch_left_to_install(gguf_path: str, wire: bool):
+    """Across the target's weight load, when ``_wire_target`` will judge
+    the resident set against live memory and wire it in chunks (an arch
+    that gathers its tables, ``capacity.gathered_table_bytes``): latch
+    that chunked wire (``table_stream.guard_resident_wire``), so the
+    load's GPU warm touch leaves the weights alone. The touch wires them
+    in one burst, and the install's check then counts them as wired
+    memory the set cannot take, and streams the experts. Serve and the
+    CLI latch it before the load (``preload_wire_check``); this covers a
+    direct call. A latch already set is left as it is."""
+    from gmlx.serve.capacity import gathered_table_bytes
+    from gmlx.stream.table_stream import (guard_resident_wire,
+                                          resident_wire_guarded)
+
+    latch = (wire and not resident_wire_guarded(gguf_path)
+             and bool(gathered_table_bytes(gguf_path)))
+    if latch:
+        guard_resident_wire(gguf_path)
+    try:
+        yield
+    finally:
+        if latch:
+            guard_resident_wire(gguf_path, False)
 
 
 def _wire_target(model, gguf_path: str) -> None:
