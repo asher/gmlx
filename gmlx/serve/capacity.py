@@ -214,12 +214,15 @@ def wired_cap_bytes(ws: float | None = None,
     memory wired outside the process (``ceiling_bytes``), read before its
     first load and live on the governor's tick, whichever is higher
     (``priced_outside_wired_bytes``), so the cap never rises past its
-    startup figure.
-    The governor plans under it, and
+    startup figure. The governor plans under it, and
     ``stream.wired_limit.install_wired_cap`` clamps ``mx.set_wired_limit``
     to it and sets the MLX memory limit to it, so the buffer cache yields
-    there instead of taking a fixed share. In any other process,
-    ``ceiling_bytes``. None when the device cannot be read."""
+    there instead of taking a fixed share. The memory limit is set once,
+    at the startup figure: while memory wired outside holds the cap below
+    it, the buffer cache can fill past the cap until a governor tick reads
+    yellow and its throttle sets the limit from the live cap. In any
+    other process, ``ceiling_bytes``. None when the device cannot be
+    read."""
     if ws is None:
         ws = working_set_bytes()
     if ws is None:

@@ -106,7 +106,9 @@ def install_wired_cap(announce: bool = False) -> None:
     call time, so this one wrapper owns the figure each gets:
     min(request, cap). Under the memory limit, MLX frees cached buffers
     before its active bytes and its buffer cache together pass the cap,
-    so the cache takes no fixed share of it. A pinned process
+    so the cache takes no fixed share of it. The memory limit keeps the
+    cap's startup figure while the clamp follows the live cap, which
+    memory wired outside the process can hold lower. A pinned process
     (``_neutralize_wired_limit_sweep``) stays at 0 and keeps MLX's memory
     limit, and ``wired_limit_held`` holds and restores through the clamp.
     ``announce`` prints the cap and the first request the clamp lowers;
