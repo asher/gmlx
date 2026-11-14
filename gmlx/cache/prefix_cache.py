@@ -398,7 +398,9 @@ class SpecPrefixCache:
         Snapshots every cache entry in prompt_cache (architecture-agnostic:
         handles KVCache, RotatingKVCache, ArraysCache, CacheList) and the
         target hidden. Arrays are evaluated/materialized so they survive
-        subsequent in-place cache mutation during decode.
+        subsequent in-place cache mutation during decode. Least recently
+        used entries make room first, so the layer holds at most its budget
+        while the new entry materializes.
         """
         ids = _ids_tuple(token_ids)
 
@@ -419,29 +421,44 @@ class SpecPrefixCache:
             )
             return
 
+        # Make room before materializing, so the copy never lands on a full
+        # layer and a store stays within the budget. The new entry is never
+        # the victim, so the entries kept are the ones insert-then-trim kept.
+        with self._lock:
+            self._drop(key)
+            self._evict_lru_for(1, entry.nbytes)
+
         _eval_snapshot(kv_snaps)
         mx.eval(hidden)
 
         with self._lock:
-            if key in self._entries:
-                old = self._entries.pop(key)
-                self._total_bytes -= old.nbytes
+            self._drop(key)
             self._entries[key] = entry
-            self._entries.move_to_end(key)
             self._total_bytes += entry.nbytes
             global _STORES
             _STORES += 1
+            # A layer bounded to no entries drops the new one here, as before.
+            self._evict_lru_for(0, 0)
 
-            while self._entries and (
-                len(self._entries) > self._max
-                or self._total_bytes > self._max_bytes
-            ):
-                _, evicted = self._entries.popitem(last=False)
-                self._total_bytes -= evicted.nbytes
-                _log.debug(
-                    "APC evict prefix len=%d (%.1f MB)",
-                    len(evicted.token_ids), evicted.nbytes / 2**20,
-                )
+    def _drop(self, key) -> None:
+        """Pop ``key`` if held. Caller holds the lock."""
+        old = self._entries.pop(key, None)
+        if old is not None:
+            self._total_bytes -= old.nbytes
+
+    def _evict_lru_for(self, entries: int, nbytes: int) -> None:
+        """Pop least recently used entries until ``entries`` more entries
+        of ``nbytes`` fit both bounds. Caller holds the lock."""
+        while self._entries and (
+            len(self._entries) + entries > self._max
+            or self._total_bytes + nbytes > self._max_bytes
+        ):
+            _, evicted = self._entries.popitem(last=False)
+            self._total_bytes -= evicted.nbytes
+            _log.debug(
+                "APC evict prefix len=%d (%.1f MB)",
+                len(evicted.token_ids), evicted.nbytes / 2**20,
+            )
 
     def restore(self, entry: _PrefixEntry, prompt_cache: list) -> None:
         """Restore target KV from a cached entry into prompt_cache."""

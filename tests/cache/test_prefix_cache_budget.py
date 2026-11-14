@@ -9,6 +9,7 @@ layers to their window, and the cache enforces a total byte budget.
 """
 
 import mlx.core as mx
+import pytest
 
 from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache
 
@@ -205,6 +206,41 @@ class TestByteBudget:
         cache.clear()
         assert cache.total_bytes == 0
         assert len(cache) == 0
+
+    @pytest.mark.parametrize("max_entries, max_bytes", [
+        (10, 9000), (2, 1 << 30),
+    ], ids=["bytes-full", "count-full"])
+    def test_a_store_into_a_full_layer_materializes_within_its_bounds(
+            self, monkeypatch, max_entries, max_bytes):
+        """The entries used longest ago make room before the new entry
+        materializes, so the layer never holds its budget plus one entry,
+        a peak inside one engine step that no governor band can act on.
+        The entries kept after the store are the same as before."""
+        import gmlx.cache.prefix_cache as pc
+
+        entry_bytes = 4096 + 16              # KV of 64 tokens, hidden
+        cache = SpecPrefixCache(max_entries=max_entries, max_bytes=max_bytes)
+        hidden = mx.zeros((1, 1, 4))
+        for start in (0, 100):
+            cache.store(mx.arange(start, start + 64)[None], [_fill_kv(64)],
+                        hidden)
+        assert len(cache) == 2               # full: a third does not fit
+        seen = []
+        real = pc._eval_snapshot
+
+        def spy(snaps):
+            seen.append((len(cache), cache.total_bytes))
+            real(snaps)
+
+        monkeypatch.setattr(pc, "_eval_snapshot", spy)
+        cache.store(mx.arange(200, 264)[None], [_fill_kv(64)], hidden)
+        assert len(seen) == 1
+        held_n, held_bytes = seen[0]
+        assert held_n + 1 <= max_entries
+        assert held_bytes + entry_bytes <= max_bytes
+        assert cache.total_bytes == 2 * entry_bytes
+        assert [cache.lookup(mx.arange(s, s + 65)[None]) is not None
+                for s in (0, 100, 200)] == [False, True, True]
 
 
 class TestSpecPrefixStats:
