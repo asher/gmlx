@@ -6,7 +6,8 @@ the conversation looked up last was the coldest one, so the budget took
 its record as the other three stored theirs. Records and the pool's
 committed blocks now share one figure; a chain of blocks is useless
 without its record, so blocks no record holds go first, and a record goes
-with the blocks only it held.
+with the blocks only it held. Beside it: a retirement no lookup can use
+stores nothing.
 """
 
 import logging
@@ -200,6 +201,26 @@ def test_autosize_stashes_the_pools_share(monkeypatch):
     m.autosize(_fake_model())
     assert m.num_blocks == 64
     assert m._kq_ckpt_share_bytes == int(64 * 16 * m._pool_per_token_bytes)
+
+
+def test_a_retirement_no_lookup_can_use_stores_nothing():
+    """The arming recorded the layout the request's lookup signed with. A
+    retirement whose cache tags another layout (QSA layers out of a merge
+    without their indexer keys tag "kv") stores nothing and counts a
+    retire_layout decline; one that matches stores."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    ids = _ids(0, 52)
+    cache = make_hybrid_cache(52, seed=4)
+    live = cs.ckpt_layout(cache, 16)
+    signed = tuple("qsa:4" if t == "kv" else t for t in live)
+    assert cs.retirement_store(man, "ckpt", ids, cache, layout=signed) == 0
+    assert len(cs._ckpt_records(man)) == 0
+    assert man.stats_snapshot()["ckpt_declines"] == {"retire_layout": 1}
+    assert cs.retirement_store(man, "ckpt", ids, cache, layout=live) == 52
+    assert [r.p for r in cs._ckpt_records(man).values()] == [52]
+    # No signature recorded (an unsupported live cache at arming): no check.
+    assert cs.retirement_store(man, "ckpt", _ids(1, 52), cache,
+                               layout=None) == 52
 
 
 def test_the_counters_reach_the_stats_and_the_metrics_payload(monkeypatch):

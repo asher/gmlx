@@ -316,7 +316,7 @@ def _retire_setup(monkeypatch, lcp, mode="exact"):
     calls = {}
 
     def fake_store(manager, m, seq, cache, row=0, extra_hash=0,
-                   max_len=None, decode_snaps=None):
+                   max_len=None, decode_snaps=None, layout=None):
         calls["store"] = (list(seq), max_len, m)
         return True
 

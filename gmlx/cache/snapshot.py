@@ -2510,18 +2510,38 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     return out
 
 
+def _retire_usable(manager, caches, layout) -> bool:
+    """Whether a retirement record of ``caches`` can serve a lookup: its
+    layout is the one the request's lookup signed with (``layout``; None
+    when the arming recorded none). A batched row whose QSA layers left
+    the merge without their indexer keys, or a decode snapshot assembled
+    with plain KV in their place, tags "kv" where every lookup signs
+    "qsa:R": such a record would cost the room and strip its chain for
+    nothing, so it is not stored."""
+    if layout is None:
+        return True
+    got = ckpt_layout(caches, int(manager.block_size))
+    if got is None or tuple(got) == tuple(layout):
+        return True
+    _ckpt_decline(manager, "retire_layout")
+    _log.info("APC retirement skipped: layout %s matches no lookup (%s)",
+              list(got), list(layout))
+    return False
+
+
 def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
-                     max_len, decode_snaps) -> int:
+                     max_len, decode_snaps, layout=None) -> int:
     """Ckpt-mode retirement: the full sequence when it can store whole
     (a short rotating prompt truncates to the block grid), else the
     newest decode-time snapshot at or below the replayable prefix. Never spills to the exact tier -- on ckpt models the exact
     tier stays empty, so the stock warm path never bypasses arming.
+    Nothing a lookup signed ``layout`` cannot use (``_retire_usable``).
     Returns the stored length (0 = nothing)."""
     try:
         cap = len(ids)
         if max_len is not None and max_len < len(ids):
             cap = max_len
-        elif len(ids) >= 2:
+        elif len(ids) >= 2 and _retire_usable(manager, prompt_cache, layout):
             # A row still on its single-row caches is sliced directly:
             # the stores copy per block, with no clone of the row. A row
             # taken out of batch classes arrives as one copy of its KV. A
@@ -2538,9 +2558,12 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             if not 2 <= p <= cap:
                 continue
             assembled = _snap_assemble(prompt_cache, states, p)
+            if assembled is None or not _retire_usable(manager, assembled,
+                                                       layout):
+                continue
             # skeleton_disk stays on: this is the entry a post-restart
             # turn restores from, unlike interval boundaries.
-            if assembled is not None and ckpt_store(
+            if ckpt_store(
                     manager, ids[:p], assembled, extra_hash=extra_hash,
                     skeleton_disk=True, kind="retire"):
                 _log.info("APC retirement: decode ckpt stored at %d "
@@ -2600,6 +2623,7 @@ def retirement_store(
     extra_hash: int = 0,
     max_len: int | None = None,
     decode_snaps: list | None = None,
+    layout: tuple | None = None,
 ) -> int:
     """Persist a finished row's full KV into the shared APC.
 
@@ -2616,7 +2640,9 @@ def retirement_store(
     below the LCP (``decode_snaps``, from ``decode_ckpt_tick``), falling
     back to the full sequence under its verbatim key -- neither recurrent
     state nor a rotating window can rewind, and nothing spills to the
-    exact tier. Best effort: a failure never breaks generation.
+    exact tier. ``layout``: the signature the request's lookup signed
+    with; a ckpt record that cannot match it is not stored. Best effort:
+    a failure never breaks generation.
 
     Returns the stored prefix length in tokens (0 = nothing stored) --
     the fallback can store past ``max_len``, so callers must log the
@@ -2628,7 +2654,7 @@ def retirement_store(
     if mode == "ckpt":
         return _ckpt_retirement(manager, ids, prompt_cache,
                                 extra_hash=extra_hash, max_len=max_len,
-                                decode_snaps=decode_snaps)
+                                decode_snaps=decode_snaps, layout=layout)
     if max_len is not None and max_len < len(ids) and mode != "exact":
         ids = ids[:max_len]
     if len(ids) < 2:

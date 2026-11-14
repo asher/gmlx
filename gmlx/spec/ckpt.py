@@ -1021,10 +1021,14 @@ def _snap_fields(batch, manager) -> dict:
     off-grid restore is the scoped-benign case). ``snap_align`` is the
     block alignment a rotating window store requires below the window;
     ``snap_offgrid_min`` (= W) is where the store gate stops caring --
-    a wrapped window is whole blocks at any p.
+    a wrapped window is whole blocks at any p. ``layout`` is the signature
+    the request's lookup signed with, which its retirement must match to
+    be of any use (``snapshot._ckpt_retirement``); None when the live
+    cache had no supported signature, which checks nothing.
     """
     import math
     from gmlx.cache.snapshot import _DECODE_CKPT_DEFAULT
+    from gmlx.spec.engine import _LAYOUT_UNSUPPORTED
     bs = int(manager.block_size)
     tags = _ckpt_layout_live(batch, bs) or ()
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
@@ -1037,6 +1041,7 @@ def _snap_fields(batch, manager) -> dict:
             rot_w = int(t.split(":")[1])
             break
     return {
+        "layout": tags if tags and tags != _LAYOUT_UNSUPPORTED else None,
         "snap_ok": bool(tags),
         "snap_grid": grid,
         "snap_align": bs if rot_w else 1,
@@ -1401,7 +1406,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             manager, stash.get("mode") or "ckpt", seq, prompt_cache,
             row=0,
             extra_hash=as_salt(stash.get("extra_hash", 0)), max_len=max_len,
-            decode_snaps=stash.get("snaps"))
+            decode_snaps=stash.get("snaps"), layout=stash.get("layout"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
     except Exception:

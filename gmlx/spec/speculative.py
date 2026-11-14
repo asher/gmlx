@@ -2351,7 +2351,8 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         ok = retirement_store(
             manager, retire.get("mode"), seq, prompt_cache,
             row=0, extra_hash=as_salt(retire.get("extra_hash", 0)),
-            max_len=max_len, decode_snaps=retire.get("snaps"))
+            max_len=max_len, decode_snaps=retire.get("snaps"),
+            layout=retire.get("layout"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
         if max_len is not None:
