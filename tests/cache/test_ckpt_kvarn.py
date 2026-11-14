@@ -262,6 +262,58 @@ def test_kvarn_rot_disk_restart_roundtrip(kvarn_apc_arms, tmp_path):
         disk2.close()
 
 
+def _rot(p, w=32):
+    rot = RotatingKVCache(max_size=w)
+    mx.random.seed(9)
+    rot.update_and_fetch(mx.random.normal((1, H, p, D)),
+                         mx.random.normal((1, H, p, D)))
+    return rot
+
+
+@pytest.mark.parametrize("with_rot", [False, True], ids=["arr", "arr+rot"])
+def test_the_replay_stand_in_keeps_the_prompt_across_a_restart(
+        kvarn_apc_arms, tmp_path, with_rot):
+    """A kvarn GDN hybrid's p=N record took a disk skeleton, with its
+    window chain on disk, so a restart restored the prompt. The N-1
+    replay that stands in for it writes both."""
+    from gmlx._vendor.mlx_vlm.apc import DiskBlockStore
+    from gmlx.cache.snapshot import (
+        ckpt_replay_stands_in,
+        rotating_canonical_window,
+    )
+
+    n = 49
+    ids = _ids(n)
+
+    def stack(p):
+        out = [_hollow_kvarn(p), _arr(seed=n)]
+        return out + [_rot(p)] if with_rot else out
+
+    replay = stack(n - 1)
+    disk = DiskBlockStore(root=tmp_path, namespace="m")
+    man = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk)
+    assert ckpt_store(man, ids[:-1], replay, extra_hash=5, kind="replay")
+    assert ckpt_replay_stands_in(man, ids, stack(n), extra_hash=5)
+    disk.close()
+    disk2 = DiskBlockStore(root=tmp_path, namespace="m")
+    man2 = GmlxAPCManager(num_blocks=64, block_size=16, disk=disk2)
+    try:
+        warm, got = ckpt_lookup(man2, ids + [999], extra_hash=5,
+                                layout=tuple(ckpt_layout(replay, 16)))
+        assert got == n - 1
+        assert type(warm[0]) is KVarNKVCache and warm[0].offset == n - 1
+        for a, b in zip(warm[1].cache, replay[1].cache):
+            assert mx.array_equal(a, b).item()
+        if with_rot:
+            got_w = rotating_canonical_window(warm[2])
+            want_w = rotating_canonical_window(replay[2])
+            assert got_w[2] == want_w[2]
+            for a, b in zip(got_w[:2], want_w[:2]):
+                assert mx.array_equal(a, b).item()
+    finally:
+        disk2.close()
+
+
 def test_kvarn_disk_write_mirrors_wire_salt(kvarn_apc_arms, tmp_path):
     # The skeleton writer bypasses the manager's exact-cache wrapper, so
     # it must fold _exact_extra_salt into the hash AND the persisted

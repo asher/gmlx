@@ -1030,10 +1030,11 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
     token. It goes back in as the p=N record would have, strip-on-extend
     and ``keep`` (the request's p_stable) included, so the boundaries of
     earlier turns on its chain still go. It takes the disk skeleton the
-    p=N store would have written, on a layout with no window chain (an
-    arr replay's rotating or kvarn window chain never went to disk). A
-    replay on an attention-only layout already adopts on extension and
-    keeps its kind. False when no replay landed: the p=N store runs."""
+    p=N store would have written, and on a kvarn layout its window chain
+    goes to disk as the p=N chain would have (``rot_disk``), so a restart
+    restores the prompt record as before. A replay on an attention-only
+    layout already adopts on extension and keeps its kind. False when no
+    replay landed: the p=N store runs."""
     if manager is None or token_ids is None:
         return False
     try:
@@ -1043,6 +1044,7 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
             return False
         key = (ids, int(salt_at(extra_hash, p)))
         idx = _ckpt_records(manager)
+        win: list[Any] = []
         with manager.lock:
             rec = idx.get(key)
             if rec is None or rec.kind != "replay":
@@ -1055,13 +1057,19 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
                 _record_insert(manager, rec, keep)
             snap = _CkptRecord(
                 **{k: getattr(rec, k) for k in _CkptRecord.__slots__})
+            if (promote and key in idx and rec.bounded_blocks
+                    and getattr(manager, "disk", None) is not None
+                    and any(_is_kvarn(t) for t in rec.layout)):
+                # Pinned for the unlocked join, as a lookup pins them.
+                win = list(rec.bounded_blocks)
+                for b in win:
+                    manager._acquire_existing(b)
+            gen = int(getattr(manager, "_kq_ckpt_gen", 0))
         _log.info("APC ckpt post-prefill store skipped: the replay at %d "
                   "stands in%s", p, " as a boundary" if promote else "")
-        # A window chain (rotating or kvarn) of an arr replay never went
-        # to disk, so a skeleton for it would restore nothing.
-        if (promote and prompt_cache is not None
-                and not any(_is_rot(t) or _is_kvarn(t) for t in snap.layout)
-                and snap.states is not None):
+        if win:
+            _window_to_disk(manager, snap, win, gen)
+        if promote and prompt_cache is not None and snap.states is not None:
             _ckpt_disk_write(manager, list(snap.ids), prompt_cache,
                              snap.layout, snap.p, snap.b_full,
                              snap.p - snap.b_full, snap.states, snap.tails,
@@ -1072,6 +1080,31 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
         _log.warning("APC ckpt replay stand-in failed; storing p=N",
                      exc_info=True)
         return False
+
+
+def _window_to_disk(manager, rec, held, gen) -> None:
+    """Write a record's window chain to disk under the salt its store
+    used, from the blocks ``held`` (pinned by the caller, released here).
+    An arr replay keeps its chain memory-only."""
+    from .apc_blocks import join_blocks
+
+    try:
+        sink, _w, _off, L = rec.rot_meta
+        ids = list(rec.ids)
+        layers = join_blocks(held)
+        got = manager.store_ckpt_blocks(
+            ids[:sink] + ids[rec.p - (L - sink):rec.p],
+            [k for k, _ in layers], [v for _, v in layers],
+            extra_hash=bounded_extra_hash(rec.extra_hash, rec.p), disk=True)
+        with manager.lock:
+            manager.release(got)
+    except Exception:
+        _log.debug("APC ckpt window chain disk write failed", exc_info=True)
+    finally:
+        with manager.lock:
+            # A clear() rebuilt the free list under the held refs.
+            if int(getattr(manager, "_kq_ckpt_gen", 0)) == gen:
+                manager.release(held)
 
 
 def _release_record(manager, rec) -> None:
