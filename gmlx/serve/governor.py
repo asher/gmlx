@@ -150,7 +150,9 @@ GREEN, YELLOW, ORANGE, RED = 0, 1, 2, 3
 _BAND_NAMES = ("green", "yellow", "orange", "red")
 
 # Registered caches: name -> (bytes_fn, evict_fn). Values may be dead
-# weakref-bound callables; a registrant that raises is dropped.
+# weakref-bound callables; a registrant that raises is dropped. Readers
+# skip a name gone since their snapshot: another model's teardown can
+# unregister while a tick is inside a registrant.
 _REG: dict = {}
 
 # Server-wide counters for /v1/metrics.
@@ -518,7 +520,10 @@ def _sample_registered(st: _GovState) -> float:
     st.reg_sampled_tick = st.tick_no
     total = 0.0
     for name in list(_REG):
-        bytes_fn, _ = _REG[name]
+        entry = _REG.get(name)
+        if entry is None:
+            continue
+        bytes_fn, _ = entry
         try:
             total += float(bytes_fn())
         except Exception:
@@ -816,7 +821,10 @@ def _shed_allowed(st: _GovState) -> bool:
 def _registered_bytes() -> float:
     total = 0.0
     for name in list(_REG):
-        bytes_fn, _ = _REG[name]
+        entry = _REG.get(name)
+        if entry is None:
+            continue
+        bytes_fn, _ = entry
         try:
             total += float(bytes_fn() or 0)
         except Exception:
@@ -841,7 +849,10 @@ def _floor_evict_fraction(recl: float, floor: float) -> float:
 def _evict_registered(fraction: float) -> float:
     freed = 0.0
     for name in list(_REG):
-        _, evict_fn = _REG[name]
+        entry = _REG.get(name)
+        if entry is None:
+            continue
+        _, evict_fn = entry
         try:
             freed += float(evict_fn(fraction) or 0)
         except Exception:

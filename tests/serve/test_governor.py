@@ -1474,6 +1474,30 @@ def test_the_governor_evicts_the_prefix_layer_least_recently_used_first(
     assert gov._registered_bytes() == 0 and len(cache) == 0
 
 
+@pytest.mark.parametrize("read, want", [
+    (lambda: gov._registered_bytes(), 5000),
+    (lambda: gov._sample_registered(gov._GovState()), 5000),
+    (lambda: gov._evict_registered(0.5), 4500),
+], ids=["bytes", "sample", "evict"])
+def test_a_teardown_inside_a_governor_tick_leaves_the_tick_the_other_caches(
+        monkeypatch, read, want):
+    """Another model's teardown can unregister its caches while this
+    model's tick is inside a registrant. The tick skips the name that is
+    gone and still counts or evicts the rest, so its decision stands."""
+    monkeypatch.setattr(gov, "_REG", {})
+
+    def teardown_lands(result):
+        gov.unregister_cache("b")
+        return result
+
+    gov.register_cache("a", lambda: teardown_lands(1000),
+                       lambda f: teardown_lands(500))
+    gov.register_cache("b", lambda: 2000, lambda f: 2000)
+    gov.register_cache("c", lambda: 4000, lambda f: 4000)
+    assert read() == want
+    assert list(gov._REG) == ["a", "c"]
+
+
 def test_kernel_floor_reads_every_16_ticks_above_the_floor(rig, monkeypatch):
     # The read is three sysctl calls on the decode step. Above the floor
     # it runs on the first tick and every 16th after; a tick in between
