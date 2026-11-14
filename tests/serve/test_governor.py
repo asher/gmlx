@@ -240,6 +240,50 @@ def test_two_throttles_put_back_the_limits_the_first_found(rig, first):
     assert gov._HOLDERS == []
 
 
+@pytest.mark.parametrize("how", ["close", "collected"])
+@pytest.mark.parametrize("gone", [0, 1])
+def test_a_model_unloaded_while_armed_leaves_the_throttles(
+        rig, monkeypatch, gone, how):
+    """Two models' throttles armed in turn, then one model unloads while
+    armed: its generator closes, or is collected unclosed. Its throttle
+    leaves the holders through the installed close, or at the next disarm
+    for a collection, which takes no lock. The other throttle's disarm
+    then puts back the limits the first throttle found, as when both
+    disarm, in either order."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    # The install wraps the class, once per process; the test puts back
+    # what it found.
+    for name in ("_next", "close", "__del__"):
+        monkeypatch.setattr(ar.BatchGenerator, name,
+                            ar.BatchGenerator.__dict__[name])
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", gov._ARMED_FLOOR)
+    monkeypatch.setitem(gov._STATS, "kernel_floor",
+                        gov._STATS.get("kernel_floor"))
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
+    assert gov.install_governor()
+    gens = [FakeGen(rows=2), FakeGen(rows=2)]
+    sts = [gov._state(g) for g in gens]
+    armed = []
+    for g, st in zip(gens, sts):
+        g._wire_stack = None
+        gov._arm_throttle(g, st, 120e9, 0.05)
+        armed.append((rig["mem_limit"], rig["cache_limit"]))
+    assert armed[0] != (0, 7)
+    if how == "close":
+        ar.BatchGenerator.close(gens[gone])
+        assert len(gov._HOLDERS) == 1
+        # The newest gone, the oldest's throttle limits are back; the
+        # oldest gone, the newest's stand and it holds what it found.
+        assert (rig["mem_limit"], rig["cache_limit"]) == armed[1 - gone]
+    else:
+        ar.BatchGenerator.__del__(gens[gone])
+        assert sts[gone].gone and len(gov._HOLDERS) == 2
+    gov._disarm_throttle(gens[1 - gone], sts[1 - gone])
+    assert (rig["mem_limit"], rig["cache_limit"]) == (0, 7)
+    assert gov._HOLDERS == []
+
+
 def test_disarm_in_a_process_pinned_since_puts_back_mlx_limit(
         rig, monkeypatch):
     """The throttle armed over the wired cap's memory limit, then a load

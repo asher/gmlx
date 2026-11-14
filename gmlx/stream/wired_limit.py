@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import sys
+import threading
 
 import mlx.core as mx
 
@@ -22,6 +23,11 @@ _CLAMP_LOGGED = False
 # True when the cap's lines print (the server); else they show under
 # --verbose only.
 _ANNOUNCE = False
+# Held by each writer that reads the MLX memory limit and then sets it
+# (the cap, its restore at a pin, the governor's throttle, expert
+# streaming's allocator limits), so none sets a limit over one another
+# thread set between its read and its write.
+LIMIT_LOCK = threading.RLock()
 
 
 def _say(msg: str) -> None:
@@ -156,12 +162,13 @@ def _limit_memory_to_cap(cap: float) -> None:
               "limit stays at its default", file=sys.stderr)
         return
     try:
-        prev = int(mx.set_memory_limit(int(cap)))
+        with LIMIT_LOCK:
+            prev = int(mx.set_memory_limit(int(cap)))
+            _CAP_MEMORY_LIMIT = (prev, int(cap))
     except Exception:
         _log.warning("[memory] set_memory_limit failed; the MLX memory "
                      "limit stays at its default", exc_info=True)
         return
-    _CAP_MEMORY_LIMIT = (prev, int(cap))
     _say(f"[memory] wired cap {cap / 1e9:.1f} GB ({why}): "
          f"mx.set_wired_limit clamped to it, MLX memory limit "
          f"{int(cap) / 1e9:.1f} GB (was {prev / 1e9:.1f} GB)")
@@ -199,16 +206,17 @@ def _restore_mlx_memory_limit() -> None:
     the record stays: the governor's throttle, disarmed, puts the cap
     back over its own limit and calls this again."""
     global _CAP_MEMORY_LIMIT
-    saved = _CAP_MEMORY_LIMIT
-    if saved is None:
-        return
-    try:
-        if int(mx.get_memory_limit()) != saved[1]:
+    with LIMIT_LOCK:
+        saved = _CAP_MEMORY_LIMIT
+        if saved is None:
             return
-        mx.set_memory_limit(saved[0])
-    except Exception:
-        return
-    _CAP_MEMORY_LIMIT = None
+        try:
+            if int(mx.get_memory_limit()) != saved[1]:
+                return
+            mx.set_memory_limit(saved[0])
+        except Exception:
+            return
+        _CAP_MEMORY_LIMIT = None
 
 
 def _neutralize_wired_limit_sweep():

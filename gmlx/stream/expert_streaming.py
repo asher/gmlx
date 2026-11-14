@@ -38,7 +38,8 @@ from .budget import (_decode_arena_bytes, _prefill_ring_reason,
                      outside_ceiling_bytes, pool_override)
 from .budget import pool_bytes as _priced_pool_bytes
 from .stack_unmap import stacks_remapped, unmap_stacks
-from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
+from .wired_limit import (LIMIT_LOCK, _neutralize_wired_limit_sweep,
+                          configure_cpu_device)
 
 
 def _ph_li(ph, li, key, dt):
@@ -513,8 +514,10 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int | None = None) -> 
         how = "priced in the KV room; GMLX_STREAM_CACHE_GB overrides"
     else:
         how = "GMLX_STREAM_CACHE_GB sizes it"
-    mx.set_memory_limit(limit)
-    mx.set_cache_limit(cache)
+    # Under the lock the governor's throttle reads and sets the limits by.
+    with LIMIT_LOCK:
+        mx.set_memory_limit(limit)
+        mx.set_cache_limit(cache)
     loadlog.info(
         f"[stream] allocator: memory limit {limit / 1e9:.0f} GB, past the "
         f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "

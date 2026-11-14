@@ -271,6 +271,8 @@ class _GovState:
         # the limits the throttle set in their place
         self.throttle_mem_limit = None
         self.throttle_cache_limit = None
+        # the generator was collected unclosed (_drop_gone)
+        self.gone = False
         self.saved_prefill_step = None
         self.width_clamped = False
         # demand-rung measurement (peak rate per tick)
@@ -546,15 +548,27 @@ def _pause_admission(gen, st: _GovState) -> None:
 
 # The throttles that hold a memory or cache limit they set, oldest
 # first: only the newest that holds a limit puts its saved one back
-# (_disarm_throttle).
+# (_disarm_throttle). A generator's close takes its throttle off
+# (release_throttle), and one collected unclosed goes at the next arm or
+# disarm (_drop_gone).
 _HOLDERS: list = []
 _HOLDERS_LOCK = threading.Lock()
 
 
+def _drop_gone() -> None:
+    """Disarm the throttles whose generator was collected unclosed. The
+    collection only marks them, since it can run on a thread that holds
+    a lock; the caller holds _HOLDERS_LOCK."""
+    for h in [h for h in _HOLDERS if h.gone]:
+        _disarm_locked(h)
+
+
 def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
     from gmlx.gen.prefill_decay import streamed_tracked_bytes, untracked_weight_bytes
+    from gmlx.stream.wired_limit import LIMIT_LOCK
 
-    with _HOLDERS_LOCK:
+    with _HOLDERS_LOCK, LIMIT_LOCK:
+        _drop_gone()
         if st.saved_mem_limit is None:
             # The limit speaks allocator terms: allocator-tracked streamed
             # expert bytes sit inside it without occupying working set, so
@@ -594,16 +608,19 @@ def _put_back(which: str, saved: int, ours: int) -> bool:
     allocator limits, a pin's MLX limit) stands. True when it went back.
     MLX reads no cache limit back, so that one is swapped and, when the
     limit it replaced was not ours, swapped back."""
-    if which == "mem":
-        if int(mx.get_memory_limit()) != int(ours):
-            return False
-        mx.set_memory_limit(int(saved))
-        return True
-    cur = int(mx.set_cache_limit(int(saved)))
-    if cur == int(ours):
-        return True
-    mx.set_cache_limit(cur)
-    return False
+    from gmlx.stream.wired_limit import LIMIT_LOCK
+
+    with LIMIT_LOCK:
+        if which == "mem":
+            if int(mx.get_memory_limit()) != int(ours):
+                return False
+            mx.set_memory_limit(int(saved))
+            return True
+        cur = int(mx.set_cache_limit(int(saved)))
+        if cur == int(ours):
+            return True
+        mx.set_cache_limit(cur)
+        return False
 
 
 def _disarm_throttle(gen, st: _GovState) -> None:
@@ -612,41 +629,59 @@ def _disarm_throttle(gen, st: _GovState) -> None:
     hands its saved limit to the next holder that saved its throttle
     limit, and drops it when a later owner set a limit in between."""
     with _HOLDERS_LOCK:
-        i = next((k for k, h in enumerate(_HOLDERS) if h is st), None)
-        later = _HOLDERS[i + 1:] if i is not None else []
-        if i is not None:
-            del _HOLDERS[i]
-        for which in ("mem", "cache"):
-            saved = getattr(st, f"saved_{which}_limit")
-            ours = getattr(st, f"throttle_{which}_limit")
-            setattr(st, f"saved_{which}_limit", None)
-            setattr(st, f"throttle_{which}_limit", None)
-            if saved is None:
-                continue
-            nxt = next((h for h in later
-                        if getattr(h, f"saved_{which}_limit") is not None),
-                       None)
-            if nxt is not None:
-                if getattr(nxt, f"saved_{which}_limit") == ours:
-                    setattr(nxt, f"saved_{which}_limit", saved)
-                continue
-            if ours is None:
-                continue
-            try:
-                back = _put_back(which, saved, ours)
-            except Exception:
-                _log.warning("[governor] %s limit restore failed; the "
-                             "throttle limit stays",
-                             "memory" if which == "mem" else "cache",
-                             exc_info=True)
-                continue
-            if back and which == "mem" and wrapped_with(mx.set_wired_limit,
-                                                        "_kq_no_sweep"):
-                # The cap went back in a process pinned since: MLX's own
-                # limit is the pin's.
-                from gmlx.stream.wired_limit import _restore_mlx_memory_limit
+        _drop_gone()
+        _disarm_locked(st)
 
-                _restore_mlx_memory_limit()
+
+def _disarm_locked(st: _GovState) -> None:
+    i = next((k for k, h in enumerate(_HOLDERS) if h is st), None)
+    later = _HOLDERS[i + 1:] if i is not None else []
+    if i is not None:
+        del _HOLDERS[i]
+    for which in ("mem", "cache"):
+        saved = getattr(st, f"saved_{which}_limit")
+        ours = getattr(st, f"throttle_{which}_limit")
+        setattr(st, f"saved_{which}_limit", None)
+        setattr(st, f"throttle_{which}_limit", None)
+        if saved is None:
+            continue
+        nxt = next((h for h in later
+                    if getattr(h, f"saved_{which}_limit") is not None),
+                   None)
+        if nxt is not None:
+            if getattr(nxt, f"saved_{which}_limit") == ours:
+                setattr(nxt, f"saved_{which}_limit", saved)
+            continue
+        if ours is None:
+            continue
+        try:
+            back = _put_back(which, saved, ours)
+        except Exception:
+            _log.warning("[governor] %s limit restore failed; the "
+                         "throttle limit stays",
+                         "memory" if which == "mem" else "cache",
+                         exc_info=True)
+            continue
+        if back and which == "mem" and wrapped_with(mx.set_wired_limit,
+                                                    "_kq_no_sweep"):
+            # The cap went back in a process pinned since: MLX's own
+            # limit is the pin's.
+            from gmlx.stream.wired_limit import _restore_mlx_memory_limit
+
+            _restore_mlx_memory_limit()
+
+
+def release_throttle(gen) -> None:
+    """Take the throttle of ``gen`` off the holders when the generator
+    closes (each batch's end, and the model's unload): its saved limits go
+    back, or pass to the next holder, as at its disarm
+    (``_disarm_throttle``), so the limits the oldest throttle found come
+    back when the last one goes. A closed generator never ticks green
+    again to disarm."""
+    st = getattr(gen, "_kq_governor", None)
+    if st is not None and (st.saved_mem_limit is not None
+                           or st.saved_cache_limit is not None):
+        _disarm_throttle(gen, st)
 
 
 def _arm_demand_rung(gen, st: _GovState) -> None:
@@ -1328,6 +1363,27 @@ def install_governor() -> bool:
 
     setattr(_governed_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = link(_governed_next, _orig)
+    _orig_close = _ar.BatchGenerator.close
+
+    def _governed_close(self):
+        try:
+            release_throttle(self)
+        except Exception:
+            _log.warning("[governor] throttle release at close failed",
+                         exc_info=True)
+        return _orig_close(self)
+
+    def _collected(self):
+        # A collection can run on a thread that holds a limit lock, so a
+        # generator collected unclosed takes none: it marks its throttle,
+        # and the next arm or disarm drops it (_drop_gone).
+        st = getattr(self, "_kq_governor", None)
+        if st is not None:
+            st.gone = True
+        _orig_close(self)
+
+    _ar.BatchGenerator.close = link(_governed_close, _orig_close)
+    _ar.BatchGenerator.__del__ = link(_collected, _ar.BatchGenerator.__del__)
     floor = _kernel_floor_bytes()
     floor_note = "off"
     if floor > 0:
