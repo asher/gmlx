@@ -272,7 +272,10 @@ def _media_safe(batch, ids) -> Callable[[int], bool]:
 
 
 def _ckpt_run_step(batch, block_size: int = 16) -> int:
-    """The step the grid follows. A resident model takes the batch's
+    """The step the grid follows, from the batch's base step: the decay
+    wrapper swaps a chunk's width in around the MTP body and keeps the
+    base in ``_gmlx_base_step``, so a schedule armed there gets the grid a
+    plain batch arms in its constructor. A resident model takes that
     step, or without recurrent state the MoE wide step its loop runs from
     in place of the stock one (``prefill_decay.moe_base_step``), so no
     boundary splits a chunk and a warm turn chunks as a cold one does.
@@ -280,17 +283,15 @@ def _ckpt_run_step(batch, block_size: int = 16) -> int:
     grid: a record there may split a wide chunk, and the gated-delta scan
     carries its state across a cut on a 64-token multiple exactly. A
     streamed one, where a cut off the loop's chunk edges costs a full
-    expert pass, takes the step the loop runs from: the batch's own (the
-    decay wrapper swaps a chunk's width in around the MTP body and keeps
-    the base in ``_gmlx_base_step``), or the arch profile's over a default
-    one (``prefill_decay._run_base``)."""
+    expert pass, takes the step the loop runs from: the base step, or the
+    arch profile's over a default one (``prefill_decay._run_base``)."""
     from gmlx.stream.expert_streaming import experts_streamed
 
     model = getattr(batch, "model", None)
-    step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    step = int(getattr(batch, "_gmlx_base_step", None)
+               or getattr(batch, "prefill_step_size", 0) or 0)
     if not experts_streamed(model):
         return _resident_run_step(batch, model, step, block_size)
-    step = int(getattr(batch, "_gmlx_base_step", None) or step)
     if step <= 0:
         return step
     from gmlx.gen import prefill_decay

@@ -80,6 +80,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limit, and the server past its memory cap.
 - A cache reset while a long prompt was being saved could make a later reply
   restore the wrong context.
+- With a drafter, Qwen3.8-Flash-Next read a long prompt in chunks twice as
+  wide as without one, and could pass the server's memory cap.
 - With a drafter, requests that shared a long prompt prefix decoded slower
   once one of them had restored its prefix from the prompt cache.
 - With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long
