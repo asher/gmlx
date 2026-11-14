@@ -101,6 +101,32 @@ def test_blockless_store_lookup_roundtrip(p):
     assert all(b.block_hash is None for b in man.pool)
 
 
+def test_the_heads_scan_reads_a_blockless_records_salt():
+    """Kvarn records carry no chain, so the heads scan compares ids. Two
+    with the same ids under different salts (another adapter, or images
+    whose placeholder ids match) are different conversations: a deeper
+    one under another salt neither hides a record's head nor makes it a
+    fork point."""
+    from gmlx.cache import snapshot as cs
+
+    man = GmlxAPCManager(num_blocks=8, block_size=16)
+    ids = _ids(48)
+
+    def store(p, salt):
+        assert ckpt_store(man, ids[:p], [_hollow_kvarn(p), _arr(seed=p)],
+                          extra_hash=salt)
+        return next(k for k, r in cs._ckpt_records(man).items()
+                    if r.p == p and r.extra_hash == salt)
+
+    store(16, 1)
+    a, b = store(32, 1), store(48, 2)
+    recs = cs._ckpt_records(man)
+    assert recs[a].kind == "boundary"
+    assert cs._chain_heads(recs) == {a, b}
+    c = store(48, 1)
+    assert cs._chain_heads(recs) == {b, c}
+
+
 def test_blockless_records_exempt_from_strip_on_extend():
     # A blockless record is its boundary's only carrier: no main chain
     # for skeleton re-index to re-cut, so strip-on-extend must not touch

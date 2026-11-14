@@ -1256,8 +1256,9 @@ def _ckpt_extends(o, r) -> bool:
     keeps one block per hashed span, the salt included, so sharing
     ``r``'s last chain block proves the prefix up to ``r.b_full``; the
     tail ids settle the rest. A record with no chain (kvarn) compares its
-    ids, the last one first, so a pair of different prompts costs one
-    compare and not a slice of the whole prompt."""
+    salt, as ``_record_insert`` does, then its ids, the last one first,
+    so a pair of different prompts costs one compare and not a slice of
+    the whole prompt."""
     if o.p <= r.p:
         return False
     nb = len(r.main_blocks or ())
@@ -1265,7 +1266,7 @@ def _ckpt_extends(o, r) -> bool:
         ob = o.main_blocks or ()
         return (len(ob) >= nb and ob[nb - 1] is r.main_blocks[nb - 1]
                 and o.ids[r.b_full:r.p] == r.ids[r.b_full:])
-    if o.ids[r.p - 1] != r.ids[-1]:
+    if o.extra_hash != r.extra_hash or o.ids[r.p - 1] != r.ids[-1]:
         return False
     return o.ids[:r.p] == r.ids
 

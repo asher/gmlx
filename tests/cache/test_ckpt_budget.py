@@ -594,10 +594,11 @@ def test_blockless_records_compare_the_last_id_first():
                 raise AssertionError("sliced the prompt")
             return tuple.__getitem__(self, i)
 
-    r = SimpleNamespace(p=10, ids=tuple(range(10)), main_blocks=(), b_full=0)
+    r = SimpleNamespace(p=10, ids=tuple(range(10)), main_blocks=(), b_full=0,
+                        extra_hash=0)
     other = SimpleNamespace(p=20, ids=NoSlice([*range(9), 99, *range(10)]),
-                            main_blocks=(), b_full=0)
+                            main_blocks=(), b_full=0, extra_hash=0)
     assert not cs._ckpt_extends(other, r)
     same = SimpleNamespace(p=20, ids=tuple(range(20)), main_blocks=(),
-                           b_full=0)
+                           b_full=0, extra_hash=0)
     assert cs._ckpt_extends(same, r)
