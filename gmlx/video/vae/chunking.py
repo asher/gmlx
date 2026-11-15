@@ -1,37 +1,16 @@
-"""Tile and chunk schedules of a video VAE, apart from any model's values.
+"""Chunk schedules of a video VAE, apart from any model's values.
 
-A decoder trained on tiles of one size decodes a larger frame as
-overlapping tiles of that size, blended linearly across each overlap. A
-temporal decoder decodes overlapping runs of latents and crossfades the
+A temporal decoder decodes overlapping runs of latents and crossfades the
 frames two runs share. The family supplies the sizes; this module holds
-the arithmetic. Importing it loads no mlx.
+the arithmetic, and re-exports the spatial tiles of
+``gmlx.image.h3.tiles``. Importing it loads no mlx.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
-
-def split_tiles(length: int, tile: int, min_overlap: int,
-                unit: int) -> tuple[list[int], list[int], list[int]]:
-    """Starts, lengths and overlaps of the tiles that cover ``length``
-    pixels: the fewest tiles of ``tile`` pixels whose overlaps are all at
-    least ``min_overlap``, with the room left over spread across the
-    overlaps in steps of ``unit``, round robin from the first. A length
-    one tile covers is one tile of that length."""
-    if tile >= length:
-        return [0], [length], []
-    n = math.ceil(length / tile)
-    while tile * n - min_overlap * (n - 1) < length:
-        n += 1
-    overlaps = [min_overlap] * (n - 1)
-    for i in range((tile * n - sum(overlaps) - length) // unit):
-        overlaps[i % (n - 1)] += unit
-    starts = [0]
-    for o in overlaps:
-        starts.append(starts[-1] + tile - o)
-    return starts, [tile] * n, overlaps
+from gmlx.image.h3.tiles import split_tiles  # noqa: F401
 
 
 @dataclass(frozen=True)

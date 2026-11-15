@@ -28,14 +28,13 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx.image import pacing
+from gmlx.image.h3.tiles import MIN_OVERLAP, TILE, split_tiles
 from gmlx.image.vae.group_norm import group_norm
 
-from .chunking import TimeChunks, split_tiles
+from .chunking import TimeChunks
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
-TILE = 256
-MIN_OVERLAP = 64
 CHUNKS = TimeChunks(clip=17, ratio=4, drop=3)
 GROUPS = 32
 GROUP_EPS = 1e-6
