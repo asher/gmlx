@@ -17,7 +17,6 @@ a model that fits too.
 from __future__ import annotations
 
 import contextlib
-import gc
 import logging
 import math
 import os
@@ -151,12 +150,15 @@ def mtp_model(mtp_gguf, mtp_draft_gguf):
         process_state.hold(state)
         yield loaded
     finally:
-        if loaded is not None:
-            release(loaded[0])
-            _unwire(getattr(loaded[0], "language_model", loaded[0]))
-            del loaded
-            gc.collect()
-        process_state.restore(state)
+        try:
+            if loaded is not None:
+                # The object the installs recorded their bytes and their
+                # residency set under.
+                lm = getattr(loaded[0], "language_model", loaded[0])
+                release(lm)
+                _unwire(lm)
+        finally:
+            process_state.restore(state)
 
 
 def _build_prompt(tokenizer, n_tokens, seed=_SEED):
