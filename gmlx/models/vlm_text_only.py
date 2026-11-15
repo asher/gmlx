@@ -5,7 +5,8 @@ wrapping GGUF-synthesized text models in the vlm interface.
 
 A forward called with ``logits_to_keep`` on one of the copy's mlx-lm models,
 or on the owned Gemma 4 text model, runs the head on the last columns only:
-the model's trunk (``model``) hands the head just those columns. A prefill
+the model's trunk (``model``, on the model itself or on a model down its
+``language_model`` links, as in Qwen3.5) hands the head just those columns. A prefill
 forward of many columns then costs one column of the vocabulary projection,
 and the batch engine runs the last prompt chunk and the first token in that
 one forward. A trunk whose ``__call__`` takes ``keep_last`` gets the count,
@@ -58,6 +59,32 @@ class _KeptColumns:
                 and out.shape[1] > self._keep):
             out = out[:, -self._keep:, :]
         return out
+
+
+def trunk_owner(module, *, layers: bool = False):
+    """The module whose ``model`` attribute is the trunk: ``module`` itself
+    or one found down its ``language_model`` links (qwen3.5 nests its text
+    model so). None when there is none, or when a forward already shadows
+    it. With ``layers``, the trunk must also hold ``layers``."""
+    owner = module
+    for _ in range(4):
+        if "model" in vars(owner):
+            return None
+        trunk = getattr(owner, "model", None)
+        if isinstance(trunk, nn.Module) and (
+                not layers or getattr(trunk, "layers", None) is not None):
+            return owner
+        owner = getattr(owner, "language_model", None)
+        if not isinstance(owner, nn.Module):
+            return None
+    return None
+
+
+def _keeps_columns(module) -> bool:
+    """True when ``module`` runs only per-column steps around its trunk:
+    one of the copy's mlx-lm models or an owned text model."""
+    name = type(module).__module__
+    return name.startswith(_COPY_MODELS) or name in _OWNED_MODELS
 
 
 @functools.lru_cache(maxsize=None)
@@ -134,25 +161,35 @@ class LanguageModel(nn.Module):
     def model(self):
         return getattr(self._model, "model", self._model)
 
+    def _kept_owner(self):
+        """The module that owns the trunk a kept forward shadows, or None.
+        The wrapped model and that owner are both models in
+        ``_keeps_columns``."""
+        owner = trunk_owner(self._model)
+        if owner is None or not (_keeps_columns(self._model)
+                                 and _keeps_columns(owner)):
+            return None
+        return owner
+
     @property
     def supports_logits_to_keep(self) -> bool:
         """True when a forward can hand the head only the kept columns: the
         wrapped model is one of the copy's mlx-lm models or an owned text
-        model in ``_OWNED_MODELS``, with its trunk at ``model``."""
-        module = type(self._model).__module__
-        return ((module.startswith(_COPY_MODELS) or module in _OWNED_MODELS)
-                and isinstance(getattr(self._model, "model", None), nn.Module))
+        model in ``_OWNED_MODELS``, with its trunk at ``model`` on it or on
+        a model down its ``language_model`` links."""
+        return self._kept_owner() is not None
 
     @contextlib.contextmanager
     def _keeping(self, keep):
         # The instance dict, not setattr: an mlx Module's setattr of a
         # non-array value drops the child module from its tree. The trunk
         # stays a child, and the entry shadows it for this forward only.
-        attrs = vars(self._model)
-        if not keep or "model" in attrs or not self.supports_logits_to_keep:
+        owner = self._kept_owner() if keep else None
+        if owner is None:
             yield False
             return
-        attrs["model"] = _KeptColumns(self._model.model, int(keep))
+        attrs = vars(owner)
+        attrs["model"] = _KeptColumns(owner.model, int(keep))
         try:
             yield True
         finally:

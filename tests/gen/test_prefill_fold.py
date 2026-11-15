@@ -60,9 +60,10 @@ class _Forwards:
     """The columns each forward's trunk ran, and the columns its head
     projected."""
 
-    def __init__(self, monkeypatch):
+    def __init__(self, monkeypatch, trunk_cls=llama.LlamaModel,
+                 head_cls=llama.Model):
         self.trunk, self.head = [], []
-        trunk, head = llama.LlamaModel.__call__, llama.Model.__call__
+        trunk, head = trunk_cls.__call__, head_cls.__call__
 
         def run_trunk(this, inputs, *a, **kw):
             out = trunk(this, inputs, *a, **kw)
@@ -74,11 +75,11 @@ class _Forwards:
             self.head.append(int(out.shape[1]))
             return out
 
-        monkeypatch.setattr(llama.LlamaModel, "__call__", run_trunk)
-        monkeypatch.setattr(llama.Model, "__call__", run_head)
+        monkeypatch.setattr(trunk_cls, "__call__", run_trunk)
+        monkeypatch.setattr(head_cls, "__call__", run_head)
 
 
-def _first_tokens(model, prompts):
+def _first_tokens(model, prompts, row_settings=None, **gen_kw):
     """Each prompt's first token and its log probabilities, from one batch
     of the serve engine."""
     proc = SimpleNamespace(tokenizer=SimpleNamespace(
@@ -86,10 +87,11 @@ def _first_tokens(model, prompts):
     gen = ar.BatchGenerator(model.language_model, proc,
                             sampler=lambda x: mx.argmax(x, axis=-1),
                             max_tokens=1, prefill_step_size=_STEP,
-                            top_logprobs_k=_V)
+                            top_logprobs_k=_V, **gen_kw)
     lm = model.language_model
     uids = gen.insert(prompts, 1, prompt_kwargs=[
-        {"inputs_embeds": lm.input_embeds(mx.array([p]))} for p in prompts])
+        {"inputs_embeds": lm.input_embeds(mx.array([p]))} for p in prompts],
+        row_settings=row_settings)
     out = {}
     while gen.has_work:
         _p, resp = gen.next()
@@ -104,7 +106,7 @@ def _unflagged(monkeypatch):
                         property(lambda self: False))
 
 
-def _close(a, b):
+def _close(a, b, atol=2e-2):
     # The two paths run the trunk at other GEMM widths, and f32 GEMM runs at
     # TF32 on the GPU.
     for (tok_a, lp_a), (tok_b, lp_b) in zip(a, b, strict=True):
@@ -112,7 +114,7 @@ def _close(a, b):
         assert sorted(lp_a) == sorted(lp_b)
         np.testing.assert_allclose([lp_a[k] for k in sorted(lp_a)],
                                    [lp_b[k] for k in sorted(lp_b)],
-                                   atol=2e-2)
+                                   atol=atol)
 
 
 def test_the_last_chunk_and_the_first_token_run_in_one_forward(monkeypatch):
@@ -149,12 +151,19 @@ def test_a_model_that_projects_every_column_runs_the_last_column_alone(
     assert (seen.trunk, seen.head) == ([4, 1], [4, 1])
 
 
-def test_a_speculative_batch_keeps_the_last_column_alone():
-    lm = _model().language_model
-    batch = SimpleNamespace(
-        model=lm, draft_model=object(), prefill_step_size=_STEP,
-        prompt_cache=[], _inputs_embeds=mx.zeros((1, 5, 32)),
+def _short_batch(lm, n=5, draft_model=None):
+    """The fields needs_processing reads, for an ``n``-token prompt."""
+    return SimpleNamespace(
+        model=lm, draft_model=draft_model, prefill_step_size=_STEP,
+        prompt_cache=[], _inputs_embeds=mx.zeros((1, n, 32)),
         _next_apc_checkpoint_column=lambda: None)
+
+
+@pytest.mark.parametrize("arch", ["llama", "qwen3_5"])
+def test_a_speculative_batch_keeps_the_last_column_alone(monkeypatch, arch):
+    lm = (_qwen35(monkeypatch) if arch == "qwen3_5"
+          else _model()).language_model
+    batch = _short_batch(lm, draft_model=object())
     assert ar.PromptProcessingBatch.needs_processing(batch) is True
     batch.draft_model = None
     assert ar.PromptProcessingBatch.needs_processing(batch) is False
@@ -180,14 +189,15 @@ def _gemma4_config(shared):
     return cfg
 
 
-def _serve_wrapped(monkeypatch, raw, cfg):
+def _serve_wrapped(monkeypatch, raw, cfg, **load):
     from gmlx.serve import bridge_vlm
 
     mx.eval(raw.parameters())
     monkeypatch.setattr(bridge_vlm, "load_model",
                         lambda *a, **k: (raw, cfg, object()))
     monkeypatch.setattr(bridge_vlm, "_make_text_processor", lambda tok: None)
-    model, _proc, _config = bridge_vlm.load_serveable_model("tiny.gguf")
+    model, _proc, _config = bridge_vlm.load_serveable_model("tiny.gguf",
+                                                            **load)
     return model
 
 
@@ -442,3 +452,271 @@ def test_a_gemma4_gguf_served_as_text_builds_the_owned_model_and_folds(
     assert (last[0], last[1], last[2]) == ((4, 4), (4, 4), (4, 1))
     _unflagged(monkeypatch)
     _close(folded, _first_tokens(model, [prompt]))
+
+
+# Qwen3.5 dense keeps its trunk at language_model.model, one link below the
+# model the text loader builds for a qwen35 GGUF. Layers 0 to 2 are
+# gated-delta layers and layer 3 is full attention.
+_Q35 = dict(model_type="qwen3_5", hidden_size=64, intermediate_size=128,
+            linear_num_value_heads=4, linear_num_key_heads=2,
+            linear_key_head_dim=32, linear_value_head_dim=32,
+            linear_conv_kernel_dim=4, num_hidden_layers=4,
+            num_attention_heads=4, rms_norm_eps=1e-6, vocab_size=_V,
+            num_key_value_heads=2, max_position_embeddings=2048,
+            tie_word_embeddings=True, head_dim=32,
+            rope_parameters={"type": "default", "mrope_section": [2, 1, 1],
+                             "rope_theta": 100000,
+                             "partial_rotary_factor": 0.25},
+            full_attention_interval=4, kv_head_layout="tiled")
+
+
+def _qwen35(monkeypatch, tied=True, dtype=mx.float32, **load):
+    """A Qwen3.5 dense model of the class the loader builds, served as
+    text through the serve loader."""
+    from gmlx._vendor.mlx_lm.models import qwen3_5
+
+    cfg = dict(_Q35, tie_word_embeddings=tied)
+    mx.random.seed(5)
+    raw = qwen3_5.Model(qwen3_5.ModelArgs.from_dict(dict(cfg)))
+    raw.set_dtype(dtype)
+    return _serve_wrapped(monkeypatch, raw, cfg, **load)
+
+
+def _q35_forwards(monkeypatch):
+    from gmlx._vendor.mlx_lm.models import qwen3_5
+
+    return _Forwards(monkeypatch, qwen3_5.Qwen3_5TextModel, qwen3_5.TextModel)
+
+
+@pytest.mark.parametrize("tied", [True, False], ids=["tied", "untied"])
+def test_a_qwen3_5_dense_runs_a_short_prompt_in_one_forward(monkeypatch,
+                                                            tied):
+    from gmlx._vendor.mlx_lm.models import qwen3_5
+
+    model = _qwen35(monkeypatch, tied)
+    lm = model.language_model
+    assert type(lm._model) is qwen3_5.Model
+    assert hasattr(lm._model.language_model, "lm_head") is not tied
+    assert lm.supports_logits_to_keep
+    assert ar.PromptProcessingBatch.needs_processing(_short_batch(lm)) is False
+    # The forward hands the head one column, and the text model's own trunk
+    # is back after it.
+    text = lm._model.language_model
+    trunk = text.model
+    ids = mx.array([[3, 9, 4, 7, 1]])
+    for kw in ({}, {"inputs_embeds": lm.input_embeds(ids)}):
+        kept = lm(ids, cache=lm.make_cache(), logits_to_keep=1, **kw).logits
+        assert kept.shape == (1, 1, _V)
+        assert "model" not in vars(text) and text.model is trunk
+    seen = _q35_forwards(monkeypatch)
+    _first_tokens(model, [[3, 9, 4, 7, 1]])
+    assert (seen.trunk, seen.head) == ([5], [1])
+    seen.trunk.clear(), seen.head.clear()
+    _first_tokens(model, [list(range(1, 13))])
+    assert (seen.trunk, seen.head) == ([8, 4], [8, 1])
+
+
+@pytest.mark.parametrize("tied", [True, False], ids=["tied", "untied"])
+def test_a_qwen3_5_dense_one_forward_matches_the_split_prefill(monkeypatch,
+                                                               tied):
+    # The one forward runs the gated-delta scan over other chunk widths, so
+    # the first tokens match within tolerance, not bit for bit.
+    model = _qwen35(monkeypatch, tied)
+    prompts = [[3, 9, 4, 7, 1], [5, 2, 8], list(range(1, 13))]
+    folded = _first_tokens(model, prompts)
+    _unflagged(monkeypatch)
+    _close(folded, _first_tokens(model, prompts))
+
+
+def test_qwen3_5_moe_folds_on_its_own_trunk_as_before(monkeypatch):
+    """The loader builds qwen3_5_moe as the unwrapped text model, whose
+    trunk is at ``model``, and it folds as it did."""
+    from gmlx._vendor.mlx_lm.models import qwen3_5
+    from gmlx.load import loader
+
+    cfg = dict(_Q35, model_type="qwen3_5_moe", num_experts=4,
+               num_experts_per_tok=2, moe_intermediate_size=32,
+               shared_expert_intermediate_size=32)
+    mx.random.seed(5)
+    raw, cfg = loader.build_model(cfg)
+    assert type(raw) is qwen3_5.TextModel
+    model = _serve_wrapped(monkeypatch, raw, cfg)
+    lm = model.language_model
+    assert lm.supports_logits_to_keep
+    seen = _q35_forwards(monkeypatch)
+    _first_tokens(model, [[3, 9, 4, 7, 1]])
+    assert (seen.trunk, seen.head) == ([5], [1])
+
+
+def test_a_model_off_the_copy_below_a_copied_wrapper_projects_every_column():
+    """Each model on the way to the trunk must be one whose forward runs
+    only per-column steps around it."""
+    import mlx.nn as nn
+
+    from gmlx._vendor.mlx_lm.models import qwen3_5
+    from gmlx.models.vlm_text_only import trunk_owner
+
+    class _Foreign(nn.Module):
+        def __init__(self, trunk):
+            super().__init__()
+            self.model = trunk
+
+    outer = qwen3_5.Model(qwen3_5.ModelArgs.from_dict(dict(_Q35)))
+    lm = LanguageModel(outer)
+    assert lm.supports_logits_to_keep
+    outer.language_model = _Foreign(outer.language_model.model)
+    assert trunk_owner(outer) is outer.language_model
+    assert not lm.supports_logits_to_keep
+
+
+def test_a_shadowed_trunk_is_no_owner():
+    """A forward that already shadows the trunk leaves nothing to keep."""
+    from gmlx._vendor.mlx_lm.models import qwen3_5
+    from gmlx.models.vlm_text_only import trunk_owner
+
+    outer = qwen3_5.Model(qwen3_5.ModelArgs.from_dict(dict(_Q35)))
+    text = outer.language_model
+    assert trunk_owner(outer) is text
+    vars(text)["model"] = object()
+    try:
+        assert trunk_owner(outer) is None
+        assert not LanguageModel(outer).supports_logits_to_keep
+    finally:
+        vars(text).pop("model")
+
+
+def _reserving_manager(monkeypatch):
+    """An autosized manager under APC_MEMORY_RESERVE_GB holding 32 idle
+    blocks, whose plan has learned 64 KB per token, on a box with no
+    headroom left."""
+    from gmlx._vendor.mlx_vlm import apc
+    from gmlx.cache.apc_manager import GmlxAPCManager
+    import gmlx.gen.prefill_decay as prefill_decay
+    import gmlx.serve.capacity as capacity
+
+    gb = 1 << 30
+    for k in ("APC_NUM_BLOCKS", "APC_EXACT_CACHE_ENTRIES",
+              "APC_MEMORY_MAX_GB"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("APC_MEMORY_RESERVE_GB", "0")
+    monkeypatch.setattr(capacity, "working_budget_bytes", lambda: 100 * gb)
+    monkeypatch.setattr(prefill_decay, "untracked_weight_bytes", lambda: 0.0)
+    monkeypatch.setattr(prefill_decay, "streamed_tracked_bytes", lambda: 0.0)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 0)
+    m = GmlxAPCManager(num_blocks=64, block_size=16)
+    m.autosize(SimpleNamespace(config=SimpleNamespace(
+        num_hidden_layers=10, num_attention_heads=8, num_key_value_heads=4,
+        head_dim=64)))
+    k = mx.zeros((1, 2, 512, 16), mx.float16)
+    m.release(m.store_kv_blocks(list(range(512)), [k, k], [k, k]))
+    assert len(m.hash_table) == 32
+    kk = mx.zeros((1, 8, 1024, 128), mx.float16)
+    m.memory_plan.observe_kv([kk] * 16, [kk] * 16, live_bytes=0)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 100 * gb)
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 0)
+    return m
+
+
+def test_a_one_forward_prefill_evicts_as_the_constructor_sizes_require(
+        monkeypatch):
+    """The one forward skips the per-chunk observe. The prompt batch's
+    constructor still sizes the prefill from the plan, and the reserve
+    evicts the idle blocks."""
+    from gmlx._vendor.mlx_vlm import apc_coordinator
+
+    model = _qwen35(monkeypatch)
+    lm = model.language_model
+    m = _reserving_manager(monkeypatch)
+    observed, reserves = [], []
+    monkeypatch.setattr(apc_coordinator.APCCoordinator, "observe_cache",
+                        lambda self, *a, **k: observed.append(a))
+    prepare = type(m).prepare_prefill
+    monkeypatch.setattr(m, "prepare_prefill",
+                        lambda r: (reserves.append(r), prepare(m, r))[1])
+    proc = SimpleNamespace(tokenizer=SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(lm, proc, sampler=lambda x: mx.argmax(x, axis=-1),
+                            max_tokens=1, prefill_step_size=_STEP,
+                            apc_manager=m)
+    prompt = [3, 9, 4, 7, 1]
+    seen = _q35_forwards(monkeypatch)
+    gen.insert([prompt], 1, prompt_kwargs=[
+        {"inputs_embeds": lm.input_embeds(mx.array([prompt]))}])
+    while gen.has_work:
+        gen.next()
+    gen.close()
+    assert seen.trunk[0] == len(prompt) and observed == []
+    assert reserves and reserves[0] > 0
+    assert m.stats.memory_evictions == 32
+    assert len(m.hash_table) == 0
+
+
+# Per dtype, how far the one-forward first-token log probabilities may sit
+# from the split prefill's. f32 runs at TF32 on the GPU. bf16 allows two
+# rounding steps at the size of these log probabilities (4 to 8).
+_LORA_ATOL = {mx.float32: 2e-2, mx.bfloat16: 6.25e-2}
+
+
+@pytest.fixture
+def _rows_channel():
+    from gmlx import lora_rows
+
+    lora_rows.install_row_channel()
+    yield lora_rows
+    lora_rows.configure("static", 1)
+
+
+def _row(scale, salt):
+    from gmlx.serve.lora_request import RowLora
+    from gmlx.serve.row_sampling import RowSettings
+
+    return RowSettings(logprobs=True, top_k=_V, lora=RowLora(
+        (scale,), np.array([scale], np.float32), salt, "m"))
+
+
+def _mint_q35_adapter(path):
+    """A LoRA adapter on a gated-delta projection, the full-attention
+    query and an MLP projection."""
+    from helpers import mint_lora_gguf
+
+    rng = np.random.default_rng(0)
+    d = _Q35["hidden_size"]
+    shapes = {"blk.0.attn_qkv.weight": 256, "blk.3.attn_q.weight": 256,
+              "blk.1.ffn_up.weight": 128}
+    mint_lora_gguf(path, "qwen35", {
+        name: (rng.standard_normal((2, d)) * 0.3,
+               rng.standard_normal((out, 2)) * 0.3)
+        for name, out in shapes.items()})
+    return str(path)
+
+
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16],
+                         ids=["f32", "bf16"])
+def test_an_adapted_qwen3_5_one_forward_matches_the_split_prefill(
+        monkeypatch, tmp_path, _rows_channel, dtype):
+    """Two rows at other adapter scales, in one batch, in rows mode."""
+    import gmlx.load.modules as modules
+
+    adapter = _mint_q35_adapter(tmp_path / "adapter.gguf")
+    model = _qwen35(monkeypatch, dtype=dtype, adapter_gguf=adapter)
+    lm = model.language_model
+    assert _rows_channel.mode() == "rows"
+    assert sum(isinstance(m, modules.LoRAKQuantLinear)
+               for _, m in lm._model.named_modules()) == 3
+    assert lm.supports_logits_to_keep
+    # Both rows in one prompt batch, whatever the installed engine sets.
+    pair = dict(prefill_batch_size=2, completion_batch_size=8)
+    prompts = [list(range(1, 13)), list(range(30, 42))]
+    rows = [_row(0.5, 11), _row(1.5, 22)]
+    seen = _q35_forwards(monkeypatch)
+    folded = _first_tokens(model, prompts, rows, **pair)
+    # A chunk, then the last chunk in one forward that keeps one column.
+    assert (seen.trunk, seen.head) == ([8, 4], [8, 1])
+    bare = _first_tokens(model, prompts, [_row(0.0, 0), _row(0.0, 0)], **pair)
+    _unflagged(monkeypatch)
+    split = _first_tokens(model, prompts, rows, **pair)
+    atol = _LORA_ATOL[dtype]
+    _close(folded, split, atol=atol)
+    # The adapter moves each row by more than the tolerance.
+    for (_t, lp_a), (_u, lp_b) in zip(folded, bare):
+        assert max(abs(lp_a[k] - lp_b[k]) for k in lp_a) > 5 * atol

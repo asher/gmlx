@@ -406,3 +406,18 @@ def test_the_mtp_prefill_takes_the_decayed_step_in_either_install_order(monkeypa
     decay. A process that loaded a model first, such as a test worker, runs
     the same prefill."""
     assert _flat_mtp(monkeypatch, decay_first=True) == _flat_mtp(monkeypatch, decay_first=False)
+
+
+def test_a_long_folding_prompt_on_a_recurrent_layout_still_splits_at_n_minus_1(
+        loop, monkeypatch):
+    """A resident model that keeps only the last logits runs a short prompt
+    in one forward. From GMLX_APC_CKPT_REPLAY_MIN tokens on, a layout with
+    recurrent layers stores the N-1 replay record, which pauses the
+    prefill at N-1."""
+    monkeypatch.delenv("GMLX_APC_CKPT_REPLAY_MIN", raising=False)
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", CONFIGS["flat"][0])
+    model = Model(("arr", "kv"), folds=True, streamed=False)
+    out = loop.run(model, 1024, 0)
+    assert out["chunks"] == [1023, 1]
+    assert (1023, "replay") in out["meta"]["ckpt_boundaries"]
+    assert loop.run(model, 1023, 0)["chunks"] == [1023]
