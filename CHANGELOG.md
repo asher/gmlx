@@ -68,8 +68,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Qwen3.8-Flash-Next requests that decoded together past 2052 tokens of
   context attended to all of it and answered unlike a request decoding alone.
-- Two Qwen3.8-Flash-Next conversations with images failed when they decoded
-  together.
+- Two Qwen3.8-Flash-Next requests failed when they decoded together with the
+  vision tower loaded.
 - With the vision tower loaded, a Qwen3.8-Flash-Next request decoding after
   another request's image prefill failed, or read that prompt's positions.
 - A model that reads its lookup table from disk, such as Qwen3.8-Flash-Next,
