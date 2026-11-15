@@ -532,8 +532,11 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     without recurrent state. The candidates there are the grid from the
     system prefix anchor, from the restored prefix, from 0 at the step
     the loop runs, and from 0 at the batch's step, which a media prompt
-    keeps. A resident model keeps the grid from 0 at the step its loop
-    runs from (``_ckpt_run_step``). The loop's cost is known at arm time
+    keeps. That last grid is main's own schedule at the batch's live step,
+    which on an MTP batch is the decay wrapper's width, and the pick's
+    floor and the disk skeletons key on it. A resident model keeps the
+    grid from 0 at the step its loop runs from (``_ckpt_run_step``). The
+    loop's cost is known at arm time
     only while the score cap is fixed, not while it follows the live
     headroom. Without turn records (GMLX_APC_CKPT_TURN=0) the pick cannot
     see which record the next turn restores, so main's grid stays."""
