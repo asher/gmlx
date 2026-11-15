@@ -238,20 +238,20 @@ class PointConv(nn.Module):
         return x @ w.T.astype(x.dtype) + self.bias.astype(x.dtype)
 
 
-def token_coords(t: int, h: int, w: int) -> mx.array:
-    """Each patch token's position on the three axes, (t * h * w, 3), each
-    axis centered on [-1, 1]."""
+def token_coords(*sizes: int) -> mx.array:
+    """Each patch token's position on the axes of ``sizes``, (prod(sizes),
+    len(sizes)), each axis centered on [-1, 1]."""
     axes = [(mx.arange(n, dtype=mx.float32) + 0.5) / n * 2.0 - 1.0
-            for n in (t, h, w)]
+            for n in sizes]
     grid = mx.meshgrid(*axes, indexing="ij")
     return mx.stack([g.reshape(-1) for g in grid], axis=-1)
 
 
 def rope_tables(cfg: Config, coords: mx.array) -> tuple[mx.array, mx.array]:
-    """cos and sin (S, pairs) of the rotary angles at ``coords`` (S, 3):
-    per axis ``pairs / 3`` frequencies, axis-major."""
+    """cos and sin (S, pairs) of the rotary angles at ``coords`` (S, axes):
+    per axis ``pairs / axes`` frequencies, axis-major."""
     rot = int(HEAD_DIM * cfg.rope_ratio)
-    step = 2 * 3 / rot
+    step = 2 * coords.shape[1] / rot
     inv = 1.0 / cfg.rope_theta ** mx.arange(0.0, 1.0, step, dtype=mx.float32)
     angles = 2 * math.pi * coords[:, :, None] * inv[None, None, :]
     angles = angles.reshape(coords.shape[0], -1)
