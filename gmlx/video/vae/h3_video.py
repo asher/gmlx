@@ -402,6 +402,47 @@ def _take(x: mx.array, axis: int, lo: int, hi: int) -> mx.array:
     return x[tuple(idx)]
 
 
+def normalized(frames: mx.array, dtype) -> mx.array:
+    """Frames in [-1, 1] as the encoder takes them: normalized by the
+    ImageNet statistics on [0, 1], in ``dtype``."""
+    mean = mx.array(IMAGENET_MEAN, mx.float32)
+    std = mx.array(IMAGENET_STD, mx.float32)
+    x = (frames.astype(mx.float32) + 1.0) * 0.5
+    return ((x - mean) / std).astype(dtype)
+
+
+def tiled_moments(x: mx.array, moments, spatial: int) -> mx.array:
+    """``moments`` of ``x`` (B, T, H, W, C) over spatial tiles, each tile
+    blended with the tiles above and to the left as each was encoded.
+    ``spatial`` is the pixels a latent spans."""
+    sp = spatial
+    ys, ylen, yo = split_tiles(x.shape[2], TILE, MIN_OVERLAP, sp)
+    xs, xlen, xo = split_tiles(x.shape[3], TILE, MIN_OVERLAP, sp)
+    rows = []
+    for i, il in zip(ys, ylen):
+        row = []
+        for j, jl in zip(xs, xlen):
+            m = moments(x[:, :, i:i + il, j:j + jl])
+            mx.eval(m)
+            row.append(m)
+        rows.append(row)
+    out_rows = []
+    for i, row in enumerate(rows):
+        parts = []
+        for j, m in enumerate(row):
+            if i > 0:
+                m = blend(rows[i - 1][j], m, yo[i - 1] // sp, axis=2)
+            if j > 0:
+                m = blend(row[j - 1], m, xo[j - 1] // sp, axis=3)
+            if i < len(rows) - 1:
+                m = m[:, :, :m.shape[2] - yo[i] // sp]
+            if j < len(row) - 1:
+                m = m[:, :, :, :m.shape[3] - xo[j] // sp]
+            parts.append(m)
+        out_rows.append(mx.concatenate(parts, axis=3))
+    return mx.concatenate(out_rows, axis=2)
+
+
 class H3VideoVAE(nn.Module):
     """The encoder, the decoder and the latent statistics."""
 
@@ -418,10 +459,7 @@ class H3VideoVAE(nn.Module):
     # encode
 
     def _normalized(self, frames: mx.array) -> mx.array:
-        mean = mx.array(IMAGENET_MEAN, mx.float32)
-        std = mx.array(IMAGENET_STD, mx.float32)
-        x = (frames.astype(mx.float32) + 1.0) * 0.5
-        return ((x - mean) / std).astype(self.encoder.conv_in.weight.dtype)
+        return normalized(frames, self.encoder.conv_in.weight.dtype)
 
     def _moments(self, x: mx.array) -> mx.array:
         return self.quant_conv(self.encoder(x)).astype(mx.float32)
@@ -429,32 +467,7 @@ class H3VideoVAE(nn.Module):
     def _tiled_moments(self, x: mx.array) -> mx.array:
         """Moments of one piece, spatial tiles blended with the tiles
         above and to the left as each was encoded."""
-        sp = self.cfg.spatial
-        ys, ylen, yo = split_tiles(x.shape[2], TILE, MIN_OVERLAP, sp)
-        xs, xlen, xo = split_tiles(x.shape[3], TILE, MIN_OVERLAP, sp)
-        rows = []
-        for i, il in zip(ys, ylen):
-            row = []
-            for j, jl in zip(xs, xlen):
-                m = self._moments(x[:, :, i:i + il, j:j + jl])
-                mx.eval(m)
-                row.append(m)
-            rows.append(row)
-        out_rows = []
-        for i, row in enumerate(rows):
-            parts = []
-            for j, m in enumerate(row):
-                if i > 0:
-                    m = blend(rows[i - 1][j], m, yo[i - 1] // sp, axis=2)
-                if j > 0:
-                    m = blend(row[j - 1], m, xo[j - 1] // sp, axis=3)
-                if i < len(rows) - 1:
-                    m = m[:, :, :m.shape[2] - yo[i] // sp]
-                if j < len(row) - 1:
-                    m = m[:, :, :, :m.shape[3] - xo[j] // sp]
-                parts.append(m)
-            out_rows.append(mx.concatenate(parts, axis=3))
-        return mx.concatenate(out_rows, axis=2)
+        return tiled_moments(x, self._moments, self.cfg.spatial)
 
     def encode(self, frames: mx.array, drop: bool = True) -> mx.array:
         """Model-space latents (B, 24, T, H, W) of frames (B, T, H, W, 3)
