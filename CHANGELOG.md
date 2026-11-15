@@ -85,6 +85,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its batch: the memory of the joining prompt was counted twice as it was read.
 - A request the server fails to free memory no longer saves its reply to the
   prompt cache, which took back most of the memory the failure freed.
+- A server near its memory cap frees the checkpoints its running requests
+  keep for their next turn before it fails a request to free memory.
 - A model that reads its lookup table from disk, such as Qwen3.8-Flash-Next,
   no longer reads the whole table into memory at every load.
 - Qwen3.8-Flash-Next keeps its weights and KV cache wired while it streams

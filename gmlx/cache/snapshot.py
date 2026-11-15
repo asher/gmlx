@@ -14,8 +14,12 @@ generations, off the per-round hot path.
 
 from __future__ import annotations
 
+import itertools
 import logging
+import math
 import os
+import threading
+import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -2757,6 +2761,76 @@ def row_kv_len(prompt_cache, row: int = 0) -> int | None:
     return best
 
 
+class _Snap(tuple):
+    """A ring entry, ``(p, states)``, carrying the order it was taken in
+    (``seq``) and its bytes (``size``) for the governor."""
+
+    seq: int
+    size: int
+
+
+class _SnapRing(list):
+    """A request's decode snapshot ring. Every live ring is listed, so the
+    governor can free the snapshots under memory pressure, oldest first;
+    the ring takes its next snapshot at its next boundary."""
+
+    __slots__ = ("__weakref__",)
+
+
+# Live rings by registration number: a list is not hashable, so a weak
+# set cannot hold one.
+_RINGS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+_RING_LOCK = threading.Lock()
+_RING_SEQ = itertools.count()
+
+
+def _snap_ring(stash: dict) -> _SnapRing:
+    ring = stash.get("snaps")
+    if not isinstance(ring, _SnapRing):
+        ring = _SnapRing(ring or ())
+        stash["snaps"] = ring
+        with _RING_LOCK:
+            _RINGS[next(_RING_SEQ)] = ring
+    return ring
+
+
+def snapshot_ring_bytes() -> int:
+    """Bytes the live decode snapshot rings hold. Attribute reads only."""
+    with _RING_LOCK:
+        return sum(getattr(s, "size", 0)
+                   for r in list(_RINGS.values()) for s in list(r))
+
+
+def evict_snapshot_rings(fraction: float) -> int:
+    """Free ``fraction`` of the bytes the live decode snapshot rings hold,
+    oldest snapshot first, for the governor. Returns the bytes freed. A
+    request whose snapshots go stores its retirement from the snapshots
+    it takes after, or stores none."""
+    fraction = min(1.0, max(0.0, float(fraction)))
+    if fraction <= 0.0:
+        return 0
+    with _RING_LOCK:
+        held = sorted(((getattr(s, "seq", -1), id(s), r, s)
+                       for r in list(_RINGS.values()) for s in list(r)),
+                      key=lambda e: e[:2])
+        total = sum(getattr(e[3], "size", 0) for e in held)
+        want = total if fraction >= 1.0 else math.ceil(total * fraction)
+        drop: dict = {}
+        freed = 0
+        for _, _, r, s in held:
+            if fraction < 1.0 and freed >= want:
+                break
+            drop.setdefault(id(r), (r, set()))[1].add(id(s))
+            freed += getattr(s, "size", 0)
+        for r, ids in drop.values():
+            r[:] = [s for s in r if id(s) not in ids]
+    if drop:
+        _log.info("APC decode ckpt: evicted %d snapshots, %.2f GB, for "
+                  "memory", sum(len(v[1]) for v in drop.values()),
+                  freed / 1e9)
+    return freed
+
+
 def _cache_offset_max(prompt_cache) -> int:
     p = 0
     for c in prompt_cache or ():
@@ -2837,8 +2911,9 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         if pred + _DECODE_CKPT_MARGIN < p:
             # Structural divergence behind us: no future snapshot can sit
             # at or below the final LCP. Keep only slots that still can.
-            stash["snaps"] = [s for s in stash.get("snaps") or ()
-                              if s[0] <= pred]
+            ring = _snap_ring(stash)
+            with _RING_LOCK:
+                ring[:] = [s for s in ring if s[0] <= pred]
             stash["snap_frozen"] = True
             _log.info("APC decode ckpt frozen: render diverges at %d "
                       "(live %d)", pred, p)
@@ -2868,12 +2943,17 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             states.append(clone)
         # The ring holds two. The oldest makes room before the new
         # snapshot materializes, so it never holds three.
-        snaps = stash.setdefault("snaps", [])
-        del snaps[:-1]
+        ring = _snap_ring(stash)
+        with _RING_LOCK:
+            del ring[:-1]
         if pending:
             from gmlx.eval_guard import guard
             guard.eval(*pending, site="decode-ckpt-tick", owner="owned")
-        snaps.append((p, states))
+        from .kv_cache import cache_nbytes
+        snap = _Snap((p, states))
+        snap.seq, snap.size = next(_RING_SEQ), cache_nbytes(states)
+        with _RING_LOCK:
+            ring.append(snap)
         stash["snap_next"] = _grid_ceil(p + eff, grid)
         _log.info("APC decode ckpt snapshot: p=%d pred=%d", p, pred)
     except Exception:

@@ -16,6 +16,8 @@ from gmlx.serve.patches.row_failed import RowShedError
 _READERS = (gov._kernel_unwired,)
 # The headroom read the rig scripts, kept for the tests that price it.
 _HEADROOM_AND_WS = gov._headroom_and_ws
+# The decode snapshot rings' registrant, which the rig turns off.
+_REGISTER_SNAPS = gov._maybe_register_snaps
 
 
 class FakeGB:
@@ -87,6 +89,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov.mx, "get_memory_limit", lambda: box["mem_limit"])
     monkeypatch.setattr(gov, "_HOLDERS", [])
     monkeypatch.setattr(gov, "_maybe_register_apc", lambda gen: None)
+    monkeypatch.setattr(gov, "_maybe_register_snaps", lambda: None)
     box["kernel"] = 40e9
     monkeypatch.setattr(gov, "_kernel_unwired", lambda: box["kernel"])
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
@@ -1023,6 +1026,43 @@ def test_red_reclaims_before_shedding(rig, monkeypatch):
     assert gov._STATS["red_failures"] == 0
     assert "shed skipped" in gov._STATS["last_action"]
     assert st.band == gov.RED  # band holds; next healthy ticks demote
+
+
+def test_red_reclaim_frees_the_decode_snapshot_rings(rig, monkeypatch):
+    # A ckpt row's decode snapshots hold recurrent states twice per
+    # row. Red reclaim frees them with the other caches before it sheds,
+    # and the ring takes its next snapshot at its next boundary.
+    import gmlx.cache.retire_key as retire_key
+    from gmlx.cache.snapshot import decode_ckpt_tick, snapshot_ring_bytes
+    from test_ckpt_tier import make_hybrid_cache
+
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "96")
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, gen, **kw: len(seq))
+    stash = {"full_ids": list(range(40)), "extra_hash": 0, "mode": "ckpt",
+             "render_ctx": {"stub": True}, "snap_ok": True}
+
+    def tick(p):
+        decode_ckpt_tick(stash, make_hybrid_cache(p, seed=p),
+                         list(range(9000, 9000 + p - 40)))
+
+    tick(136)
+    tick(232)
+    assert [s[0] for s in stash["snaps"]] == [136, 232]
+    monkeypatch.setattr(gov, "_maybe_register_snaps", _REGISTER_SNAPS)
+    gov._REG["pool"] = (lambda: 50e9,
+                        lambda fraction: (rig.__setitem__("head", 200e9),
+                                          50e9)[1])
+    held = snapshot_ring_bytes()
+    gen = FakeGen(rows=2, rate=60e9, live=30e9)
+    st = gov._state(gen)
+    st.obs_delta_ema = 20e9
+    gov._governor_tick(gen)
+    assert "shed skipped" in gov._STATS["last_action"]
+    assert (stash["snaps"], gov._registered_bytes()) == ([], 50e9)
+    assert held > 0
+    tick(328)
+    assert [s[0] for s in stash["snaps"]] == [328]
 
 
 # ---------------------------------------------------------------- kernel floor

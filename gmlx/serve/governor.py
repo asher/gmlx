@@ -1110,6 +1110,7 @@ def _governor_tick(gen) -> None:
 
     _maybe_register_apc(gen)
     _maybe_register_arena(gen)
+    _maybe_register_snaps()
     _read_outside_wired()
     head, ws = _headroom_and_ws(margin)
     if head is None:
@@ -1437,6 +1438,20 @@ def unregister_arena(feeder) -> None:
     name = _arena_name(feeder)
     unregister_cache(name)
     _ARENA_REFS.pop(name, None)
+
+
+_SNAPS_NAME = "decode_snaps"
+
+
+def _maybe_register_snaps() -> None:
+    """Register the decode snapshot rings of every live request, which
+    a ckpt model's rows fill while they decode: one registrant for all
+    models, holding nothing once no request runs."""
+    if _SNAPS_NAME in _REG:
+        return
+    from gmlx.cache.snapshot import evict_snapshot_rings, snapshot_ring_bytes
+
+    register_cache(_SNAPS_NAME, snapshot_ring_bytes, evict_snapshot_rings)
 
 
 _SPEC_PREFIX_REFS: dict = {}   # registry name -> weakref of the cache
