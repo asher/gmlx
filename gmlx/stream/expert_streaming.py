@@ -316,7 +316,9 @@ def _install_gpu_residency(model, moe_modules, *,
                 if w is not None:
                     skip.add(id(w))
     inserted = []
-    model._kq_resident_arrays = inserted
+    # A plain attribute: in the module tree, the list would count every
+    # array it holds a second time in the model's size.
+    object.__setattr__(model, "_kq_resident_arrays", inserted)
     nbytes = 0
     pending = 0
     left_out = left_out_bytes = 0
@@ -372,7 +374,7 @@ def _unwire(model) -> int:
         kq.residency_erase(a)
     if arrays:
         kq.residency_commit()
-    model._kq_resident_arrays = []
+    object.__setattr__(model, "_kq_resident_arrays", [])
     return sum(a.nbytes for a in arrays)
 
 

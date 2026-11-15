@@ -502,6 +502,30 @@ def test_an_interrupted_wire_takes_its_set_back_out(monkeypatch):
     assert kq.members == {} and m._kq_resident_arrays == []
 
 
+def test_the_arrays_a_wire_holds_are_not_counted_again_in_the_model_size(
+        monkeypatch):
+    # Each generation reads the model's size off its module tree for the
+    # working set warning. The wire keeps the arrays it inserted on the
+    # model, and in the tree that list doubled the size.
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx.utils import tree_reduce
+
+    def size():
+        return tree_reduce(
+            lambda acc, x: acc + x.nbytes if isinstance(x, mx.array) else acc,
+            m, 0)
+
+    _Residency(monkeypatch)
+    m = nn.Linear(64, 32)
+    want = size()
+    assert es._install_gpu_residency(m, {}, include_expert_stacks=True,
+                                     say=False)
+    assert len(m._kq_resident_arrays) == 2 and size() == want
+    es._unwire(m)
+    assert m._kq_resident_arrays == [] and size() == want
+
+
 def test_a_wire_past_the_page_cache_compresses_other_apps(monkeypatch,
                                                           capsys):
     # Flash-Next's 90 GiB resident set at the serve room on a 128 GiB Mac

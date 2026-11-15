@@ -97,6 +97,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer reads the whole table into memory at every load.
 - Qwen3.8-Flash-Next keeps its weights and KV cache wired while it streams
   its lookup table, with an mlx-kquant that maps the table untracked.
+- A model whose weights are wired, such as Qwen3.8-Flash-Next, no longer
+  prints a large-model warning that gives about twice its size.
 - Qwen3.8-Flash-Next's context budget counts the indexer keys its attention
   keeps, 16% more memory per token than it priced before.
 - Running short of memory or a failed GPU command while a request was
