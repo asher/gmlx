@@ -2796,6 +2796,13 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             # for the step in flight, so they are read once a boundary
             # is due.
             return
+        if row is not None and any(
+                _is_kvarn(str(t)) for t in stash.get("layout") or ()):
+            # A kvarn record carries its whole KV inline, so the snapshot
+            # of a row in a batch would copy that KV at every boundary,
+            # and requantize it when the row is padded. The row takes its
+            # snapshots once it decodes alone.
+            return
         if row is None:
             p = _cache_offset_max(prompt_cache)
         else:

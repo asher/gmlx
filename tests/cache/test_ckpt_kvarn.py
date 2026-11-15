@@ -202,6 +202,36 @@ def test_offset_gate_declines_stale_kvarn():
     assert man.stats_snapshot()["ckpt_declines"] == {"offset": 1}
 
 
+def test_a_kvarn_row_takes_decode_snapshots_only_alone(monkeypatch):
+    """A kvarn record carries the row's whole KV, so a decode snapshot of a
+    row in a batch would copy that KV at every boundary. The row in a
+    batch passes the boundary with an empty ring and the ring still on;
+    the same row alone takes the snapshot."""
+    import gmlx.cache.retire_key as retire_key
+    from gmlx.cache.snapshot import decode_ckpt_tick
+
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, gen, **kw: len(seq))
+    p, full = 64, _ids(32)
+    gen = list(range(900, 900 + p - len(full)))
+
+    def stash():
+        return {"full_ids": full, "render_ctx": {"stub": True},
+                "snap_ok": True, "layout": [KVARN_TAG, "arr"],
+                "snap_grid": 16, "snap_next": p}
+
+    batch = BatchKVarNKVCache(left_padding=[0, 0])
+    batch._idx = p                  # each row's offset reads p
+    states = ArraysCache(size=2)
+    states.cache = [mx.random.normal((2, 3, D)),
+                    mx.random.normal((2, H, D, D))]
+    joined, alone = stash(), stash()
+    decode_ckpt_tick(joined, [batch, states], gen, row=1)
+    decode_ckpt_tick(alone, [_hollow_kvarn(p), _arr()], gen)
+    assert (joined.get("snaps", []), joined["snap_ok"]) == ([], True)
+    assert [s[0] for s in alone["snaps"]] == [p]
+
+
 def test_cross_boot_refusal_both_directions():
     # Stock record cannot be adopted by a kvarn-boot layout...
     man = GmlxAPCManager(num_blocks=64, block_size=16)
