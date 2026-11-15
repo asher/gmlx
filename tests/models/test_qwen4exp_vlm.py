@@ -237,21 +237,26 @@ def test_qsa_cache_pos_tracks_ik_across_midstep_growth():
     assert bool(mx.all(got == want).item())
 
 
-def test_batched_decode_slices_mrope_positions_per_row():
-    """Two rows decoding together past the indexer budget, with explicit
-    mrope positions: the QSA batch cache gives each row its own slice of
-    the position block, and each row answers as it does alone. Norms of 3
-    on the QSA layer's q and k make its attention peaked, so the context
-    a sparse row leaves out shows in the logits."""
-    from gmlx._vendor.mlx_lm.generate import _merge_caches
-
-    model = _tiny_vlm()
-    lm = model.language_model
+def _peaked_qsa(lm):
+    """Norms of 3 on the QSA layer's q and k make its attention peaked, so
+    the context a sparse row leaves out, and a wrong position, show in the
+    logits."""
     for layer in lm.layers:
         if not layer.is_linear and layer.self_attn.ratio > 0:
             attn = layer.self_attn
             attn.q_norm.weight = mx.full(attn.q_norm.weight.shape, 3.0)
             attn.k_norm.weight = mx.full(attn.k_norm.weight.shape, 3.0)
+
+
+def test_batched_decode_slices_mrope_positions_per_row():
+    """Two rows decoding together past the indexer budget, with explicit
+    mrope positions: the QSA batch cache gives each row its own slice of
+    the position block, and each row answers as it does alone."""
+    from gmlx._vendor.mlx_lm.generate import _merge_caches
+
+    model = _tiny_vlm()
+    lm = model.language_model
+    _peaked_qsa(lm)
     vocab = lm.args.vocab_size
     mx.random.seed(5)
     lens = (15, 13)
@@ -271,6 +276,40 @@ def test_batched_decode_slices_mrope_positions_per_row():
                 position_ids=pos([lens[i]], 1)).logits for i in range(2)]
     batch = _merge_caches([prefilled(0), prefilled(1)])
     got = lm(nxt, cache=batch, position_ids=pos(list(lens), 1)).logits
+    for i in range(2):
+        scale = float(mx.abs(alone[i]).max())
+        # the batched projections round unlike a one-row GEMV
+        assert float(mx.abs(got[i:i + 1] - alone[i]).max()) < 2e-3 * scale
+
+
+def test_batched_decode_after_image_turns_takes_each_rows_delta():
+    """Two rows after image turns decode together with their own mrope
+    deltas, one per row as the decode batch carries them: each row's
+    positions are its own offset plus its own delta, and each row answers
+    as it does alone."""
+    from gmlx._vendor.mlx_lm.generate import _merge_caches
+
+    model = _tiny_vlm()
+    lm = model.language_model
+    _peaked_qsa(lm)
+    vocab = lm.args.vocab_size
+    mx.random.seed(9)
+    lens, deltas = (15, 13), (3, -2)
+    prompts = [mx.random.randint(0, vocab, (1, n)) for n in lens]
+    nxt = mx.random.randint(0, vocab, (2, 1))
+
+    def prefilled(i):
+        c = lm.make_cache()
+        lm(prompts[i], cache=c)
+        return c
+
+    def delta(*ds):
+        return mx.array([[d] for d in ds], dtype=mx.int32)
+
+    alone = [lm(nxt[i:i + 1], cache=prefilled(i),
+                rope_deltas=delta(deltas[i])).logits for i in range(2)]
+    batch = _merge_caches([prefilled(0), prefilled(1)])
+    got = lm(nxt, cache=batch, rope_deltas=delta(*deltas)).logits
     for i in range(2):
         scale = float(mx.abs(alone[i]).max())
         # the batched projections round unlike a one-row GEMV

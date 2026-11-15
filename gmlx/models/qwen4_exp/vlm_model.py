@@ -130,6 +130,9 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
         deltas = rope_deltas if rope_deltas is not None else self._rope_deltas
         if deltas is None:
             return None  # text-only: scalar-offset rope
+        if isinstance(offset, mx.array):
+            # A decode batch's cache holds one offset per row.
+            offset = offset.reshape(B, 1)
         pos = offset + deltas.astype(mx.int32).reshape(B, 1) \
             + mx.arange(L, dtype=mx.int32)[None]
         return mx.broadcast_to(pos[None], (3, B, L))
