@@ -582,6 +582,36 @@ def test_spec_state_skips_shared_kv_a_cache_holds(monkeypatch):
     # So does every view with a release that has no buffer_id.
     monkeypatch.delattr(kq, "buffer_id", raising=False)
     assert sm.spec_state_bytes(g)[0] == drafter + views
+    # And a view of memory the cache counts fewer bytes of than the view.
+    kv.keys = kv.keys[..., :10, :]
+    monkeypatch.setattr(kq, "buffer_id", _ids_by_object(
+        (kv.keys, k_view), (kv.values, v_view)), raising=False)
+    assert sm.spec_state_bytes(g)[0] == drafter + k_view.nbytes
+
+
+def test_join_prices_the_shared_kv_the_cache_holds(monkeypatch):
+    # The live bytes leave out the snapshot's views of the cache, and a
+    # join is still priced for them: it copies the snapshot out.
+    import gmlx.gen.prefill_decay as pd
+    import mlx_kquant as kq
+
+    monkeypatch.setenv("GMLX_ADMIT_RESERVE_GB", "2")
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    monkeypatch.delattr(kq, "buffer_id", raising=False)
+    full = _shared_view_gen()
+    p_full = sm.project_admission(full, [_pending(2, 300, 200)])[0]
+    g = _shared_view_gen()
+    kv = g._generation_batch.prompt_cache[0]
+    k_view, v_view = g._generation_batch.shared_kv_states["full_attention"]
+    views = k_view.nbytes + v_view.nbytes
+    monkeypatch.setattr(kq, "buffer_id", _ids_by_object(
+        (kv.keys, k_view), (kv.values, v_view)), raising=False)
+    p = sm.project_admission(g, [_pending(2, 300, 200)])[0]
+    assert g._kq_admit_spec_shared == views
+    assert g._kq_admit_live_bytes == full._kq_admit_live_bytes - views
+    assert g._kq_admit_kv_rates["_spec_state"]["rate"] == pytest.approx(
+        full._kq_admit_kv_rates["_spec_state"]["rate"])
+    assert p - p_full == pytest.approx(views)
 
 
 def test_spec_state_shared_kv_on_kq_buffer_ids():
