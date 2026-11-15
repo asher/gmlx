@@ -109,6 +109,19 @@ def test_eval_cache_evaluates_each_row(monkeypatch):
     assert id(a._kt) in ids
 
 
+def test_the_memory_walk_counts_the_rows():
+    """Admission's KV rates, the governor's reserve and the memory trace
+    walk the leaf caches. A batched QSA layer's arrays are on its rows."""
+    from gmlx.serve.memtrace import _cache_report, _leaf_caches
+
+    a, b = _row(13, 1, tail=2), _row(9, 2)
+    c = BatchQSAKVCache.merge([a, b])
+    assert list(_leaf_caches([c])) == [a, b]
+    total, kinds, _, _ = _cache_report([c])
+    assert total == a.nbytes + b.nbytes > 0
+    assert kinds["QSAKVCache"]["n"] == 2
+
+
 def test_extract_is_a_plain_kv_view_of_the_row():
     a, b = _row(13, 1), _row(9, 2, tail=3)
     c = BatchQSAKVCache.merge([a, b])

@@ -124,6 +124,41 @@ def test_tick_failure_disables_ring(monkeypatch):
     assert len(calls) == 1
 
 
+def test_tick_takes_no_snapshot_of_a_batched_qsa_row(monkeypatch):
+    """A row left alone after a join keeps its QSA layers in a cache of one
+    cache per row. The tick clones the recurrent states and skips that
+    layer, so the row's K and V are neither extracted nor copied, and no
+    snapshot assembles with it."""
+    from gmlx.models.qwen4_exp.model import BatchQSAKVCache, QSAKVCache
+
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "32")
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, gen, **kw: 72)
+    cache = make_hybrid_cache(72, seed=45)
+    for i, c in enumerate(cache):
+        if hasattr(c, "keys"):
+            row = QSAKVCache(ratio=4)
+            row.append_qsa(c.keys, c.values, mx.zeros((1, 72, 8)))
+            cache[i] = BatchQSAKVCache([row])
+    extracts, cloned = [], []
+    monkeypatch.setattr(BatchQSAKVCache, "extract",
+                        lambda self, i: extracts.append(i))
+    clone = cs._clone_single_row
+
+    def spy(c, pending=None):
+        cloned.append(c)
+        return clone(c, pending)
+
+    monkeypatch.setattr(cs, "_clone_single_row", spy)
+    stash = _stash(list(range(40)))
+    decode_ckpt_tick(stash, cache, list(range(9000, 9032)))
+    (p, states), = stash["snaps"]
+    assert p == 72 and extracts == []
+    assert len(states) == LAYOUT.count("arr")
+    assert not any(isinstance(c, BatchQSAKVCache) for c in cloned)
+    assert cs._snap_assemble(cache, states, 72) is None
+
+
 def test_retirement_uses_newest_snap_at_or_below_lcp():
     man = APCManager(num_blocks=64, block_size=16)
     full = 96

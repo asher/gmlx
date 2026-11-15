@@ -2811,8 +2811,11 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         pending: list[Any] = []
         for c in prompt_cache:
             # Plain KV is sliced from the row at retirement. A row that
-            # was joined holds it in the batch class.
-            if isinstance(c, BatchKVCache) or (
+            # was joined holds it in the batch class, or in a cache of one
+            # cache per row (qwen4exp's QSA layers), which no snapshot
+            # assembles.
+            if isinstance(c, BatchKVCache) or getattr(
+                    c, "holds_row_caches", False) or (
                     isinstance(c, KVCache)
                     and not isinstance(c, RotatingKVCache)):
                 continue
@@ -2849,6 +2852,9 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     out = []
     si = 0
     for c in prompt_cache:
+        if getattr(c, "holds_row_caches", False):
+            # A batched QSA row: the tick took no snapshot of it.
+            return None
         if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
             if c.keys is None or int(getattr(c, "offset", 0) or 0) < p:
                 return None
