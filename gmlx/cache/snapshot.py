@@ -2845,8 +2845,8 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
 def _snap_assemble(prompt_cache: list[Any], states: list[Any],
                    p: int) -> list[Any] | None:
     """Rebuild a single-row cache list at snapshot position ``p``: plain
-    KV sliced from the live row, rotating windows and recurrent states
-    from the snapshot clones."""
+    KV and QSA layers sliced from the live row, rotating windows and
+    recurrent states from the snapshot clones."""
     from .kv_cache import KVCache, RotatingKVCache
 
     out = []
@@ -2855,6 +2855,21 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
         if getattr(c, "holds_row_caches", False):
             # A batched QSA row: the tick took no snapshot of it.
             return None
+        if _qsa_tag(c) is not None:
+            # K, V, indexer keys and positions to p, as the prefix arm of
+            # the layer's merge takes them, so the record tags "qsa:R" as
+            # the lookups sign. Views: the store's per-block copy is the
+            # only copy.
+            if int(c.offset) < p:
+                return None
+            st = c.state
+            if st[0] is None or st[2] is None:
+                return None
+            head = (st[0][..., :p, :], st[1][..., :p, :], st[2][:, :p])
+            out.append(type(c).from_state(
+                head if len(st) == 3 else head + (st[3][:, :, :p],),
+                c.meta_state))
+            continue
         if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
             if c.keys is None or int(getattr(c, "offset", 0) or 0) < p:
                 return None
@@ -2876,10 +2891,10 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
 def _retire_usable(manager, caches, layout, refused) -> bool:
     """Whether a retirement record of ``caches`` can serve a lookup: its
     layout is the one the request's lookup signed with (``layout``; None
-    when the arming recorded none). A decode snapshot assembled with
-    plain KV in place of its QSA layers tags "kv" where every lookup
-    signs "qsa:R": such a record would cost the room and strip its chain
-    for nothing, so it is not stored. A refused layout goes on
+    when the arming recorded none). A row whose QSA layers come back as
+    plain KV, as the padded batch class leaves them, tags "kv" where every
+    lookup signs "qsa:R": such a record would cost the room and strip its
+    chain for nothing, so it is not stored. A refused layout goes on
     ``refused``."""
     if layout is None:
         return True
@@ -2898,7 +2913,7 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
     tier stays empty, so the stock warm path never bypasses arming.
     Nothing a lookup signed ``layout`` cannot use (``_retire_usable``):
     one retire_layout decline and one line per retirement, however many
-    candidates it refused (every decode snapshot of a QSA model is one).
+    candidates it refused.
     Returns the stored length (0 = nothing)."""
     refused: list = []
     try:

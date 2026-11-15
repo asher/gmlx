@@ -159,6 +159,30 @@ def test_tick_takes_no_snapshot_of_a_batched_qsa_row(monkeypatch):
     assert cs._snap_assemble(cache, states, 72) is None
 
 
+def test_a_snapshot_takes_a_qsa_layer_to_its_p_with_its_positions():
+    """A decode snapshot's QSA layer is the live row's K, V, indexer keys
+    and mrope positions to the snapshot's p, as a QSA cache, so the record
+    tags the layout the lookups sign."""
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    n, p = 40, 32
+    mx.random.seed(46)
+    c = QSAKVCache(ratio=4)
+    pos = mx.broadcast_to((mx.arange(n, dtype=mx.int32) // 2)[None, None],
+                          (3, 1, n))
+    c.update_and_fetch_qsa(mx.random.normal((1, 2, n, 8)),
+                           mx.random.normal((1, 2, n, 8)),
+                           mx.random.normal((1, n, 8)), pos=pos)
+    (got,) = cs._snap_assemble([c], [], p)
+    assert type(got) is QSAKVCache and got.offset == p
+    assert cs._qsa_tag(got) == "qsa:4"
+    k, v, ik, ps = c.state
+    want = (k[..., :p, :], v[..., :p, :], ik[:, :p], ps[:, :, :p])
+    assert len(got.state) == 4
+    for x, y in zip(got.state, want):
+        assert mx.array_equal(x, y).item()
+
+
 def test_retirement_uses_newest_snap_at_or_below_lcp():
     man = APCManager(num_blocks=64, block_size=16)
     full = 96

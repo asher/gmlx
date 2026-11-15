@@ -308,9 +308,9 @@ def test_autosize_stashes_the_pools_share(monkeypatch):
 
 def test_a_retirement_no_lookup_can_use_stores_nothing():
     """The arming recorded the layout the request's lookup signed with. A
-    retirement whose cache tags another layout (QSA layers assembled as
-    plain KV tag "kv") stores nothing and counts a retire_layout decline;
-    one that matches stores."""
+    retirement whose cache tags another layout (QSA layers that come back
+    as plain KV tag "kv") stores nothing and counts a retire_layout
+    decline; one that matches stores."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     ids = _ids(0, 52)
     cache = make_hybrid_cache(52, seed=4)
@@ -330,10 +330,10 @@ def test_a_retirement_no_lookup_can_use_stores_nothing():
                          ids=["diverged", "whole"])
 def test_a_retirement_counts_its_refused_layouts_once(caplog, max_len,
                                                       refused):
-    """A QSA row whose layers come back as plain KV, as every decode
-    snapshot assembled for it does. Its retirement counts one decline and
-    logs one line however many candidates it refused, and says nothing of
-    missing snapshots."""
+    """A QSA row whose layers come back as plain KV, as the padded batch
+    class leaves them, so its decode snapshots assemble with plain KV too.
+    Its retirement counts one decline and logs one line however many
+    candidates it refused, and says nothing of missing snapshots."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(72, seed=5)
     signed = tuple("qsa:4" if t == "kv" else t
@@ -479,9 +479,18 @@ def _render(monkeypatch, final):
             len(seq) if partial else final(seq))
 
 
+def _seen(cache, seen):
+    """The row's state after a step, by its offset: each QSA layer's held
+    streams, the other layers' recurrent states."""
+    p = next(int(c.offset) for c in cache if hasattr(c, "update_and_fetch_qsa"))
+    seen[p] = [c.state if hasattr(c, "update_and_fetch_qsa")
+               else tuple(c.cache) for c in cache]
+
+
 def _plain_turn(man, ids, steps):
     """Arm, decode and retire a stock-path row: the step tick takes the
-    decode snapshots and the batch filter retires through _plain_retire."""
+    decode snapshots and the batch filter retires through _plain_retire.
+    Returns the stash and the row's state after each step."""
     from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
     ckpt._install_plain_ckpt_decode()
@@ -489,12 +498,14 @@ def _plain_turn(man, ids, steps):
     gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
     gb.uids = [ids[0]]
     gb.prompt_cache = b.prompt_cache
+    seen = {}
     for tok in steps:
         _decode_qsa(gb.prompt_cache, tok)
+        _seen(gb.prompt_cache, seen)
         ckpt._plain_step_tick(gb, ([tok], None, None, None))
     stash = gb._kq_apc_retire_rows[ids[0]]
     gb.filter([])
-    return stash
+    return stash, seen
 
 
 def _mtp_turn(man, ids, steps):
@@ -504,33 +515,48 @@ def _mtp_turn(man, ids, steps):
     from gmlx.spec.speculative import _retire_b1
 
     model, cache, ctx = _mtp_armed(man, ids, _qsa_hybrid_cache, ids[0])
-    gen = []
+    gen, seen = [], {}
     for tok in steps:
         _decode_qsa(cache, tok)
+        _seen(cache, seen)
         gen.append(tok)
         decode_ckpt_tick(ctx, cache, gen)
     _retire_b1(model, cache, gen, ctx)
-    return ctx
+    return ctx, seen
 
 
 @pytest.mark.parametrize("turn", [_plain_turn, _mtp_turn],
                          ids=["plain", "mtp"])
-def test_a_retirement_checks_the_layout_its_arming_signed(monkeypatch, turn):
+def test_a_lone_qsa_row_retires_whole_or_from_its_decode_snapshot(
+        monkeypatch, turn):
     """Driven from the arming: it signs the live QSA layout, a decode
     snapshot lands at 48, and the row retires at 56. The whole sequence
     stores. A render that diverges at 52 falls to the snapshot, whose QSA
-    layers come back as plain KV: one retire_layout decline, no record."""
+    layers are the row's own to 48: it stores at 48 with no retire_layout
+    decline, and the next turn's lookup restores the row as it stood at
+    48, bit for bit."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     steps = range(9000, 9024)
     _render(monkeypatch, len)
-    stash = turn(man, _ids(0, 32), steps)
+    stash, _ = turn(man, _ids(0, 32), steps)
     assert [p for p, _ in stash["snaps"]] == [48]
     assert [r.p for r in cs._ckpt_records(man).values()] == [56]
     _render(monkeypatch, lambda seq: 52)
-    stash = turn(man, _ids(1, 32), steps)
+    ids = _ids(1, 32)
+    stash, seen = turn(man, ids, steps)
     assert [p for p, _ in stash["snaps"]] == [48]
-    assert [r.p for r in cs._ckpt_records(man).values()] == [56]
-    assert man.stats_snapshot()["ckpt_declines"] == {"retire_layout": 1}
+    assert sorted(r.p for r in cs._ckpt_records(man).values()) == [48, 56]
+    assert man.stats_snapshot()["ckpt_declines"] == {}
+    seq = ids + list(steps)
+    warm, got = ckpt_lookup(man, seq[:48] + [7],
+                            extra_hash=stash["extra_hash"],
+                            layout=stash["layout"])
+    assert got == 48
+    for c, row in zip(warm, seen[48]):
+        held = c.state if hasattr(c, "update_and_fetch_qsa") else c.cache
+        assert len(held) == len(row)
+        for x, y in zip(held, row):
+            assert mx.array_equal(x, y).item()
 
 
 def _decode_rows(cache, toks):
