@@ -52,7 +52,7 @@ from gmlx.cache.attention import (
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from gmlx.cache.kv_cache import ArraysCache, KVCache
+from gmlx.cache.kv_cache import ArraysCache, KVCache, _BaseCache
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
@@ -1539,6 +1539,104 @@ class QSAKVCache(KVCache):
             a.nbytes for a in (self._kb, self._vb, self._ib, self._kt,
                                self._vt, self._it, self.blocks, self._bt)
             if a is not None)
+
+
+class BatchQSAKVCache(_BaseCache):
+    """A decode batch's cache on a QSA layer: one single-row QSAKVCache per
+    batch row, in batch order.
+
+    Each row keeps its indexer key stream, so the layer can run the
+    single-row sparse attention on each row. A join, a leave or a filter
+    moves rows in the list and copies no array, and no row is padded.
+    ``left_padding`` is all zeros: it marks the cache as batched for the
+    admission lift, and no row has any. The list is ``rows``, not
+    ``caches``: readers that walk a CacheList's members would take one
+    row's offset for the layer's, and the admission lift would find a
+    member without ``left_padding`` and merge the cache again.
+    """
+
+    kv_quant_unsupported = True
+    holds_config_pools = True
+    preserve_auxiliary_kv_state = True
+    holds_row_caches = True
+
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+
+    @property
+    def left_padding(self):
+        return mx.zeros((len(self.rows),), mx.int32)
+
+    @property
+    def offset(self):
+        return mx.array([r.offset for r in self.rows], mx.int32)
+
+    @classmethod
+    def merge(cls, caches):
+        """Single rows and containers joined, in order, with no copy."""
+        rows = []
+        for c in caches:
+            rows.extend(c.rows if isinstance(c, BatchQSAKVCache) else [c])
+        return cls(rows)
+
+    def extend(self, other):
+        self.rows.extend(other.rows if isinstance(other, BatchQSAKVCache)
+                         else [other])
+
+    def filter(self, batch_indices):
+        keep = (batch_indices.tolist() if isinstance(batch_indices, mx.array)
+                else list(batch_indices))
+        self.rows = [self.rows[int(i)] for i in keep]
+
+    def extract(self, idx):
+        """Row ``idx`` as a plain KVCache over views of its K and V. Its
+        record tags "kv", which no lookup on a QSA model signs, so the
+        retirement of a batched row is refused."""
+        row = self.rows[idx]
+        n = row.offset
+        out = KVCache()
+        out.keys = row.keys[..., :n, :]
+        out.values = row.values[..., :n, :]
+        out.offset = n
+        return out
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        """Every row by the same ``n`` (no batched path rolls rows back by
+        different counts)."""
+        n = min([n] + [r.offset for r in self.rows])
+        for r in self.rows:
+            r.trim(n)
+        return n
+
+    def make_mask(self, N, return_array=False, window_size=None, **kwargs):
+        # Each row's attention builds its own mask.
+        return None if N == 1 else "causal"
+
+    @property
+    def state(self):
+        """Every row's buffers as they are held, with no fold and no slice:
+        what the batch evaluates before it changes."""
+        return [tuple(a for a in (r._kb, r._vb, r._ib, r._kt, r._vt, r._it,
+                                  r.blocks, r._bt, r.pos) if a is not None)
+                for r in self.rows]
+
+    def size(self):
+        return max((r.offset for r in self.rows), default=0)
+
+    def empty(self):
+        return all(r.offset == 0 for r in self.rows)
+
+    @property
+    def nbytes(self):
+        return sum(r.nbytes for r in self.rows)
+
+    def to_quantized(self, group_size: int = 64, bits: int = 4):
+        raise NotImplementedError(
+            "BatchQSAKVCache cannot quantize: the QSA indexer key stream has "
+            "no quantized form (drop --kv-bits for qwen4exp)")
 
 
 class QSAIndexer(nn.Module):

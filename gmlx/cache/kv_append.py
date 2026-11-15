@@ -62,8 +62,9 @@ def eval_cache(cache) -> None:
     """Evaluate every array ``cache`` holds, in one eval, so the copies a
     join or a rollback left lazy are made for this cache alone and not
     with every other layer's at the next step. Walks the members of a
-    cache list. Rebinds nothing and keeps no handle, so the next append
-    still donates its buffer or writes in place."""
+    cache list and the rows of a cache that holds one cache per row.
+    Rebinds nothing and keeps no handle, so the next append still donates
+    its buffer or writes in place."""
     arrays = []
     stack = [cache]
     while stack:
@@ -71,6 +72,9 @@ def eval_cache(cache) -> None:
         members = getattr(c, "caches", None)
         if isinstance(members, (tuple, list)):
             stack.extend(members)
+            continue
+        if getattr(c, "holds_row_caches", False):
+            stack.extend(c.rows)
             continue
         for v in (getattr(c, "__dict__", None) or {}).values():
             if isinstance(v, mx.array):
