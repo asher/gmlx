@@ -18,9 +18,9 @@ Turn 1's prompt record, two ways: the p=N store at 70 after the last
 column, and the N-1 replay at 69 standing in for it as a boundary. Turn 2
 restored from each must answer as fresh does.
 
-Batched decode: two rows merged into the batch caches decode off float32
-conv states too, and the merged QSA keys must keep their dtype through
-the batch cache's growth.
+Batched decode: two rows joined into a decode batch decode off float32
+conv states too, and each row's QSA keys must keep their dtype in the
+row's own buffers.
 
 The hc prefill kernels are Metal only, so the file runs on a real Apple
 GPU."""
@@ -253,9 +253,10 @@ def test_turn_two_from_the_stand_in_matches_fresh_leaves(arms):
 
 
 def test_batched_decode_keeps_the_qsa_dtype(model):
-    """Two rows merged into the batch caches, two decode steps off the
-    float32 conv states the last column leaves: the QSA layers' keys and
-    values keep the merged dtype through the batch cache's growth."""
+    """Two rows joined into a decode batch, two decode steps off the
+    float32 conv states the last column leaves: each row's QSA keys and
+    values, in its base and its decode tail, keep the dtype they had at
+    the join."""
     m = model
     V = m.args.vocab_size
     mx.random.seed(11)
@@ -266,15 +267,19 @@ def test_batched_decode_keeps_the_qsa_dtype(model):
         _fwd(m, P[:-1], c)
         _fwd(m, P[-1:], c)
         rows.append(c)
-    batch = _merge_caches(rows)
     qsa = _qsa_layers(m)
     assert qsa
-    merged = {i: (batch[i].keys.dtype, batch[i].values.dtype) for i in qsa}
+    joined = {(i, r): (rows[r][i]._kb.dtype, rows[r][i]._vb.dtype)
+              for i in qsa for r in range(2)}
+    batch = _merge_caches(rows)
     tok = mx.array([[3], [4]])
     for _ in range(2):
         out = m(tok, cache=batch)
         mx.eval(out, [c.state for c in batch])
         tok = mx.argmax(out[:, -1:, :], axis=-1)
     for i in qsa:
-        assert batch[i].keys.shape[2] > 40, "the decode grew the buffer"
-        assert (batch[i].keys.dtype, batch[i].values.dtype) == merged[i]
+        for r, row in enumerate(batch[i].rows):
+            assert row is rows[r][i] and row.offset == (40, 33)[r] + 2
+            k_dt, v_dt = joined[i, r]
+            assert {row._kb.dtype, row._kt.dtype} == {k_dt}
+            assert {row._vb.dtype, row._vt.dtype} == {v_dt}

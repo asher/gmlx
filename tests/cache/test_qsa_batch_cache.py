@@ -132,3 +132,13 @@ def test_extract_is_a_plain_kv_view_of_the_row():
     assert mx.array_equal(got.values, b.values[..., :12, :]).item()
     assert c.rows == [a, b], "the row stays in the batch"
 
+
+def test_the_decode_lift_joins_qsa_rows_into_the_batch_form():
+    """The decode batch lifts a layer by its class's merge: QSA rows join a
+    BatchQSAKVCache as themselves, indexer stream included. The APC merge,
+    which passes prefix lengths, still rebuilds one QSA row."""
+    a, b = _row(13, 1), _row(9, 2, tail=3)
+    lifted = type(a).merge([a, b])
+    assert type(lifted) is BatchQSAKVCache and lifted.rows == [a, b]
+    one = QSAKVCache.merge([a], prefix_lens=[8])
+    assert type(one) is QSAKVCache and one.offset == 8

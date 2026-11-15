@@ -2876,9 +2876,9 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
 def _retire_usable(manager, caches, layout, refused) -> bool:
     """Whether a retirement record of ``caches`` can serve a lookup: its
     layout is the one the request's lookup signed with (``layout``; None
-    when the arming recorded none). A batched row whose QSA layers left
-    the merge without their indexer keys, or a decode snapshot assembled
-    with plain KV in their place, tags "kv" where every lookup signs
+    when the arming recorded none). A batched QSA row, whose extract is
+    a plain KV view of the row, or a decode snapshot assembled with plain
+    KV in place of its QSA layers, tags "kv" where every lookup signs
     "qsa:R": such a record would cost the room and strip its chain for
     nothing, so it is not stored. A refused layout goes on ``refused``."""
     if layout is None:

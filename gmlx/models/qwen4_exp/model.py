@@ -1488,18 +1488,16 @@ class QSAKVCache(KVCache):
 
     @classmethod
     def merge(cls, entries, prefix_lens=None):
-        # Two callers share this name. mlx_lm's batch lift calls
-        # merge(caches): delegate to the inherited KVCache.merge; the
-        # resulting BatchKVCache drops the indexer stream, so a batched row
-        # decodes dense over its whole context, which differs from
-        # single-stream QSA attention past the indexer budget. mlx-vlm's APC
-        # merge_cache_entries calls merge(entries, prefix_lens) and
-        # dispatches on the class's own __dict__, so the arm must live
-        # here, not on a parent. Single-request batches only; multi-row
-        # joins decline to the cold path rather than guess at row padding
-        # for the indexer stream.
+        # Two callers share this name. The decode batch's lift calls
+        # merge(caches): the rows join a BatchQSAKVCache as they are, each
+        # with its indexer stream, so every batched row runs the
+        # single-row sparse attention. mlx-vlm's APC merge_cache_entries
+        # calls merge(entries, prefix_lens) and dispatches on the class's
+        # own __dict__, so the arm must live here, not on a parent.
+        # Single-request batches only; multi-row joins decline to the cold
+        # path rather than guess at row padding for the indexer stream.
         if prefix_lens is None:
-            return super().merge(entries)
+            return BatchQSAKVCache.merge(entries)
         if len(entries) != 1:
             return None
         e, p = entries[0], int(prefix_lens[0])
@@ -1997,7 +1995,10 @@ class Attention(nn.Module):
         window (VLM loads); ``None`` takes the scalar-offset text path."""
         B, L, _ = x.shape
         q, gate, k, v, ik = self._project(x)
-        out = self._attend(x, q, k, v, ik, mask, cache, positions)
+        if isinstance(cache, BatchQSAKVCache):
+            out = self._attend_rows(x, q, k, v, ik, cache, positions)
+        else:
+            out = self._attend(x, q, k, v, ik, mask, cache, positions)
         prof = _subprof_on(L)
         if prof:
             import time
@@ -2007,6 +2008,26 @@ class Attention(nn.Module):
         if prof:
             _prof_mark("a.out", self._li, out, t0)
         return out
+
+    def _attend_rows(self, x, q, k, v, ik, cache, positions) -> mx.array:
+        """A decode batch on a BatchQSAKVCache: each row's attention is the
+        single-row path on that row's slice of the projections, over the
+        row's own cache with the row's own mask, so it computes what the
+        row alone computes. The model's batch mask is not read."""
+        rows = cache.rows
+        if len(rows) != x.shape[0]:
+            raise ValueError(
+                f"BatchQSAKVCache holds {len(rows)} rows for a batch of "
+                f"{x.shape[0]}")
+        outs = []
+        for i, row in enumerate(rows):
+            s = slice(i, i + 1)
+            xi = x[s]
+            outs.append(self._attend(
+                xi, q[s], k[s], v[s], None if ik is None else ik[s],
+                create_attention_mask(xi, row), row,
+                None if positions is None else positions[:, s]))
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=0)
 
     def _attend(self, x, q, k, v, ik, mask, cache, positions) -> mx.array:
         """Rope, the cache append, the block selection and the attention
@@ -2537,6 +2558,8 @@ class Qwen4ExpModel(nn.Module):
             (i for i, t in enumerate(args.layer_types) if t == "linear_attention"), 0)
         self.fa_idx = next(
             (i for i, t in enumerate(args.layer_types) if t == "full_attention"), 0)
+        self._all_qsa = all(layer.self_attn.ratio > 0 for layer in self.layers
+                            if not layer.is_linear)
 
     def __call__(self, inputs: mx.array, cache=None, input_embeddings=None,
                  return_streams: bool = False, gdn_sink=None, position_ids=None):
@@ -2545,6 +2568,11 @@ class Qwen4ExpModel(nn.Module):
         h = mx.broadcast_to(h[:, :, None, :], (B, T, self.hc, D))
         if cache is None:
             cache = [None] * len(self.layers)
+        if isinstance(cache[self.fa_idx], BatchQSAKVCache) and not self._all_qsa:
+            # The batch mask comes from that layer's cache, which builds
+            # none: a plain attention layer would attend its padding.
+            raise NotImplementedError(
+                "batched decode needs every attention layer on the QSA cache")
         probe = h[:, :, 0, :]
         fa_mask = create_attention_mask(probe, cache[self.fa_idx])
         ssm_mask = create_ssm_mask(probe, cache[self.ssm_idx])
