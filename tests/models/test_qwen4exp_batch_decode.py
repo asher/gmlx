@@ -202,6 +202,9 @@ def test_the_dense_control_sits_above_the_noise_floor(arms):
 def test_a_batched_row_decodes_as_the_row_alone(arms):
     """Each batched row's log-probabilities stay within twice the
     fixture's noise of the row decoded alone."""
+    # A pair arm bit-equal to the row alone leaves the bound at the chunk
+    # arm's 0: the fixture lost its two-row rounding, not the batch its rows.
+    assert max(d for d, _ in arms["pair"]) > 0, arms
     assert max(d for d, _ in arms["batch"]) <= _bound(arms), arms
 
 
