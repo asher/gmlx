@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import weakref
+from collections import deque
 from typing import NoReturn
 from types import SimpleNamespace
 
@@ -136,27 +138,94 @@ def outside_wired_bytes() -> float:
     return _OUTSIDE_WIRED or 0.0
 
 
-# The memory wired outside this process as the governor's tick last read it
-# live, and the kernel wired count that reading came from
-# (note_live_outside_wired); None until the first read.
+# The memory wired outside this process as the governor's tick last priced
+# it live, the kernel wired count of the last reading, the most this
+# process held wired since that count, and the readings of the counts
+# within the window (note_live_outside_wired); None and empty until the
+# first read. No lock: every caller and the governor tick run on the
+# generation thread.
 _OUTSIDE_LIVE: float | None = None
 _WIRED_SEEN: float | None = None
+_OWN_PEAK: float | None = None
+# (_now(), reading) of each new count, oldest first.
+_LIVE_READS: deque = deque()
+# How long a rise in the live reading holds before the cap prices it:
+# longer than the driver takes to release a buffer the process freed.
+_LIVE_WINDOW_S = 1.0
+_now = time.monotonic
 
 
 def note_live_outside_wired(wired: float, own: float) -> None:
     """Book the memory wired outside this process, read live: the kernel's
-    wired bytes ``wired`` less ``own``, the bytes the process holds wired
-    (``prefill_decay.own_wired_bytes``). The governor's tick calls it in a
-    process under the wired cap, with one host_statistics64 read and no
-    device sync. That counter refreshes about once a second, so a count
-    equal to the last one is a stale read and keeps the last figure: a
-    fresh ``own`` against a stale count would read the process's own
-    frees as memory wired outside it."""
-    global _OUTSIDE_LIVE, _WIRED_SEEN
+    wired bytes ``wired`` less what the process holds wired
+    (``prefill_decay.own_wired_bytes``, passed as ``own``). The governor's
+    tick calls it in a process under the wired cap, with one
+    host_statistics64 read and no device sync. To a process outside the
+    platform, that call returns a fresh count about once a second and a
+    cached reply in between, so a count equal to the last one is a stale
+    read: it adds no reading and keeps the most the process held. A new
+    count is read against the most the process held since the last one,
+    at the ticks and just before each clear of MLX's cache
+    (``note_own_before_clear``), so its own frees never read as memory
+    wired outside it.
+
+    The driver also releases a buffer the process freed a few hundred ms
+    after the process stops counting it, and a new count that lands
+    before the driver has finished holds that buffer as if it were wired
+    outside. The reading priced is the least of the readings in force
+    over the last ``_LIVE_WINDOW_S`` (W): a fall prices at once, and a
+    rise, such a release among them, prices once the reading has held
+    for W. A rise counts as held when no lower reading is left in the
+    window, so a count read W after the last lower one prices as it is.
+
+    Two limits follow, each bounded. A low reading prices until W after
+    the next new count, up to D + W after it was read, where D is the gap
+    to that count: about a second between dense ticks, 1.5 to 2.5 s in a
+    deep prefill and longer on an idle server. The cap stays bounded by
+    max(startup, live) through it (``priced_outside_wired_bytes``). And
+    when the process frees what it held and the driver releases it
+    before the next new count, that count reads short of the memory
+    wired outside by up to the free. The window holds that under-read W
+    longer than the count alone would, with the startup reading as its
+    floor."""
+    global _OUTSIDE_LIVE, _WIRED_SEEN, _OWN_PEAK
+    now = _now()
+    peak = own if _OWN_PEAK is None else max(_OWN_PEAK, own)
     if wired == _WIRED_SEEN:
+        _OWN_PEAK = peak
+    else:
+        _WIRED_SEEN = wired
+        _OWN_PEAK = own
+        _LIVE_READS.append((now, max(0.0, float(wired) - float(peak))))
+    # Keep the newest reading at least the window old, and each later one.
+    while (len(_LIVE_READS) > 1
+           and _LIVE_READS[1][0] <= now - _LIVE_WINDOW_S):
+        _LIVE_READS.popleft()
+    if _LIVE_READS:
+        _OUTSIDE_LIVE = min(v for _, v in _LIVE_READS)
+
+
+def note_own_held(own: float) -> None:
+    """Raise the most this process held since the last kernel count to
+    ``own``, read off the governor's tick."""
+    global _OWN_PEAK
+    _OWN_PEAK = own if _OWN_PEAK is None else max(_OWN_PEAK, own)
+
+
+def note_own_before_clear() -> None:
+    """Book what this process holds just before the generation thread
+    clears MLX's cache: the most it held through the chunk or step,
+    whose transients sit in the cache until the clear. The tick after
+    the clear reads a count from the driver's release lag, or one cached
+    from mid-chunk, and prices it against at least that
+    (``note_live_outside_wired``). Nothing outside the wired cap."""
+    if not cap_applies():
         return
-    _WIRED_SEEN = wired
-    _OUTSIDE_LIVE = max(0.0, float(wired) - float(own))
+    from gmlx.gen.prefill_decay import own_wired_bytes
+
+    own = own_wired_bytes()
+    if own is not None:
+        note_own_held(own)
 
 
 def priced_outside_wired_bytes() -> float:

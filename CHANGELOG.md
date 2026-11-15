@@ -59,13 +59,46 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   video only when ffmpeg is missing.
 - Past the drafter's width cap a batch decodes without speculation, and a dense
   Qwen model's native head has a cap of 2. `GMLX_MTP_MIXED=1` undoes the first.
+- Qwen3.8-Flash-Next prefills a chat turn restored after a reply as fast as a
+  fresh prompt.
+- A Qwen3.8-Flash-Next chat turn after a reply that decoded beside other
+  requests no longer prefills that reply again.
+- A chat turn on a model with recurrent layers, such as Qwen3.8-Flash-Next,
+  whose last reply left nothing cached restores to the end of the previous
+  prompt, where it stopped up to one prefill chunk short.
+- A request on a model with recurrent layers, left alone in its batch, no
+  longer waits for each decode step to finish before queuing the next.
+- A Qwen3.8-Flash-Next server reading its lookup table from disk prefills a
+  prompt whose table rows are not in the page cache faster.
+- A chat turn whose template renders the last reply differently restores from
+  inside a reply decoded beside other requests too, unless `--kv-bits` is set.
 
 ### Fixed
 
+- Qwen3.8-Flash-Next requests that decoded together past 2052 tokens of
+  context attended to all of it and answered unlike a request decoding alone.
+- Two Qwen3.8-Flash-Next requests failed when they decoded together with the
+  vision tower loaded.
+- With the vision tower loaded, a Qwen3.8-Flash-Next request decoding after
+  another request's image prefill failed, or read that prompt's positions.
+- A Qwen3.8-Flash-Next chat turn whose client renders the last reply
+  differently no longer prefills that whole reply again.
+- A server near its memory cap no longer fails a request while another joins
+  its batch: the memory of the joining prompt was counted twice as it was read.
+- A request the server fails to free memory no longer saves its reply to the
+  prompt cache, which took back most of the memory the failure freed.
+- A server near its memory cap frees the checkpoints its running requests
+  keep for their next turn before it fails a request to free memory.
+- A server near its memory cap no longer fails a request where it would have
+  freed its caches and requeued it, after a request joins or leaves its batch.
+- A server near its memory cap no longer holds back requests it has room for:
+  it counted the KV cache of the requests decoding twice.
 - A model that reads its lookup table from disk, such as Qwen3.8-Flash-Next,
   no longer reads the whole table into memory at every load.
 - Qwen3.8-Flash-Next keeps its weights and KV cache wired while it streams
   its lookup table, with an mlx-kquant that maps the table untracked.
+- A model whose weights are wired, such as Qwen3.8-Flash-Next, no longer
+  prints a large-model warning that gives about twice its size.
 - Qwen3.8-Flash-Next's context budget counts the indexer keys its attention
   keeps, 16% more memory per token than it priced before.
 - Running short of memory or a failed GPU command while a request was

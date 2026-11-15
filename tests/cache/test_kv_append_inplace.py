@@ -368,6 +368,28 @@ _REBINDS = {
 }
 
 
+def _own_views_case(make, b=1):
+    """A decoding cache whose ``state`` is set from views of its own
+    buffers, as a restore from its own snapshot sets it."""
+    c = make()
+    for n, seed in ((20, 0), (1, 1)):
+        c.update_and_fetch(*_rows(n, seed, b=b))
+    return c, lambda: setattr(c, "state", c.state)
+
+
+_REBINDS.update({
+    "state_own_views_kv": lambda: _own_views_case(owned.KVCache),
+    "state_own_views_batch": lambda: _own_views_case(
+        lambda: owned.BatchKVCache([0, 0]), b=2),
+    "state_own_views_chunked": lambda: _own_views_case(
+        lambda: owned.ChunkedKVCache(4096)),
+    "state_own_views_quantized": lambda: _own_views_case(
+        lambda: owned.QuantizedKVCache(64, 8)),
+    "state_own_views_quantized_batch": lambda: _own_views_case(
+        lambda: owned.BatchQuantizedKVCache([0, 0], 64, 8), b=2),
+})
+
+
 @pytest.mark.parametrize("case", sorted(_REBINDS))
 def test_rebinds_drop_the_old_buffers(case):
     c, op = _REBINDS[case]()

@@ -1325,10 +1325,10 @@ def _plain_step_tick(gb, out) -> None:
     Runs per step, so a deterministic failure disables the hook for that
     row on first strike instead of emitting a traceback per token;
     dropping ``gen`` also quiets retirement (its offset check would skip
-    anyway on a broken count). The decode-time snapshot ring stays B=1
-    (its clones ride the live single-row caches); rows in a B>1 batch
-    retire snapshot-free, under their verbatim key or an LCP cap the
-    tier arm can serve without a ring."""
+    anyway on a broken count). A row in a batch of two or more takes its
+    decode-time snapshots from its own row of the batch's states, so its
+    retirement, which extracts the row, can store at a next-turn key the
+    reply's render diverges inside."""
     try:
         _lift_cache_stash(gb)
         reg = getattr(gb, "_kq_apc_retire_rows", None)
@@ -1361,9 +1361,10 @@ def _plain_step_tick(gb, out) -> None:
             if isinstance(tok, (list, tuple)):
                 tok = tok[0]
             stash["gen"].append(int(tok))
-            if solo and stash.get("mode") == "ckpt":
+            if stash.get("mode") == "ckpt":
                 from gmlx.cache.snapshot import decode_ckpt_tick
-                decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"])
+                decode_ckpt_tick(stash, gb.prompt_cache, stash["gen"],
+                                 row=None if solo else i)
         except Exception:
             stash.pop("gen", None)
             stash["snap_ok"] = False
@@ -1459,6 +1460,8 @@ def _install_plain_ckpt_decode() -> None:
 
     def _filter_with_ckpt(self, keep):
         try:
+            from gmlx.cache.snapshot import retirement_is_blocked
+
             _lift_cache_stash(self)
             reg = getattr(self, "_kq_apc_retire_rows", None)
             if reg and self.prompt_cache:
@@ -1470,7 +1473,9 @@ def _install_plain_ckpt_decode() -> None:
                     if i in keep_set:
                         continue
                     stash = reg.pop(uid, None)
-                    if stash is None:
+                    if stash is None or retirement_is_blocked():
+                        # A blocked retirement stores nothing, so the row
+                        # is neither extracted nor offered.
                         continue
                     if solo and _retires_live(stash, self.prompt_cache):
                         _plain_retire(stash, self.prompt_cache)

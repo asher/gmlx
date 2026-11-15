@@ -39,6 +39,7 @@ from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
 from gmlx.gen.logprobs import RoundLogprobs
 from gmlx.gen.thinking_budget import drop_mtp_hook
+from gmlx.serve.capacity import note_own_before_clear
 from gmlx.serve.row_sampling import RowSampler
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
@@ -1658,6 +1659,7 @@ def _owned_decode_rounds(
             else:
                 kv_offset += accepted + 1
             if emitted - _last_clear >= 256:
+                note_own_before_clear()
                 mx.clear_cache()
                 _last_clear = emitted
             _round_log((_t1 - _t0) * 1e3, (_t2 - _t1) * 1e3,
@@ -2080,13 +2082,14 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
         )
         meta = retire_ctx.get("apc_meta")
         extra_hash = as_salt(retire_ctx.get("extra_hash", 0))
+        if ckpt_replay_stands_in(manager, retire_ctx["full_ids"], prompt_cache,
+                                 extra_hash=extra_hash,
+                                 keep=(meta or {}).get("ckpt_p_stable"),
+                                 beside_turn=ckpt_full_store_redundant(meta)):
+            return
         if ckpt_full_store_redundant(meta):
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
-            return
-        if ckpt_replay_stands_in(manager, retire_ctx["full_ids"], prompt_cache,
-                                 extra_hash=extra_hash,
-                                 keep=(meta or {}).get("ckpt_p_stable")):
             return
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
                             extra_hash=extra_hash,
@@ -2322,6 +2325,10 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
             return
+        from gmlx.cache.snapshot import retirement_is_blocked
+        if retirement_is_blocked():
+            # It would store nothing, after a render of the whole sequence.
+            return
         full_ids = retire["full_ids"]
         seq = full_ids + [int(t) for t in generated]
         offset = _mtp_cache_offset_max(prompt_cache)
@@ -2454,6 +2461,10 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
     try:
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
+            return
+        from gmlx.cache.snapshot import retirement_is_blocked
+        if retirement_is_blocked():
+            # It would store nothing, after a render of the whole sequence.
             return
         mode = retire.get("mode")
         if mode == "exact":
@@ -4136,6 +4147,7 @@ def _owned_decode_rounds_batch(
                 left_padding=_batch_left_padding(prompt_cache))
 
         if sum(emitted) - _last_clear >= 256:
+            note_own_before_clear()
             mx.clear_cache()
             _last_clear = sum(emitted)
 

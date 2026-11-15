@@ -577,12 +577,50 @@ def _demand_bytes(gen, st: _GovState) -> tuple:
     oneshot = st.pending_shed_bytes
     proj = getattr(gen, "_kq_admit_last_projection", None)
     if proj is not None:
-        stamp, projected = proj
-        join_relevant = (gen._unprocessed_sequences
-                         or gen._prompt_batch is not None)
-        if join_relevant and time.perf_counter() - stamp < 30.0:
-            oneshot += projected
+        oneshot += _join_charge(gen, proj)
     return rate, oneshot
+
+
+# How long a projection prices a join that has not started.
+_JOIN_WAIT_S = 30.0
+
+
+def _join_charge(gen, proj) -> float:
+    """What the join the admission projection ``proj`` priced has still
+    to take from the headroom. ``proj`` is ``(stamp, projected, uids)``,
+    the uids those of the join's candidates. The gate projects no join
+    while a prompt batch runs, so the batch is that join's when it holds
+    one of them: what its caches hold already came out of the headroom,
+    and only the rest is still to come, however long its prefill runs. A
+    join the gate admitted without a projection is not the one priced,
+    and neither is a join that has gone: the stamp charges for neither.
+    A join still waiting, or a stamp with no uids, charges for
+    ``_JOIN_WAIT_S`` after it."""
+    projected = proj[1]
+    uids = set(proj[2]) if len(proj) > 2 else None
+    batch = gen._prompt_batch
+    if batch is not None and uids is not None and uids & set(
+            getattr(batch, "uids", ()) or ()):
+        return max(0.0, projected - _joined_bytes(batch))
+    if time.perf_counter() - proj[0] >= _JOIN_WAIT_S:
+        return 0.0
+    if batch is not None and uids is None:
+        return max(0.0, projected - _joined_bytes(batch))
+    pending = gen._unprocessed_sequences
+    if pending and (uids is None or uids & {s[0] for s in pending}):
+        return projected
+    return 0.0
+
+
+def _joined_bytes(batch) -> float:
+    """Bytes the caches of an in-flight prompt batch hold, from array
+    metadata (no eval, no sync)."""
+    from gmlx.cache.kv_cache import cache_nbytes
+
+    try:
+        return float(cache_nbytes(getattr(batch, "prompt_cache", None)))
+    except Exception:
+        return 0.0
 
 
 def _shed_transient_bytes(gen, st: _GovState) -> float:
@@ -1082,6 +1120,7 @@ def _governor_tick(gen) -> None:
 
     _maybe_register_apc(gen)
     _maybe_register_arena(gen)
+    _maybe_register_snaps()
     _read_outside_wired()
     head, ws = _headroom_and_ws(margin)
     if head is None:
@@ -1102,8 +1141,11 @@ def _governor_tick(gen) -> None:
     # pending one-shot lands
     ttc = max(0.0, head - oneshot) / max(rate, 1.0)
 
-    from .memory import admit_reserve_bytes
+    from .memory import admit_reserve_bytes, walk_changed_batch
 
+    # The live figures the reserve and the shed price read follow the batch
+    # through every join and leave, not only the next projection.
+    walk_changed_batch(gen)
     reserve = admit_reserve_bytes(ws, gen)
     # escalation clock is rate-only: an oversized pending one-shot is
     # the admission gate's problem (it declines), and tight-but-stable
@@ -1409,6 +1451,20 @@ def unregister_arena(feeder) -> None:
     name = _arena_name(feeder)
     unregister_cache(name)
     _ARENA_REFS.pop(name, None)
+
+
+_SNAPS_NAME = "decode_snaps"
+
+
+def _maybe_register_snaps() -> None:
+    """Register the decode snapshot rings of every live request, which
+    a ckpt model's rows fill while they decode: one registrant for all
+    models, holding nothing once no request runs."""
+    if _SNAPS_NAME in _REG:
+        return
+    from gmlx.cache.snapshot import evict_snapshot_rings, snapshot_ring_bytes
+
+    register_cache(_SNAPS_NAME, snapshot_ring_bytes, evict_snapshot_rings)
 
 
 _SPEC_PREFIX_REFS: dict = {}   # registry name -> weakref of the cache

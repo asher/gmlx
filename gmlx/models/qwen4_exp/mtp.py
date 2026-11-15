@@ -34,7 +34,9 @@ vendored ``Model`` so the text remap loads onto it unchanged and adds the
 the PLE history / conv states rewind to the accepted prefix on rejection.
 ``Qwen4ExpMTPDrafter`` reuses ``QwenMTPDrafter``'s draft algorithm (full
 prompt teacher-forced into the head's own KV, seed precomputed at accept)
-on the four-stream hidden. v1 is B=1 (the QSA cache has no batch form).
+on the four-stream hidden. v1 is B=1: the target's decode batch has a QSA
+form (``BatchQSAKVCache``), but the draft and the verify run one row, and
+the batch form trims every row by one count.
 
 Correctness is drafter-independent: the verify walk emits the target's own
 greedy/sampled tokens, so the drafter sets acceptance (speed), never output.
@@ -325,8 +327,8 @@ class Qwen4ExpMTPDrafter(QwenMTPDrafter):
             len(left_padding) != 1 or int(left_padding[0]) != 0
         ):
             raise NotImplementedError(
-                "Qwen4ExpMTPDrafter is B=1 only (v1): the QSA key-stream "
-                "cache has no batched form")
+                "Qwen4ExpMTPDrafter is B=1 only (v1): its draft and verify "
+                "run one row")
         return [q4.QSAKVCache(int(self.config.compress_ratio))]
 
     # --- forward primitives -------------------------------------------------

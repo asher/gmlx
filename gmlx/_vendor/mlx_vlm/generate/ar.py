@@ -68,6 +68,12 @@ from gmlx.serve.tick_guard import mark_broken as _mark_broken
 from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
 from gmlx.serve import speech_rows as _speech_rows
+# gmlx: what the process held before each clear prices the next count of
+# memory wired outside it.
+from gmlx.serve.capacity import note_own_before_clear as _note_own_before_clear
+# gmlx: a streamed lookup table's rows for the chunk are read into the page
+# cache beside its forward.
+from gmlx.stream.table_readahead import read_ahead as _table_read_ahead
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
@@ -2529,6 +2535,8 @@ class PromptProcessingBatch:
             n = min(n, checkpoint_col - self._processed_prompt_columns)
         if n <= 0:
             return 0
+        # gmlx: queue the table rows the chunk reads before its forward.
+        _table_read_ahead(self, n)
         prompt_kwargs = {
             **self._prompt_kwargs_for_step(n),
             **self._speculative_prefill.kwargs,
@@ -2566,6 +2574,8 @@ class PromptProcessingBatch:
             self._prompt_kwargs[k] = _slice_sequence_aligned_prompt_kwarg(
                 k, self._prompt_kwargs[k], start=n
             )
+        # gmlx: book what the process held before the clear.
+        _note_own_before_clear()
         mx.clear_cache()
         return n
 
@@ -3592,6 +3602,8 @@ class BatchGenerator:
                     mx.async_eval(
                         [c.state for c in self._generation_batch.prompt_cache]
                     )
+                # gmlx: book what the process held before the clear.
+                _note_own_before_clear()
                 mx.clear_cache()
             if yield_after_decode:
                 return prompt_responses, generation_responses
@@ -3657,6 +3669,8 @@ class BatchGenerator:
             prompt_responses = self._prompt_batch_progress(self._prompt_batch)
             self._extend_generation_batch(gen_batch)
             self._prompt_batch = None
+            # gmlx: book what the process held before the clear.
+            _note_own_before_clear()
             mx.clear_cache()
             return prompt_responses, generation_responses
 
@@ -3708,6 +3722,8 @@ class BatchGenerator:
                     prompt_responses = self._prompt_batch_progress(self._prompt_batch)
                     self._extend_generation_batch(gen_batch)
                     self._prompt_batch = None
+                    # gmlx: book what the process held before the clear.
+                    _note_own_before_clear()
                     mx.clear_cache()
                 return prompt_responses, generation_responses
 
@@ -3785,6 +3801,8 @@ class BatchGenerator:
                 prompt_responses = self._prompt_batch_progress(self._prompt_batch)
                 self._extend_generation_batch(gen_batch)
                 self._prompt_batch = None
+                # gmlx: book what the process held before the clear.
+                _note_own_before_clear()
                 mx.clear_cache()
 
             return prompt_responses, generation_responses

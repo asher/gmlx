@@ -383,6 +383,25 @@ def test_retire_b1_no_ctx_keeps_today(monkeypatch):
     assert calls["store"][1] is None
 
 
+@pytest.mark.parametrize("path", ["b1", "row-block", "row-exact"])
+def test_a_blocked_retirement_skips_the_mtp_retire_paths(monkeypatch, path):
+    """A row the server fails to free memory retires under a block, where
+    a store saves nothing. The MTP retire paths neither predict the next
+    turn's key, which renders the whole sequence, nor try the store."""
+    mode = "block" if path == "row-block" else "exact"
+    model, cache, gen, retire, calls = _retire_setup(monkeypatch, lcp=5,
+                                                     mode=mode)
+    lcps = []
+    monkeypatch.setattr(rk, "next_turn_lcp",
+                        lambda ctx, seq, gen: lcps.append(len(seq)) or 5)
+    with cs.retirement_blocked():
+        if path == "b1":
+            sp._retire_b1(model, cache, gen, retire)
+        else:
+            sp._retire_batch_row(model, cache, 0, retire, gen, 5)
+    assert (lcps, calls) == ([], {})
+
+
 # -- mid-decode partial prediction: virtual thinking closer --
 
 

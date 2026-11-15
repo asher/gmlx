@@ -14,8 +14,12 @@ generations, off the per-round hot path.
 
 from __future__ import annotations
 
+import itertools
 import logging
+import math
 import os
+import threading
+import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -917,9 +921,11 @@ class _CkptRecord:
     # _record_insert's strip-on-extend rules and eviction order;
     # adoption gates only ever test for "replay". spared: a record
     # strip-on-extend kept for the next turn (see _record_insert).
+    # stood_in: a replay that stands in beside its prompt's render-stable
+    # boundary, a replay again once a record past it lands.
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
-                 "tails", "qsa", "nbytes", "kind", "spared")
+                 "tails", "qsa", "nbytes", "kind", "spared", "stood_in")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -1067,7 +1073,9 @@ def ckpt_full_store_redundant(meta) -> bool:
     With that record live, N-1 covers identical resend, p_stable covers
     turn-2 and branch prefixes, and retirement covers continuation --
     the near-identical adjacent records at N-1/N are exactly what
-    strip-on-extend was fighting over."""
+    strip-on-extend was fighting over. A replay that landed stands in
+    first all the same (``ckpt_replay_stands_in``): it covers the
+    continuation a retirement leaves unstored, and adds no record."""
     if not meta:
         return False
     stored = meta.get("ckpt_stored_boundaries") or ()
@@ -1075,7 +1083,8 @@ def ckpt_full_store_redundant(meta) -> bool:
 
 
 def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
-                          extra_hash: int = 0, keep: int | None = None) -> bool:
+                          extra_hash: int = 0, keep: int | None = None,
+                          beside_turn: bool = False) -> bool:
     """Whether the request's N-1 replay record stands in for the p=N
     post-prefill store, which then is skipped. The two sit one token
     apart and differ only in the lookups they serve: the replay the
@@ -1091,8 +1100,18 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
     p=N store would have written, and on a kvarn layout its window chain
     goes to disk as the p=N chain would have (``rot_disk``), so a restart
     restores the prompt record as before. A replay on an attention-only
-    layout already adopts on extension and keeps its kind. False when no
-    replay landed: the p=N store runs."""
+    layout already adopts on extension and keeps its kind.
+    ``beside_turn``: the request's render-stable boundary landed. That
+    boundary sits on the grid below p_stable, up to a unit short of the
+    prompt, so where no retirement stores, the next turn restores from the
+    replay rather than from it. A boundary at or below ``keep`` on the
+    chain counts the same, for a request that restored past the boundary
+    an earlier one with its prompt stored. Once a record past the replay
+    lands, the replay is a replay again (``_record_insert``): it serves
+    the resend, and strip-on-extend keeps the boundary for the branches
+    it serves.
+    False when no replay landed: the p=N store runs unless the boundary
+    makes it redundant."""
     if manager is None or token_ids is None:
         return False
     try:
@@ -1112,6 +1131,15 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
                 # Out of the index unreleased, then in again as a boundary.
                 idx.pop(key)
                 rec.kind = "boundary"
+                # A boundary at or below keep on the chain is the turn
+                # boundary too when an earlier request with this prompt
+                # stored it and this one restored past it.
+                rec.stood_in = bool(beside_turn) or (
+                    keep is not None and any(
+                        r.kind == "boundary" and r.p <= keep
+                        and r.extra_hash == rec.extra_hash
+                        and r.p < p and ids[:r.p] == r.ids
+                        for r in idx.values()))
                 _record_insert(manager, rec, keep)
             snap = _CkptRecord(
                 **{k: getattr(rec, k) for k in _CkptRecord.__slots__})
@@ -1654,6 +1682,11 @@ def _record_insert(manager, rec, keep: int | None = None,
         chain = [k for k, r in idx.items()
                  if r.extra_hash == rec.extra_hash and r.p < rec.p
                  and rec.ids[:r.p] == r.ids]
+        if rec.kind != "decision":
+            for k in chain:
+                if idx[k].stood_in:
+                    # Its continuation is past it now: back to the resend.
+                    idx[k].kind, idx[k].stood_in = "replay", False
         if rec.kind == "replay":
             # One replay per chain: the newer one supersedes outright.
             for k in [k for k in chain if idx[k].kind == "replay"]:
@@ -2739,6 +2772,76 @@ def row_kv_len(prompt_cache, row: int = 0) -> int | None:
     return best
 
 
+class _Snap(tuple):
+    """A ring entry, ``(p, states)``, carrying the order it was taken in
+    (``seq``) and its bytes (``size``) for the governor."""
+
+    seq: int
+    size: int
+
+
+class _SnapRing(list):
+    """A request's decode snapshot ring. Every live ring is listed, so the
+    governor can free the snapshots under memory pressure, oldest first;
+    the ring takes its next snapshot at its next boundary."""
+
+    __slots__ = ("__weakref__",)
+
+
+# Live rings by registration number: a list is not hashable, so a weak
+# set cannot hold one.
+_RINGS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
+_RING_LOCK = threading.Lock()
+_RING_SEQ = itertools.count()
+
+
+def _snap_ring(stash: dict) -> _SnapRing:
+    ring = stash.get("snaps")
+    if not isinstance(ring, _SnapRing):
+        ring = _SnapRing(ring or ())
+        stash["snaps"] = ring
+        with _RING_LOCK:
+            _RINGS[next(_RING_SEQ)] = ring
+    return ring
+
+
+def snapshot_ring_bytes() -> int:
+    """Bytes the live decode snapshot rings hold. Attribute reads only."""
+    with _RING_LOCK:
+        return sum(getattr(s, "size", 0)
+                   for r in list(_RINGS.values()) for s in list(r))
+
+
+def evict_snapshot_rings(fraction: float) -> int:
+    """Free ``fraction`` of the bytes the live decode snapshot rings hold,
+    oldest snapshot first, for the governor. Returns the bytes freed. A
+    request whose snapshots go stores its retirement from the snapshots
+    it takes after, or stores none."""
+    fraction = min(1.0, max(0.0, float(fraction)))
+    if fraction <= 0.0:
+        return 0
+    with _RING_LOCK:
+        held = sorted(((getattr(s, "seq", -1), id(s), r, s)
+                       for r in list(_RINGS.values()) for s in list(r)),
+                      key=lambda e: e[:2])
+        total = sum(getattr(e[3], "size", 0) for e in held)
+        want = total if fraction >= 1.0 else math.ceil(total * fraction)
+        drop: dict = {}
+        freed = 0
+        for _, _, r, s in held:
+            if fraction < 1.0 and freed >= want:
+                break
+            drop.setdefault(id(r), (r, set()))[1].add(id(s))
+            freed += getattr(s, "size", 0)
+        for r, ids in drop.values():
+            r[:] = [s for s in r if id(s) not in ids]
+    if drop:
+        _log.info("APC decode ckpt: evicted %d snapshots, %.2f GB, for "
+                  "memory", sum(len(v[1]) for v in drop.values()),
+                  freed / 1e9)
+    return freed
+
+
 def _cache_offset_max(prompt_cache) -> int:
     p = 0
     for c in prompt_cache or ():
@@ -2752,13 +2855,16 @@ def _cache_offset_max(prompt_cache) -> int:
 
 
 def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
-                     generated: list[int]) -> None:
-    """Advance the decode-time snapshot ring for a live B=1 ckpt row.
+                     generated: list[int], row: int | None = None) -> None:
+    """Advance the decode-time snapshot ring for a live ckpt row.
 
     ``stash`` is the request's retirement context (``snaps`` /
-    ``snap_next`` / ``snap_frozen`` live here and die with it). Cheap
-    off-boundary; never raises into the decode loop, and a failure
-    disables the ring for the request rather than retrying per token.
+    ``snap_next`` / ``snap_frozen`` live here and die with it). ``row``
+    is the request's row in a batch of two or more, whose states the
+    snapshot takes from that row alone; None reads ``prompt_cache`` as
+    the row's own. Cheap off-boundary; never raises into the decode
+    loop, and a failure disables the ring for the request rather than
+    retrying per token.
     """
     try:
         if stash.get("snap_frozen") or not stash.get("snap_ok"):
@@ -2768,13 +2874,29 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         if interval <= 0 or ctx is None:
             return
         full_ids = stash["full_ids"]
-        p = _cache_offset_max(prompt_cache)
+        nxt = stash.get("snap_next")
+        if nxt is not None and len(full_ids) + len(generated) < nxt:
+            # The row's cache holds at most its tokens so far. A batch
+            # class keeps its offsets in arrays, and reading one waits
+            # for the step in flight, so they are read once a boundary
+            # is due.
+            return
+        if row is not None and any(
+                _is_kvarn(str(t)) for t in stash.get("layout") or ()):
+            # A kvarn record carries its whole KV inline, so the snapshot
+            # of a row in a batch would copy that KV at every boundary,
+            # and requantize it when the row is padded. The row takes its
+            # snapshots once it decodes alone.
+            return
+        if row is None:
+            p = _cache_offset_max(prompt_cache)
+        else:
+            p = row_kv_len(prompt_cache, row) or 0
         # The render retokenizes the whole sequence, so its cost grows
         # with p; widening the interval with p keeps prediction a bounded
         # fraction of decode time.
         eff = max(interval, p >> 6)
         grid = int(stash.get("snap_grid") or 1)
-        nxt = stash.get("snap_next")
         if nxt is None:
             nxt = _grid_ceil(len(full_ids) + eff, grid)
             stash["snap_next"] = nxt
@@ -2800,8 +2922,9 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         if pred + _DECODE_CKPT_MARGIN < p:
             # Structural divergence behind us: no future snapshot can sit
             # at or below the final LCP. Keep only slots that still can.
-            stash["snaps"] = [s for s in stash.get("snaps") or ()
-                              if s[0] <= pred]
+            ring = _snap_ring(stash)
+            with _RING_LOCK:
+                ring[:] = [s for s in ring if s[0] <= pred]
             stash["snap_frozen"] = True
             _log.info("APC decode ckpt frozen: render diverges at %d "
                       "(live %d)", pred, p)
@@ -2811,11 +2934,17 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         pending: list[Any] = []
         for c in prompt_cache:
             # Plain KV is sliced from the row at retirement. A row that
-            # was joined holds it in the batch class.
-            if isinstance(c, BatchKVCache) or (
+            # was joined holds it in the batch class, or in a cache of one
+            # cache per row (qwen4exp's QSA layers), which the retirement
+            # extracts.
+            if isinstance(c, BatchKVCache) or getattr(
+                    c, "holds_row_caches", False) or (
                     isinstance(c, KVCache)
                     and not isinstance(c, RotatingKVCache)):
                 continue
+            if row is not None:
+                # The row's view, copied once by the clone below.
+                c = (_row_view(c) or c.extract)(row)
             clone = _clone_single_row(c, pending)
             if clone is None:
                 stash["snap_ok"] = False
@@ -2825,12 +2954,17 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             states.append(clone)
         # The ring holds two. The oldest makes room before the new
         # snapshot materializes, so it never holds three.
-        snaps = stash.setdefault("snaps", [])
-        del snaps[:-1]
+        ring = _snap_ring(stash)
+        with _RING_LOCK:
+            del ring[:-1]
         if pending:
             from gmlx.eval_guard import guard
             guard.eval(*pending, site="decode-ckpt-tick", owner="owned")
-        snaps.append((p, states))
+        from .kv_cache import cache_nbytes
+        snap = _Snap((p, states))
+        snap.seq, snap.size = next(_RING_SEQ), cache_nbytes(states)
+        with _RING_LOCK:
+            ring.append(snap)
         stash["snap_next"] = _grid_ceil(p + eff, grid)
         _log.info("APC decode ckpt snapshot: p=%d pred=%d", p, pred)
     except Exception:
@@ -2842,13 +2976,34 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
 def _snap_assemble(prompt_cache: list[Any], states: list[Any],
                    p: int) -> list[Any] | None:
     """Rebuild a single-row cache list at snapshot position ``p``: plain
-    KV sliced from the live row, rotating windows and recurrent states
-    from the snapshot clones."""
+    KV and QSA layers sliced from the live row, rotating windows and
+    recurrent states from the snapshot clones."""
     from .kv_cache import KVCache, RotatingKVCache
 
     out = []
     si = 0
     for c in prompt_cache:
+        if getattr(c, "holds_row_caches", False):
+            # A batched QSA row: the tick took no snapshot of it.
+            return None
+        if _qsa_tag(c) is not None:
+            # K, V, indexer keys and positions to p, as the prefix arm of
+            # the layer's merge takes them, so the record tags "qsa:R" as
+            # the lookups sign. Views of the live row, set past the state
+            # setter, which copies and evaluates each stream: the store
+            # copies what it keeps, so its copies are the only ones.
+            if int(c.offset) < p:
+                return None
+            st = c.state
+            if st[0] is None or st[2] is None:
+                return None
+            q = type(c)(c.ratio)
+            q._kb, q._vb = st[0][..., :p, :], st[1][..., :p, :]
+            q._ib = st[2][:, :p]
+            q.pos = None if len(st) == 3 else st[3][:, :, :p]
+            q.offset = p
+            out.append(q)
+            continue
         if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
             if c.keys is None or int(getattr(c, "offset", 0) or 0) < p:
                 return None
@@ -2870,11 +3025,11 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
 def _retire_usable(manager, caches, layout, refused) -> bool:
     """Whether a retirement record of ``caches`` can serve a lookup: its
     layout is the one the request's lookup signed with (``layout``; None
-    when the arming recorded none). A batched row whose QSA layers left
-    the merge without their indexer keys, or a decode snapshot assembled
-    with plain KV in their place, tags "kv" where every lookup signs
-    "qsa:R": such a record would cost the room and strip its chain for
-    nothing, so it is not stored. A refused layout goes on ``refused``."""
+    when the arming recorded none). A row whose QSA layers come back as
+    plain KV, as the padded batch class leaves them, tags "kv" where every
+    lookup signs "qsa:R": such a record would cost the room and strip its
+    chain for nothing, so it is not stored. A refused layout goes on
+    ``refused``."""
     if layout is None:
         return True
     got = ckpt_layout(caches, int(manager.block_size))
@@ -2892,7 +3047,7 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
     tier stays empty, so the stock warm path never bypasses arming.
     Nothing a lookup signed ``layout`` cannot use (``_retire_usable``):
     one retire_layout decline and one line per retirement, however many
-    candidates it refused (every decode snapshot of a QSA model is one).
+    candidates it refused.
     Returns the stored length (0 = nothing)."""
     refused: list = []
     try:
@@ -2980,6 +3135,12 @@ def retirement_blocked():
         yield
     finally:
         _RETIRE_BLOCKED[0] -= 1
+
+
+def retirement_is_blocked() -> bool:
+    """Whether a ``retirement_blocked`` scope is open: a caller skips the
+    work it does for a retirement store, which would store nothing."""
+    return _RETIRE_BLOCKED[0] > 0
 
 
 def retirement_store(

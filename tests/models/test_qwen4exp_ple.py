@@ -81,3 +81,20 @@ def test_ple_hash_gate_off_on_cpu():
         assert q4._ple_hash() is None
     finally:
         q4._ple_hash_kernel = None
+
+
+@pytest.mark.parametrize("shape", [(1, 1), (2, 7), (2, 63)])
+def test_the_host_hash_reads_the_rows_the_model_reads(shape):
+    # The table read-ahead hashes a prompt's rows on the host before its
+    # chunk runs: the rows the model's own hash gives, EOS cuts included.
+    B, T = shape
+    ple = _ple()
+    rng = np.random.default_rng(B * 100 + T + 1)
+    ids = rng.integers(0, 248000, size=(B, T))
+    ids[rng.random((B, T)) < 0.15] = _EOS
+    prev = rng.integers(0, 248000, size=(B, 2))
+    prev[rng.random((B, 2)) < 0.3] = _EOS
+    want = _rows(ple, ids.astype(np.int64), prev.astype(np.int64),
+                 _real_apple_gpu())
+    got = ple.host_hash()(np.concatenate([prev, ids], axis=1))
+    assert got.shape == want.shape and (got == want).all()

@@ -308,9 +308,9 @@ def test_autosize_stashes_the_pools_share(monkeypatch):
 
 def test_a_retirement_no_lookup_can_use_stores_nothing():
     """The arming recorded the layout the request's lookup signed with. A
-    retirement whose cache tags another layout (QSA layers out of a merge
-    without their indexer keys tag "kv") stores nothing and counts a
-    retire_layout decline; one that matches stores."""
+    retirement whose cache tags another layout (QSA layers that come back
+    as plain KV tag "kv") stores nothing and counts a retire_layout
+    decline; one that matches stores."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     ids = _ids(0, 52)
     cache = make_hybrid_cache(52, seed=4)
@@ -330,9 +330,9 @@ def test_a_retirement_no_lookup_can_use_stores_nothing():
                          ids=["diverged", "whole"])
 def test_a_retirement_counts_its_refused_layouts_once(caplog, max_len,
                                                       refused):
-    """A QSA row that took decode snapshots alone, then joined a batch,
-    leaves as plain KV, and so does every snapshot assembled for it. Its
-    retirement counts one decline and logs one line however many
+    """A QSA row whose layers come back as plain KV, as the padded batch
+    class leaves them, so its decode snapshots assemble with plain KV too.
+    Its retirement counts one decline and logs one line however many
     candidates it refused, and says nothing of missing snapshots."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(72, seed=5)
@@ -392,7 +392,7 @@ def _plain_armed(man, ids, make, seed):
 
 def _mtp_armed(man, ids, make, seed):
     """An MTP prompt batch armed by _mtp_prefill_init, and the retirement
-    context the B=1 rounds pop off its cache."""
+    context the B=1 rounds pop off its cache, which a restore replaces."""
     from gmlx.spec import mtp_prefill
     from gmlx.spec.speculative import _pop_retire_ctx
 
@@ -407,6 +407,7 @@ def _mtp_armed(man, ids, make, seed):
         _prompt_kwargs={}, prefill_step_size=16,
         _prompt_length_aware_keys=())
     mtp_prefill._mtp_prefill_init(batch)
+    cache = batch.prompt_cache
     return model, cache, _pop_retire_ctx(cache)
 
 
@@ -417,20 +418,48 @@ def _replay(man, stash, cache):
                       extra_hash=stash["extra_hash"], kind="replay")
 
 
-def _plain_post_prefill(man, ids, seed, replay):
+def _turn_landed(man, stash, cache, turn):
+    """The chain's anchor at 16, then a render-stable boundary at ``turn``
+    landed during the prefill, the whole prompt render-stable."""
+    ids, meta = stash["full_ids"], stash["apc_meta"]
+    for p in (16, turn):
+        assert ckpt_store(man, ids[:p], _trim_kv(cache, p),
+                          extra_hash=stash["extra_hash"])
+    meta.update(ckpt_p_stable=len(ids) - 1, ckpt_p_stable_bounds=[turn],
+                ckpt_stored_boundaries=[turn])
+
+
+def _turn_restored(stash, turn):
+    """The whole prompt render-stable, its turn boundary at ``turn``
+    stored by an earlier request and restored past, so none landed."""
+    stash["apc_meta"].update(
+        ckpt_p_stable=len(stash["full_ids"]) - 1,
+        ckpt_p_stable_bounds=[turn], ckpt_stored_boundaries=[])
+
+
+def _plain_post_prefill(man, ids, seed, replay, turn=None, restored=None):
     from gmlx.spec.mtp_prefill import _ckpt_plain_post_prefill
 
     b = _plain_armed(man, ids, make_hybrid_cache, seed)
+    stash = b.prompt_cache[0]._kq_apc_retire
+    if turn:
+        _turn_landed(man, stash, b.prompt_cache, turn)
+    if restored:
+        _turn_restored(stash, restored)
     if replay:
-        _replay(man, b.prompt_cache[0]._kq_apc_retire, b.prompt_cache)
+        _replay(man, stash, b.prompt_cache)
     _ckpt_plain_post_prefill(b)
     return b._apc_meta[0]
 
 
-def _mtp_post_prefill(man, ids, seed, replay):
+def _mtp_post_prefill(man, ids, seed, replay, turn=None, restored=None):
     from gmlx.spec.speculative import _ckpt_post_prefill
 
     model, cache, ctx = _mtp_armed(man, ids, make_hybrid_cache, seed)
+    if turn:
+        _turn_landed(man, ctx, cache, turn)
+    if restored:
+        _turn_restored(ctx, restored)
     if replay:
         _replay(man, ctx, cache)
     _ckpt_post_prefill(model, cache, ctx)
@@ -452,6 +481,61 @@ def test_the_post_prefill_skips_the_store_its_replay_covers(post):
     recs = {r.ids[0]: (r.p, r.kind) for r in cs._ckpt_records(man).values()}
     assert recs == {a[0]: (n, "anchor"), b[0]: (n - 1, "anchor")}
     assert man.stats_snapshot()["ckpt_stores"] == 2
+
+
+@pytest.mark.parametrize("post", [_plain_post_prefill, _mtp_post_prefill],
+                         ids=["plain", "mtp"])
+def test_the_replay_stands_in_beside_a_landed_turn_boundary(post):
+    """A prompt whose render-stable boundary landed on the grid below its
+    end skips the p=N store, and its N-1 replay still becomes a boundary.
+    A next turn that extends the prompt, with no retirement record,
+    restores at N-1, not at the turn boundary, which stays. Once the
+    retirement lands past it, the N-1 record is a replay again: it serves
+    the resend, and the turn boundary keeps its place on the chain for a
+    branch the retirement does not reach."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    n = 52
+    ids = _ids(3, n)
+    meta = post(man, ids, 3, replay=True, turn=32)
+    assert meta["ckpt_stored_boundaries"] == [32]
+    recs = [(r.p, r.kind) for r in cs._ckpt_records(man).values()]
+    assert recs == [(16, "anchor"), (32, "boundary"), (n - 1, "boundary")]
+    _, got = ckpt_lookup(man, ids + [7, 8], extra_hash=0)
+    assert got == n - 1
+    seq = ids + [9001, 9002, 9003, 9004]
+    assert ckpt_store(man, seq, make_hybrid_cache(len(seq), seed=8),
+                      kind="retire")
+    recs = sorted((r.p, r.kind) for r in cs._ckpt_records(man).values())
+    assert recs == [(16, "anchor"), (32, "boundary"), (n - 1, "replay"),
+                    (n + 4, "retire")]
+    _, got = ckpt_lookup(man, ids + [7, 8], extra_hash=0)
+    assert got == 32
+    _, got = ckpt_lookup(man, ids, extra_hash=0)
+    assert got == n - 1
+
+
+@pytest.mark.parametrize("post", [_plain_post_prefill, _mtp_post_prefill],
+                         ids=["plain", "mtp"])
+def test_a_resend_that_restored_past_the_turn_boundary_keeps_it(post):
+    """A second request with the same prompt, sent while the first still
+    decodes, restores past the turn boundary the first stored, so none
+    lands for it, and its replay stands in. The first one's retirement
+    turns that stand-in back into a replay and keeps the turn boundary
+    for a branch between it and the prompt end."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    n = 52
+    ids = _ids(3, n)
+    post(man, ids, 3, replay=True, turn=32)
+    assert post(man, ids, 4, replay=True,
+                restored=32)["ckpt_stored_boundaries"] == []
+    seq = ids + [9001, 9002, 9003, 9004]
+    assert ckpt_store(man, seq, make_hybrid_cache(len(seq), seed=8),
+                      kind="retire")
+    recs = sorted((r.p, r.kind) for r in cs._ckpt_records(man).values())
+    assert recs == [(16, "anchor"), (32, "boundary"), (n - 1, "replay"),
+                    (n + 4, "retire")]
+    _, got = ckpt_lookup(man, ids + [7, 8], extra_hash=0)
+    assert got == 32
 
 
 def _decode_qsa(cache, tok):
@@ -479,9 +563,18 @@ def _render(monkeypatch, final):
             len(seq) if partial else final(seq))
 
 
+def _seen(cache, seen):
+    """The row's state after a step, by its offset: each QSA layer's held
+    streams, the other layers' recurrent states."""
+    p = next(int(c.offset) for c in cache if hasattr(c, "update_and_fetch_qsa"))
+    seen[p] = [c.state if hasattr(c, "update_and_fetch_qsa")
+               else tuple(c.cache) for c in cache]
+
+
 def _plain_turn(man, ids, steps):
     """Arm, decode and retire a stock-path row: the step tick takes the
-    decode snapshots and the batch filter retires through _plain_retire."""
+    decode snapshots and the batch filter retires through _plain_retire.
+    Returns the stash and the row's state after each step."""
     from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
     ckpt._install_plain_ckpt_decode()
@@ -489,12 +582,14 @@ def _plain_turn(man, ids, steps):
     gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
     gb.uids = [ids[0]]
     gb.prompt_cache = b.prompt_cache
+    seen = {}
     for tok in steps:
         _decode_qsa(gb.prompt_cache, tok)
+        _seen(gb.prompt_cache, seen)
         ckpt._plain_step_tick(gb, ([tok], None, None, None))
     stash = gb._kq_apc_retire_rows[ids[0]]
     gb.filter([])
-    return stash
+    return stash, seen
 
 
 def _mtp_turn(man, ids, steps):
@@ -504,33 +599,172 @@ def _mtp_turn(man, ids, steps):
     from gmlx.spec.speculative import _retire_b1
 
     model, cache, ctx = _mtp_armed(man, ids, _qsa_hybrid_cache, ids[0])
-    gen = []
+    gen, seen = [], {}
     for tok in steps:
         _decode_qsa(cache, tok)
+        _seen(cache, seen)
         gen.append(tok)
         decode_ckpt_tick(ctx, cache, gen)
     _retire_b1(model, cache, gen, ctx)
-    return ctx
+    return ctx, seen
 
 
 @pytest.mark.parametrize("turn", [_plain_turn, _mtp_turn],
                          ids=["plain", "mtp"])
-def test_a_retirement_checks_the_layout_its_arming_signed(monkeypatch, turn):
+def test_a_lone_qsa_row_retires_whole_or_from_its_decode_snapshot(
+        monkeypatch, turn):
     """Driven from the arming: it signs the live QSA layout, a decode
     snapshot lands at 48, and the row retires at 56. The whole sequence
     stores. A render that diverges at 52 falls to the snapshot, whose QSA
-    layers come back as plain KV: one retire_layout decline, no record."""
+    layers are the row's own to 48: it stores at 48 with no retire_layout
+    decline, and the next turn's lookup restores the row as it stood at
+    48, bit for bit."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     steps = range(9000, 9024)
     _render(monkeypatch, len)
-    stash = turn(man, _ids(0, 32), steps)
+    stash, _ = turn(man, _ids(0, 32), steps)
     assert [p for p, _ in stash["snaps"]] == [48]
     assert [r.p for r in cs._ckpt_records(man).values()] == [56]
     _render(monkeypatch, lambda seq: 52)
-    stash = turn(man, _ids(1, 32), steps)
+    ids = _ids(1, 32)
+    stash, seen = turn(man, ids, steps)
     assert [p for p, _ in stash["snaps"]] == [48]
-    assert [r.p for r in cs._ckpt_records(man).values()] == [56]
-    assert man.stats_snapshot()["ckpt_declines"] == {"retire_layout": 1}
+    assert sorted(r.p for r in cs._ckpt_records(man).values()) == [48, 56]
+    assert man.stats_snapshot()["ckpt_declines"] == {}
+    seq = ids + list(steps)
+    warm, got = ckpt_lookup(man, seq[:48] + [7],
+                            extra_hash=stash["extra_hash"],
+                            layout=stash["layout"])
+    assert got == 48
+    for c, row in zip(warm, seen[48]):
+        held = c.state if hasattr(c, "update_and_fetch_qsa") else c.cache
+        assert len(held) == len(row)
+        for x, y in zip(held, row):
+            assert mx.array_equal(x, y).item()
+
+
+def _decode_rows(cache, toks):
+    """One decode step on a batched QSA hybrid: a key, value and indexer
+    key row into each row's decode tail on each QSA layer, as the layer's
+    step appends them, and new recurrent states on the rest."""
+    mx.random.seed(sum(toks))
+    for c in cache:
+        if getattr(c, "holds_row_caches", False):
+            for r in c.rows:
+                r.append_qsa(mx.random.normal((1, H, 1, D)),
+                             mx.random.normal((1, H, 1, D)),
+                             mx.random.normal((1, 1, D)))
+        else:
+            c.cache = [mx.random.normal(a.shape) for a in c.cache]
+
+
+def _row_state(cache, i):
+    """Row ``i`` of a batched QSA hybrid, read without folding a tail:
+    K, V and indexer keys of each QSA layer, the states of the rest."""
+    out = []
+    for c in cache:
+        if getattr(c, "holds_row_caches", False):
+            r = c.rows[i]
+            out.append((*r.kv_full(), r._ik_rows(0, r.offset)))
+        else:
+            out.append(tuple(a[i:i + 1] for a in c.cache))
+    mx.eval(out)
+    return out
+
+
+def test_a_row_leaving_a_qsa_decode_batch_retires_what_its_lookup_restores():
+    """Two armed QSA hybrid rows join a decode batch, where each QSA layer
+    is one BatchQSAKVCache, and decode together. The row that finishes
+    first retires through its extract: single-row QSA layers, the layout
+    its arming signed. Its whole sequence stores with no retire_layout
+    decline, and the next turn's lookup restores the row's state bit for
+    bit."""
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+    from gmlx.models.qwen4_exp.model import BatchQSAKVCache
+
+    ckpt._install_plain_ckpt_decode()
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    prompts = (_ids(0, 32), _ids(1, 40))
+    batches = []
+    for ids in prompts:
+        gb = GenerationBatch.empty(model=None, sampler=None,
+                                   stop_criteria=None)
+        gb.uids, gb.max_tokens, gb._num_tokens = [ids[0]], [64], [0]
+        gb.prompt_cache = _plain_armed(man, ids, _qsa_hybrid_cache,
+                                       ids[0]).prompt_cache
+        batches.append(gb)
+    gb = batches[0]
+    gb.extend(batches[1])
+    qsa = [i for i, t in enumerate(LAYOUT) if t == "kv"]
+    assert all(type(gb.prompt_cache[i]) is BatchQSAKVCache for i in qsa)
+    steps = range(9000, 9006)
+    for tok in steps:
+        _decode_rows(gb.prompt_cache, [tok, tok + 100])
+        ckpt._plain_step_tick(gb, ([tok, tok + 100], None, None, None))
+    assert all(gb.prompt_cache[i].rows[1]._tl for i in qsa), "a tail to fold"
+    want = _row_state(gb.prompt_cache, 1)
+    stash = gb._kq_apc_retire_rows[prompts[1][0]]
+    gb.filter([0])
+    seq = prompts[1] + [t + 100 for t in steps]
+    assert [r.p for r in cs._ckpt_records(man).values()] == [len(seq)]
+    assert man.stats_snapshot()["ckpt_declines"] == {}
+    warm, got = ckpt_lookup(man, seq + [7], extra_hash=stash["extra_hash"],
+                            layout=stash["layout"])
+    assert got == len(seq)
+    for c, row in zip(warm, want):
+        held = c.state if hasattr(c, "update_and_fetch_qsa") else c.cache
+        assert len(held) == len(row)
+        for x, y in zip(held, row):
+            assert mx.array_equal(x, y).item()
+
+
+def test_a_row_in_a_qsa_decode_batch_retires_from_its_own_decode_snapshot(
+        monkeypatch):
+    """Two armed QSA hybrid rows decode together in one batch. Each takes
+    its decode snapshots from its own row of the batch's recurrent states.
+    The row that finishes first, with a next-turn render that diverges
+    inside its reply at 68, stores from its snapshot at 64 with no
+    retire_layout decline, and the next turn's lookup restores the row as
+    it stood at 64, bit for bit."""
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+
+    ckpt._install_plain_ckpt_decode()
+    _render(monkeypatch, lambda seq: 68)
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    prompts = (_ids(0, 32), _ids(1, 40))
+    batches = []
+    for ids in prompts:
+        gb = GenerationBatch.empty(model=None, sampler=None,
+                                   stop_criteria=None)
+        gb.uids, gb.max_tokens, gb._num_tokens = [ids[0]], [64], [0]
+        gb.prompt_cache = _plain_armed(man, ids, _qsa_hybrid_cache,
+                                       ids[0]).prompt_cache
+        batches.append(gb)
+    gb = batches[0]
+    gb.extend(batches[1])
+    steps = range(9000, 9032)
+    seen = {}
+    for tok in steps:
+        _decode_rows(gb.prompt_cache, [tok, tok + 100])
+        ckpt._plain_step_tick(gb, ([tok, tok + 100], None, None, None))
+        if tok == 9023:
+            seen[64] = _row_state(gb.prompt_cache, 1)
+    stashes = [gb._kq_apc_retire_rows[ids[0]] for ids in prompts]
+    gb.filter([0])
+    seq = prompts[1] + [t + 100 for t in steps]
+    assert [r.p for r in cs._ckpt_records(man).values()] == [64]
+    assert man.stats_snapshot()["ckpt_declines"] == {}
+    assert [[p for p, _ in s.get("snaps", ())] for s in stashes] == [
+        [48, 64], [64]]
+    warm, got = ckpt_lookup(man, seq[:64] + [7],
+                            extra_hash=stashes[1]["extra_hash"],
+                            layout=stashes[1]["layout"])
+    assert got == 64
+    for c, row in zip(warm, seen[64]):
+        held = c.state if hasattr(c, "update_and_fetch_qsa") else c.cache
+        assert len(held) == len(row)
+        for x, y in zip(held, row):
+            assert mx.array_equal(x, y).item()
 
 
 def test_the_counters_reach_the_stats_and_the_metrics_payload(monkeypatch):

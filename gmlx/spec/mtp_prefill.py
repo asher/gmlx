@@ -17,6 +17,7 @@ import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_int
+from gmlx.serve.capacity import note_own_before_clear
 from gmlx.spec.ckpt import (
     _install_ckpt_checkpoint_store,
     _install_exact_anchor_pick,
@@ -43,6 +44,7 @@ from gmlx.spec.engine import (
     _resolve_l1,
     _trim_prompt_columns,
 )
+from gmlx.stream.table_readahead import read_ahead
 from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
@@ -388,13 +390,14 @@ def _ckpt_plain_post_prefill(result) -> None:
 
         m = stash.get("apc_meta")
         extra_hash = as_salt(stash.get("extra_hash", 0))
-        if ckpt_full_store_redundant(m):
+        if ckpt_replay_stands_in(stash["manager"], stash["full_ids"], cache,
+                                 extra_hash=extra_hash,
+                                 keep=(m or {}).get("ckpt_p_stable"),
+                                 beside_turn=ckpt_full_store_redundant(m)):
+            pass
+        elif ckpt_full_store_redundant(m):
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
-        elif ckpt_replay_stands_in(stash["manager"], stash["full_ids"], cache,
-                                   extra_hash=extra_hash,
-                                   keep=(m or {}).get("ckpt_p_stable")):
-            pass
         elif ckpt_store(
                 stash["manager"], stash["full_ids"], cache,
                 extra_hash=extra_hash, keep=(m or {}).get("ckpt_p_stable")):
@@ -610,6 +613,9 @@ def install_full_prompt_mtp_prefill() -> None:
         n = prefill_decay.fit_cut(self, n_span) if n_span < n else n_span
         if n <= 0:
             return 0
+        # The table rows the chunk reads go to the page cache beside its
+        # forward, after the restore above trimmed what the cache holds.
+        read_ahead(self, n)
         prompt_kwargs = self._prompt_kwargs_for_step(n)
         prompt_kwargs = _widen_prompt_rope_state(self, prompt_kwargs)
         with lora_rows.published(getattr(self, "uids", [])):
@@ -703,6 +709,9 @@ def install_full_prompt_mtp_prefill() -> None:
         # _install_ckpt_checkpoint_store).
         self._store_apc_exact_checkpoints()
         _trim_prompt_columns(self, n)
+        # What the process held before the clear prices the next count of
+        # memory wired outside it.
+        note_own_before_clear()
         mx.clear_cache()
         return n
 

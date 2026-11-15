@@ -64,9 +64,13 @@ def _arrays(v, depth: int = 2):
 
 
 def _leaf_caches(prompt_cache):
-    """Flatten one CacheList level, same shape as prefill_decay's walk."""
+    """Flatten one CacheList level, same shape as prefill_decay's walk,
+    and the rows of a cache that holds one cache per batch row (their
+    arrays are on the rows, so the wrapper alone counts zero)."""
     for entry in prompt_cache or ():
         subs = getattr(entry, "caches", None)
+        if subs is None and getattr(entry, "holds_row_caches", False):
+            subs = entry.rows
         for c in subs or (entry,):
             yield c
 

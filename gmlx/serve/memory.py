@@ -294,6 +294,19 @@ class cache_release_gate:
         return False
 
 
+def _cache_arrays(c):
+    """The arrays a cache holds, each once: the in-place append keeps a
+    second handle on a cache's buffers (``_kv_own``)."""
+    from .memtrace import _arrays
+
+    seen = set()
+    for v in vars(c).values():
+        for a in _arrays(v):
+            if id(a) not in seen:
+                seen.add(id(a))
+                yield a
+
+
 def spec_state_bytes(gen):
     """Speculative-batch resident bytes the cache walk cannot see:
     the parked batch attrs (hidden, shared KV snapshot, prompt tokens,
@@ -316,8 +329,7 @@ def spec_state_bytes(gen):
     dcache = getattr(draft, "_cache", None)
     if dcache:
         for c in dcache:
-            nbytes = sum(a.nbytes for v in vars(c).values()
-                         for a in _arrays(v))
+            nbytes = sum(a.nbytes for a in _cache_arrays(c))
             if _cache_depth(c) > 0:
                 depth_scaled += nbytes
             else:
@@ -344,7 +356,37 @@ def _fold_window(kind: dict, c) -> None:
                           else min(kind["window"], window))
 
 
-def update_kv_rates(gen) -> None:
+def _held_rows(batch) -> tuple:
+    """The rows the batch's cache holds, from its metadata: the leading
+    dims of the arrays of the first cache that holds any, or the row count
+    of a cache that holds one cache per row (``holds_row_caches``). A
+    speculative batch's uids move at a finish or an injection, and its
+    cache rows at the end of the round after."""
+    from .memtrace import _arrays
+
+    for entry in getattr(batch, "prompt_cache", None) or ():
+        for c in getattr(entry, "caches", None) or (entry,):
+            if getattr(c, "holds_row_caches", False):
+                return (len(c.rows),)
+            dims = tuple(int(a.shape[0])
+                         for v in (getattr(c, "__dict__", None) or {}).values()
+                         for a in _arrays(v) if a.ndim)
+            if dims:
+                return dims
+    return ()
+
+
+def _walk_key(gen) -> tuple:
+    """The rows a walk measures: the active row count, the batch's uids,
+    so a leave and a join in the same step change it too, and the rows
+    its cache holds, which a speculative batch sheds and merges a round
+    after its uids move."""
+    batch = getattr(gen, "_generation_batch", None)
+    return (batch_rows(gen), tuple(getattr(batch, "uids", None) or ()),
+            _held_rows(batch))
+
+
+def update_kv_rates(gen, fold: bool = True) -> None:
     """Fold a fresh per-kind KV bytes-per-row-token measurement of the live
     decode batch into the generator's running estimate (``_kq_admit_``
     attrs, the same convention the gate's defer state uses). Speculative
@@ -355,13 +397,23 @@ def update_kv_rates(gen) -> None:
     state) are constant-size: they join the per-row constant, never the
     rate map. A cache that owns its accounting (``admit_bytes``, the kvarn
     classes) supplies its record rate, depth and per-row bytes directly,
-    because its arrays' time axis is not its token count."""
+    because its arrays' time axis is not its token count. With no row
+    decoding, the live bytes and depth go to 0: the batch they measured
+    has finished. ``_kq_admit_walk_key`` records the rows the call saw,
+    so the governor walks again after a join or a leave
+    (``walk_changed_batch``). With ``fold`` False the walk refreshes the
+    live figures and leaves the rate estimate as it was."""
     batch = gen._generation_batch
     rows = batch_rows(gen)
     pc = getattr(batch, "prompt_cache", None)
-    if rows <= 0 or not pc:
+    gen._kq_admit_walk_key = _walk_key(gen)
+    if rows <= 0:
+        gen._kq_admit_live_bytes = 0.0
+        gen._kq_admit_live_depth = 0
         return
-    from .memtrace import _arrays, _leaf_caches
+    if not pc:
+        return
+    from .memtrace import _leaf_caches
 
     fresh: dict = {}
     live_bytes = 0.0
@@ -396,11 +448,10 @@ def update_kv_rates(gen) -> None:
             continue
         nbytes = 0
         alen = 0
-        for v in vars(c).values():
-            for a in _arrays(v):
-                nbytes += a.nbytes
-                if a.ndim >= 3:
-                    alen = max(alen, int(a.shape[-2]))
+        for a in _cache_arrays(c):
+            nbytes += a.nbytes
+            if a.ndim >= 3:
+                alen = max(alen, int(a.shape[-2]))
         if not nbytes:
             continue
         live_bytes += nbytes
@@ -435,17 +486,19 @@ def update_kv_rates(gen) -> None:
         fresh["_spec_state"] = {
             "rate": spec_depth_bytes / live_depth / rows, "window": None}
     live_bytes += spec_depth_bytes + spec_row_const
-    prev = getattr(gen, "_kq_admit_kv_rates", None) or {}
-    merged = {}
-    for name, k in fresh.items():
-        old = prev.get(name)
-        rate = (k["rate"] if old is None else
-                (1 - _KV_EWM_ALPHA) * old["rate"] + _KV_EWM_ALPHA * k["rate"])
-        merged[name] = {"rate": rate, "window": k["window"]}
-        for key in ("fill", "grid"):
-            if key in k:
-                merged[name][key] = k[key]
-    gen._kq_admit_kv_rates = merged
+    if fold:
+        prev = getattr(gen, "_kq_admit_kv_rates", None) or {}
+        merged = {}
+        for name, k in fresh.items():
+            old = prev.get(name)
+            rate = (k["rate"] if old is None else
+                    (1 - _KV_EWM_ALPHA) * old["rate"]
+                    + _KV_EWM_ALPHA * k["rate"])
+            merged[name] = {"rate": rate, "window": k["window"]}
+            for key in ("fill", "grid"):
+                if key in k:
+                    merged[name][key] = k[key]
+        gen._kq_admit_kv_rates = merged
     gen._kq_admit_live_bytes = live_bytes
     gen._kq_admit_live_depth = live_depth
     row_const = spec_row_const + state_row_bytes
@@ -454,6 +507,18 @@ def update_kv_rates(gen) -> None:
     gen._kq_admit_n_caches = n_caches
     gen._kq_admit_layer = layer
     gen._kq_admit_layer_state = layer_state
+
+
+def walk_changed_batch(gen) -> None:
+    """Walk the batch for its live figures when its rows are not the ones
+    the last walk saw: a join or a leave since then, in the batch or in
+    its cache, a join at an idle server among them. The gate walks only
+    while a request waits, and the governor's shed and reserve read these
+    figures between its walks. The rate estimate still folds only at the
+    gate's walks, so the projection prices as it did. Reads array
+    metadata and integer depths, never a value."""
+    if _walk_key(gen) != getattr(gen, "_kq_admit_walk_key", (0, (), ())):
+        update_kv_rates(gen, fold=False)
 
 
 def project_admission(gen, candidates):
@@ -493,18 +558,20 @@ def project_admission(gen, candidates):
         cand_tokens.append(prompt_toks + max_toks)
     if not cand_tokens:
         return None
-    width = batch_rows(gen) + len(cand_tokens)
-    tokens = max([getattr(gen, "_kq_admit_live_depth", 0)] + cand_tokens)
+    rows = batch_rows(gen)
+    # With no row decoding there is no live KV to subtract and no batch
+    # depth to price at, whatever the last walk left.
+    live_bytes = getattr(gen, "_kq_admit_live_bytes", 0.0) if rows else 0.0
+    live_depth = getattr(gen, "_kq_admit_live_depth", 0) if rows else 0
+    width = rows + len(cand_tokens)
+    tokens = max([live_depth] + cand_tokens)
     kv_total = 0.0
     for k in rates.values():
         kv_total += _priced_rate(k) * width * _span(k, tokens)
     kv_total += getattr(gen, "_kq_admit_spec_row_const", 0.0) * width
-    live_bytes = getattr(gen, "_kq_admit_live_bytes", 0.0)
     # Self-consistency: the rate model evaluated at the live batch must
     # reproduce the measured bytes. A model that overstates the present
     # overstates the future by the same factor; rescale and say so.
-    rows = batch_rows(gen)
-    live_depth = getattr(gen, "_kq_admit_live_depth", 0)
     model_now = getattr(gen, "_kq_admit_spec_row_const", 0.0) * rows
     for k in rates.values():
         capped = live_depth if k["window"] is None else min(
@@ -535,10 +602,12 @@ def project_admission(gen, candidates):
              f" + reserve {reserve / 1e9:.1f}")
     # Stash for the governor's per-tick demand model: while a join is
     # pending (or its prompt batch is in flight) the declared next-tick
-    # peak includes this projection, without re-walking anything.
+    # peak includes this projection, without re-walking anything. The
+    # candidates' uids tie it to that join.
     import time
 
-    gen._kq_admit_last_projection = (time.perf_counter(), projected)
+    gen._kq_admit_last_projection = (time.perf_counter(), projected,
+                                     tuple(c[0] for c in candidates))
     return projected, head, parts
 
 

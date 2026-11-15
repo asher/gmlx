@@ -52,7 +52,7 @@ from gmlx.cache.attention import (
     create_ssm_mask,
     scaled_dot_product_attention,
 )
-from gmlx.cache.kv_cache import ArraysCache, KVCache
+from gmlx.cache.kv_cache import ArraysCache, KVCache, _BaseCache
 from gmlx.envflags import env_bool
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
@@ -640,6 +640,20 @@ def _hc_combine(h: mx.array, out: mx.array, inject: mx.array,
 # Gated DeltaNet
 
 
+def _conv_state_in(state: mx.array, dtype) -> mx.array:
+    """A conv state in the activation dtype of the call it feeds. Decode
+    runs the hc residual float32, and a conv state whose input follows it
+    is float32: on the real model the PLE's, and a GDN's after a step
+    wider than the hc kernel's 8 rows (the kq low-rank mixer emits bf16
+    up to that, the eager hc path float32). A retire record keeps them. A
+    prefill after its restore would concatenate them into its bf16 rows
+    and run float32 from there on, where the hc prefill kernels decline;
+    the cast keeps it in the dtype a fresh prefill runs. A bf16 call
+    always runs bf16, and a float32 call (decode, a verify block) gets
+    the state the concatenation promoted before."""
+    return state if state.dtype == dtype else state.astype(dtype)
+
+
 class GatedDeltaNet(nn.Module):
     """qwen3.5 gated DeltaNet with a sigmoid output gate and the GGUF tiled
     K->V head pairing applied explicitly. Attribute and cache layout match
@@ -747,6 +761,7 @@ class GatedDeltaNet(nn.Module):
                 conv_state = None
         if conv_state is None:
             conv_state = mx.zeros((B, n_keep, self.conv_dim), dtype=inputs.dtype)
+        conv_state = _conv_state_in(conv_state, inputs.dtype)
 
         if mask is not None:
             if mask.shape[0] != B:
@@ -1229,6 +1244,9 @@ class QSAKVCache(KVCache):
     _tail_cap = None
     _bt = None              # finished blocks after the first _nbb
     _nbb = 0                # finished blocks live in ``blocks``
+    # Set by a model whose decode batch cannot keep its rows on their own
+    # caches (Qwen4ExpModel._qsa_dense_batch): merge lifts such rows dense.
+    dense_lift = False
 
     def __init__(self, ratio: int = 4):
         super().__init__()
@@ -1292,9 +1310,8 @@ class QSAKVCache(KVCache):
     def _write(cls, base, start: int, rows):
         """``base`` with ``rows`` at ``start`` on the token axis, grown
         when it is short. A grown base keeps its dtype, as the write in
-        place does: a prefill after a restore runs float32 off the conv
-        states decode leaves float32, and its rows must not widen the
-        whole stream."""
+        place does: a decode-width step runs float32 off the hc residual,
+        and its rows must not widen the whole stream."""
         n = rows.shape[-2]
         if base is None or start + n > base.shape[-2]:
             dt = rows.dtype if base is None else base.dtype
@@ -1488,18 +1505,20 @@ class QSAKVCache(KVCache):
 
     @classmethod
     def merge(cls, entries, prefix_lens=None):
-        # Two callers share this name. mlx_lm's batch lift calls
-        # merge(caches): delegate to the inherited KVCache.merge; the
-        # resulting BatchKVCache drops the indexer stream, so a batched row
-        # decodes dense over its whole context, which differs from
-        # single-stream QSA attention past the indexer budget. mlx-vlm's APC
-        # merge_cache_entries calls merge(entries, prefix_lens) and
-        # dispatches on the class's own __dict__, so the arm must live
-        # here, not on a parent. Single-request batches only; multi-row
-        # joins decline to the cold path rather than guess at row padding
-        # for the indexer stream.
+        # Two callers share this name. The decode batch's lift calls
+        # merge(caches): the rows join a BatchQSAKVCache as they are, each
+        # with its indexer stream, so every batched row runs the
+        # single-row sparse attention. mlx-vlm's APC merge_cache_entries
+        # calls merge(entries, prefix_lens) and dispatches on the class's
+        # own __dict__, so the arm must live here, not on a parent.
+        # Single-request batches only; multi-row joins decline to the cold
+        # path rather than guess at row padding for the indexer stream.
         if prefix_lens is None:
-            return super().merge(entries)
+            if any(getattr(e, "dense_lift", False) for e in entries):
+                # The padded batch class: keys and values only, each row
+                # dense over its whole context.
+                return super().merge(entries)
+            return BatchQSAKVCache.merge(entries)
         if len(entries) != 1:
             return None
         e, p = entries[0], int(prefix_lens[0])
@@ -1539,6 +1558,113 @@ class QSAKVCache(KVCache):
             a.nbytes for a in (self._kb, self._vb, self._ib, self._kt,
                                self._vt, self._it, self.blocks, self._bt)
             if a is not None)
+
+
+class BatchQSAKVCache(_BaseCache):
+    """A decode batch's cache on a QSA layer: one single-row QSAKVCache per
+    batch row, in batch order.
+
+    Each row keeps its indexer key stream, so the layer can run the
+    single-row sparse attention on each row. A join, a leave or a filter
+    moves rows in the list and copies no array, and no row is padded.
+    ``left_padding`` is all zeros: it marks the cache as batched for the
+    admission lift, and no row has any. The list is ``rows``, not
+    ``caches``: readers that walk a CacheList's members would take one
+    row's offset for the layer's, and the admission lift would find a
+    member without ``left_padding`` and merge the cache again.
+    """
+
+    kv_quant_unsupported = True
+    holds_config_pools = True
+    preserve_auxiliary_kv_state = True
+    holds_row_caches = True
+
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+
+    @property
+    def left_padding(self):
+        return mx.zeros((len(self.rows),), mx.int32)
+
+    @property
+    def offset(self):
+        return mx.array([r.offset for r in self.rows], mx.int32)
+
+    @classmethod
+    def merge(cls, caches):
+        """Single rows and containers joined, in order, with no copy."""
+        rows = []
+        for c in caches:
+            rows.extend(c.rows if isinstance(c, BatchQSAKVCache) else [c])
+        return cls(rows)
+
+    def extend(self, other):
+        self.rows.extend(other.rows if isinstance(other, BatchQSAKVCache)
+                         else [other])
+
+    def filter(self, batch_indices):
+        keep = (batch_indices.tolist() if isinstance(batch_indices, mx.array)
+                else list(batch_indices))
+        self.rows = [self.rows[int(i)] for i in keep]
+
+    def extract(self, idx):
+        """Row ``idx`` as a single-row QSAKVCache on the row's buffers, so
+        its record tags "qsa:R" as the lookups sign and a batched row's
+        retirement stores.
+
+        The row's tail folds in first, in place: a fold on the copy would
+        rewrite the whole base while the live row still holds it. The copy
+        takes new handles on the buffers, not the row's arrays: a slice
+        assignment updates the array object it writes, so two caches
+        holding one array object would each write into the other's rows.
+        With a handle each, a write on either side lands in a copy. The
+        block keys are rebuilt from the indexer stream when read."""
+        row = self.rows[idx]
+        row._fold()
+        out = QSAKVCache(row.ratio)
+        out._kb, out._vb, out._ib, out.pos = (
+            None if a is None else mx.contiguous(a)
+            for a in (row._kb, row._vb, row._ib, row.pos))
+        out.offset = row.offset
+        return out
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        """Every row by the same ``n`` (no batched path rolls rows back by
+        different counts)."""
+        n = min([n] + [r.offset for r in self.rows])
+        for r in self.rows:
+            r.trim(n)
+        return n
+
+    def make_mask(self, N, return_array=False, window_size=None, **kwargs):
+        # Each row's attention builds its own mask.
+        return None if N == 1 else "causal"
+
+    @property
+    def state(self):
+        """Every row's buffers as they are held, with no fold and no slice:
+        what the batch evaluates before it changes."""
+        return [tuple(a for a in (r._kb, r._vb, r._ib, r._kt, r._vt, r._it,
+                                  r.blocks, r._bt, r.pos) if a is not None)
+                for r in self.rows]
+
+    def size(self):
+        return max((r.offset for r in self.rows), default=0)
+
+    def empty(self):
+        return all(r.offset == 0 for r in self.rows)
+
+    @property
+    def nbytes(self):
+        return sum(r.nbytes for r in self.rows)
+
+    def to_quantized(self, group_size: int = 64, bits: int = 4):
+        raise NotImplementedError(
+            "BatchQSAKVCache cannot quantize: the QSA indexer key stream has "
+            "no quantized form (drop --kv-bits for qwen4exp)")
 
 
 class QSAIndexer(nn.Module):
@@ -1878,10 +2004,10 @@ class Attention(nn.Module):
         pages = mx.broadcast_to(pages[:, None, :], (B, Hkv, pages.shape[-1]))
         return paged(q, k, v, self.scale, pages, tile_c=4)
 
-    def __call__(self, x: mx.array, mask=None, cache=None,
-                 positions=None) -> mx.array:
-        """``positions`` is the ``[3, B, L]`` mrope position block for this
-        window (VLM loads); ``None`` takes the scalar-offset text path."""
+    def _project(self, x: mx.array):
+        """The layer's projections of ``x``: q (normed, not roped), the
+        output gate, k (normed, not roped), v, and the raw indexer keys
+        (None on a layer without an indexer)."""
         B, L, _ = x.shape
         H, Hkv, D = self.num_attention_heads, self.num_key_value_heads, self.head_dim
         qg = self.q_proj(x).reshape(B, L, H, 2 * D)
@@ -1890,7 +2016,55 @@ class Attention(nn.Module):
         q = self.q_norm(q).transpose(0, 2, 1, 3)
         k = self.k_norm(self.k_proj(x).reshape(B, L, Hkv, D)).transpose(0, 2, 1, 3)
         v = self.v_proj(x).reshape(B, L, Hkv, D).transpose(0, 2, 1, 3)
+        ik = self.indexer.k_proj(x) if "indexer" in self else None
+        return q, gate, k, v, ik
 
+    def __call__(self, x: mx.array, mask=None, cache=None,
+                 positions=None) -> mx.array:
+        """``positions`` is the ``[3, B, L]`` mrope position block for this
+        window (VLM loads); ``None`` takes the scalar-offset text path."""
+        B, L, _ = x.shape
+        q, gate, k, v, ik = self._project(x)
+        if isinstance(cache, BatchQSAKVCache):
+            out = self._attend_rows(x, q, k, v, ik, cache, positions)
+        else:
+            out = self._attend(x, q, k, v, ik, mask, cache, positions)
+        prof = _subprof_on(L)
+        if prof:
+            import time
+            t0 = time.perf_counter()
+        out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        out = self.o_proj(out * mx.sigmoid(gate))
+        if prof:
+            _prof_mark("a.out", self._li, out, t0)
+        return out
+
+    def _attend_rows(self, x, q, k, v, ik, cache, positions) -> mx.array:
+        """A decode batch on a BatchQSAKVCache: each row's attention is the
+        single-row path on that row's slice of the projections, over the
+        row's own cache with the row's own mask, so it computes what the
+        row alone computes. The model's batch mask is not read."""
+        rows = cache.rows
+        if len(rows) != x.shape[0]:
+            raise ValueError(
+                f"BatchQSAKVCache holds {len(rows)} rows for a batch of "
+                f"{x.shape[0]}")
+        outs = []
+        for i, row in enumerate(rows):
+            s = slice(i, i + 1)
+            xi = x[s]
+            outs.append(self._attend(
+                xi, q[s], k[s], v[s], None if ik is None else ik[s],
+                create_attention_mask(xi, row), row,
+                None if positions is None else positions[:, s]))
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=0)
+
+    def _attend(self, x, q, k, v, ik, mask, cache, positions) -> mx.array:
+        """Rope, the cache append, the block selection and the attention
+        core over one cache: ``[B, H, L, D]``. ``x`` is the layer input the
+        indexer queries project from."""
+        B, L, _ = x.shape
+        H, Hkv, D = self.num_attention_heads, self.num_key_value_heads, self.head_dim
         offset = cache.offset if cache is not None else 0
         cos = sin = None
         if positions is not None:
@@ -1906,12 +2080,11 @@ class Attention(nn.Module):
         prof = _subprof_on(L)
         if prof:
             import time
-            t0 = _prof_mark("a.proj", self._li, (q, k, v, gate),
+            t0 = _prof_mark("a.proj", self._li, (q, k, v),
                             time.perf_counter())
         selection = None
         seg = False
         if "indexer" in self:
-            ik = self.indexer.k_proj(x)
             if cache is not None and hasattr(cache, "update_and_fetch_qsa"):
                 seg = cache.append_qsa(k, v, ik, pos=positions)
                 if prof:
@@ -2020,11 +2193,7 @@ class Attention(nn.Module):
                     out = mx.fast.scaled_dot_product_attention(
                         q, k, v, scale=self.scale, mask=qsa)
         if prof:
-            t0 = _prof_mark("a.core", self._li, out, time.perf_counter())
-        out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        out = self.o_proj(out * mx.sigmoid(gate))
-        if prof:
-            _prof_mark("a.out", self._li, out, t0)
+            _prof_mark("a.core", self._li, out, time.perf_counter())
         return out
 
 
@@ -2125,6 +2294,58 @@ def _ple_hash():
     return _ple_hash_kernel or None
 
 
+@dataclass(frozen=True)
+class PLEHostHash:
+    """``PLEEmbedding.row_ids`` in numpy, for a reader that needs a
+    prompt's table rows before its prefill runs (the table read-ahead).
+    Called with ``[B, context_len + T]`` token ids, the first
+    ``context_len`` of them the history before the T tokens, it returns
+    their ``[B, T, n_heads]`` rows as int64. Plain values only, so it
+    holds nothing of the model."""
+
+    context_len: int
+    ngram_size: int
+    heads_per_ngram: int
+    eos_token_id: int
+    mults: tuple
+    sizes: tuple
+    offsets: tuple
+
+    def __call__(self, hist):
+        import numpy as np
+
+        hist = np.asarray(hist, dtype=np.int64)
+        if hist.ndim == 1:
+            hist = hist[None]
+        B, L = hist.shape
+        eos = self.eos_token_id
+        pos = np.arange(L)
+        eos_pos = np.where(hist == eos, pos[None], -1)
+        prev_eos = np.concatenate(
+            [np.full((B, 1), -1, np.int64),
+             np.maximum.accumulate(eos_pos, axis=1)[:, :-1]], axis=1)
+        shifted = []
+        for s in range(self.ngram_size):
+            src = pos - s
+            g = hist[:, np.maximum(src, 0)]
+            valid = (src[None] > prev_eos) & (src[None] >= 0)
+            shifted.append(np.where(valid, g, eos).astype(np.uint64))
+        mults = [np.uint64(m) for m in self.mults]
+        sizes = np.asarray(self.sizes, dtype=np.uint64)
+        offs = np.asarray(self.offsets, dtype=np.uint64)
+        blocks = []
+        with np.errstate(over="ignore"):
+            for n in range(2, self.ngram_size + 1):
+                lo = (n - 2) * self.heads_per_ngram
+                hi = lo + self.heads_per_ngram
+                mixed = shifted[0] * mults[0]
+                for p in range(1, n):
+                    mixed = mixed ^ (shifted[p] * mults[p])
+                blocks.append(mixed[..., None] % sizes[lo:hi] + offs[lo:hi])
+        rows = np.concatenate(blocks, axis=-1)[:, self.context_len:]
+        return rows.astype(np.int64)
+
+
 class PLEEmbedding(nn.Module):
     """Hash the token history into per-head row ids and gather the rows.
 
@@ -2151,6 +2372,14 @@ class PLEEmbedding(nn.Module):
                                dtype=mx.uint64)
         self._offsets = mx.array([int(o) for o in args.ple_head_offsets],
                                  dtype=mx.uint64)
+
+    def host_hash(self) -> PLEHostHash:
+        """This hash on the host (``PLEHostHash``)."""
+        return PLEHostHash(
+            self.context_len, self.ngram_size, self.heads_per_ngram,
+            int(self.eos_token_id), tuple(int(m) for m in self._mults),
+            tuple(int(v) for v in self._sizes.tolist()),
+            tuple(int(v) for v in self._offsets.tolist()))
 
     def _shift_right_ignore_eos(self, tokens: mx.array, shift: int) -> mx.array:
         if shift == 0:
@@ -2253,7 +2482,7 @@ class PLELayer(nn.Module):
                 state = None
         if state is None:
             state = mx.zeros((B, self.conv_state_len, x.shape[-1]), dtype=x.dtype)
-        conv_input = mx.concatenate([state, x], axis=1)
+        conv_input = mx.concatenate([_conv_state_in(state, x.dtype), x], axis=1)
         if cache is not None:
             cache[2] = mx.contiguous(conv_input[:, -self.conv_state_len:])
         return nn.silu(self.conv1d(conv_input)), conv_input
@@ -2419,6 +2648,14 @@ class Qwen4ExpModel(nn.Module):
             (i for i, t in enumerate(args.layer_types) if t == "linear_attention"), 0)
         self.fa_idx = next(
             (i for i, t in enumerate(args.layer_types) if t == "full_attention"), 0)
+        attn = [layer.self_attn for layer in self.layers if not layer.is_linear]
+        self._all_qsa = all(a.ratio > 0 for a in attn)
+        # The batch mask comes from the first attention layer's cache. Where
+        # that layer is QSA and another is plain, a cache of one cache per
+        # row on it would build no mask for the plain layer's padding, so
+        # the QSA rows join the padded batch class (QSAKVCache.dense_lift).
+        self._qsa_dense_batch = (bool(attn) and attn[0].ratio > 0
+                                 and not self._all_qsa)
 
     def __call__(self, inputs: mx.array, cache=None, input_embeddings=None,
                  return_streams: bool = False, gdn_sink=None, position_ids=None):
@@ -2427,6 +2664,18 @@ class Qwen4ExpModel(nn.Module):
         h = mx.broadcast_to(h[:, :, None, :], (B, T, self.hc, D))
         if cache is None:
             cache = [None] * len(self.layers)
+        if self._qsa_dense_batch:
+            # A restored row's QSA caches are rebuilt from its record, not
+            # by make_cache, and every row runs at least its last prompt
+            # token here before it joins a batch.
+            for c in cache:
+                if isinstance(c, QSAKVCache):
+                    c.dense_lift = True
+        if isinstance(cache[self.fa_idx], BatchQSAKVCache) and not self._all_qsa:
+            # The batch mask comes from that layer's cache, which builds
+            # none: a plain attention layer would attend its padding.
+            raise NotImplementedError(
+                "batched decode needs every attention layer on the QSA cache")
         probe = h[:, :, 0, :]
         fa_mask = create_attention_mask(probe, cache[self.fa_idx])
         ssm_mask = create_ssm_mask(probe, cache[self.ssm_idx])
@@ -2463,13 +2712,24 @@ class Model(nn.Module):
     def layers(self):
         return self.model.layers
 
+    def table_row_hashes(self) -> dict:
+        """The host hash of each lookup table's rows, by the table's path:
+        a reader computes what a prompt's prefill reads from it."""
+        ple = next((layer.ple for layer in self.layers if "ple" in layer),
+                   None)
+        if ple is None or "ple_embed" not in self.model:
+            return {}
+        return {"model.ple_embed": ple.embedding.host_hash()}
+
     def make_cache(self):
         caches: List[Any] = []
         for layer in self.layers:
             if layer.is_linear:
                 caches.append(ArraysCache(size=4 if "ple" in layer else 2))
             elif layer.self_attn.ratio > 0:
-                caches.append(QSAKVCache(layer.self_attn.ratio))
+                c = QSAKVCache(layer.self_attn.ratio)
+                c.dense_lift = self.model._qsa_dense_batch
+                caches.append(c)
             else:
                 caches.append(KVCache())
         return caches

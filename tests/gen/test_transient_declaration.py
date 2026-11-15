@@ -148,6 +148,8 @@ def test_lfm3_declares_from_a_config_alone():
 
 
 def test_other_model_types_declare_nothing():
+    import gmlx.models.lfm3  # noqa: F401  (registers the three below)
+
     for mt in ("llama", "flint", "beam", "qwen3_5", "faketype"):
         assert transient_declaration({"model_type": mt, "head_dim": 128}) \
             is None
@@ -162,6 +164,11 @@ def test_a_model_with_its_projector_declares_as_the_text_model(
     """The boot table reads the text header, and the runtime the loaded
     container. Both price the same model, so both declare the same. The
     container's lookup imports its own module."""
+    # The package registers the score profiles, as the real import of the
+    # container module below would. A worker that ran no other LFM3 test
+    # has not imported it.
+    import gmlx.models.lfm3  # noqa: F401
+
     cfg = {"model_type": model_type, "text_config": dict(LFM3_CFG)}
     monkeypatch.setattr(pd, "_TRANSIENT_DECLARATIONS", {})
     monkeypatch.setattr(pd, "_DECLARATION_IMPORTS", set())

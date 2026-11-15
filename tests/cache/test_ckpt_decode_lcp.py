@@ -124,6 +124,89 @@ def test_tick_failure_disables_ring(monkeypatch):
     assert len(calls) == 1
 
 
+def test_tick_takes_no_snapshot_of_a_batched_qsa_row(monkeypatch):
+    """A row left alone after a join keeps its QSA layers in a cache of one
+    cache per row. The tick clones the recurrent states and skips that
+    layer, so the row's K and V are neither extracted nor copied, and no
+    snapshot assembles with it."""
+    from gmlx.models.qwen4_exp.model import BatchQSAKVCache, QSAKVCache
+
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "32")
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, gen, **kw: 72)
+    cache = make_hybrid_cache(72, seed=45)
+    for i, c in enumerate(cache):
+        if hasattr(c, "keys"):
+            row = QSAKVCache(ratio=4)
+            row.append_qsa(c.keys, c.values, mx.zeros((1, 72, 8)))
+            cache[i] = BatchQSAKVCache([row])
+    extracts, cloned = [], []
+    monkeypatch.setattr(BatchQSAKVCache, "extract",
+                        lambda self, i: extracts.append(i))
+    clone = cs._clone_single_row
+
+    def spy(c, pending=None):
+        cloned.append(c)
+        return clone(c, pending)
+
+    monkeypatch.setattr(cs, "_clone_single_row", spy)
+    stash = _stash(list(range(40)))
+    decode_ckpt_tick(stash, cache, list(range(9000, 9032)))
+    (p, states), = stash["snaps"]
+    assert p == 72 and extracts == []
+    assert len(states) == LAYOUT.count("arr")
+    assert not any(isinstance(c, BatchQSAKVCache) for c in cloned)
+    assert cs._snap_assemble(cache, states, 72) is None
+
+
+def test_a_snapshot_takes_a_qsa_layer_to_its_p_with_its_positions():
+    """A decode snapshot's QSA layer is the live row's K, V, indexer keys
+    and mrope positions to the snapshot's p, as a QSA cache, so the record
+    tags the layout the lookups sign."""
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    n, p = 40, 32
+    mx.random.seed(46)
+    c = QSAKVCache(ratio=4)
+    pos = mx.broadcast_to((mx.arange(n, dtype=mx.int32) // 2)[None, None],
+                          (3, 1, n))
+    c.update_and_fetch_qsa(mx.random.normal((1, 2, n, 8)),
+                           mx.random.normal((1, 2, n, 8)),
+                           mx.random.normal((1, n, 8)), pos=pos)
+    (got,) = cs._snap_assemble([c], [], p)
+    assert type(got) is QSAKVCache and got.offset == p
+    assert cs._qsa_tag(got) == "qsa:4"
+    k, v, ik, ps = c.state
+    want = (k[..., :p, :], v[..., :p, :], ik[:, :p], ps[:, :, :p])
+    assert len(got.state) == 4
+    for x, y in zip(got.state, want):
+        assert mx.array_equal(x, y).item()
+
+
+def test_a_snapshots_qsa_layer_shares_the_live_rows_buffers():
+    """The QSA layer a retirement assembles from a decode snapshot reads
+    the live row's streams in place. The store copies the rows it keeps,
+    so a copy here, 1.1 GB at 40k tokens on Qwen3.8-Flash-Next, would be
+    a second one, made on the engine thread and priced nowhere."""
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    n, p, heads, dim = 4096, 4000, 2, 64
+    mx.random.seed(47)
+    c = QSAKVCache(ratio=4)
+    c.update_and_fetch_qsa(
+        mx.random.normal((1, heads, n, dim)).astype(mx.float16),
+        mx.random.normal((1, heads, n, dim)).astype(mx.float16),
+        mx.random.normal((1, n, dim)).astype(mx.float16))
+    mx.eval(c._kb, c._vb, c._ib)
+    before = mx.get_active_memory()
+    (got,) = cs._snap_assemble([c], [], p)
+    grown = mx.get_active_memory() - before
+    assert grown < p * heads * dim * 2 // 8, grown
+    k, v, ik = c.state
+    for x, y in zip(got.state, (k[..., :p, :], v[..., :p, :], ik[:, :p])):
+        assert mx.array_equal(x, y).item()
+
+
 def test_retirement_uses_newest_snap_at_or_below_lcp():
     man = APCManager(num_blocks=64, block_size=16)
     full = 96

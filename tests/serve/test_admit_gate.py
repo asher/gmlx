@@ -137,6 +137,32 @@ def test_never_declines_idle_server(gated, monkeypatch):
     assert g.admitted == [1]
 
 
+def test_an_idle_server_prices_the_lone_join_it_admits(gated, monkeypatch):
+    # With no row decoding the gate admits without a decision, and still
+    # stamps the join's projection, which the governor charges a deep
+    # lone prefill with. A batch that has finished leaves its live bytes
+    # and depth behind, and the join is priced its whole KV all the same.
+    import gmlx.gen.prefill_decay as pd
+
+    wrapped, _ = gated
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    # 100 KB per row token over an 80000-token prompt and 2000 more to
+    # write, 82176 tokens on the block grid: 8.2 GB of KV in the stamp.
+    rate, kv = 100e3, 100e3 * 82176
+    stamps = []
+    for left in ({}, {"_kq_admit_live_bytes": 20e9,
+                      "_kq_admit_live_depth": 100000}):
+        g = FakeGen(rows=0, pending=())
+        g._unprocessed_sequences = [_pending(1, 80000, 2000)]
+        g._kq_admit_kv_rates = {"FakeKV": {"rate": rate, "window": None}}
+        vars(g).update(left)
+        wrapped(g)
+        assert g.admitted == [1]
+        stamps.append(g._kq_admit_last_projection)
+    assert stamps[0][2] == (1,) and stamps[0][1] >= kv
+    assert stamps[1][1:] == stamps[0][1:]
+
+
 def test_never_declines_with_prompt_batch_live(gated, monkeypatch):
     wrapped, _ = gated
     calls = []
@@ -299,6 +325,8 @@ def test_update_kv_rates_and_projection(monkeypatch):
         kv_new + pd.score_transient_bytes(g.model, None, 500)
         + sm.admit_reserve_bytes(0), rel=0.05)
     assert "kv" in parts and "reserve" in parts
+    # The governor's charge for it names the join it priced.
+    assert g._kq_admit_last_projection[1:] == (projected, (2,))
 
 
 class FakeBatchKV(FakeKV):
@@ -336,6 +364,27 @@ def test_update_kv_rates_reads_the_batch_watermark():
     assert g._kq_admit_live_bytes == pytest.approx(
         kv.keys.nbytes + kv.values.nbytes, rel=1e-3)
     assert g._kq_admit_spec_row_const == 0
+
+
+def test_update_kv_rates_counts_a_decoding_cache_once():
+    # A decode step appends in place and keeps a second handle on the
+    # cache's buffers. The walk counts them once, or the gate and the
+    # governor price the KV of every row decoding twice.
+    from gmlx.cache.kv_cache import BatchKVCache, KVCache
+
+    row = KVCache()
+    prompt = mx.zeros((1, 4, 1000, 8), dtype=mx.float16)
+    row.update_and_fetch(prompt, prompt)
+    kv = BatchKVCache.merge([row])
+    step = mx.zeros((1, 4, 1, 8), dtype=mx.float16)
+    kv.update_and_fetch(step, step)
+    g = FakeGen(rows=1)
+    g._generation_batch.prompt_cache = [kv]
+    sm.update_kv_rates(g)
+    held = sum(a.nbytes for a in (kv.keys, kv.values, kv.offset,
+                                  kv.left_padding))
+    assert g._kq_admit_live_bytes == held
+    assert g._kq_admit_kv_rates["BatchKVCache"]["rate"] == held / 1001
 
 
 def test_update_kv_rates_takes_the_cache_accounting(monkeypatch, caplog):

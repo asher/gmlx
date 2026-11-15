@@ -16,6 +16,8 @@ from gmlx.serve.patches.row_failed import RowShedError
 _READERS = (gov._kernel_unwired,)
 # The headroom read the rig scripts, kept for the tests that price it.
 _HEADROOM_AND_WS = gov._headroom_and_ws
+# The decode snapshot rings' registrant, which the rig turns off.
+_REGISTER_SNAPS = gov._maybe_register_snaps
 
 
 class FakeGB:
@@ -87,6 +89,7 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov.mx, "get_memory_limit", lambda: box["mem_limit"])
     monkeypatch.setattr(gov, "_HOLDERS", [])
     monkeypatch.setattr(gov, "_maybe_register_apc", lambda gen: None)
+    monkeypatch.setattr(gov, "_maybe_register_snaps", lambda: None)
     box["kernel"] = 40e9
     monkeypatch.setattr(gov, "_kernel_unwired", lambda: box["kernel"])
     monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "8")
@@ -166,6 +169,175 @@ def test_static_box_never_sheds_sweep(rig):
         if head - oneshot > st_bytes + sm.admit_reserve_bytes(120e9, gen)                 + 4 * 64e6:
             assert st.band <= gov.YELLOW, combo
         gov._STATS["orange_evictions"] = 0
+
+
+class _KV:
+    """One layer's KV of a padded decode batch: ``rows`` rows of
+    ``length`` slots, ``offset`` tokens deep."""
+
+    def __init__(self, rows, length, offset):
+        self.keys = mx.zeros((rows, 2, length, 8), dtype=mx.float16)
+        self.values = mx.zeros((rows, 2, length, 8), dtype=mx.float16)
+        self.offset = offset
+
+
+def _land(gen, uids, depth):
+    """Put a decode batch of ``uids`` at ``depth`` tokens, two layers, on
+    ``gen``, and return the bytes its caches hold."""
+    caches = [_KV(len(uids), depth + 128, depth) for _ in range(2)]
+    gen._generation_batch = FakeGB(uids, [4] * len(uids))
+    gen._generation_batch.prompt_cache = caches
+    return sum(a.nbytes for c in caches for a in (c.keys, c.values))
+
+
+def _shed(live, rows):
+    # The extract of the largest row, at most twice the mean, then one
+    # layer's filter gather, over the two layers.
+    return 2.0 * live / rows + live / (rows * 2)
+
+
+def test_a_row_joined_at_an_idle_server_prices_its_shed_at_the_first_tick(
+        rig, monkeypatch):
+    # The gate projects a join at an idle server before any row decodes,
+    # and that walk zeroes the live bytes the last batch left. The first
+    # tick after the row lands walks it, once, so orange prices the shed
+    # from the row's own caches rather than 0 until another request.
+    import gmlx.serve.memory as sm
+
+    gen = FakeGen(rows=0, live=20e9)
+    sm.update_kv_rates(gen)
+    assert gen._kq_admit_live_bytes == 0.0
+    live = _land(gen, [7], 1000)
+    walks = []
+    walk = sm.update_kv_rates
+    monkeypatch.setattr(sm, "update_kv_rates",
+                        lambda g, **kw: walks.append(1) or walk(g, **kw))
+    st = gov._state(gen)
+    for _ in range(3):
+        gov._governor_tick(gen)
+    assert gov._shed_transient_bytes(gen, st) == _shed(live, 1)
+    assert walks == [1]
+
+
+@pytest.mark.parametrize("before, after", [
+    (([7], 80000), ([7, 8], 80000)),
+    (([7, 8], 80000), ([8], 1000)),
+    (([7], 1000), ([8], 80000)),
+], ids=["join", "leave", "swap"])
+def test_the_shed_follows_the_batch_through_a_join_or_a_leave(
+        rig, before, after):
+    # The gate walked the batch while a request waited. The first tick
+    # after a second 80k row joins, after the 80k row leaves the 1k one,
+    # or after a leave and a join in one step walks it again, so orange
+    # prices the rows decoding now. The rates still fold only at the
+    # gate's walks.
+    import gmlx.serve.memory as sm
+
+    gen = FakeGen(rows=0)
+    _land(gen, *before)
+    sm.update_kv_rates(gen)
+    rates = gen._kq_admit_kv_rates
+    live = _land(gen, *after)
+    st = gov._state(gen)
+    gov._governor_tick(gen)
+    assert gov._shed_transient_bytes(gen, st) == _shed(live, len(after[0]))
+    assert gen._kq_admit_kv_rates is rates
+
+
+class _SpecGB(FakeGB):
+    """A speculative batch: rows counted from ``_finished``. A finish or
+    an injection moves its uids at once, and the round sheds or merges
+    the cache rows at its end."""
+
+    def __init__(self, uids):
+        super().__init__(uids, [4] * len(uids))
+        self._finished = [False] * len(uids)
+
+    def refresh(self):
+        self.uids = [u for u, done in zip(self._all_uids, self._finished)
+                     if not done]
+
+
+class _RowCaches:
+    """A layer that holds one single-row cache per batch row."""
+
+    holds_row_caches = True
+
+    def __init__(self, rows):
+        self.rows = rows
+
+
+def _spec_caches(kind, rows, depth):
+    if kind == "padded":
+        return [_KV(rows, depth + 128, depth) for _ in range(2)]
+    return [_RowCaches([_KV(1, depth + 128, depth) for _ in range(rows)])
+            for _ in range(2)]
+
+
+def _shed_rows(caches, keep):
+    for c in caches:
+        if isinstance(c, _RowCaches):
+            c.rows = [c.rows[i] for i in keep]
+        else:
+            idx = mx.array(keep)
+            c.keys, c.values = c.keys[idx], c.values[idx]
+
+
+def _merge_row(caches, depth):
+    for c in caches:
+        if isinstance(c, _RowCaches):
+            c.rows.append(_KV(1, depth + 128, depth))
+        else:
+            row = _KV(1, c.keys.shape[2], depth)
+            c.keys = mx.concatenate([c.keys, row.keys])
+            c.values = mx.concatenate([c.values, row.values])
+
+
+@pytest.mark.parametrize("kind", ["padded", "row_caches"])
+@pytest.mark.parametrize("change", ["leave", "join"])
+def test_a_spec_batch_s_shed_follows_its_cache_through_the_round_end(
+        rig, change, kind):
+    # On the MTP batch a finish or an injection moves the uids at once,
+    # and the round sheds or merges the cache rows at its end. The tick
+    # after the uids move walks the cache as it is, and the tick after
+    # the round's end walks it again, so orange prices the rows the
+    # cache holds rather than the moment before the round caught up.
+    import gmlx.serve.memory as sm
+
+    gen = FakeGen(rows=0)
+    batch = _SpecGB([7, 8] if change == "leave" else [7])
+    batch.prompt_cache = _spec_caches(kind, len(batch.uids), 1000)
+    gen._generation_batch = batch
+    sm.update_kv_rates(gen)
+    rates = gen._kq_admit_kv_rates
+    st = gov._state(gen)
+
+    def walked():
+        # What a walk of the cache as it is now prices.
+        fresh = FakeGen(rows=0)
+        fresh._generation_batch = batch
+        sm.update_kv_rates(fresh, fold=False)
+        return gov._shed_transient_bytes(fresh, st)
+
+    if change == "leave":
+        batch._finished[1] = True
+    else:
+        batch._all_uids.append(9)
+        batch._finished.append(False)
+    batch.refresh()
+    gov._governor_tick(gen)
+    before = gov._shed_transient_bytes(gen, st)
+    assert before == walked()
+    if change == "leave":
+        _shed_rows(batch.prompt_cache, [0])
+    else:
+        _merge_row(batch.prompt_cache, 1000)
+    gov._governor_tick(gen)
+    after = gov._shed_transient_bytes(gen, st)
+    assert after == walked() and after != before
+    gov._governor_tick(gen)
+    assert gov._shed_transient_bytes(gen, st) == after
+    assert gen._kq_admit_kv_rates is rates
 
 
 def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
@@ -1025,6 +1197,43 @@ def test_red_reclaims_before_shedding(rig, monkeypatch):
     assert st.band == gov.RED  # band holds; next healthy ticks demote
 
 
+def test_red_reclaim_frees_the_decode_snapshot_rings(rig, monkeypatch):
+    # A ckpt row's decode snapshots hold recurrent states twice per
+    # row. Red reclaim frees them with the other caches before it sheds,
+    # and the ring takes its next snapshot at its next boundary.
+    import gmlx.cache.retire_key as retire_key
+    from gmlx.cache.snapshot import decode_ckpt_tick, snapshot_ring_bytes
+    from test_ckpt_tier import make_hybrid_cache
+
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "96")
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, gen, **kw: len(seq))
+    stash = {"full_ids": list(range(40)), "extra_hash": 0, "mode": "ckpt",
+             "render_ctx": {"stub": True}, "snap_ok": True}
+
+    def tick(p):
+        decode_ckpt_tick(stash, make_hybrid_cache(p, seed=p),
+                         list(range(9000, 9000 + p - 40)))
+
+    tick(136)
+    tick(232)
+    assert [s[0] for s in stash["snaps"]] == [136, 232]
+    monkeypatch.setattr(gov, "_maybe_register_snaps", _REGISTER_SNAPS)
+    gov._REG["pool"] = (lambda: 50e9,
+                        lambda fraction: (rig.__setitem__("head", 200e9),
+                                          50e9)[1])
+    held = snapshot_ring_bytes()
+    gen = FakeGen(rows=2, rate=60e9, live=30e9)
+    st = gov._state(gen)
+    st.obs_delta_ema = 20e9
+    gov._governor_tick(gen)
+    assert "shed skipped" in gov._STATS["last_action"]
+    assert (stash["snaps"], gov._registered_bytes()) == ([], 50e9)
+    assert held > 0
+    tick(328)
+    assert [s[0] for s in stash["snaps"]] == [328]
+
+
 # ---------------------------------------------------------------- kernel floor
 
 def test_kernel_floor_reds_while_rate_math_is_green(rig, monkeypatch):
@@ -1339,10 +1548,13 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     """Under the wired cap, each tick reads the memory wired outside the
     server live: the kernel's wired count less what the server holds
     wired (active, cache and the mapped weights outside MLX's tracker).
-    A rise lowers the headroom the governor admits against by the rise.
-    A fall lifts the cap back no further than its startup figure. A
-    count the kernel has not refreshed keeps the last reading, so the
-    server's own frees never read as memory wired outside it."""
+    A rise held for the window lowers the headroom the governor admits
+    against by the rise. A fall lifts the cap back no further than its
+    startup figure. A count the kernel has not refreshed keeps the last
+    reading, so the server's own frees never read as memory wired
+    outside it."""
+    from collections import deque
+
     import gmlx.serve.capacity as cap
     import gmlx.serve.kernel_vm as kvm
 
@@ -1351,6 +1563,10 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
     monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None, raising=False)
     monkeypatch.setattr(cap, "_WIRED_SEEN", None, raising=False)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None, raising=False)
+    monkeypatch.setattr(cap, "_LIVE_READS", deque())
+    clock = {"t": 0.0}
+    monkeypatch.setattr(cap, "_now", lambda: clock["t"])
     monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda *a, **k: {
@@ -1362,10 +1578,11 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     gen = FakeGen(rows=2, rate=1e6)
     st = gov._state(gen)
 
-    def tick(outside):
+    def tick(outside, t=0.0):
         # The server holds 30 GB active, its cache and the rig's 50 GB of
         # mapped weights wired.
         box["wired"] = 30e9 + box["cache"] + 50e9 + outside
+        clock["t"] = t
         gov._governor_tick(gen)
         return (gov._ceiling_bytes(120e9, 0.05),
                 gov._headroom_and_ws(0.05)[0],
@@ -1375,8 +1592,11 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     ceiling, head, short = tick(6e9)
     assert ceiling == pytest.approx(91e9)
     assert head == pytest.approx(91e9 - 50e9 - 30e9 - 2e9)
-    # 2 GB more wired outside: the join is 2 GB further over.
-    ceiling2, head2, short2 = tick(8e9)
+    # 2 GB more wired outside, held for the window: the join is 2 GB
+    # further over.
+    tick(8e9, 0.25)
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(91e9)
+    ceiling2, head2, short2 = tick(8e9, 1.25)
     assert ceiling2 == pytest.approx(89e9)
     assert head2 == pytest.approx(head - 2e9)
     assert short2 == pytest.approx(short + 2e9)
@@ -1387,10 +1607,158 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     gov._governor_tick(gen)
     assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(89e9)
     box["cache"] = 2e9
-    # Less wired outside than at startup: the cap stops at 91 GB.
-    ceiling3, head3, _ = tick(3e9)
+    # Less wired outside than at startup prices at once: the cap stops at
+    # 91 GB.
+    ceiling3, head3, _ = tick(3e9, 1.5)
     assert ceiling3 == pytest.approx(91e9)
     assert head3 == pytest.approx(head)
+
+
+@pytest.fixture
+def read_outside(monkeypatch):
+    """``read(wired, own, t)``: the tick's reading of memory wired outside
+    the server for the kernel's wired count and what the server holds
+    wired at ``t`` seconds (where the last read left the clock when
+    omitted), as the cap prices it, from no reading yet and 6 GB at
+    startup."""
+    from collections import deque
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.kernel_vm as kvm
+
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
+    monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None)
+    monkeypatch.setattr(cap, "_WIRED_SEEN", None)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None, raising=False)
+    monkeypatch.setattr(cap, "_LIVE_READS", deque())
+    monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
+    box = {"t": 0.0}
+    monkeypatch.setattr(kvm, "wired_bytes", lambda: box["wired"])
+    monkeypatch.setattr(pd, "own_wired_bytes", lambda: box["own"])
+    monkeypatch.setattr(cap, "_now", lambda: box["t"])
+
+    def read(wired, own, t=None):
+        box["wired"], box["own"] = wired, own
+        if t is not None:
+            box["t"] = t
+        gov._read_outside_wired()
+        return cap.priced_outside_wired_bytes()
+    return read
+
+
+@pytest.mark.parametrize("own2, wired2, wired3, want2, want3", [
+    # A yellow trim frees 6.5 GB of cache: the server stops counting it
+    # before the kernel's count does, and the next count read refreshed
+    # only partway.
+    (87.09e9, 103.03e9, 96.5e9, 9.43e9, 9.41e9),
+    # The server holds the same and 6 GB more is wired outside it.
+    (93.6e9, 109.0e9, 109.0e9, 15.4e9, 15.4e9),
+], ids=["own-trim", "outside-rise"])
+def test_the_live_outside_reading_is_not_moved_by_the_servers_own_trim(
+        read_outside, own2, wired2, wired3, want2, want3):
+    """The tick reads memory wired outside the server as the kernel's
+    wired count less what the server holds wired. A trim the governor
+    makes leaves the server's count before the kernel's: a count read in
+    between is priced against the most the server held since the last
+    count, so the trim is not booked as memory wired outside. A real rise
+    outside shows once it has held for the window, as each count read
+    here prices once the next read finds it held."""
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    read_outside(wired2, own2, 0.25)
+    assert read_outside(wired2, own2, 1.25) == pytest.approx(want2)
+    read_outside(wired3, own2, 1.5)
+    assert read_outside(wired3, own2, 2.5) == pytest.approx(want3)
+
+
+def test_a_read_of_the_same_count_keeps_what_the_server_held(read_outside):
+    """Decode ticks far more often than the kernel refreshes its wired
+    count, so most reads see the count the last one saw, and the server
+    can hold more by the time it moves. Such a read leaves the reading as
+    it is and keeps the most the server held, which the next count is
+    read against."""
+    assert read_outside(103.0e9, 87.0e9) == pytest.approx(16.0e9)
+    assert read_outside(103.0e9, 93.6e9) == pytest.approx(16.0e9)
+    assert read_outside(103.03e9, 87.09e9) == pytest.approx(9.43e9)
+
+
+def test_a_free_no_tick_saw_is_not_priced_while_the_driver_holds_it(
+        read_outside):
+    """A prefill chunk allocates and frees its transients inside one step,
+    so no tick sees the server hold them, and the driver releases them a
+    few hundred ms after the server stops counting them. A count read in
+    between holds them as if wired outside. The reading priced is the
+    least over the last second, so the spike is never priced."""
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    assert read_outside(109.5e9, 93.6e9, 0.05) == pytest.approx(9.4e9)
+    assert read_outside(103.1e9, 93.6e9, 0.4) == pytest.approx(9.4e9)
+    assert read_outside(103.1e9, 93.6e9, 1.4) == pytest.approx(9.5e9)
+
+
+def test_a_rise_outside_prices_once_it_has_held_for_the_window(read_outside):
+    """More wired outside the server, read at each count from 0.1 s on,
+    prices once it has held for the window, and a fall prices at once."""
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    assert read_outside(109.0e9, 93.6e9, 0.1) == pytest.approx(9.4e9)
+    assert read_outside(109.1e9, 93.7e9, 0.6) == pytest.approx(9.4e9)
+    assert read_outside(109.2e9, 93.8e9, 1.2) == pytest.approx(15.4e9)
+    assert read_outside(103.3e9, 93.8e9, 1.3) == pytest.approx(9.5e9)
+
+
+def test_a_count_read_after_a_clear_is_priced_against_what_the_chunk_held(
+        read_outside):
+    """A prefill chunk's transients sit in MLX's cache until the clear
+    that ends it, and the tick after reads a count from the driver's
+    release lag or one cached from mid-chunk. Booked just before each
+    clear, what the chunk held is what that count is read against, at
+    every chunk of a deep prefill, however far apart the ticks."""
+    import gmlx.serve.capacity as cap
+
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    cap.note_own_held(99.6e9)
+    assert read_outside(109.0e9, 93.6e9, 1.7) == pytest.approx(9.4e9)
+    cap.note_own_held(99.6e9)
+    assert read_outside(109.01e9, 93.6e9, 3.4) == pytest.approx(9.4e9)
+
+
+@pytest.mark.parametrize("capped", [True, False], ids=["capped", "uncapped"])
+def test_a_prefill_chunk_books_what_it_held_before_its_clear(monkeypatch,
+                                                             capped):
+    """prompt_step ends each chunk with a clear of MLX's cache. Under the
+    wired cap it books what the process holds just before the clear, the
+    most the chunk held. A process outside the cap reads nothing."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    order = []
+    monkeypatch.setattr(cap, "_CAP", capped)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None)
+    monkeypatch.setattr(pd, "own_wired_bytes",
+                        lambda: order.append("own") or 99.6e9)
+    monkeypatch.setattr(ar.mx, "clear_cache", lambda: order.append("clear"))
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+
+    class _Model:
+        def __call__(self, input_ids, cache=None, inputs_embeds=None, **kw):
+            b, n = input_ids.shape
+            kv = mx.zeros((b, 1, n, 4))
+            for c in cache:
+                c.update_and_fetch(kv, kv)
+            return mx.zeros((b, n, 8))
+
+    ids = list(range(1, 9))
+    batch = ar.PromptProcessingBatch(
+        _Model(), [0], [ids], [4], mx.zeros((1, len(ids), 4)), {},
+        warm_cache=[BatchKVCache(left_padding=[0])], prefill_step_size=4)
+    assert batch.prompt_step() == 4
+    if capped:
+        assert order[:2] == ["own", "clear"] and cap._OWN_PEAK == 99.6e9
+    else:
+        assert "own" not in order and cap._OWN_PEAK is None
 
 
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
@@ -1464,6 +1832,83 @@ def test_demand_rate_seeds_from_boot_table(rig, monkeypatch):
     monkeypatch.setattr(cap, "_TABLE", {"weight_bytes": 1})
     gen.model = types.SimpleNamespace()
     assert gov._demand_bytes(gen, st)[0] == 0.0
+
+
+def _joined_caches():
+    """A prompt batch's caches holding 2.56 GB, never materialized."""
+    from gmlx.cache.kv_cache import KVCache
+
+    caches = []
+    for _ in range(2):
+        c = KVCache()
+        c.state = (mx.zeros((1, 8, 312500, 128), dtype=mx.float16),
+                   mx.zeros((1, 8, 312500, 128), dtype=mx.float16))
+        caches.append(c)
+    return caches
+
+
+def test_a_join_in_flight_is_charged_the_room_its_caches_do_not_hold(rig):
+    """The admission projection is the newest join's room. Queued, the
+    join holds none of it and is charged all of it. Once its prompt batch
+    runs, what the batch's caches hold is already out of the headroom, so
+    the tick charges only the rest, read from the caches' array sizes
+    with nothing evaluated. The gate projects no join while a batch runs,
+    so a request waiting beside the batch leaves the charge as it is."""
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9)
+    gen._unprocessed_sequences = [("u", None)]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9)
+    gen._unprocessed_sequences = []
+    gen._prompt_batch = types.SimpleNamespace(prompt_cache=_joined_caches())
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
+    # A join that already holds more than it was priced for adds nothing.
+    gen._kq_admit_last_projection = (time.perf_counter(), 2e9)
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9)
+    gen._unprocessed_sequences = [("v", None)]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
+
+
+def test_the_projection_charges_only_the_join_it_priced(rig):
+    """The projection names its join's candidates. That join is charged
+    all of it while it waits and the rest once its batch runs. A batch
+    the gate formed without a projection is another join, and so is a
+    request after the priced one has gone: the stamp charges neither."""
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9, ("u",))
+    gen._unprocessed_sequences = [("u", None)]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9)
+    gen._unprocessed_sequences = [("v", None)]
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    gen._prompt_batch = types.SimpleNamespace(
+        uids=["w"], prompt_cache=_joined_caches())
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    gen._prompt_batch.uids = ["u"]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
+
+
+def test_a_join_prefilling_past_the_wait_window_keeps_its_charge(rig):
+    """A paced deep join can prefill for longer than a waiting join is
+    priced for: its batch is charged the rest of its projection however
+    old the stamp is. The window still ends the charge of a join that
+    waits, and of a stamp that names no join."""
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    old = time.perf_counter() - 31.0
+    gen._kq_admit_last_projection = (old, 10.4e9, ("u",))
+    gen._prompt_batch = types.SimpleNamespace(
+        uids=["u"], prompt_cache=_joined_caches())
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
+    gen._prompt_batch = None
+    gen._unprocessed_sequences = [("u", None)]
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    gen._unprocessed_sequences = []
+    gen._kq_admit_last_projection = (old, 10.4e9)
+    gen._prompt_batch = types.SimpleNamespace(
+        uids=["u"], prompt_cache=_joined_caches())
+    assert gov._demand_bytes(gen, st)[1] == 0.0
 
 
 def test_dead_arena_entry_is_replaced(rig, monkeypatch):

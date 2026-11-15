@@ -337,6 +337,37 @@ def test_gen_batch_filter_retires_leaving_row_batched():
     assert got == 40
 
 
+def test_a_blocked_retirement_neither_extracts_nor_offers_the_row(
+        monkeypatch):
+    """Under a block a retirement stores nothing, so a row leaving the
+    batch is not extracted, which syncs on a QSA row with a decode tail,
+    and is not offered, which logs a retire that never happens. Its stash
+    goes with it."""
+    import gmlx.cache.snapshot as cs
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+
+    ckpt._install_plain_ckpt_decode()
+    calls = []
+    extract = cs.row_snapshot
+    monkeypatch.setattr(cs, "row_snapshot", lambda c, i: (
+        calls.append("extract"), extract(c, i))[1])
+    monkeypatch.setattr(ckpt, "_plain_retire",
+                        lambda stash, cache: calls.append("retire"))
+    man = APCManager(num_blocks=64, block_size=16)
+    stash = {"full_ids": list(range(700, 724)), "extra_hash": 0,
+             "mode": "ckpt", "manager": man, "render_ctx": None,
+             "snap_ok": True, "gen": list(range(970, 986))}
+    gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    gb.uids = [7, 8]
+    gb.max_tokens = [64, 64]
+    gb._num_tokens = [0, 0]
+    gb.prompt_cache = _batched_hybrid_cache([48, 40], 48)
+    gb._kq_apc_retire_rows = {8: stash}
+    with cs.retirement_blocked():
+        gb.filter([0])
+    assert (calls, gb.uids, gb._kq_apc_retire_rows) == ([], [7], {})
+
+
 def _one_row(uid, cache):
     from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
@@ -507,6 +538,39 @@ def test_row_alone_on_batch_classes_then_leaves_a_batch(monkeypatch):
     warm, got = ckpt_lookup(man, full + gen[:16] + [1], extra_hash=0)
     assert got == 40
     assert_warm_matches(warm, truth, 40)
+
+
+def test_a_lone_row_on_batch_classes_reads_its_offsets_at_boundaries(
+        monkeypatch):
+    # A row left alone after a join keeps its batch classes, whose offsets
+    # are arrays, and reading one waits for the step in flight. The tick
+    # reads them at the row's first step and once a boundary is due, not
+    # on the steps between.
+    import gmlx.cache.snapshot as cs
+
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "16")
+    ckpt._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    truth = make_hybrid_cache(40, seed=71)
+    full = list(range(1900, 1924))
+    gen = []
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "ckpt",
+             "manager": man, "render_ctx": {"stub": True}, "snap_ok": True,
+             "gen": gen}
+    monkeypatch.setattr(retire_key, "next_turn_lcp", _replays)
+    gb = _one_row(7, _row_prefix(truth, 24))
+    gb.prompt_cache[0]._kq_apc_retire = stash
+    _join_and_leave(gb, stash, 24, seed=72)
+    reads = []
+    real = cs._cache_offset_max
+    monkeypatch.setattr(cs, "_cache_offset_max",
+                        lambda c: reads.append(len(gen)) or real(c))
+    for p in range(25, 41):
+        _decode_to(gb.prompt_cache, truth, p, truth)
+        ckpt._plain_step_tick(gb, ([p], None, None, None))
+    assert reads == [1, 16]
+    (p, _), = stash["snaps"]
+    assert p == 40
 
 
 def test_gen_batch_extend_carries_stash():

@@ -316,7 +316,9 @@ def _install_gpu_residency(model, moe_modules, *,
                 if w is not None:
                     skip.add(id(w))
     inserted = []
-    model._kq_resident_arrays = inserted
+    # A plain attribute: in the module tree, the list would count every
+    # array it holds a second time in the model's size.
+    object.__setattr__(model, "_kq_resident_arrays", inserted)
     nbytes = 0
     pending = 0
     left_out = left_out_bytes = 0
@@ -372,7 +374,7 @@ def _unwire(model) -> int:
         kq.residency_erase(a)
     if arrays:
         kq.residency_commit()
-    model._kq_resident_arrays = []
+    object.__setattr__(model, "_kq_resident_arrays", [])
     return sum(a.nbytes for a in arrays)
 
 
@@ -771,6 +773,10 @@ def install_expert_streaming(
             tracked_total, "table")
         # The experts stay resident, so this was the last streamed share.
         end_build_credit(getattr(model, "_kq_weights_key", None))
+    if plan.tables:
+        from gmlx.stream.table_readahead import attach_table_readahead
+
+        attach_table_readahead(model, gguf_path)
 
     streaming = force_stream or over_budget
     # the verdict itself: a CPU-only expert codec marks its modules the way

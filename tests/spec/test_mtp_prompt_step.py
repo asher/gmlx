@@ -118,6 +118,59 @@ def test_right_padded_rows_keep_their_last_real_logits(ar, monkeypatch):
     assert coordinator.observed == [(3, 2), (6, 2)]
 
 
+def test_an_mtp_chunk_books_what_it_held_before_its_clear(ar, monkeypatch):
+    # The owned MTP body ends each chunk with its own clear of MLX's cache.
+    # Under the wired cap it books what the process holds just before the
+    # clear, the most the chunk held, as the stock prompt step does.
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    order = []
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None)
+    monkeypatch.setattr(pd, "own_wired_bytes",
+                        lambda: order.append("own") or 99.6e9)
+    monkeypatch.setattr(mx, "clear_cache", lambda: order.append("clear"))
+    rows = [list(range(1, 9))]
+    batch = ar.PromptProcessingBatch(
+        _Model(), [0], rows, [4], _embeds(rows, 8), {},
+        warm_cache=[BatchKVCache(left_padding=[0])],
+        apc_coordinator=_Coordinator(), suffix_lens=[8],
+        draft_model=object(), draft_kind="mtp")
+    assert batch.prompt_step() > 0
+    assert order[-2:] == ["own", "clear"] and cap._OWN_PEAK == 99.6e9
+
+
+def test_an_mtp_chunk_queues_its_rows_before_its_forward(ar, monkeypatch):
+    # The owned MTP body runs its own forward, so it feeds a streamed
+    # table's read-ahead itself, after its restore and before the forward.
+    import gmlx.stream.table_readahead as tra
+
+    order = []
+
+    class _Recorder:
+        def submit(self, spans):
+            order.append(("submit", [(s, e) for _, s, e in spans]))
+
+    class _OrderModel(_Model):
+        def __call__(self, *a, **kw):
+            order.append("forward")
+            return super().__call__(*a, **kw)
+
+    model = _OrderModel()
+    setattr(model, tra._ATTR, _Recorder())
+    rows = [list(range(1, 9))]
+    batch = ar.PromptProcessingBatch(
+        model, [0], rows, [4], _embeds(rows, 8), {},
+        warm_cache=[BatchKVCache(left_padding=[0])],
+        apc_coordinator=_Coordinator(), suffix_lens=[8],
+        draft_model=object(), draft_kind="mtp")
+    batch._apc_meta = [{"full_input_ids": rows[0]}]
+    n = batch.prompt_step()
+    assert n > 0
+    assert order[0] == ("submit", [(0, n)]) and order[-1] == "forward"
+
+
 def test_mrope_position_ids_slice_on_the_sequence_axis(ar, monkeypatch):
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2")
     monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
