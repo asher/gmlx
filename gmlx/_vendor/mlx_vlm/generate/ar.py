@@ -3473,10 +3473,8 @@ class BatchGenerator:
             self._unprocessed_sequences.append((uid, p, m, kw, lp, tc))
             uids.append(uid)
             self.uid_count += 1
-        # Sort in ascending order of length
-        self._unprocessed_sequences = sorted(
-            self._unprocessed_sequences, key=lambda x: len(x[1])
-        )
+        # gmlx: pending stays in arrival order, so no prompt waits behind
+        # a stream of shorter ones and a requeued row keeps the head.
         return uids
 
     def remove(self, uid) -> bool:
