@@ -2770,13 +2770,16 @@ def _cache_offset_max(prompt_cache) -> int:
 
 
 def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
-                     generated: list[int]) -> None:
-    """Advance the decode-time snapshot ring for a live B=1 ckpt row.
+                     generated: list[int], row: int | None = None) -> None:
+    """Advance the decode-time snapshot ring for a live ckpt row.
 
     ``stash`` is the request's retirement context (``snaps`` /
-    ``snap_next`` / ``snap_frozen`` live here and die with it). Cheap
-    off-boundary; never raises into the decode loop, and a failure
-    disables the ring for the request rather than retrying per token.
+    ``snap_next`` / ``snap_frozen`` live here and die with it). ``row``
+    is the request's row in a batch of two or more, whose states the
+    snapshot takes from that row alone; None reads ``prompt_cache`` as
+    the row's own. Cheap off-boundary; never raises into the decode
+    loop, and a failure disables the ring for the request rather than
+    retrying per token.
     """
     try:
         if stash.get("snap_frozen") or not stash.get("snap_ok"):
@@ -2793,7 +2796,10 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             # for the step in flight, so they are read once a boundary
             # is due.
             return
-        p = _cache_offset_max(prompt_cache)
+        if row is None:
+            p = _cache_offset_max(prompt_cache)
+        else:
+            p = row_kv_len(prompt_cache, row) or 0
         # The render retokenizes the whole sequence, so its cost grows
         # with p; widening the interval with p keeps prediction a bounded
         # fraction of decode time.
@@ -2836,13 +2842,16 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         for c in prompt_cache:
             # Plain KV is sliced from the row at retirement. A row that
             # was joined holds it in the batch class, or in a cache of one
-            # cache per row (qwen4exp's QSA layers), which no snapshot
-            # assembles.
+            # cache per row (qwen4exp's QSA layers), which the retirement
+            # extracts.
             if isinstance(c, BatchKVCache) or getattr(
                     c, "holds_row_caches", False) or (
                     isinstance(c, KVCache)
                     and not isinstance(c, RotatingKVCache)):
                 continue
+            if row is not None:
+                # The row's view, copied once by the clone below.
+                c = (_row_view(c) or c.extract)(row)
             clone = _clone_single_row(c, pending)
             if clone is None:
                 stash["snap_ok"] = False

@@ -681,6 +681,55 @@ def test_a_row_leaving_a_qsa_decode_batch_retires_what_its_lookup_restores():
             assert mx.array_equal(x, y).item()
 
 
+def test_a_row_in_a_qsa_decode_batch_retires_from_its_own_decode_snapshot(
+        monkeypatch):
+    """Two armed QSA hybrid rows decode together in one batch. Each takes
+    its decode snapshots from its own row of the batch's recurrent states.
+    The row that finishes first, with a next-turn render that diverges
+    inside its reply at 68, stores from its snapshot at 64 with no
+    retire_layout decline, and the next turn's lookup restores the row as
+    it stood at 64, bit for bit."""
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+
+    ckpt._install_plain_ckpt_decode()
+    _render(monkeypatch, lambda seq: 68)
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    prompts = (_ids(0, 32), _ids(1, 40))
+    batches = []
+    for ids in prompts:
+        gb = GenerationBatch.empty(model=None, sampler=None,
+                                   stop_criteria=None)
+        gb.uids, gb.max_tokens, gb._num_tokens = [ids[0]], [64], [0]
+        gb.prompt_cache = _plain_armed(man, ids, _qsa_hybrid_cache,
+                                       ids[0]).prompt_cache
+        batches.append(gb)
+    gb = batches[0]
+    gb.extend(batches[1])
+    steps = range(9000, 9032)
+    seen = {}
+    for tok in steps:
+        _decode_rows(gb.prompt_cache, [tok, tok + 100])
+        ckpt._plain_step_tick(gb, ([tok, tok + 100], None, None, None))
+        if tok == 9023:
+            seen[64] = _row_state(gb.prompt_cache, 1)
+    stashes = [gb._kq_apc_retire_rows[ids[0]] for ids in prompts]
+    gb.filter([0])
+    seq = prompts[1] + [t + 100 for t in steps]
+    assert [r.p for r in cs._ckpt_records(man).values()] == [64]
+    assert man.stats_snapshot()["ckpt_declines"] == {}
+    assert [[p for p, _ in s.get("snaps", ())] for s in stashes] == [
+        [48, 64], [64]]
+    warm, got = ckpt_lookup(man, seq[:64] + [7],
+                            extra_hash=stashes[1]["extra_hash"],
+                            layout=stashes[1]["layout"])
+    assert got == 64
+    for c, row in zip(warm, seen[64]):
+        held = c.state if hasattr(c, "update_and_fetch_qsa") else c.cache
+        assert len(held) == len(row)
+        for x, y in zip(held, row):
+            assert mx.array_equal(x, y).item()
+
+
 def test_the_counters_reach_the_stats_and_the_metrics_payload(monkeypatch):
     """Both counters sit in stats_snapshot(), which /v1/cache/stats
     returns, and in the server snapshot /v1/metrics carries as "server":
