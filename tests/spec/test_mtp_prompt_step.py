@@ -118,6 +118,29 @@ def test_right_padded_rows_keep_their_last_real_logits(ar, monkeypatch):
     assert coordinator.observed == [(3, 2), (6, 2)]
 
 
+def test_an_mtp_chunk_books_what_it_held_before_its_clear(ar, monkeypatch):
+    # The owned MTP body ends each chunk with its own clear of MLX's cache.
+    # Under the wired cap it books what the process holds just before the
+    # clear, the most the chunk held, as the stock prompt step does.
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    order = []
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None)
+    monkeypatch.setattr(pd, "own_wired_bytes",
+                        lambda: order.append("own") or 99.6e9)
+    monkeypatch.setattr(mx, "clear_cache", lambda: order.append("clear"))
+    rows = [list(range(1, 9))]
+    batch = ar.PromptProcessingBatch(
+        _Model(), [0], rows, [4], _embeds(rows, 8), {},
+        warm_cache=[BatchKVCache(left_padding=[0])],
+        apc_coordinator=_Coordinator(), suffix_lens=[8],
+        draft_model=object(), draft_kind="mtp")
+    assert batch.prompt_step() > 0
+    assert order[-2:] == ["own", "clear"] and cap._OWN_PEAK == 99.6e9
+
+
 def test_mrope_position_ids_slice_on_the_sequence_axis(ar, monkeypatch):
     monkeypatch.setenv("PREFILL_STEP_SIZE", "2")
     monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")

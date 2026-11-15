@@ -1497,6 +1497,61 @@ def test_a_rise_outside_prices_once_it_has_held_for_the_window(read_outside):
     assert read_outside(103.3e9, 93.8e9, 1.3) == pytest.approx(9.5e9)
 
 
+def test_a_count_read_after_a_clear_is_priced_against_what_the_chunk_held(
+        read_outside):
+    """A prefill chunk's transients sit in MLX's cache until the clear
+    that ends it, and the tick after reads a count from the driver's
+    release lag or one cached from mid-chunk. Booked just before each
+    clear, what the chunk held is what that count is read against, at
+    every chunk of a deep prefill, however far apart the ticks."""
+    import gmlx.serve.capacity as cap
+
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    cap.note_own_held(99.6e9)
+    assert read_outside(109.0e9, 93.6e9, 1.7) == pytest.approx(9.4e9)
+    cap.note_own_held(99.6e9)
+    assert read_outside(109.01e9, 93.6e9, 3.4) == pytest.approx(9.4e9)
+
+
+@pytest.mark.parametrize("capped", [True, False], ids=["capped", "uncapped"])
+def test_a_prefill_chunk_books_what_it_held_before_its_clear(monkeypatch,
+                                                             capped):
+    """prompt_step ends each chunk with a clear of MLX's cache. Under the
+    wired cap it books what the process holds just before the clear, the
+    most the chunk held. A process outside the cap reads nothing."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    order = []
+    monkeypatch.setattr(cap, "_CAP", capped)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None)
+    monkeypatch.setattr(pd, "own_wired_bytes",
+                        lambda: order.append("own") or 99.6e9)
+    monkeypatch.setattr(ar.mx, "clear_cache", lambda: order.append("clear"))
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+
+    class _Model:
+        def __call__(self, input_ids, cache=None, inputs_embeds=None, **kw):
+            b, n = input_ids.shape
+            kv = mx.zeros((b, 1, n, 4))
+            for c in cache:
+                c.update_and_fetch(kv, kv)
+            return mx.zeros((b, n, 8))
+
+    ids = list(range(1, 9))
+    batch = ar.PromptProcessingBatch(
+        _Model(), [0], [ids], [4], mx.zeros((1, len(ids), 4)), {},
+        warm_cache=[BatchKVCache(left_padding=[0])], prefill_step_size=4)
+    assert batch.prompt_step() == 4
+    if capped:
+        assert order[:2] == ["own", "clear"] and cap._OWN_PEAK == 99.6e9
+    else:
+        assert "own" not in order and cap._OWN_PEAK is None
+
+
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda: {

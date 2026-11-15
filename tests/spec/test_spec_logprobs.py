@@ -1,5 +1,6 @@
 """Logprobs on the owned speculative rounds, from the target's verify
-logits, and each row's own sampler in every round kind.
+logits, and each row's own sampler in every round kind. The same rounds
+book what the process held before their cache clears.
 
 A toy target scores each next token from its input token alone, with
 non-integer bf16 logits, so a teacher-forced reference is the f32
@@ -560,3 +561,32 @@ def test_spec_kind_unsupported(kind, want):
 
     assert spec_kind_unsupported(SimpleNamespace(draft_kind=kind)) == want
     assert spec_kind_unsupported(SimpleNamespace()) is None
+
+
+# The rounds' cache clears.
+
+
+@pytest.mark.parametrize("loop", ["scalar", "batch"])
+def test_the_rounds_book_what_the_process_held_before_a_clear(monkeypatch,
+                                                              loop):
+    # Every 256 tokens the rounds clear MLX's cache. Under the wired cap
+    # the clear books what the process holds first, for the governor's
+    # next count of memory wired outside it.
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    order = []
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None)
+    monkeypatch.setattr(pd, "own_wired_bytes",
+                        lambda: order.append("own") or 99.6e9)
+    monkeypatch.setattr(spec.mx, "clear_cache",
+                        lambda: order.append("clear"))
+    if loop == "scalar":
+        _scalar(max_tokens=300)
+    else:
+        _batch({1: RowSettings()}, max_tokens=300)
+    assert "clear" in order
+    assert all(order[i - 1] == "own"
+               for i, step in enumerate(order) if step == "clear")
+    assert cap._OWN_PEAK == 99.6e9

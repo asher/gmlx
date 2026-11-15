@@ -142,7 +142,8 @@ def outside_wired_bytes() -> float:
 # it live, the kernel wired count of the last reading, the most this
 # process held wired since that count, and the readings of the counts
 # within the window (note_live_outside_wired); None and empty until the
-# first read.
+# first read. No lock: every caller and the governor tick run on the
+# generation thread.
 _OUTSIDE_LIVE: float | None = None
 _WIRED_SEEN: float | None = None
 _OWN_PEAK: float | None = None
@@ -164,7 +165,9 @@ def note_live_outside_wired(wired: float, own: float) -> None:
     cached reply in between, so a count equal to the last one is a stale
     read: it adds no reading and keeps the most the process held. A new
     count is read against the most the process held since the last one,
-    so its own frees never read as memory wired outside it.
+    at the ticks and just before each clear of MLX's cache
+    (``note_own_before_clear``), so its own frees never read as memory
+    wired outside it.
 
     The driver also releases a buffer the process freed a few hundred ms
     after the process stops counting it, and a new count that lands
@@ -200,6 +203,29 @@ def note_live_outside_wired(wired: float, own: float) -> None:
         _LIVE_READS.popleft()
     if _LIVE_READS:
         _OUTSIDE_LIVE = min(v for _, v in _LIVE_READS)
+
+
+def note_own_held(own: float) -> None:
+    """Raise the most this process held since the last kernel count to
+    ``own``, read off the governor's tick."""
+    global _OWN_PEAK
+    _OWN_PEAK = own if _OWN_PEAK is None else max(_OWN_PEAK, own)
+
+
+def note_own_before_clear() -> None:
+    """Book what this process holds just before the generation thread
+    clears MLX's cache: the most it held through the chunk or step,
+    whose transients sit in the cache until the clear. The tick after
+    the clear reads a count from the driver's release lag, or one cached
+    from mid-chunk, and prices it against at least that
+    (``note_live_outside_wired``). Nothing outside the wired cap."""
+    if not cap_applies():
+        return
+    from gmlx.gen.prefill_decay import own_wired_bytes
+
+    own = own_wired_bytes()
+    if own is not None:
+        note_own_held(own)
 
 
 def priced_outside_wired_bytes() -> float:
