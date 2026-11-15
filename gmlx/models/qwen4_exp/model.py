@@ -1598,15 +1598,24 @@ class BatchQSAKVCache(_BaseCache):
         self.rows = [self.rows[int(i)] for i in keep]
 
     def extract(self, idx):
-        """Row ``idx`` as a plain KVCache over views of its K and V. Its
-        record tags "kv", which no lookup on a QSA model signs, so the
-        retirement of a batched row is refused."""
+        """Row ``idx`` as a single-row QSAKVCache on the row's buffers, so
+        its record tags "qsa:R" as the lookups sign and a batched row's
+        retirement stores.
+
+        The row's tail folds in first, in place: a fold on the copy would
+        rewrite the whole base while the live row still holds it. The copy
+        takes new handles on the buffers, not the row's arrays: a slice
+        assignment updates the array object it writes, so two caches
+        holding one array object would each write into the other's rows.
+        With a handle each, a write on either side lands in a copy. The
+        block keys are rebuilt from the indexer stream when read."""
         row = self.rows[idx]
-        n = row.offset
-        out = KVCache()
-        out.keys = row.keys[..., :n, :]
-        out.values = row.values[..., :n, :]
-        out.offset = n
+        row._fold()
+        out = QSAKVCache(row.ratio)
+        out._kb, out._vb, out._ib, out.pos = (
+            None if a is None else mx.contiguous(a)
+            for a in (row._kb, row._vb, row._ib, row.pos))
+        out.offset = row.offset
         return out
 
     def is_trimmable(self):

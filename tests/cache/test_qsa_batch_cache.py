@@ -1,7 +1,8 @@
 """BatchQSAKVCache: the decode batch's cache on a qwen4exp QSA layer, one
 single-row QSAKVCache per row. Joins, leaves and filters move rows and
 copy nothing; the batch's readers see a batched cache with per-row
-offsets; a row's extract is a plain KV view that no QSA lookup signs."""
+offsets; a row's extract is the row as a single-row QSA cache, the layout
+a lookup signs."""
 
 from __future__ import annotations
 
@@ -10,7 +11,6 @@ import pytest
 
 from gmlx.cache.apc_pooling import _is_batched_cache
 from gmlx.cache.kv_append import eval_cache
-from gmlx.cache.kv_cache import KVCache
 from gmlx.cache.snapshot import _qsa_tag, row_kv_len
 from gmlx.models.qwen4_exp.model import BatchQSAKVCache, QSAKVCache
 
@@ -122,15 +122,36 @@ def test_the_memory_walk_counts_the_rows():
     assert kinds["QSAKVCache"]["n"] == 2
 
 
-def test_extract_is_a_plain_kv_view_of_the_row():
+def _chunk(seed, n=9):
+    mx.random.seed(seed)
+    return (mx.random.normal((1, H, n, D)), mx.random.normal((1, H, n, D)),
+            mx.random.normal((1, n, DI)))
+
+
+def test_extract_is_the_row_as_a_single_row_qsa_cache():
+    """The extract tags "qsa:4", as a lookup signs, and holds the row's
+    whole state. The live row's tail folds in place first. A prefill
+    chunk on each side afterwards writes into its own rows only."""
     a, b = _row(13, 1), _row(9, 2, tail=3)
     c = BatchQSAKVCache.merge([a, b])
+    k, v = b.kv_full()
+    want = (k, v, b._ik_rows(0, 12))
+    mx.eval(want)
     got = c.extract(1)
-    assert type(got) is KVCache and _qsa_tag(got) is None
-    assert got.offset == 12
-    assert mx.array_equal(got.keys, b.keys[..., :12, :]).item()
-    assert mx.array_equal(got.values, b.values[..., :12, :]).item()
+    assert type(got) is QSAKVCache and _qsa_tag(got) == "qsa:4"
+    assert got.offset == 12 and b._tl == 0 and got._tl == 0
+    for x, y in zip(got.state, want):
+        assert mx.array_equal(x, y).item()
     assert c.rows == [a, b], "the row stays in the batch"
+    mine, theirs = _chunk(5), _chunk(6)
+    got.append_qsa(*mine)
+    b.append_qsa(*theirs)
+    for cache, rows in ((got, mine), (b, theirs)):
+        k, v, ik = cache.state
+        for x, y in zip((k[..., :12, :], v[..., :12, :], ik[:, :12]), want):
+            assert mx.array_equal(x, y).item()
+        for x, y in zip((k[..., 12:, :], v[..., 12:, :], ik[:, 12:]), rows):
+            assert mx.array_equal(x, y).item()
 
 
 def test_the_decode_lift_joins_qsa_rows_into_the_batch_form():

@@ -61,6 +61,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Qwen model's native head has a cap of 2. `GMLX_MTP_MIXED=1` undoes the first.
 - Qwen3.8-Flash-Next prefills a chat turn restored after a reply as fast as a
   fresh prompt.
+- A Qwen3.8-Flash-Next chat turn after a reply that decoded beside other
+  requests no longer prefills that reply again.
 
 ### Fixed
 

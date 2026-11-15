@@ -308,9 +308,9 @@ def test_autosize_stashes_the_pools_share(monkeypatch):
 
 def test_a_retirement_no_lookup_can_use_stores_nothing():
     """The arming recorded the layout the request's lookup signed with. A
-    retirement whose cache tags another layout (QSA layers out of a merge
-    without their indexer keys tag "kv") stores nothing and counts a
-    retire_layout decline; one that matches stores."""
+    retirement whose cache tags another layout (QSA layers assembled as
+    plain KV tag "kv") stores nothing and counts a retire_layout decline;
+    one that matches stores."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     ids = _ids(0, 52)
     cache = make_hybrid_cache(52, seed=4)
@@ -330,10 +330,10 @@ def test_a_retirement_no_lookup_can_use_stores_nothing():
                          ids=["diverged", "whole"])
 def test_a_retirement_counts_its_refused_layouts_once(caplog, max_len,
                                                       refused):
-    """A QSA row that took decode snapshots alone, then joined a batch,
-    leaves as plain KV, and so does every snapshot assembled for it. Its
-    retirement counts one decline and logs one line however many
-    candidates it refused, and says nothing of missing snapshots."""
+    """A QSA row whose layers come back as plain KV, as every decode
+    snapshot assembled for it does. Its retirement counts one decline and
+    logs one line however many candidates it refused, and says nothing of
+    missing snapshots."""
     man = GmlxAPCManager(num_blocks=64, block_size=16)
     cache = make_hybrid_cache(72, seed=5)
     signed = tuple("qsa:4" if t == "kv" else t
@@ -531,6 +531,81 @@ def test_a_retirement_checks_the_layout_its_arming_signed(monkeypatch, turn):
     assert [p for p, _ in stash["snaps"]] == [48]
     assert [r.p for r in cs._ckpt_records(man).values()] == [56]
     assert man.stats_snapshot()["ckpt_declines"] == {"retire_layout": 1}
+
+
+def _decode_rows(cache, toks):
+    """One decode step on a batched QSA hybrid: a key, value and indexer
+    key row into each row's decode tail on each QSA layer, as the layer's
+    step appends them, and new recurrent states on the rest."""
+    mx.random.seed(sum(toks))
+    for c in cache:
+        if getattr(c, "holds_row_caches", False):
+            for r in c.rows:
+                r.append_qsa(mx.random.normal((1, H, 1, D)),
+                             mx.random.normal((1, H, 1, D)),
+                             mx.random.normal((1, 1, D)))
+        else:
+            c.cache = [mx.random.normal(a.shape) for a in c.cache]
+
+
+def _row_state(cache, i):
+    """Row ``i`` of a batched QSA hybrid, read without folding a tail:
+    K, V and indexer keys of each QSA layer, the states of the rest."""
+    out = []
+    for c in cache:
+        if getattr(c, "holds_row_caches", False):
+            r = c.rows[i]
+            out.append((*r.kv_full(), r._ik_rows(0, r.offset)))
+        else:
+            out.append(tuple(a[i:i + 1] for a in c.cache))
+    mx.eval(out)
+    return out
+
+
+def test_a_row_leaving_a_qsa_decode_batch_retires_what_its_lookup_restores():
+    """Two armed QSA hybrid rows join a decode batch, where each QSA layer
+    is one BatchQSAKVCache, and decode together. The row that finishes
+    first retires through its extract: single-row QSA layers, the layout
+    its arming signed. Its whole sequence stores with no retire_layout
+    decline, and the next turn's lookup restores the row's state bit for
+    bit."""
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+    from gmlx.models.qwen4_exp.model import BatchQSAKVCache
+
+    ckpt._install_plain_ckpt_decode()
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    prompts = (_ids(0, 32), _ids(1, 40))
+    batches = []
+    for ids in prompts:
+        gb = GenerationBatch.empty(model=None, sampler=None,
+                                   stop_criteria=None)
+        gb.uids, gb.max_tokens, gb._num_tokens = [ids[0]], [64], [0]
+        gb.prompt_cache = _plain_armed(man, ids, _qsa_hybrid_cache,
+                                       ids[0]).prompt_cache
+        batches.append(gb)
+    gb = batches[0]
+    gb.extend(batches[1])
+    qsa = [i for i, t in enumerate(LAYOUT) if t == "kv"]
+    assert all(type(gb.prompt_cache[i]) is BatchQSAKVCache for i in qsa)
+    steps = range(9000, 9006)
+    for tok in steps:
+        _decode_rows(gb.prompt_cache, [tok, tok + 100])
+        ckpt._plain_step_tick(gb, ([tok, tok + 100], None, None, None))
+    assert all(gb.prompt_cache[i].rows[1]._tl for i in qsa), "a tail to fold"
+    want = _row_state(gb.prompt_cache, 1)
+    stash = gb._kq_apc_retire_rows[prompts[1][0]]
+    gb.filter([0])
+    seq = prompts[1] + [t + 100 for t in steps]
+    assert [r.p for r in cs._ckpt_records(man).values()] == [len(seq)]
+    assert man.stats_snapshot()["ckpt_declines"] == {}
+    warm, got = ckpt_lookup(man, seq + [7], extra_hash=stash["extra_hash"],
+                            layout=stash["layout"])
+    assert got == len(seq)
+    for c, row in zip(warm, want):
+        held = c.state if hasattr(c, "update_and_fetch_qsa") else c.cache
+        assert len(held) == len(row)
+        for x, y in zip(held, row):
+            assert mx.array_equal(x, y).item()
 
 
 def test_the_counters_reach_the_stats_and_the_metrics_payload(monkeypatch):
