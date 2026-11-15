@@ -137,6 +137,22 @@ def test_never_declines_idle_server(gated, monkeypatch):
     assert g.admitted == [1]
 
 
+def test_an_idle_server_prices_the_lone_join_it_admits(gated, monkeypatch):
+    # With no row decoding the gate admits without a decision, and still
+    # stamps the join's projection, which the governor charges a deep
+    # lone prefill with.
+    import gmlx.gen.prefill_decay as pd
+
+    wrapped, _ = gated
+    monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    g = FakeGen(rows=0)
+    g._kq_admit_kv_rates = {"FakeKV": {"rate": 64.0, "window": None}}
+    wrapped(g)
+    assert g.admitted == [1]
+    stamp = g._kq_admit_last_projection
+    assert stamp[2] == (1,) and stamp[1] >= 64.0 * 512
+
+
 def test_never_declines_with_prompt_batch_live(gated, monkeypatch):
     wrapped, _ = gated
     calls = []

@@ -134,6 +134,7 @@ def _should_decline(gen) -> bool:
         return False
     # Nothing to wait for: admitting is the only way to make progress.
     if batch_rows(gen) == 0:
+        _price_lone_join(gen)
         return False
 
     uids = _candidate_uids(gen)
@@ -208,6 +209,19 @@ def _should_decline(gen) -> bool:
             "[admit] deferred uid=%s: %s; waiting=%d, decoding=%d",
             uids, _LAST_DEFER, len(pending), batch_rows(gen))
     return True
+
+
+def _price_lone_join(gen) -> None:
+    """Project the join an idle server admits without a decision: the
+    projection's stamp is what the governor charges a deep prefill with
+    while it runs alone."""
+    from .memory import project_admission
+
+    try:
+        project_admission(
+            gen, gen._unprocessed_sequences[:len(_candidate_uids(gen))])
+    except Exception:
+        _log.debug("[admit] lone join projection failed", exc_info=True)
 
 
 def _evict_shortfall(gen, cands, projected: float) -> bool:

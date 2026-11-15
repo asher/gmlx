@@ -1604,9 +1604,8 @@ def test_a_join_in_flight_is_charged_the_room_its_caches_do_not_hold(rig):
 def test_the_projection_charges_only_the_join_it_priced(rig):
     """The projection names its join's candidates. That join is charged
     all of it while it waits and the rest once its batch runs. A batch
-    the gate formed without a projection, as it does with no row
-    decoding, is another join, and so is a request after the priced one
-    has gone: the stamp charges neither."""
+    the gate formed without a projection is another join, and so is a
+    request after the priced one has gone: the stamp charges neither."""
     gen = FakeGen(rows=2)
     st = gov._state(gen)
     gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9, ("u",))
