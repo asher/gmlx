@@ -392,7 +392,7 @@ def _plain_armed(man, ids, make, seed):
 
 def _mtp_armed(man, ids, make, seed):
     """An MTP prompt batch armed by _mtp_prefill_init, and the retirement
-    context the B=1 rounds pop off its cache."""
+    context the B=1 rounds pop off its cache, which a restore replaces."""
     from gmlx.spec import mtp_prefill
     from gmlx.spec.speculative import _pop_retire_ctx
 
@@ -407,6 +407,7 @@ def _mtp_armed(man, ids, make, seed):
         _prompt_kwargs={}, prefill_step_size=16,
         _prompt_length_aware_keys=())
     mtp_prefill._mtp_prefill_init(batch)
+    cache = batch.prompt_cache
     return model, cache, _pop_retire_ctx(cache)
 
 
@@ -428,25 +429,37 @@ def _turn_landed(man, stash, cache, turn):
                 ckpt_stored_boundaries=[turn])
 
 
-def _plain_post_prefill(man, ids, seed, replay, turn=None):
+def _turn_restored(stash, turn):
+    """The whole prompt render-stable, its turn boundary at ``turn``
+    stored by an earlier request and restored past, so none landed."""
+    stash["apc_meta"].update(
+        ckpt_p_stable=len(stash["full_ids"]) - 1,
+        ckpt_p_stable_bounds=[turn], ckpt_stored_boundaries=[])
+
+
+def _plain_post_prefill(man, ids, seed, replay, turn=None, restored=None):
     from gmlx.spec.mtp_prefill import _ckpt_plain_post_prefill
 
     b = _plain_armed(man, ids, make_hybrid_cache, seed)
     stash = b.prompt_cache[0]._kq_apc_retire
     if turn:
         _turn_landed(man, stash, b.prompt_cache, turn)
+    if restored:
+        _turn_restored(stash, restored)
     if replay:
         _replay(man, stash, b.prompt_cache)
     _ckpt_plain_post_prefill(b)
     return b._apc_meta[0]
 
 
-def _mtp_post_prefill(man, ids, seed, replay, turn=None):
+def _mtp_post_prefill(man, ids, seed, replay, turn=None, restored=None):
     from gmlx.spec.speculative import _ckpt_post_prefill
 
     model, cache, ctx = _mtp_armed(man, ids, make_hybrid_cache, seed)
     if turn:
         _turn_landed(man, ctx, cache, turn)
+    if restored:
+        _turn_restored(ctx, restored)
     if replay:
         _replay(man, ctx, cache)
     _ckpt_post_prefill(model, cache, ctx)
@@ -499,6 +512,30 @@ def test_the_replay_stands_in_beside_a_landed_turn_boundary(post):
     assert got == 32
     _, got = ckpt_lookup(man, ids, extra_hash=0)
     assert got == n - 1
+
+
+@pytest.mark.parametrize("post", [_plain_post_prefill, _mtp_post_prefill],
+                         ids=["plain", "mtp"])
+def test_a_resend_that_restored_past_the_turn_boundary_keeps_it(post):
+    """A second request with the same prompt, sent while the first still
+    decodes, restores past the turn boundary the first stored, so none
+    lands for it, and its replay stands in. The first one's retirement
+    turns that stand-in back into a replay and keeps the turn boundary
+    for a branch between it and the prompt end."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    n = 52
+    ids = _ids(3, n)
+    post(man, ids, 3, replay=True, turn=32)
+    assert post(man, ids, 4, replay=True,
+                restored=32)["ckpt_stored_boundaries"] == []
+    seq = ids + [9001, 9002, 9003, 9004]
+    assert ckpt_store(man, seq, make_hybrid_cache(len(seq), seed=8),
+                      kind="retire")
+    recs = sorted((r.p, r.kind) for r in cs._ckpt_records(man).values())
+    assert recs == [(16, "anchor"), (32, "boundary"), (n - 1, "replay"),
+                    (n + 4, "retire")]
+    _, got = ckpt_lookup(man, ids + [7, 8], extra_hash=0)
+    assert got == 32
 
 
 def _decode_qsa(cache, tok):

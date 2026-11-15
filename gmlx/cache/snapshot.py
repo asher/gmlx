@@ -1104,9 +1104,12 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
     ``beside_turn``: the request's render-stable boundary landed. That
     boundary sits on the grid below p_stable, up to a unit short of the
     prompt, so where no retirement stores, the next turn restores from the
-    replay rather than from it. Once a record past the replay lands, the
-    replay is a replay again (``_record_insert``): it serves the resend,
-    and strip-on-extend keeps the boundary for the branches it serves.
+    replay rather than from it. A boundary at or below ``keep`` on the
+    chain counts the same, for a request that restored past the boundary
+    an earlier one with its prompt stored. Once a record past the replay
+    lands, the replay is a replay again (``_record_insert``): it serves
+    the resend, and strip-on-extend keeps the boundary for the branches
+    it serves.
     False when no replay landed: the p=N store runs unless the boundary
     makes it redundant."""
     if manager is None or token_ids is None:
@@ -1128,7 +1131,15 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
                 # Out of the index unreleased, then in again as a boundary.
                 idx.pop(key)
                 rec.kind = "boundary"
-                rec.stood_in = bool(beside_turn)
+                # A boundary at or below keep on the chain is the turn
+                # boundary too when an earlier request with this prompt
+                # stored it and this one restored past it.
+                rec.stood_in = bool(beside_turn) or (
+                    keep is not None and any(
+                        r.kind == "boundary" and r.p <= keep
+                        and r.extra_hash == rec.extra_hash
+                        and r.p < p and ids[:r.p] == r.ids
+                        for r in idx.values()))
                 _record_insert(manager, rec, keep)
             snap = _CkptRecord(
                 **{k: getattr(rec, k) for k in _CkptRecord.__slots__})
