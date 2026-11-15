@@ -59,6 +59,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   video only when ffmpeg is missing.
 - Past the drafter's width cap a batch decodes without speculation, and a dense
   Qwen model's native head has a cap of 2. `GMLX_MTP_MIXED=1` undoes the first.
+- Qwen3.8-Flash-Next prefills a chat turn restored after a reply as fast as a
+  fresh prompt.
 
 ### Fixed
 

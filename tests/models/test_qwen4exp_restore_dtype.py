@@ -10,9 +10,12 @@ last column alone.
 
 Arms: fresh (B from an empty cache), warm grid (the 64 record restored),
 warm tail (the 74 record restored) and live (turn 1's own cache
-continued). Decode leaves the conv states float32, so the prefill after
-the warm tail restore runs float32; its rows must not widen the restored
-QSA streams, nor the decode tails the last column opens.
+continued). Decode leaves the conv states float32 and the retire record
+keeps them. The prefill after the warm tail restore casts them to the
+activation dtype, so it runs bf16 as fresh does and the hc prefill
+kernels engage. The last column alone runs float32 off the hc residual;
+its rows must not widen the restored QSA streams, nor the decode tails it
+opens.
 
 Turn 1's prompt record, two ways: the p=N store at 70 after the last
 column, and the N-1 replay at 69 standing in for it as a boundary. Turn 2
@@ -27,6 +30,8 @@ GPU."""
 
 from __future__ import annotations
 
+import functools
+
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
@@ -34,8 +39,10 @@ import pytest
 from helpers import _real_apple_gpu
 from test_config_synth import _QWEN4EXP_SHAPES, _qwen4exp_meta
 
+import gmlx.models.qwen4_exp.model as q4
 from gmlx._vendor.mlx_lm.generate import _merge_caches
 from gmlx._vendor.mlx_vlm.apc import APCManager
+from gmlx.cache.kv_cache import ArraysCache
 from gmlx.cache.snapshot import (
     _assemble_from_record,
     _ckpt_records,
@@ -227,8 +234,8 @@ def test_warm_tail_matches_live(arms):
 
 def test_warm_tail_decode_tails_keep_the_base_dtype(arms):
     """The last column after the warm tail restore opens the decode tails
-    off float32 conv states. They take the base's dtype, so gather_kv's
-    fused kernel stays on for the turn."""
+    off the float32 hc residual. They take the base's dtype, so
+    gather_kv's fused kernel stays on for the turn."""
     for kt, kb, it, ib in arms["warm_tail_tails"]:
         assert (kt, it) == (kb, ib)
 
@@ -283,3 +290,79 @@ def test_batched_decode_keeps_the_qsa_dtype(model):
             k_dt, v_dt = joined[i, r]
             assert {row._kb.dtype, row._kt.dtype} == {k_dt}
             assert {row._vb.dtype, row._vt.dtype} == {v_dt}
+
+
+@pytest.fixture(scope="module")
+def retired(model):
+    """A retire record at 74 stored after 4 decode steps, and turn 2's
+    prompt."""
+    m = model
+    V = m.args.vocab_size
+    mx.random.seed(13)
+    A = mx.random.randint(3, V, (70,)).tolist()
+    G = mx.random.randint(3, V, (4,)).tolist()
+    B = A + G + mx.random.randint(3, V, (12,)).tolist()
+    man = APCManager(num_blocks=64, block_size=BS)
+    live = m.make_cache()
+    _fwd(m, A[:-1], live)
+    _fwd(m, A[-1:], live)
+    for t in G:
+        _fwd(m, [t], live)
+    assert ckpt_store(man, A + G, live, kind="retire",
+                      skeleton_disk=False) == 74
+    return man, B, ckpt_layout(live, BS)
+
+
+def _conv_states(cache):
+    """(layer cache, slot) of every conv state: the GDN's, and the PLE's
+    in a layer that carries one."""
+    return [(c, j) for c in cache if isinstance(c, ArraysCache)
+            for j in ((0, 2) if len(c.cache) == 4 else (0,))]
+
+
+def test_prefill_after_a_retire_restore_runs_in_the_activation_dtype(
+        model, retired, monkeypatch):
+    """The retire record keeps the float32 conv states decode left (every
+    layer's after the first, whose input is the bf16 embedding). The
+    follow-up prefill casts them to the activation dtype, so it runs bf16
+    as a fresh prefill does and every hc combine takes the prefill
+    kernel."""
+    m = model
+    man, B, layout = retired
+    warm, p = ckpt_lookup(man, B, layout=layout)
+    assert p == 74
+    f32 = [j for c, j in _conv_states(warm) if c[j].dtype == mx.float32]
+    assert 0 in f32 and 2 in f32, "a GDN and the PLE conv state are float32"
+    seen = []
+    kern = q4._hc_combine_kern
+
+    @functools.wraps(kern)
+    def spy(*a, **k):
+        y = kern(*a, **k)
+        seen.append(y is not None)
+        return y
+
+    monkeypatch.setattr(q4, "_hc_combine_kern", spy)
+    out = _fwd(m, B[p:-1], warm)
+    assert out.dtype == mx.bfloat16
+    assert seen and all(seen)
+
+
+def test_the_cast_equals_the_float32_state_cast_elementwise(model, retired):
+    """The follow-up prefill off the record's float32 conv states answers
+    bit for bit as the same prefill off those states cast to bf16 first,
+    leaf for leaf and logit for logit."""
+    m = model
+    man, B, layout = retired
+    runs = []
+    for cast in (False, True):
+        warm, p = ckpt_lookup(man, B, layout=layout)
+        assert p == 74
+        if cast:
+            for c, j in _conv_states(warm):
+                c[j] = c[j].astype(mx.bfloat16)
+        runs.append((warm, _fwd(m, B[p:-1], warm)))
+    c = _cmp(*runs[0], *runs[1])
+    assert c["meta"] == []
+    assert all(d == 0.0 for d in c["diffs"].values())
+    assert c["logits"]["max_abs"] == 0.0

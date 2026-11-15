@@ -640,6 +640,17 @@ def _hc_combine(h: mx.array, out: mx.array, inject: mx.array,
 # Gated DeltaNet
 
 
+def _conv_state_in(state: mx.array, dtype) -> mx.array:
+    """A conv state in the activation dtype of the call it feeds. Decode
+    runs the hc residual float32 and leaves float32 conv states, which a
+    retire record keeps. A prefill after its restore would concatenate
+    them into its bf16 rows and run float32 from there on, where the hc
+    prefill kernels decline; the cast keeps it in the dtype a fresh
+    prefill runs. A float32 call (decode, a verify block) gets the state
+    the concatenation promoted before."""
+    return state if state.dtype == dtype else state.astype(dtype)
+
+
 class GatedDeltaNet(nn.Module):
     """qwen3.5 gated DeltaNet with a sigmoid output gate and the GGUF tiled
     K->V head pairing applied explicitly. Attribute and cache layout match
@@ -747,6 +758,7 @@ class GatedDeltaNet(nn.Module):
                 conv_state = None
         if conv_state is None:
             conv_state = mx.zeros((B, n_keep, self.conv_dim), dtype=inputs.dtype)
+        conv_state = _conv_state_in(conv_state, inputs.dtype)
 
         if mask is not None:
             if mask.shape[0] != B:
@@ -1292,9 +1304,8 @@ class QSAKVCache(KVCache):
     def _write(cls, base, start: int, rows):
         """``base`` with ``rows`` at ``start`` on the token axis, grown
         when it is short. A grown base keeps its dtype, as the write in
-        place does: a prefill after a restore runs float32 off the conv
-        states decode leaves float32, and its rows must not widen the
-        whole stream."""
+        place does: a decode-width step runs float32 off the hc residual,
+        and its rows must not widen the whole stream."""
         n = rows.shape[-2]
         if base is None or start + n > base.shape[-2]:
             dt = rows.dtype if base is None else base.dtype
@@ -2392,7 +2403,7 @@ class PLELayer(nn.Module):
                 state = None
         if state is None:
             state = mx.zeros((B, self.conv_state_len, x.shape[-1]), dtype=x.dtype)
-        conv_input = mx.concatenate([state, x], axis=1)
+        conv_input = mx.concatenate([_conv_state_in(state, x.dtype), x], axis=1)
         if cache is not None:
             cache[2] = mx.contiguous(conv_input[:, -self.conv_state_len:])
         return nn.silu(self.conv1d(conv_input)), conv_input

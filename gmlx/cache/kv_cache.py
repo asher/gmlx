@@ -430,8 +430,8 @@ def _quant_zeros(group_size, bits):
 
 def _grow_dtype(base, x):
     """The dtype a cache buffer grows in: its own, or the first rows' when
-    there is none yet. Rows of a wider dtype, such as a step run off
-    float32 conv states, must not widen the whole cache."""
+    there is none yet. Rows of a wider dtype, such as a decode-width
+    step's off a float32 hc residual, must not widen the whole cache."""
     return x.dtype if base is None else base.dtype
 
 
