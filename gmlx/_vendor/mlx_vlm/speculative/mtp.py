@@ -4,6 +4,10 @@ from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 import mlx.core as mx
 import mlx.nn as nn
 
+# gmlx: what the process held before each clear prices the next count of
+# memory wired outside it.
+from gmlx.serve.capacity import note_own_before_clear as _note_own_before_clear
+
 from ..models import cache
 from ..models.linear import native_batch_linear
 from ..models.quantized_verifier import decode_quantized_argmax
@@ -738,6 +742,8 @@ def _mtp_rounds(
         )
 
         if emitted % 256 == 0:
+            # gmlx: book what the process held before the clear.
+            _note_own_before_clear()
             mx.clear_cache()
 
 
@@ -1201,4 +1207,6 @@ def _mtp_rounds_batch(
         )
 
         if sum(emitted) % 256 == 0:
+            # gmlx: book what the process held before the clear.
+            _note_own_before_clear()
             mx.clear_cache()

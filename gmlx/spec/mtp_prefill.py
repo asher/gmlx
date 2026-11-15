@@ -17,6 +17,7 @@ import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_int
+from gmlx.serve.capacity import note_own_before_clear
 from gmlx.spec.ckpt import (
     _install_ckpt_checkpoint_store,
     _install_exact_anchor_pick,
@@ -704,6 +705,9 @@ def install_full_prompt_mtp_prefill() -> None:
         # _install_ckpt_checkpoint_store).
         self._store_apc_exact_checkpoints()
         _trim_prompt_columns(self, n)
+        # What the process held before the clear prices the next count of
+        # memory wired outside it.
+        note_own_before_clear()
         mx.clear_cache()
         return n
 

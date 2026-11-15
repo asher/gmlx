@@ -39,6 +39,7 @@ from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
 from gmlx.gen.logprobs import RoundLogprobs
 from gmlx.gen.thinking_budget import drop_mtp_hook
+from gmlx.serve.capacity import note_own_before_clear
 from gmlx.serve.row_sampling import RowSampler
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
@@ -1658,6 +1659,7 @@ def _owned_decode_rounds(
             else:
                 kv_offset += accepted + 1
             if emitted - _last_clear >= 256:
+                note_own_before_clear()
                 mx.clear_cache()
                 _last_clear = emitted
             _round_log((_t1 - _t0) * 1e3, (_t2 - _t1) * 1e3,
@@ -4145,6 +4147,7 @@ def _owned_decode_rounds_batch(
                 left_padding=_batch_left_padding(prompt_cache))
 
         if sum(emitted) - _last_clear >= 256:
+            note_own_before_clear()
             mx.clear_cache()
             _last_clear = sum(emitted)
 
