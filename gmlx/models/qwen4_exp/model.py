@@ -1878,10 +1878,10 @@ class Attention(nn.Module):
         pages = mx.broadcast_to(pages[:, None, :], (B, Hkv, pages.shape[-1]))
         return paged(q, k, v, self.scale, pages, tile_c=4)
 
-    def __call__(self, x: mx.array, mask=None, cache=None,
-                 positions=None) -> mx.array:
-        """``positions`` is the ``[3, B, L]`` mrope position block for this
-        window (VLM loads); ``None`` takes the scalar-offset text path."""
+    def _project(self, x: mx.array):
+        """The layer's projections of ``x``: q (normed, not roped), the
+        output gate, k (normed, not roped), v, and the raw indexer keys
+        (None on a layer without an indexer)."""
         B, L, _ = x.shape
         H, Hkv, D = self.num_attention_heads, self.num_key_value_heads, self.head_dim
         qg = self.q_proj(x).reshape(B, L, H, 2 * D)
@@ -1890,7 +1890,32 @@ class Attention(nn.Module):
         q = self.q_norm(q).transpose(0, 2, 1, 3)
         k = self.k_norm(self.k_proj(x).reshape(B, L, Hkv, D)).transpose(0, 2, 1, 3)
         v = self.v_proj(x).reshape(B, L, Hkv, D).transpose(0, 2, 1, 3)
+        ik = self.indexer.k_proj(x) if "indexer" in self else None
+        return q, gate, k, v, ik
 
+    def __call__(self, x: mx.array, mask=None, cache=None,
+                 positions=None) -> mx.array:
+        """``positions`` is the ``[3, B, L]`` mrope position block for this
+        window (VLM loads); ``None`` takes the scalar-offset text path."""
+        B, L, _ = x.shape
+        q, gate, k, v, ik = self._project(x)
+        out = self._attend(x, q, k, v, ik, mask, cache, positions)
+        prof = _subprof_on(L)
+        if prof:
+            import time
+            t0 = time.perf_counter()
+        out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
+        out = self.o_proj(out * mx.sigmoid(gate))
+        if prof:
+            _prof_mark("a.out", self._li, out, t0)
+        return out
+
+    def _attend(self, x, q, k, v, ik, mask, cache, positions) -> mx.array:
+        """Rope, the cache append, the block selection and the attention
+        core over one cache: ``[B, H, L, D]``. ``x`` is the layer input the
+        indexer queries project from."""
+        B, L, _ = x.shape
+        H, Hkv, D = self.num_attention_heads, self.num_key_value_heads, self.head_dim
         offset = cache.offset if cache is not None else 0
         cos = sin = None
         if positions is not None:
@@ -1906,12 +1931,11 @@ class Attention(nn.Module):
         prof = _subprof_on(L)
         if prof:
             import time
-            t0 = _prof_mark("a.proj", self._li, (q, k, v, gate),
+            t0 = _prof_mark("a.proj", self._li, (q, k, v),
                             time.perf_counter())
         selection = None
         seg = False
         if "indexer" in self:
-            ik = self.indexer.k_proj(x)
             if cache is not None and hasattr(cache, "update_and_fetch_qsa"):
                 seg = cache.append_qsa(k, v, ik, pos=positions)
                 if prof:
@@ -2020,11 +2044,7 @@ class Attention(nn.Module):
                     out = mx.fast.scaled_dot_product_attention(
                         q, k, v, scale=self.scale, mask=qsa)
         if prof:
-            t0 = _prof_mark("a.core", self._li, out, time.perf_counter())
-        out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        out = self.o_proj(out * mx.sigmoid(gate))
-        if prof:
-            _prof_mark("a.out", self._li, out, t0)
+            _prof_mark("a.core", self._li, out, time.perf_counter())
         return out
 
 
