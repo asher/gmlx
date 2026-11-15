@@ -1036,6 +1036,54 @@ def test_retirement_stores_wait_out_the_block():
     assert snapshot._RETIRE_BLOCKED[0] == 0 and calls == []
 
 
+@pytest.mark.parametrize("failed", [True, False], ids=["fail", "retire"])
+def test_a_failed_row_leaves_no_retirement_record(failed):
+    """A row failed for good never replays, so its removal stores nothing:
+    a record would copy its memory back into the pool the failure was
+    meant to free. A row the governor retires and requeues keeps its
+    record, which its replay restores from."""
+    import mlx.core as mx
+
+    from gmlx._vendor.mlx_vlm.apc import APCManager
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+    from gmlx.cache.snapshot import ckpt_lookup
+    from gmlx.spec import ckpt
+    from test_ckpt_plain_path import _batched_hybrid_cache
+
+    ckpt._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    full = list(range(700, 724))
+    toks = list(range(970, 986))                # row 1: 24 + 16 = 40
+    gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    gb.uids = [7, 8]
+    gb.max_tokens = [64, 64]
+    gb._num_tokens = [0, 0]
+    gb.prompt_cache = _batched_hybrid_cache([48, 40], 48)
+    gb._kq_apc_retire_rows = {8: {
+        "full_ids": full, "extra_hash": 0, "mode": "ckpt", "manager": man,
+        "render_ctx": None, "snap_ok": True, "gen": list(toks)}}
+    class _Gen:
+        remove = ar.BatchGenerator.remove
+        _kq_remove = ar.BatchGenerator._kq_remove
+
+    gen = _Gen()
+    gen._stream = mx.default_stream(mx.default_device())
+    gen._unprocessed_sequences, gen._prompt_batch = [], None
+    gen._generation_batch = gb
+    st = tg._state(gen)
+    st.ledger[8] = tg._Row(full, 64, {}, None, None)
+    st.ledger[8].committed = list(toks)
+    if failed:
+        assert tg._fail_row_permanently(gen, st, 8, "governor red")
+    else:
+        assert tg._rebuild_row(gen, st, 8)
+        assert [q[0] for q in gen._unprocessed_sequences] == [8]
+    assert gb.uids == [7] and gb._kq_apc_retire_rows == {}
+    got = ckpt_lookup(man, full + toks + [1], extra_hash=0)[1]
+    used = man.stats_snapshot()["pool_used"]
+    assert (got, used == 0) == ((0, True) if failed else (40, False))
+
+
 # Injection sites (GMLX_OOM_INJECT, never set in production).
 
 

@@ -486,15 +486,20 @@ def _fail_row_permanently(gen, st: _TickState, uid, err: str, *,
     failure, which sheds the row even when its removal stays refused; any
     other caller (the governor) leaves the row decoding then. Returns
     whether the row failed."""
+    from gmlx.cache.snapshot import retirement_blocked
+
     swept = []
     if remove:
-        removed, swept = _take_out_or_drop(gen, st, uid, keep_out=True)
-        if removed is _STAYS:
-            if not strike:
-                return False
-            # The pool refuses even the filter: the batch goes without
-            # one, so the strike still sheds this row.
-            swept = [u for u in _drop_decode_batch(gen) if u != uid]
+        # The row never replays, so a retirement record of it would only
+        # copy back into the pool the memory its failure frees.
+        with retirement_blocked():
+            removed, swept = _take_out_or_drop(gen, st, uid, keep_out=True)
+            if removed is _STAYS:
+                if not strike:
+                    return False
+                # The pool refuses even the filter: the batch goes without
+                # one, so the strike still sheds this row.
+                swept = [u for u in _drop_decode_batch(gen) if u != uid]
     row = st.ledger.pop(uid, None)
     _requeue_rows(gen, st, swept)
     # A spoken reply's record closes on every path that ends its row.
