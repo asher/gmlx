@@ -2964,7 +2964,7 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
             _ckpt_decline(manager, "retire_layout")
             _log.info("APC retirement: %d candidate(s) skipped, layout %s "
                       "matches no lookup (%s)", len(refused), refused[0],
-                      list(layout))
+                      list(layout or ()))
 
 
 _RETIRE_BLOCKED = [0]
