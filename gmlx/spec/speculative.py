@@ -2323,6 +2323,10 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
             return
+        from gmlx.cache.snapshot import retirement_is_blocked
+        if retirement_is_blocked():
+            # It would store nothing, after a render of the whole sequence.
+            return
         full_ids = retire["full_ids"]
         seq = full_ids + [int(t) for t in generated]
         offset = _mtp_cache_offset_max(prompt_cache)
@@ -2455,6 +2459,10 @@ def _retire_batch_row(model, prompt_cache: list, slot: int,
     try:
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
+            return
+        from gmlx.cache.snapshot import retirement_is_blocked
+        if retirement_is_blocked():
+            # It would store nothing, after a render of the whole sequence.
             return
         mode = retire.get("mode")
         if mode == "exact":
