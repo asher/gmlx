@@ -187,7 +187,9 @@ class MSAKVCache(KVCache):
         if self.ik is None or (prev + n) > self.ik.shape[2]:
             B, _, _, idx_dim = ik.shape
             n_steps = (self.step + n - 1) // self.step
-            new = mx.zeros((B, 1, n_steps * self.step, idx_dim), ik.dtype)
+            # A grown stream keeps its dtype; the write casts the rows.
+            dt = ik.dtype if self.ik is None else self.ik.dtype
+            new = mx.zeros((B, 1, n_steps * self.step, idx_dim), dt)
             if self.ik is not None:
                 if prev % self.step != 0:
                     self.ik = self.ik[..., :prev, :]

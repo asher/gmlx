@@ -59,6 +59,7 @@ def load_gguf_wire_bytes(
     """
     if shards is None:
         shards = find_split_shards(gguf_path)
+    arch = _arch_of(shards, arch)
     skip = _deferred_table_names(shards, arch)
     arrays: dict[str, mx.array] = {}
     kquant_meta: dict[str, str] = {}
@@ -66,12 +67,8 @@ def load_gguf_wire_bytes(
     tensor_shapes: dict = {}
     for i, shard in enumerate(shards):
         try:
-            if skip:
-                s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(
-                    shard, zero_copy, skip)
-            else:
-                s_arrays, s_codecs, s_meta, s_shapes = kq.load_gguf(
-                    shard, zero_copy)
+            s_arrays, s_codecs, s_meta, s_shapes = _load_shard(
+                gguf_path, shard, arch, zero_copy, skip)
         except TypeError as e:
             if not skip:
                 raise
@@ -93,7 +90,6 @@ def load_gguf_wire_bytes(
         loadlog.verbose_print(
             f"[gguf] loaded {len(shards)} shards, {len(arrays)} total tensors"
         )
-
     if expect_quant and not kquant_meta:
         loadlog.warn(
             "WARNING: no quantized tensors found - is this actually a K-quant GGUF?"
@@ -101,6 +97,89 @@ def load_gguf_wire_bytes(
 
     arch = meta.get("general.architecture")
     return arrays, kquant_meta, arch, meta, tensor_shapes
+
+
+def _load_shard(gguf_path: str, shard: str, arch: str | None,
+                zero_copy: bool, skip):
+    """``kq.load_gguf`` on one shard. The streamable tables the load
+    streams for sure, when the caller installs the table stream on the
+    model, map outside MLX's tracker
+    (``table_stream.untracked_table_names``), so MLX neither counts nor
+    wires them. Only a process under the wired cap maps one
+    (``capacity.decide_cap``, before its first load); asked to map one in
+    any other process, the load raises. An mlx-kquant without
+    ``load_gguf(untracked=...)``, or a table it cannot view that way,
+    reloads the shard tracked; the install then pins the wired limit as
+    for any tracked table."""
+    from gmlx.serve.capacity import cap_applies
+    from gmlx.stream.table_stream import (note_untracked_load,
+                                          untracked_table_names)
+
+    args = (shard, zero_copy, skip) if skip else (shard, zero_copy)
+    untracked = (untracked_table_names(gguf_path, shard, arch, skip)
+                 if zero_copy else [])
+    # A backstop no load reaches today: untracked_table_names names no
+    # table outside the cap, and the decision never goes back once made.
+    # It stays for a future step that asks for the map by another route.
+    if untracked and not cap_applies():
+        raise RuntimeError(
+            f"{', '.join(untracked)}: a table maps outside MLX's tracker "
+            "only in a process under the wired cap, decided before its "
+            "first load")
+    if untracked:
+        try:
+            out = kq.load_gguf(*args, untracked=untracked)
+        except TypeError:
+            loadlog.verbose_print(
+                f"[stream] {', '.join(untracked)} loads MLX-tracked: this "
+                "mlx-kquant has no load_gguf(untracked=...)")
+        except RuntimeError as e:
+            if "untracked" not in str(e):
+                raise
+            loadlog.warn(f"[stream] {', '.join(untracked)} loads "
+                         f"MLX-tracked: {e}")
+        else:
+            note_untracked_load(shard, untracked)
+            loadlog.note(
+                f"[stream] {', '.join(untracked)} mapped untracked, "
+                f"{_table_bytes(out[0], untracked) / 1e9:.1f} GB: MLX "
+                "neither counts nor wires it")
+            return out
+    note_untracked_load(shard, ())
+    if not untracked:
+        return kq.load_gguf(*args)
+    active0 = float(mx.get_active_memory())
+    out = kq.load_gguf(*args)
+    _credit_tracked_tables(_table_bytes(out[0], untracked), active0)
+    return out
+
+
+def _table_bytes(arrays: dict, names) -> int:
+    return sum(arrays[n].nbytes for n in names if n in arrays)
+
+
+def _credit_tracked_tables(nbytes: int, active0: float) -> None:
+    """A serve build that expected its tables untracked
+    (``table_stream.tables_load_untracked``) gave them no build credit:
+    the tables that fell back to tracked buffers would read as live
+    memory until their install credits them. Credit them to the build's
+    owner from here."""
+    from gmlx.gen.prefill_decay import (add_build_credit,
+                                        untracked_weights_owner)
+    from gmlx.stream.table_stream import untracked_tables_supported
+
+    if untracked_tables_supported():
+        add_build_credit(untracked_weights_owner(), nbytes, active0)
+
+
+def _arch_of(shards: list[str], arch: str | None) -> str | None:
+    """``arch``, or ``general.architecture`` from the first shard."""
+    if arch is not None or not shards:
+        return arch
+    from .headerscan import scan_gguf
+
+    return scan_gguf(shards[0], include_tensors=False,
+                     array_limit=0).kv.get("general.architecture")
 
 
 def _check_type43(shard: str, codecs: dict[str, str], skip) -> None:

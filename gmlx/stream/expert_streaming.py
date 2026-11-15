@@ -38,7 +38,8 @@ from .budget import (_decode_arena_bytes, _prefill_ring_reason,
                      outside_ceiling_bytes, pool_override)
 from .budget import pool_bytes as _priced_pool_bytes
 from .stack_unmap import stacks_remapped, unmap_stacks
-from .wired_limit import _neutralize_wired_limit_sweep, configure_cpu_device
+from .wired_limit import (LIMIT_LOCK, _neutralize_wired_limit_sweep,
+                          configure_cpu_device)
 
 
 def _ph_li(ph, li, key, dt):
@@ -513,8 +514,10 @@ def _set_allocator_limits(tracked_bytes: int, pool_bytes: int | None = None) -> 
         how = "priced in the KV room; GMLX_STREAM_CACHE_GB overrides"
     else:
         how = "GMLX_STREAM_CACHE_GB sizes it"
-    mx.set_memory_limit(limit)
-    mx.set_cache_limit(cache)
+    # Under the lock the governor's throttle reads and sets the limits by.
+    with LIMIT_LOCK:
+        mx.set_memory_limit(limit)
+        mx.set_cache_limit(cache)
     loadlog.info(
         f"[stream] allocator: memory limit {limit / 1e9:.0f} GB, past the "
         f"tracked file-backed bytes; buffer cache {cache / 1e9:.1f} GB "
@@ -728,6 +731,15 @@ def install_expert_streaming(
     # (casts or repacks tracked, views untracked) frees each byte once.
     untracked0 = untracked_weight_bytes_for(
         getattr(model, "_kq_weights_key", None))
+    # A table its load mapped outside MLX's tracker is in neither the
+    # active bytes nor the untracked registration: it is neither tracked
+    # weight nor credited. Credited, it would read as reclaimable memory
+    # the tracker never held and lift the headroom by its size.
+    from gmlx.stream.table_stream import untracked_table_bytes
+
+    table_untracked = untracked_table_bytes(model)
+    tracked_total = max(0.0, total_bytes - table_untracked - untracked0)
+    table_tracked = max(0, table_offloaded - table_untracked)
     table_credit = 0.0
     if table_offloaded and compose:
         loadlog.info(
@@ -737,8 +749,8 @@ def install_expert_streaming(
             "AND experts streamed"
         )
         table_credit = credit_streamed(
-            getattr(model, "_kq_weights_key", None), table_offloaded,
-            max(0.0, total_bytes - untracked0), "table")
+            getattr(model, "_kq_weights_key", None), table_tracked,
+            tracked_total, "table")
     elif table_only:
         # The selection test admits the table only when the remainder
         # clears the budget (or streaming is forced on a fits model),
@@ -755,8 +767,8 @@ def install_expert_streaming(
             f"{(total_bytes - table_offloaded) / 2**30:.1f} GiB{base})"
         )
         table_credit = credit_streamed(
-            getattr(model, "_kq_weights_key", None), table_offloaded,
-            max(0.0, total_bytes - untracked0), "table")
+            getattr(model, "_kq_weights_key", None), table_tracked,
+            tracked_total, "table")
         # The experts stay resident, so this was the last streamed share.
         end_build_credit(getattr(model, "_kq_weights_key", None))
 
@@ -1424,7 +1436,7 @@ def install_expert_streaming(
         # Same 0.9 x working-set budget test as _warm_touch_pass.
         credit = credit_streamed(
             getattr(model, "_kq_weights_key", None), offloaded,
-            max(0.0, total_bytes - untracked0), "experts",
+            tracked_total, "experts",
             prior=table_credit)
         if credit > 0:
             print(
@@ -1866,6 +1878,12 @@ def install_expert_streaming(
                 f"layers ({offloaded / 1e9:.1f} GB stays file-backed; rest "
                 f"of the model + KV on {base_dev}; {staging})"
             )
+    if table_untracked:
+        from gmlx.stream.table_stream import untracked_table_gguf_names
+        from gmlx.stream.wired_limit import note_untracked_tables
+
+        note_untracked_tables(untracked_table_gguf_names(model),
+                              table_untracked)
     # The coarse caps of the CLI's streaming lift hold the load only.
     from gmlx.serve.cb_phase import end_lift
 

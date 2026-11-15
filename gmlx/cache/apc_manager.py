@@ -279,9 +279,11 @@ class GmlxAPCManager(_apc.APCManager):
         if budget_fraction is None:
             budget_fraction = _POOL_BUDGET_FRACTION
         from gmlx.serve.capacity import working_budget_bytes
-        from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
+        from gmlx.serve.mem_preflight import block_costs, per_token_bytes
 
-        costs = kv_layer_costs(model)
+        # What a stored block holds per token, which can be less than the
+        # live cache: qwen4_exp's indexer keys ride the record whole.
+        costs = block_costs(model)
         budget = working_budget_bytes()
         if not costs or not budget:
             return
@@ -299,6 +301,15 @@ class GmlxAPCManager(_apc.APCManager):
                       self._exact_budget_bytes / 1e9)
         if not os.environ.get("APC_NUM_BLOCKS"):
             self._grow_pool(free * budget_fraction, per_tok)
+        # Checkpoint records share the pool's room with its blocks
+        # (snapshot._record_room): the share the pool cap is sized from,
+        # or the pool APC_NUM_BLOCKS sets, never less than the pool's cap.
+        pool_cap = self.num_blocks * self.block_size * per_tok
+        share = (pool_cap if os.environ.get("APC_NUM_BLOCKS")
+                 else max(free * budget_fraction, pool_cap))
+        self._kq_ckpt_share_bytes = int(share)
+        _log.info("APC pool share: %.1f GB for pool blocks and checkpoint "
+                  "records together", share / 1e9)
         self._working_set_bytes = int(budget)
         if not os.environ.get("APC_MEMORY_MAX_GB"):
             cap = (self.num_blocks * self.block_size * per_tok
@@ -392,18 +403,35 @@ class GmlxAPCManager(_apc.APCManager):
         spec_prefix_stats_clear()
 
     def clear(self) -> None:
-        """Stock clear plus the ckpt tier: the pool wipe zeroes the block
-        tensors pinned records reference, so records/sidecars/counters
-        must not survive it. One lock span (RLock) so a concurrent
-        lookup can never pin a record between the pool wipe and the
-        record drop."""
+        """Drop everything cached: the checkpoint tier first (records give
+        their chains back, ``ckpt_reset``), then the pool and the exact
+        tier. A block no one holds is freed at once. A block a holder
+        still leases (a prompt batch, a lookup, a store in flight) leaves
+        the hash table and is marked dropped, as ``_kq_take_back`` does:
+        it keeps its tensors for that holder, and the holder's last
+        release frees it. The stock clear zeroed every refcount instead,
+        so a holder's release pushed a free block twice, or freed one a
+        new owner had taken since. One lock span (RLock) so a concurrent
+        lookup can never pin a record between the record drop and the
+        pool wipe."""
         from .snapshot import ckpt_reset
         from .prefix_cache import clear_all_spec_prefix_caches
         with self.lock:
-            super().clear()
             ckpt_reset(self)
+            self._free_head = self._free_tail = None
+            for b in self.pool:
+                if b.ref_cnt > 0:
+                    self._kq_dropped[id(b)] = b
+                    continue
+                self._kq_dropped.pop(id(b), None)
+                b.ref_cnt = 0
+                self._kq_free(b)
+                b.prev = b.next = None
+                self._free_push(b)
+            self.hash_table.clear()
+            self._exact_cache.clear()
+            self.stats = _apc.APCStats()
             self._kq_stores = []
-            self._kq_dropped = {}
         # Outside the manager lock: the spec prefix cache has its own
         # lifetime and its pinned snapshots must not survive a reset.
         clear_all_spec_prefix_caches()
@@ -571,10 +599,11 @@ class GmlxAPCManager(_apc.APCManager):
                 return got
         return None, 0
 
-    def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0):
+    def store_exact_cache(self, token_ids, prompt_cache, *, extra_hash=0,
+                          materialize=None):
         salt = salt_at(extra_hash, len(token_ids)) ^ self._exact_extra_salt
         out = super().store_exact_cache(
-            token_ids, prompt_cache, extra_hash=salt)
+            token_ids, prompt_cache, extra_hash=salt, materialize=materialize)
         if out:
             self.kq_record("exact", _apc._sequence_hash(
                 tuple(int(t) for t in token_ids), salt, self.block_size))

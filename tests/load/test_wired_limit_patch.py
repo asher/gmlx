@@ -211,3 +211,131 @@ def test_a_held_load_that_streams_keeps_the_limit_at_0(monkeypatch,
     assert calls == [0]
     assert getattr(mx.set_wired_limit, "_kq_no_sweep", False)
 
+
+
+def _decide_the_cap(monkeypatch) -> None:
+    """The start decides the wired cap, as for a model predicted to map
+    its table untracked (``capacity.decide_cap``): it reads the memory
+    wired outside the process and installs the cap."""
+    import gmlx.stream.table_stream as ts
+    from gmlx.serve import capacity
+
+    monkeypatch.setattr(ts, "predicts_untracked", lambda *a, **k: True)
+    monkeypatch.setattr(capacity, "_CAP", None)
+    assert capacity.decide_cap([("/m/Flash-Next-Q4.gguf", None)])
+
+
+@pytest.mark.host_gb(128)
+def test_a_caller_asking_for_the_working_set_gets_the_wired_cap(
+        restore_wired_limit, monkeypatch):
+    """mlx-lm's generation context asks for Metal's whole recommended
+    working set. Under the clamp it gets the wired cap: the working set
+    less the margin, or RAM less the reserve and the memory wired outside
+    the server (read once when the start decides the cap), whichever is
+    lower. The cap is the MLX memory limit too. A process the streaming
+    install pinned stays at 0 and gets MLX's own memory limit back."""
+    import host_box
+
+    from gmlx.serve import capacity
+    from gmlx.stream.wired_limit import _neutralize_wired_limit_sweep
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(mx, "default_device", lambda: mx.Device(mx.gpu))
+    monkeypatch.setattr(mx, "synchronize", lambda *a, **k: None)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", None)
+    calls = _recorded_limit(monkeypatch, 0)
+    _install_wired_limit_warn_once()
+    mlx_limit = mx.get_memory_limit()
+    _decide_the_cap(monkeypatch)
+    box, vm = host_box.mac(128)
+    mem = box["memory_size"]
+    cap = min(box["max_recommended_working_set_size"]
+              * (1 - capacity.margin()),
+              mem - capacity.reserve_bytes(mem) - vm["wired"])
+    assert mx.get_memory_limit() == pytest.approx(cap, abs=1)
+    model = {"w": mx.zeros((4,), dtype=mx.float32)}
+    with _gen.wired_limit(model):
+        pass
+    assert calls == [pytest.approx(cap, abs=1), 0]
+    _neutralize_wired_limit_sweep()
+    assert mx.get_memory_limit() == mlx_limit
+    with _gen.wired_limit(model):
+        pass
+    assert calls[2:] == [0]
+
+
+# The line a load prints when its table is untracked and the clamp and the
+# MLX memory limit both stand at the wired cap: what a server log shows.
+B2_LINE = (r"\[memory\] per_layer_token_embd\.weight untracked, [0-9.]+ GB: "
+           r"mx\.set_wired_limit clamped to the wired cap ([0-9.]+) GB, "
+           r"MLX memory limit \1 GB$")
+
+
+@pytest.mark.host_gb(128)
+def test_a_load_with_an_untracked_table_prints_the_limits_it_leaves(
+        restore_wired_limit, monkeypatch, capsys):
+    """After the install, a load whose table MLX never tracks prints the
+    limits it leaves, read back: the clamp owns mx.set_wired_limit at the
+    wired cap, and the MLX memory limit is the same figure. A pin shows
+    instead, with MLX's own memory limit back."""
+    import re
+
+    from gmlx.serve import capacity
+    from gmlx.stream.wired_limit import (_neutralize_wired_limit_sweep,
+                                         note_untracked_tables)
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", None)
+    _recorded_limit(monkeypatch, 0)
+    mlx_limit = mx.get_memory_limit()
+    _decide_the_cap(monkeypatch)
+    capsys.readouterr()
+    note_untracked_tables(["per_layer_token_embd.weight"], 28.8e9)
+    line = capsys.readouterr().out.strip()
+    m = re.search(B2_LINE, line)
+    assert m, line
+    assert m.group(1) == f"{capacity.wired_cap_bytes() / 1e9:.1f}"
+    _neutralize_wired_limit_sweep()
+    capsys.readouterr()
+    note_untracked_tables(["per_layer_token_embd.weight"], 28.8e9)
+    line = capsys.readouterr().out.strip()
+    assert not re.search(B2_LINE, line)
+    assert line == ("[memory] per_layer_token_embd.weight untracked, 28.8 GB: "
+                    "the wired limit is pinned at 0, MLX memory limit "
+                    f"{mlx_limit / 1e9:.1f} GB")
+
+
+@pytest.mark.host_gb(128)
+def test_a_process_that_maps_no_table_untracked_keeps_mlx_limits(
+        restore_wired_limit, monkeypatch):
+    """A start whose models predict no untracked map decides no wired
+    cap, and the cache-limit steps install nothing: the process plans
+    under the serve ceiling, and keeps MLX's own mx.set_wired_limit and
+    memory limit, as before the wired cap. A generation then gets the
+    whole working set it asks for."""
+    from types import SimpleNamespace
+
+    from gmlx.serve import capacity, memory
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(mx, "default_device", lambda: mx.Device(mx.gpu))
+    monkeypatch.setattr(mx, "synchronize", lambda *a, **k: None)
+    monkeypatch.setattr(mx, "set_cache_limit", lambda n: 0)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", None)
+    monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
+    calls = _recorded_limit(monkeypatch, 0)
+    stock = mx.set_wired_limit
+    mlx_limit = mx.get_memory_limit()
+    monkeypatch.setattr(capacity, "_CAP", None)
+    assert not capacity.decide_cap([("/m/dense-Q4.gguf", None)])
+    memory.apply_cache_limit(SimpleNamespace(cache_limit_gb=None, models={}))
+    memory.apply_local_cache_limit([])
+    assert not capacity.cap_applies()
+    assert mx.set_wired_limit is stock
+    assert mx.get_memory_limit() == mlx_limit
+    ws = capacity.working_set_bytes()
+    assert capacity.wired_cap_bytes() == capacity.ceiling_bytes(ws)
+    _install_wired_limit_warn_once()
+    with _gen.wired_limit({"w": mx.zeros((4,), dtype=mx.float32)}):
+        pass
+    assert calls == [pytest.approx(ws, abs=1), 0]

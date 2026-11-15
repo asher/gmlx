@@ -18,6 +18,7 @@ import logging
 import os
 from collections import OrderedDict
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Any
 
 from gmlx.envflags import env_int
@@ -75,22 +76,24 @@ def _clone_single_row(cache: Any, eval_targets: list | None = None) -> Any | Non
     window and a future request can never reproduce this stream's ring
     phase. Same-stream resumes must use ``_clone_row_faithful`` instead.
 
-    With ``eval_targets``, the copies of a plain row go into that list and
-    the caller evaluates them, so a many-layer clone syncs once.
+    With ``eval_targets``, the copies go into that list and the caller
+    evaluates them, so a many-layer clone syncs once and a store can make
+    room before its copy materializes.
     """
     return _clone_row(cache, rot_canonical=True, eval_targets=eval_targets)
 
 
-def _clone_row_faithful(cache: Any) -> Any | None:
+def _clone_row_faithful(cache: Any,
+                        eval_targets: list | None = None) -> Any | None:
     """Deep-copy a single-row cache bitwise, rotating rings included.
 
     For SAME-STREAM consumers (exact retirement, the rung ring, drafter
     KV sidecars): the restored state must replay bitwise against the live
     row. The canonical rotating reorder holds the same window but permutes
     fp16 summation order inside it, which MoE routing amplifies into
-    visible logit swings.
+    visible logit swings. ``eval_targets`` as in ``_clone_single_row``.
     """
-    return _clone_row(cache, rot_canonical=False)
+    return _clone_row(cache, rot_canonical=False, eval_targets=eval_targets)
 
 
 def _clone_row(cache: Any, *, rot_canonical: bool,
@@ -100,9 +103,9 @@ def _clone_row(cache: Any, *, rot_canonical: bool,
     from .kv_cache import RotatingKVCache
 
     if isinstance(cache, _buffered_types()):
-        return _clone_buffered_window(cache)
+        return _clone_buffered_window(cache, eval_targets)
     if rot_canonical and isinstance(cache, RotatingKVCache):
-        return _clone_rot_canonical(cache)
+        return _clone_rot_canonical(cache, eval_targets)
     targets: list[Any] = [] if eval_targets is None else eval_targets
     out = _apc._clone_cache_entry_for_apc(
         cache, min_capacity_tokens=None, eval_targets=targets)
@@ -112,10 +115,10 @@ def _clone_row(cache: Any, *, rot_canonical: bool,
     return out
 
 
-def _clone_rot_canonical(cache: Any) -> Any | None:
+def _clone_rot_canonical(cache: Any,
+                         eval_targets: list | None = None) -> Any | None:
     """Canonical rotating clone: same concrete class, buffer trimmed to
     the canonical window, ring pointer at its end (the restored form)."""
-    import mlx.core as mx
     from gmlx._vendor.mlx_vlm import apc as _apc
 
     out = type(cache)(max_size=int(cache.max_size),
@@ -137,11 +140,12 @@ def _clone_rot_canonical(cache: Any) -> Any | None:
     out.values = copy(tv)
     out.offset = int(offset)
     out._idx = int(length)
-    mx.eval(out.keys, out.values)
+    _eval_or_defer([out.keys, out.values], eval_targets)
     return out
 
 
-def _clone_buffered_window(cache: Any) -> Any | None:
+def _clone_buffered_window(cache: Any,
+                           eval_targets: list | None = None) -> Any | None:
     """Clone of a BufferedRotatingKVCache (the spec-path swap-in) as the
     plain RotatingKVCache the model's make_cache produces.
 
@@ -152,7 +156,6 @@ def _clone_buffered_window(cache: Any) -> Any | None:
     both consumers. The result is what a stored entry restores into (the
     spec path re-swaps on its next prefill). ``keep > 0`` never reaches
     the swap; declined."""
-    import mlx.core as mx
     from gmlx._vendor.mlx_vlm import apc as _apc
 
     from .kv_cache import RotatingKVCache
@@ -188,8 +191,17 @@ def _clone_buffered_window(cache: Any) -> Any | None:
     out.keys = copy(cache.keys[..., idx - L:idx, :])
     out.values = copy(cache.values[..., idx - L:idx, :])
     out._idx = L
-    mx.eval(out.keys, out.values)
+    _eval_or_defer([out.keys, out.values], eval_targets)
     return out
+
+
+def _eval_or_defer(arrays: list, eval_targets: list | None) -> None:
+    """Evaluate ``arrays`` now, or hand them to the caller's list."""
+    if eval_targets is None:
+        import mlx.core as mx
+        mx.eval(*arrays)
+    else:
+        eval_targets.extend(arrays)
 
 
 def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
@@ -202,11 +214,33 @@ def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
     window) layers are snapshot-able even after they wrap: the window they retain
     is exactly what sliding-window attention re-attends to on continuation.
     """
+    return _row_snapshot(prompt_cache, row, lazy=False)
+
+
+def _row_view(cache: Any):
+    """The cache's ``_row_view`` when its ``extract`` is the copy of that
+    view (both defined on the same class), else None."""
+    for klass in type(cache).__mro__:
+        if "extract" in klass.__dict__:
+            if "_row_view" in klass.__dict__:
+                return cache._row_view
+            return None
+    return None
+
+
+def _row_snapshot(prompt_cache: list[Any], row: int, *,
+                  lazy: bool) -> list[Any] | None:
+    """``row_snapshot``; with ``lazy`` nothing is copied yet, for a caller
+    that copies the snapshot once and drops it before that copy
+    materializes. Plain KV layers then give views of the live row, and
+    the other layers their extract or clone unevaluated."""
     if not prompt_cache:
         return None
     snaps: list[Any] = []
     for cache in prompt_cache:
         extract = getattr(cache, "extract", None)
+        if lazy and callable(extract):
+            extract = _row_view(cache) or extract
         if callable(extract):
             try:
                 snap = extract(row)
@@ -217,11 +251,11 @@ def row_snapshot(prompt_cache: list[Any], row: int = 0) -> list[Any] | None:
                 # the whole stack; any other row doesn't exist.
                 if row != 0:
                     return None
-                snap = _clone_row_faithful(cache)
+                snap = _clone_row_faithful(cache, [] if lazy else None)
         else:
             # Already single-row (B=1 without a batch wrapper); clone so the
             # stored copy is decoupled from the live decode cache.
-            snap = _clone_row_faithful(cache)
+            snap = _clone_row_faithful(cache, [] if lazy else None)
         if snap is None or not _layer_has_content(snap):
             return None
         snaps.append(snap)
@@ -259,6 +293,21 @@ def _sidecar_index(manager: Any) -> "OrderedDict":
         return idx
 
 
+def _side_room(idx: "OrderedDict", key: Any, nbytes: int, entries: int,
+               budget: int, size_of) -> None:
+    """Make room in a side index (drafter sidecars, anchors) for one entry
+    of ``nbytes`` under ``key`` before its copy materializes: drop ``key``,
+    then the least recently used entries until the new one fits
+    ``entries`` and ``budget``. The newest always survives, so an entry
+    over the whole budget empties the index and is still kept. The entries
+    kept are the ones insert-then-trim kept. Caller holds the lock."""
+    idx.pop(key, None)
+    total = sum(size_of(v) for v in idx.values())
+    while idx and (len(idx) + 1 > entries or total + nbytes > budget):
+        _, victim = idx.popitem(last=False)
+        total -= size_of(victim)
+
+
 def drafter_sidecar_store(
     manager: Any,
     drafter: Any,
@@ -285,7 +334,9 @@ def drafter_sidecar_store(
         caches = drafter.export_kv()
         if not caches:
             return False
+        # The clones stay lazy until the index has made room for them.
         clones: list[Any] = []
+        pending: list[Any] = []
         for c in caches:
             offset = int(getattr(c, "offset", 0) or 0)
             if offset < store_len:
@@ -293,7 +344,7 @@ def drafter_sidecar_store(
                     "APC sidecar store skipped: head offset %d < %d",
                     offset, store_len)
                 return False
-            clone = _clone_row_faithful(c)
+            clone = _clone_row_faithful(c, pending)
             if clone is None:
                 return False
             excess = offset - store_len
@@ -306,19 +357,20 @@ def drafter_sidecar_store(
                 return False
             clones.append(clone)
         ids = tuple(int(t) for t in token_ids)[:store_len]
+        key = (ids, int(extra_hash))
         idx = _sidecar_index(manager)
         record = getattr(manager, "kq_record", None)
         with manager.lock:
-            idx[(ids, int(extra_hash))] = clones
+            _side_room(idx, key, _caches_nbytes(clones), _SIDECAR_ENTRIES,
+                       _SIDECAR_BUDGET_BYTES, _caches_nbytes)
+        if pending:
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="sidecar-store", owner="owned")
+        with manager.lock:
+            idx[key] = clones
             if record is not None:
-                record("sidecar", (ids, int(extra_hash)))
-            idx.move_to_end((ids, int(extra_hash)))
-            while len(idx) > _SIDECAR_ENTRIES:
-                idx.popitem(last=False)
-            total = sum(_caches_nbytes(v) for v in idx.values())
-            while total > _SIDECAR_BUDGET_BYTES and len(idx) > 1:
-                _, victim = idx.popitem(last=False)
-                total -= _caches_nbytes(victim)
+                record("sidecar", key)
+            idx.move_to_end(key)
         disk = getattr(manager, "disk", None)
         if disk is not None:
             try:
@@ -397,11 +449,12 @@ def drafter_sidecar_lookup(
         if (stored_extra != salted or len(stored_tokens) != prefix_len
                 or stored_tokens != ids[:prefix_len]):
             return None
+        # The load serves this restore either way; the index keeps it
+        # within both of its bounds.
         with manager.lock:
+            _side_room(idx, key, _caches_nbytes(caches), _SIDECAR_ENTRIES,
+                       _SIDECAR_BUDGET_BYTES, _caches_nbytes)
             idx[key] = caches
-            idx.move_to_end(key)
-            while len(idx) > _SIDECAR_ENTRIES:
-                idx.popitem(last=False)
         return [_clone_row_faithful(c) for c in caches]
     except Exception:
         _log.warning("APC sidecar lookup failed; continuing", exc_info=True)
@@ -449,22 +502,29 @@ def anchor_exact_store(
         if not ids:
             return False
         from gmlx._vendor.mlx_vlm import apc as _apc
-        clones = _apc._clone_prompt_cache_for_apc(prompt_cache)
-        if clones is None:
-            _ckpt_decline(manager, "anchor_clone")
-            return False
+        # The upstream exact clone, with its one eval held back until the
+        # index has made room for the copy.
+        pending: list[Any] = []
+        clones = []
+        for c in prompt_cache:
+            copied = _apc._clone_cache_entry_for_apc(
+                c, min_capacity_tokens=None, eval_targets=pending)
+            if copied is None:
+                _ckpt_decline(manager, "anchor_clone")
+                return False
+            clones.append(copied)
         nbytes = _caches_nbytes(clones)
         key = (ids, int(salt_at(extra_hash, len(ids))))
         idx = _anchor_index(manager)
         with manager.lock:
+            _side_room(idx, key, nbytes, _ANCHOR_ENTRIES,
+                       _ANCHOR_BUDGET_BYTES, lambda v: v[1])
+        if pending:
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="anchor-store", owner="owned")
+        with manager.lock:
             idx[key] = (clones, nbytes)
             idx.move_to_end(key)
-            while len(idx) > _ANCHOR_ENTRIES:
-                idx.popitem(last=False)
-            total = sum(n for _, n in idx.values())
-            while total > _ANCHOR_BUDGET_BYTES and len(idx) > 1:
-                _, (_, n) = idx.popitem(last=False)
-                total -= n
         _ckpt_bump(manager, "anchor_stores")
         _log.info("APC anchor store: tokens=%d", len(ids))
         return True
@@ -680,10 +740,14 @@ _CKPT_HEAVY_PER_CHAIN = max(1, env_int("GMLX_APC_CKPT_HEAVY", 2))
 # Decision records a manager keeps, so a stream of decisions on new states
 # cannot push the chat records out.
 _CKPT_DECISION_ENTRIES = 8
-# Byte budget for record-owned payload (recurrent states + KV tails; chain
-# blocks are bounded by the manager pool). A GDN record can carry >100 MB
-# of state, so a count bound alone silently pins gigabytes.
+# Records-only byte budget for record-owned payload (recurrent states, KV
+# tails, indexer keys). A GDN record can carry >100 MB of state, so a count
+# bound alone silently pins gigabytes. It bounds the records of a manager
+# autosize never sized; on an autosized one the records share the pool's
+# room with its blocks (_record_room), unless GMLX_APC_CKPT_BUDGET_MB sets
+# this budget in its place.
 _CKPT_BUDGET_BYTES = max(1, env_int("GMLX_APC_CKPT_BUDGET_MB", 4096)) << 20
+_CKPT_BUDGET_SET = bool(os.environ.get("GMLX_APC_CKPT_BUDGET_MB", "").strip())
 
 
 def _iter_arrays(obj):
@@ -883,7 +947,7 @@ _CKPT_STAT_INTS = (
     "ckpt_missed_adoptions", "ckpt_skeleton_writes", "sidecar_writes",
     "retire_fallback_suppressed",
     "ckpt_pool_evictions", "ckpt_governor_released",
-    "ckpt_evict_own_chain",
+    "ckpt_evict_own_chain", "ckpt_budget_evictions", "ckpt_budget_evicted_mb",
     "ckpt_grid_truncate", "anchor_stores", "anchor_hits",
 )
 
@@ -925,21 +989,19 @@ def ckpt_stats_clear(manager) -> None:
 
 
 def ckpt_reset(manager) -> None:
-    """Drop ckpt records, sidecars, and counters after a manager.clear().
-
-    The pool clear already zeroed every block's tensors and refcount, so
-    the pinned records' chains are gone either way; references are
-    dropped, never released (a release into the reset pool would push
-    blocks onto the free list twice). The generation bump tells an
-    in-flight lookup that pinned a record before the clear to drop its
-    held refs the same way."""
+    """Drop ckpt records, sidecars, and counters, as manager.clear() does
+    before it wipes the pool. Each record gives its chains back
+    (``_release_record``), so the pool frees what only records held and
+    leaves what a lookup or a store still leases to that holder. The
+    generation bump tells a store in flight to insert no record and a
+    lookup in flight to discard what it assembled from a record pinned
+    before the clear; each still releases what it holds."""
     with manager.lock:
         manager._kq_ckpt_gen = int(getattr(manager, "_kq_ckpt_gen", 0)) + 1
         idx = getattr(manager, "_kq_ckpt_records", None)
         if idx:
             for rec in idx.values():
-                rec.main_blocks = rec.bounded_blocks = []
-                rec.states = rec.tails = None
+                _release_record(manager, rec)
             idx.clear()
         side = getattr(manager, "_kq_sidecar_cache", None)
         if side:
@@ -1010,6 +1072,104 @@ def ckpt_full_store_redundant(meta) -> bool:
         return False
     stored = meta.get("ckpt_stored_boundaries") or ()
     return any(b in stored for b in meta.get("ckpt_p_stable_bounds") or ())
+
+
+def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
+                          extra_hash: int = 0, keep: int | None = None) -> bool:
+    """Whether the request's N-1 replay record stands in for the p=N
+    post-prefill store, which then is skipped. The two sit one token
+    apart and differ only in the lookups they serve: the replay the
+    identical resend (a record at N cannot serve an N-token query), the
+    p=N record the next turn or a branch past the prompt. A replay on a
+    recurrent layout serves only the resend (the replay gate in
+    ``_ckpt_scan``), so it becomes a boundary here and serves both: the
+    p=N record is off the grid as well, so a next turn restored from
+    either chunks off the grid alike, and the resend still forwards one
+    token. It goes back in as the p=N record would have, strip-on-extend
+    and ``keep`` (the request's p_stable) included, so the boundaries of
+    earlier turns on its chain still go. It takes the disk skeleton the
+    p=N store would have written, and on a kvarn layout its window chain
+    goes to disk as the p=N chain would have (``rot_disk``), so a restart
+    restores the prompt record as before. A replay on an attention-only
+    layout already adopts on extension and keeps its kind. False when no
+    replay landed: the p=N store runs."""
+    if manager is None or token_ids is None:
+        return False
+    try:
+        ids = tuple(int(t) for t in token_ids)[:-1]
+        p = len(ids)
+        if p < 2:
+            return False
+        key = (ids, int(salt_at(extra_hash, p)))
+        idx = _ckpt_records(manager)
+        win: list[Any] = []
+        with manager.lock:
+            rec = idx.get(key)
+            if rec is None or rec.kind != "replay":
+                return False
+            promote = "arr" in rec.layout
+            if promote:
+                # Out of the index unreleased, then in again as a boundary.
+                idx.pop(key)
+                rec.kind = "boundary"
+                _record_insert(manager, rec, keep)
+            snap = _CkptRecord(
+                **{k: getattr(rec, k) for k in _CkptRecord.__slots__})
+            if (promote and key in idx and rec.bounded_blocks
+                    and getattr(manager, "disk", None) is not None
+                    and any(_is_kvarn(t) for t in rec.layout)):
+                # Pinned for the unlocked join, as a lookup pins them.
+                win = list(rec.bounded_blocks)
+                for b in win:
+                    manager._acquire_existing(b)
+        _log.info("APC ckpt post-prefill store skipped: the replay at %d "
+                  "stands in%s", p, " as a boundary" if promote else "")
+        if win:
+            _window_to_disk(manager, snap, win)
+        if promote and prompt_cache is not None and snap.states is not None:
+            _ckpt_disk_write(manager, list(snap.ids), prompt_cache,
+                             snap.layout, snap.p, snap.b_full,
+                             snap.p - snap.b_full, snap.states, snap.tails,
+                             ckpt_extra_hash(snap.extra_hash),
+                             qsa_streams=snap.qsa)
+        return True
+    except Exception:
+        _log.warning("APC ckpt replay stand-in failed; storing p=N",
+                     exc_info=True)
+        return False
+
+
+def _window_to_disk(manager, rec, held) -> None:
+    """Write a record's window chain to disk under the salt its store
+    used, from the blocks ``held`` (pinned by the caller, released here).
+    An arr replay keeps its chain memory-only."""
+    from .apc_blocks import join_blocks
+
+    try:
+        sink, _w, _off, L = rec.rot_meta
+        ids = list(rec.ids)
+        layers = join_blocks(held)
+        got = manager.store_ckpt_blocks(
+            ids[:sink] + ids[rec.p - (L - sink):rec.p],
+            [k for k, _ in layers], [v for _, v in layers],
+            extra_hash=bounded_extra_hash(rec.extra_hash, rec.p), disk=True)
+        with manager.lock:
+            manager.release(got)
+    except Exception:
+        _log.debug("APC ckpt window chain disk write failed", exc_info=True)
+    finally:
+        with manager.lock:
+            manager.release(held)
+
+
+def _release_blocks(manager, blocks) -> None:
+    """Give ``blocks`` back to the pool. A clear() since they were taken
+    left them to this holder (``GmlxAPCManager.clear``), so the release
+    frees them."""
+    if not blocks:
+        return
+    with manager.lock:
+        manager.release(blocks)
 
 
 def _release_record(manager, rec) -> None:
@@ -1156,25 +1316,275 @@ def _evict_for_pool(manager, deficit: int, store_ids=None) -> int:
     return evicted
 
 
+def _ckpt_extends(o, r) -> bool:
+    """Whether record ``o`` continues record ``r``'s prompt. The pool
+    keeps one block per hashed span, the salt included, so sharing
+    ``r``'s last chain block proves the prefix up to ``r.b_full``; the
+    tail ids settle the rest. A record with no chain (kvarn) compares its
+    salt, as ``_record_insert`` does, then its ids, the last one first,
+    so a pair of different prompts costs one compare and not a slice of
+    the whole prompt."""
+    if o.p <= r.p:
+        return False
+    nb = len(r.main_blocks or ())
+    if nb:
+        ob = o.main_blocks or ()
+        return (len(ob) >= nb and ob[nb - 1] is r.main_blocks[nb - 1]
+                and o.ids[r.b_full:r.p] == r.ids[r.b_full:])
+    if o.extra_hash != r.extra_hash or o.ids[r.p - 1] != r.ids[-1]:
+        return False
+    return o.ids[:r.p] == r.ids
+
+
+def _chain_heads(idx) -> set:
+    """Keys of the records a next turn restores: per chain, the deepest
+    record no deeper one continues, and each fork point, a record that
+    two or more branches continue, unless it is the anchor. A client that
+    forks a parent's context into children leaves the parent's record
+    continued by every child, and the parent's next turn restores it. A
+    shared anchor stays a non-head, as decided with the heads rule: it
+    goes before any conversation's head, last among the rest, trading a
+    future sibling's restore for a running conversation's next turn.
+    Records on one line below a deeper record (the anchor, the record the
+    last turn restored from) are not heads. A replay serves only its
+    identical resend and a decision record belongs to no conversation, so
+    neither is a head nor hides one."""
+    recs = [(k, r) for k, r in idx.items()
+            if r.kind not in ("replay", "decision")]
+    n = len(recs)
+    # ext[i][j]: record j continues record i.
+    ext = [[_ckpt_extends(recs[j][1], recs[i][1]) for j in range(n)]
+           for i in range(n)]
+    heads = set()
+    for i in range(n):
+        kids = [j for j in range(n) if ext[i][j]]
+        # A branch's first record continues no other record of i's.
+        firsts = [j for j in kids if not any(ext[c][j] for c in kids)]
+        if not firsts or (len(firsts) > 1
+                          and recs[i][1].kind != "anchor"):
+            heads.add(recs[i][0])
+    return heads
+
+
+def _lru_victim_key(idx, keep):
+    """Key of the eviction victim, never the ``keep`` key (the record
+    being inserted always survives). A chain's head (``_chain_heads``)
+    goes only when nothing else is left: under round robin the least
+    recently used conversation is the one due next, and its head is the
+    record that turn restores. Within each group: the least recently used
+    spared record, else non-anchor, else anchor. Lookup hits move_to_end,
+    so anchor order is LRU by last hit: an anchor that never serves a
+    sibling ages out, one that does stays hot. Caller holds the lock and
+    guarantees a non-keep record exists."""
+    heads = _chain_heads(idx)
+    for group in ([k for k in idx if k != keep and k not in heads],
+                  [k for k in idx if k != keep]):
+        for tier in (lambda r: r.spared, lambda r: r.kind != "anchor",
+                     lambda r: True):
+            key = next((k for k in group if tier(idx[k])), None)
+            if key is not None:
+                return key
+    raise KeyError("no eviction victim besides the record kept")
+
+
 def _evict_lru_record(manager, idx, keep):
-    """Release and return the eviction victim: the least-recently-used
-    spared record, else non-anchor record, else anchor, never the
-    ``keep`` key (the record being inserted always survives). Lookup
-    hits move_to_end, so anchor order is LRU by last hit: an anchor
-    that never serves a sibling ages out, one that does stays hot.
-    Caller holds the lock and guarantees a non-keep record exists."""
-    key = next((k for k, r in idx.items() if r.spared and k != keep), None)
-    if key is None:
-        key = next((k for k, r in idx.items()
-                    if r.kind != "anchor" and k != keep), None)
-    if key is None:
-        key = next(k for k in idx if k != keep)
-    victim = idx.pop(key)
-    _release_record(manager, victim)
+    """Drop and return the eviction victim (``_lru_victim_key``), with the
+    blocks only it held (``_drop_record``)."""
+    victim = idx.pop(_lru_victim_key(idx, keep))
+    _drop_record(manager, victim)
     return victim
 
 
-def _record_insert(manager, rec, keep: int | None = None) -> None:
+def _record_room(manager) -> tuple[int, bool]:
+    """The bytes checkpoint records may hold, and whether the pool's
+    committed blocks count against the same figure. autosize stashes the
+    pool's share of the prompt cache's room (``_kq_ckpt_share_bytes``),
+    and records and blocks live within it together.
+    GMLX_APC_CKPT_BUDGET_MB, when set, is a records-only budget in its
+    place, and a manager autosize never sized keeps the records-only
+    default."""
+    share = getattr(manager, "_kq_ckpt_share_bytes", None)
+    if share and not _CKPT_BUDGET_SET:
+        return int(share), True
+    return int(_CKPT_BUDGET_BYTES), False
+
+
+def _committed_block_bytes(manager) -> int:
+    return sum(int(b.resident_bytes())
+               for b in getattr(manager, "pool", None) or ())
+
+
+def _free_unheld(manager, blocks) -> int:
+    """Free each of ``blocks`` that nothing holds any more: on a
+    checkpoint model a chain of blocks is useless without its record. The
+    block leaves the hash table and releases its slabs, and stays empty
+    in the free queue, as the pool's own eviction leaves one. A block a
+    live record or a lookup still holds stays. Returns the bytes freed."""
+    freed = 0
+    table = getattr(manager, "hash_table", None)
+    seen: set[int] = set()
+    for b in blocks:
+        if id(b) in seen or b.ref_cnt > 0:
+            continue
+        seen.add(id(b))
+        nb = int(b.resident_bytes())
+        if not nb:
+            continue
+        if (table is not None and b.block_hash is not None
+                and table.get(b.block_hash) is b):
+            del table[b.block_hash]
+            manager.stats.evictions += 1
+        b.block_hash = None
+        b.token_ids = ()
+        b.release_components()
+        freed += nb
+    return freed
+
+
+def _drop_record(manager, rec) -> int:
+    """Release a record leaving the index and free the blocks only it
+    held: a record is never dropped while its blocks stay, and blocks
+    whose record is gone are freed, on every path that drops one. The
+    pool path (``_evict_for_pool``) and the governor release only, since
+    their callers take or free those blocks at once. Returns the bytes
+    freed. Caller holds the lock."""
+    held = list(rec.main_blocks or ()) + list(rec.bounded_blocks or ())
+    _release_record(manager, rec)
+    return _free_unheld(manager, held)
+
+
+def _fit_record_room(manager, idx, keep) -> tuple[list, dict]:
+    """Bring the records, and the pool's committed blocks when they share
+    the room, within the room (``_record_room``). What goes first: blocks
+    no record holds, then records in eviction order (``_lru_victim_key``),
+    each with the blocks only it held, so a record is never dropped while
+    its blocks stay. The record ``keep`` always stays. Caller holds the
+    lock. Returns each dropped record with the bytes it freed, and the
+    figures the log line reports."""
+    room, shared = _record_room(manager)
+    total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
+    blocks = _committed_block_bytes(manager) if shared else 0
+    note = {"room": room, "shared": shared, "before": total + blocks,
+            "idle": 0}
+    victims: list = []
+    if total + blocks <= room:
+        return victims, note
+    evict_idle = getattr(manager, "_evict_idle_blocks", None)
+    if shared and evict_idle is not None:
+        note["idle"] = int(evict_idle(total + blocks - room))
+        blocks -= note["idle"]
+    while total + blocks > room and len(idx) > 1:
+        victim = idx.pop(_lru_victim_key(idx, keep))
+        own = int(getattr(victim, "nbytes", 0) or 0)
+        freed = _drop_record(manager, victim)
+        total -= own
+        if shared:
+            blocks -= freed
+        victims.append((victim, own + freed))
+    note["after"] = total + blocks
+    return victims, note
+
+
+def _chain_fresh_bytes(manager, chain, block_bytes: int) -> int:
+    """The bytes a chain's block store adds to the pool's committed
+    blocks. ``chain`` is the chain's ``(chunk, hash)`` pairs
+    (``apc_manager.block_chain``). A block the pool holds already dedups
+    and adds nothing; each other block takes the next block of the free
+    queue, in order, and adds ``block_bytes`` less what that block held,
+    all of it for an empty block. Caller holds the lock."""
+    table = getattr(manager, "hash_table", None) or {}
+    held: set[int] = set()
+    new = 0
+    for chunk, h in chain:
+        b = table.get(h)
+        if b is not None and b.token_ids == chunk:
+            held.add(id(b))
+        else:
+            new += 1
+    fresh = 0
+    b = getattr(manager, "_free_head", None)
+    while b is not None and new > 0:
+        if id(b) not in held:
+            new -= 1
+            fresh += max(0, int(block_bytes) - int(b.resident_bytes()))
+        b = b.next
+    return fresh
+
+
+def _fit_chain_room(manager, span_ids, ks, vs, extra, n_blocks: int,
+                    keep) -> tuple[list, dict | None]:
+    """Before a checkpoint chain's block copy, bring the records and the
+    pool's committed blocks, with the bytes the chain adds
+    (``_chain_fresh_bytes``), within the shared room (``_record_room``),
+    in ``_fit_record_room``'s order: blocks no record holds, then records
+    in eviction order, each with the blocks only it held. Blocks the
+    chain dedups are not priced, so no record goes for them. The record
+    ``keep`` stays; the new record's own payload is priced at its insert.
+    Caller holds the lock. Returns the dropped records with the bytes
+    each freed, and the figures the log line reports (None when the room
+    is not shared)."""
+    room, shared = _record_room(manager)
+    if not shared or n_blocks <= 0 or not ks:
+        return [], None
+    from .apc_manager import block_chain
+
+    bs = int(manager.block_size)
+    tokens = max(1, int(ks[0].shape[-2]))
+    block = int(sum(int(a.nbytes) for a in list(ks) + list(vs))
+                * bs // tokens)
+    chain = list(block_chain(span_ids, extra, n_blocks, bs))
+    idx = _ckpt_records(manager)
+
+    def size() -> int:
+        return (sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
+                + _committed_block_bytes(manager)
+                + _chain_fresh_bytes(manager, chain, block))
+
+    total = size()
+    note = {"room": room, "shared": True, "before": total, "idle": 0}
+    victims: list = []
+    evict_idle = getattr(manager, "_evict_idle_blocks", None)
+    while total > room:
+        idle = int(evict_idle(total - room)) if evict_idle else 0
+        if idle:
+            note["idle"] += idle
+        elif any(k != keep for k in idx):
+            victim = idx.pop(_lru_victim_key(idx, keep))
+            own = int(getattr(victim, "nbytes", 0) or 0)
+            victims.append((victim, own + _drop_record(manager, victim)))
+        else:
+            break
+        total = size()
+    note["after"] = total
+    return victims, note
+
+
+def _note_budget_evictions(manager, rec, victims, note) -> None:
+    """The budget's counters and its one log line for an insert that
+    dropped records."""
+    mib = float(1 << 20)
+    freed = sum(b for _, b in victims)
+    st = _ckpt_stats(manager)
+    with manager.lock:
+        st["ckpt_budget_evictions"] = (st.get("ckpt_budget_evictions", 0)
+                                       + len(victims))
+        st["_budget_evicted_bytes"] = (st.get("_budget_evicted_bytes", 0)
+                                       + int(freed))
+        st["ckpt_budget_evicted_mb"] = st["_budget_evicted_bytes"] >> 20
+    _log.info(
+        "APC ckpt budget: dropped %d record(s), %.1f MiB, for the p=%d %s "
+        "store: %s; %s %.1f MiB, now %.1f MiB, of %.1f MiB%s",
+        len(victims), freed / mib, rec.p, rec.kind,
+        ", ".join(f"p={v.p} {v.kind} {b / mib:.1f} MiB"
+                  for v, b in victims),
+        "records and pool blocks" if note["shared"] else "records",
+        note["before"] / mib, note["after"] / mib, note["room"] / mib,
+        f"; blocks no record held {note['idle'] / mib:.1f} MiB"
+        if note["idle"] else "")
+
+
+def _record_insert(manager, rec, keep: int | None = None,
+                   materialize=None, gen: int | None = None) -> bool:
     """Insert a checkpoint record: strip-on-extend superseded records on the
     same chain immediately (LRU would keep exactly the wrong ones - the
     second-newest on a just-grown chain is among the most recently touched),
@@ -1199,25 +1609,47 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
     _CKPT_DECISION_ENTRIES releases the least recently used decision
     record. Eviction ranks them with the non-anchors.
 
+    Bytes: the records, with the pool's committed blocks on an autosized
+    manager, stay within the room (``_fit_record_room``).
+
     Against real memory pressure the exemptions pin little: the count
-    and byte bounds evict anchors after non-anchors (LRU by last hit),
-    and pool-pressure eviction (_evict_for_pool) gives anchors no
-    protection at all: position-salted window chains must never sit
-    pinned on an exhausted pool.
+    and byte bounds keep each chain's head to the last and evict anchors
+    after non-anchors among the rest (LRU by last hit), and
+    pool-pressure eviction (_evict_for_pool) gives anchors no protection
+    at all: position-salted window chains must never sit pinned on an
+    exhausted pool.
 
     ``keep``: the storing request's p_stable. Where a record past it would
     strip the deepest record at or below it, the one a next turn
     restores, that record stays, marked spared: the count and byte
-    bounds evict it first, so it never costs another chain a record."""
+    bounds evict it first, so it never costs another chain a record.
+
+    ``materialize``: the eval of a new record's payload. The bounds run
+    first with the record counted, from its shapes, so the payload lands
+    in the room they made. The record sits out of the index while it
+    materializes, so no lookup adopts arrays not yet evaluated, and comes
+    back as the newest.
+
+    ``gen``: the clear generation the record's blocks were taken at. Once
+    a clear() has run since, the reset dropped what was cached: nothing
+    goes in and the call returns False, and the caller releases the
+    record's chains."""
     idx = _ckpt_records(manager)
     key = (rec.ids, rec.extra_hash)
     rec.nbytes = _rec_nbytes(rec)
+
+    def cleared() -> bool:
+        return (gen is not None
+                and int(getattr(manager, "_kq_ckpt_gen", 0)) != gen)
+
     with manager.lock:
+        if cleared():
+            return False
         old = idx.pop(key, None)
         if old is not None:
             if old.kind == "anchor" and rec.kind == "boundary":
                 rec.kind = "anchor"     # a re-store keeps the anchor tag
-            _release_record(manager, old)
+            _drop_record(manager, old)
         # chain = records whose ids are a strict prefix of this one
         chain = [k for k, r in idx.items()
                  if r.extra_hash == rec.extra_hash and r.p < rec.p
@@ -1225,10 +1657,10 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         if rec.kind == "replay":
             # One replay per chain: the newer one supersedes outright.
             for k in [k for k in chain if idx[k].kind == "replay"]:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
         elif rec.kind == "anchor":
             for k in [k for k in chain if idx[k].kind == "anchor"]:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
         elif rec.kind == "boundary" and not any(
                 idx[k].kind not in ("replay", "decision")
                 for k in chain if k in idx):
@@ -1258,7 +1690,7 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         chain.sort(key=lambda k: idx[k].p, reverse=True)
         for k in chain[_CKPT_HEAVY_PER_CHAIN - 1:]:
             if k != held:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
             else:
                 idx[k].spared = True
         idx[key] = rec
@@ -1266,13 +1698,22 @@ def _record_insert(manager, rec, keep: int | None = None) -> None:
         if rec.kind == "decision":
             decisions = [k for k, r in idx.items() if r.kind == "decision"]
             for k in decisions[:-_CKPT_DECISION_ENTRIES]:
-                _release_record(manager, idx.pop(k))
+                _drop_record(manager, idx.pop(k))
         while len(idx) > _CKPT_RECORD_ENTRIES:
             _evict_lru_record(manager, idx, key)
-        total = sum(int(getattr(r, "nbytes", 0) or 0) for r in idx.values())
-        while total > _CKPT_BUDGET_BYTES and len(idx) > 1:
-            victim = _evict_lru_record(manager, idx, key)
-            total -= int(getattr(victim, "nbytes", 0) or 0)
+        victims, note = _fit_record_room(manager, idx, key)
+        if materialize is not None:
+            idx.pop(key)
+    if victims:
+        _note_budget_evictions(manager, rec, victims, note)
+    if materialize is not None:
+        materialize()
+        with manager.lock:
+            if cleared():
+                return False
+            idx[key] = rec
+            idx.move_to_end(key)
+    return True
 
 
 def ckpt_store(
@@ -1313,6 +1754,7 @@ def ckpt_store(
 
     main_blocks: list[Any] = []
     bounded_blocks: list[Any] = []
+    gen = None
     try:
         ids = [int(t) for t in token_ids]
         p = len(ids)
@@ -1445,17 +1887,29 @@ def ckpt_store(
                 return None
 
             def _once():
-                if store_blocks is not None:
-                    return store_blocks(
-                        span_ids, ks, vs, extra_hash=extra, disk=disk)
-                return manager.store_kv_blocks(
-                    span_ids, ks, vs, extra_hash=extra)
+                # The chain's new blocks are priced against the shared
+                # room before the copy, under the lock the copy runs in.
+                with manager.lock:
+                    victims, note = _fit_chain_room(
+                        manager, span_ids, ks, vs, extra, need,
+                        (tuple(ids), int(extra_hash)))
+                    if store_blocks is not None:
+                        got = store_blocks(
+                            span_ids, ks, vs, extra_hash=extra, disk=disk)
+                    else:
+                        got = manager.store_kv_blocks(
+                            span_ids, ks, vs, extra_hash=extra)
+                if victims:
+                    _note_budget_evictions(
+                        manager, SimpleNamespace(p=p, kind=kind), victims,
+                        note)
+                return got
 
             blocks = _once()
             evicted_total = 0
             while len(blocks) < need:
                 got = len(blocks)
-                manager.release(blocks)
+                _release_blocks(manager, blocks)
                 evicted = _evict_for_pool(manager, need - got,
                                           store_ids=ids)
                 if not evicted:
@@ -1473,6 +1927,10 @@ def ckpt_store(
                     "%s chain store", evicted_total, what)
             return blocks
 
+        # The clear generation the chains are taken at: after a clear()
+        # the insert puts no record in (_record_insert).
+        with manager.lock:
+            gen = int(getattr(manager, "_kq_ckpt_gen", 0))
         if b_full > 0 and kv_caches:
             lk = [c.keys[..., :b_full, :] for c in kv_caches]
             lv = [c.values[..., :b_full, :] for c in kv_caches]
@@ -1504,12 +1962,12 @@ def ckpt_store(
                          for cw in canon]
             if any(cw is None for cw in canon):
                 _ckpt_decline(manager, "canon")
-                manager.release(main_blocks)
+                _release_blocks(manager, main_blocks)
                 return 0
             metas = {cw[2] for cw in canon}
             if len(metas) != 1:
                 _ckpt_decline(manager, "canon")
-                manager.release(main_blocks)
+                _release_blocks(manager, main_blocks)
                 return 0
             rot_meta = canon[0][2]
             sink, _w, _off, L = rot_meta
@@ -1525,17 +1983,18 @@ def ckpt_store(
                 canon_ids, canon_k, canon_v, extra=bsalt, disk=rot_disk,
                 need=L // bs, what="window")
             if got_win is None:
-                manager.release(main_blocks)
+                _release_blocks(manager, main_blocks)
                 return 0
             bounded_blocks = got_win
 
-        # The clones sync once, before the record takes them.
+        # The payload clones stay lazy and sync once, inside the insert,
+        # after the bounds have made room for the record.
         pending: list[Any] = []
         states = [_clone_single_row(c, pending) for c in inline_caches]
         if any(s is None for s in states):
             _ckpt_decline(manager, "clone")
-            manager.release(main_blocks)
-            manager.release(bounded_blocks)
+            _release_blocks(manager, main_blocks)
+            _release_blocks(manager, bounded_blocks)
             return 0
         # QSA layers: the chain carries only k/v, so the indexer key
         # stream (and mrope positions) ride the record whole. ik is one
@@ -1556,13 +2015,11 @@ def ckpt_store(
                 qsa_streams.append((ik, qpos, int(c.ratio)))
             if qsa_streams is None:
                 _ckpt_decline(manager, "clone")
-                manager.release(main_blocks)
-                manager.release(bounded_blocks)
+                _release_blocks(manager, main_blocks)
+                _release_blocks(manager, bounded_blocks)
                 return 0
-            from gmlx.eval_guard import guard
-            guard.eval(*[a for t in qsa_streams for a in t[:2]
-                         if a is not None],
-                       site="ckpt-store-qsa", owner="owned")
+            pending.extend(a for t in qsa_streams for a in t[:2]
+                           if a is not None)
         tails = None
         if tail_len and kv_caches:
             tails = []
@@ -1573,24 +2030,36 @@ def ckpt_store(
                 t = _clone_single_row(t, pending)
                 if t is None:
                     _ckpt_decline(manager, "clone")
-                    manager.release(main_blocks)
-                    manager.release(bounded_blocks)
+                    _release_blocks(manager, main_blocks)
+                    _release_blocks(manager, bounded_blocks)
                     return 0
                 tails.append(t)
-        if pending:
-            # Owned survivors, as on the main chain: the clones read the
-            # live prompt cache and its pending graph.
-            from gmlx.eval_guard import guard
-            guard.eval(*pending, site="ckpt-store-clones", owner="owned")
+
+        def materialize():
+            if pending:
+                # Owned survivors, as on the main chain: the clones read
+                # the live prompt cache and its pending graph.
+                from gmlx.eval_guard import guard
+                guard.eval(*pending, site="ckpt-store-clones",
+                           owner="owned")
 
         rec = _CkptRecord(
             ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,
             layout=tuple(layout), main_blocks=main_blocks,
             bounded_blocks=bounded_blocks, rot_meta=rot_meta,
             states=states, tails=tails, qsa=qsa_streams, kind=str(kind))
-        _record_insert(manager, rec, keep)
+        inserted = _record_insert(manager, rec, keep, materialize, gen)
         # Ownership moved to the record; the except path must not release.
         main_blocks = bounded_blocks = []
+        if not inserted:
+            # A clear() ran since the chains were taken: the reset dropped
+            # what was cached and left the chains to this store, whose
+            # release frees the blocks taken before it.
+            _release_record(manager, rec)
+            _ckpt_decline(manager, "reset")
+            _log.info("APC ckpt store dropped: the cache was reset during "
+                      "the store (p=%d)", p)
+            return 0
 
         if skeleton_disk:
             _ckpt_disk_write(manager, ids, prompt_cache, layout, p, b_full,
@@ -1612,7 +2081,7 @@ def ckpt_store(
             pass
         for blks in (main_blocks, bounded_blocks):
             try:
-                manager.release(blks)
+                _release_blocks(manager, blks)
             except Exception:  # noqa: S110 - best-effort release on the failure path
                 pass
         _log.warning("APC ckpt store failed; continuing", exc_info=True)
@@ -1931,14 +2400,12 @@ def ckpt_lookup(
             finally:
                 with manager.lock:
                     stale = int(getattr(manager, "_kq_ckpt_gen", 0)) != gen
-                    if not stale:
-                        manager.release(held)
+                    manager.release(held)
             if stale:
-                # A clear() ran while the record was pinned: the pool
-                # free list was rebuilt under the held refs (releasing
-                # them would push already-free blocks twice) and the
-                # record index died with it. The warm result is
-                # pre-clear state -- discard it.
+                # A clear() ran while the record was pinned: the record
+                # index died with it, and the warm result is pre-clear
+                # state, so it is discarded. The clear left the pinned
+                # blocks to this lookup, and the release above frees them.
                 continue
             if warm is not None:
                 with manager.lock:
@@ -2341,6 +2808,7 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
             return
         from .kv_cache import BatchKVCache, KVCache, RotatingKVCache
         states = []
+        pending: list[Any] = []
         for c in prompt_cache:
             # Plain KV is sliced from the row at retirement. A row that
             # was joined holds it in the batch class.
@@ -2348,16 +2816,21 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
                     isinstance(c, KVCache)
                     and not isinstance(c, RotatingKVCache)):
                 continue
-            clone = _clone_single_row(c)
+            clone = _clone_single_row(c, pending)
             if clone is None:
                 stash["snap_ok"] = False
                 _log.info("APC decode ckpt disabled: uncloneable cache %s",
                           type(c).__name__)
                 return
             states.append(clone)
+        # The ring holds two. The oldest makes room before the new
+        # snapshot materializes, so it never holds three.
         snaps = stash.setdefault("snaps", [])
+        del snaps[:-1]
+        if pending:
+            from gmlx.eval_guard import guard
+            guard.eval(*pending, site="decode-ckpt-tick", owner="owned")
         snaps.append((p, states))
-        del snaps[:-2]
         stash["snap_next"] = _grid_ceil(p + eff, grid)
         _log.info("APC decode ckpt snapshot: p=%d pred=%d", p, pred)
     except Exception:
@@ -2394,18 +2867,40 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
     return out
 
 
+def _retire_usable(manager, caches, layout, refused) -> bool:
+    """Whether a retirement record of ``caches`` can serve a lookup: its
+    layout is the one the request's lookup signed with (``layout``; None
+    when the arming recorded none). A batched row whose QSA layers left
+    the merge without their indexer keys, or a decode snapshot assembled
+    with plain KV in their place, tags "kv" where every lookup signs
+    "qsa:R": such a record would cost the room and strip its chain for
+    nothing, so it is not stored. A refused layout goes on ``refused``."""
+    if layout is None:
+        return True
+    got = ckpt_layout(caches, int(manager.block_size))
+    if got is None or tuple(got) == tuple(layout):
+        return True
+    refused.append(list(got))
+    return False
+
+
 def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
-                     max_len, decode_snaps) -> int:
+                     max_len, decode_snaps, layout=None) -> int:
     """Ckpt-mode retirement: the full sequence when it can store whole
     (a short rotating prompt truncates to the block grid), else the
     newest decode-time snapshot at or below the replayable prefix. Never spills to the exact tier -- on ckpt models the exact
     tier stays empty, so the stock warm path never bypasses arming.
+    Nothing a lookup signed ``layout`` cannot use (``_retire_usable``):
+    one retire_layout decline and one line per retirement, however many
+    candidates it refused (every decode snapshot of a QSA model is one).
     Returns the stored length (0 = nothing)."""
+    refused: list = []
     try:
         cap = len(ids)
         if max_len is not None and max_len < len(ids):
             cap = max_len
-        elif len(ids) >= 2:
+        elif len(ids) >= 2 and _retire_usable(manager, prompt_cache, layout,
+                                              refused):
             # A row still on its single-row caches is sliced directly:
             # the stores copy per block, with no clone of the row. A row
             # taken out of batch classes arrives as one copy of its KV. A
@@ -2417,14 +2912,20 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                                 grid_truncate=True, kind="retire")
             if stored:
                 return stored
+        snap_refused = False
         for p, states in sorted(decode_snaps or [],
                                 key=lambda s: s[0], reverse=True):
             if not 2 <= p <= cap:
                 continue
             assembled = _snap_assemble(prompt_cache, states, p)
+            if assembled is None:
+                continue
+            if not _retire_usable(manager, assembled, layout, refused):
+                snap_refused = True
+                continue
             # skeleton_disk stays on: this is the entry a post-restart
             # turn restores from, unlike interval boundaries.
-            if assembled is not None and ckpt_store(
+            if ckpt_store(
                     manager, ids[:p], assembled, extra_hash=extra_hash,
                     skeleton_disk=True, kind="retire"):
                 _log.info("APC retirement: decode ckpt stored at %d "
@@ -2449,14 +2950,21 @@ def _ckpt_retirement(manager, ids, prompt_cache, *, extra_hash,
                 "APC retirement: predicted-diverged fallback suppressed "
                 "(replayable prefix %d, full %d)", cap, len(ids))
             return 0
-        _log.info("APC retirement skipped: no decode snapshot at or "
-                  "below the replayable prefix %d (full %d)",
-                  cap, len(ids))
+        if not snap_refused:
+            _log.info("APC retirement skipped: no decode snapshot at or "
+                      "below the replayable prefix %d (full %d)",
+                      cap, len(ids))
         return 0
     except Exception:
         _log.warning("APC ckpt retirement failed; continuing",
                      exc_info=True)
         return 0
+    finally:
+        if refused:
+            _ckpt_decline(manager, "retire_layout")
+            _log.info("APC retirement: %d candidate(s) skipped, layout %s "
+                      "matches no lookup (%s)", len(refused), refused[0],
+                      list(layout or ()))
 
 
 _RETIRE_BLOCKED = [0]
@@ -2484,6 +2992,7 @@ def retirement_store(
     extra_hash: int = 0,
     max_len: int | None = None,
     decode_snaps: list | None = None,
+    layout: tuple | None = None,
 ) -> int:
     """Persist a finished row's full KV into the shared APC.
 
@@ -2500,7 +3009,9 @@ def retirement_store(
     below the LCP (``decode_snaps``, from ``decode_ckpt_tick``), falling
     back to the full sequence under its verbatim key -- neither recurrent
     state nor a rotating window can rewind, and nothing spills to the
-    exact tier. Best effort: a failure never breaks generation.
+    exact tier. ``layout``: the signature the request's lookup signed
+    with; a ckpt record that cannot match it is not stored. Best effort:
+    a failure never breaks generation.
 
     Returns the stored prefix length in tokens (0 = nothing stored) --
     the fallback can store past ``max_len``, so callers must log the
@@ -2512,37 +3023,15 @@ def retirement_store(
     if mode == "ckpt":
         return _ckpt_retirement(manager, ids, prompt_cache,
                                 extra_hash=extra_hash, max_len=max_len,
-                                decode_snaps=decode_snaps)
+                                decode_snaps=decode_snaps, layout=layout)
     if max_len is not None and max_len < len(ids) and mode != "exact":
         ids = ids[:max_len]
     if len(ids) < 2:
         return 0
     try:
         if mode == "exact":
-            snap = row_snapshot(prompt_cache, row)
-            if snap is None:
-                return 0
-            covered = _cache_offset_max(snap)
-            if covered and covered != len(ids):
-                # An exact entry replays bitwise from its key; a row whose
-                # KV count disagrees with the key (a batch row with a
-                # pending or stale tail) must not be stored under it.
-                _log.warning("APC retirement skipped: row covers %d tokens, "
-                             "key %d", covered, len(ids))
-                return 0
-            if max_len is not None and max_len < len(ids):
-                if max_len < 2:
-                    return 0
-                snap = _truncate_kv_snapshot(snap, max_len)
-                if snap is None:
-                    _log.info(
-                        "APC retirement skipped: snapshot not truncatable "
-                        "to the replayable prefix %d", max_len)
-                    return 0
-                ids = ids[:max_len]
-            if manager.store_exact_cache(ids, snap, extra_hash=extra_hash):
-                return len(ids)
-            return 0
+            return _exact_retirement(manager, ids, prompt_cache, row=row,
+                                     extra_hash=extra_hash, max_len=max_len)
         from gmlx._vendor.mlx_vlm import apc as _apc
         blocks = _apc.harvest_blocks_from_batch_cache(
             manager, prompt_cache, ids, batch_idx=row, extra_hash=extra_hash)
@@ -2554,3 +3043,51 @@ def retirement_store(
     except Exception:
         _log.warning("APC retirement store failed; continuing", exc_info=True)
         return 0
+
+
+def _exact_retirement(manager: Any, ids: list[int], prompt_cache: list[Any],
+                      *, row: int, extra_hash: int,
+                      max_len: int | None) -> int:
+    """Store ``row`` in the exact tier as one copy of its KV.
+
+    The snapshot copies nothing yet (``_row_snapshot`` lazy), and it is
+    cloned the way the tier clones, unevaluated too. Once the snapshot is
+    dropped only the clone's graph holds it, so the store makes room for
+    the clone's bytes and then materializes the clone as the row's only
+    copy. A truncated plain KV row slices views, so the copy holds only
+    the kept prefix.
+    """
+    from gmlx._vendor.mlx_vlm import apc as _apc
+
+    snap = _row_snapshot(prompt_cache, row, lazy=True)
+    if snap is None:
+        return 0
+    covered = _cache_offset_max(snap)
+    if covered and covered != len(ids):
+        # An exact entry replays bitwise from its key; a row whose KV count
+        # disagrees with the key (a batch row with a pending or stale tail)
+        # must not be stored under it.
+        _log.warning("APC retirement skipped: row covers %d tokens, key %d",
+                     covered, len(ids))
+        return 0
+    if max_len is not None and max_len < len(ids):
+        if max_len < 2:
+            return 0
+        snap = _truncate_kv_snapshot(snap, max_len)
+        if snap is None:
+            _log.info("APC retirement skipped: snapshot not truncatable to "
+                      "the replayable prefix %d", max_len)
+            return 0
+        ids = ids[:max_len]
+    pending: list = []
+    entry = [_apc._clone_cache_entry_for_apc(
+        c, min_capacity_tokens=None, eval_targets=pending) for c in snap]
+    if any(c is None for c in entry):
+        # The tier's own clone declines the row too, and books the reject.
+        stored = manager.store_exact_cache(ids, snap, extra_hash=extra_hash)
+        return len(ids) if stored else 0
+    del snap
+    if manager.store_exact_cache(ids, entry, extra_hash=extra_hash,
+                                 materialize=pending):
+        return len(ids)
+    return 0

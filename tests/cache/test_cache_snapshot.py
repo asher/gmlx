@@ -268,6 +268,137 @@ def test_retirement_store_batched_row_exact():
         mgr.close()
 
 
+_XH, _XL, _XD, _XLAYERS = 8, 200, 64, 4   # 400 KB per K or V array
+_XW = 64                                   # a sliding layer's window
+
+
+def _x_row(salt):
+    c = KVCache()
+    k = mx.random.normal((1, _XH, _XL, _XD), key=mx.random.key(salt))
+    c.update_and_fetch(k, k + 1.0)
+    mx.eval(c.keys, c.values)
+    return c
+
+
+def _x_rot(salt):
+    c = RotatingKVCache(_XW)
+    k = mx.random.normal((1, _XH, _XL, _XD), key=mx.random.key(salt))
+    c.update_and_fetch(k, k + 1.0)
+    mx.eval(c.keys, c.values)
+    return c
+
+
+def _x_window(c, name):
+    """The tokens a stored row keeps of ``c``: a sliding layer's window in
+    temporal order, else every token."""
+    a = getattr(c, name)
+    if isinstance(c, RotatingKVCache):
+        return c._temporal_order(a)[..., -c.size():, :]
+    return a[..., :c.offset, :]
+
+
+@pytest.mark.parametrize("kind",
+                         ["single row", "batch row", "truncated", "rotating"])
+def test_an_exact_retirement_copies_the_row_once_after_the_room(
+        kind, monkeypatch):
+    """An exact retirement holds one copy of the row, made after the store
+    makes room: the tier's entries plus that copy stay within memory_max,
+    and the tier keeps the entries it kept before. The rotating row puts a
+    sliding layer beside the KV layers, as Gemma-style models do."""
+    from gmlx._vendor.mlx_vlm.apc import _cache_nbytes
+
+    row = 1 if kind in ("batch row", "rotating") else 0
+    make = [_x_row] * _XLAYERS
+    if kind == "rotating":
+        make[-1] = _x_rot
+    rows = [mk(10 * i) for i, mk in enumerate(make)]
+    live = rows
+    if row:
+        live = [(BatchRotatingKVCache if mk is _x_rot else BatchKVCache)
+                .merge([mk(10 * i + 1), r])
+                for i, (mk, r) in enumerate(zip(make, rows))]
+        mx.eval(*[a for c in live for a in (c.keys, c.values)])
+    max_len = _XL // 2 if kind == "truncated" else None
+    n = max_len or _XL
+    entry = sum(2 * _XH * (_XW if mk is _x_rot else n) * _XD * 4
+                for mk in make)
+    mgr = _manager()
+    mgr._exact_cache_max = 3
+    mgr.memory_reserve_bytes = 0
+    mgr.memory_max_bytes = entry * 5 // 2      # room for two and a half
+    try:
+        mx.synchronize()
+        floor = mx.get_active_memory()         # the live row, empty tier
+        for first in (1000, 2000):
+            assert retirement_store(mgr, "exact", range(first, first + _XL),
+                                    live, row=row, max_len=max_len) == n
+        real_eval, evals = mx.eval, []
+
+        def spy(*a, **k):
+            held = sum(_cache_nbytes(e.prompt_cache)
+                       for e in mgr._exact_cache.values())
+            mx.synchronize()
+            before = mx.get_active_memory()
+            out = real_eval(*a, **k)
+            mx.synchronize()
+            evals.append((mx.get_active_memory() - before, held))
+            return out
+
+        monkeypatch.setattr(mx, "eval", spy)
+        mx.synchronize()
+        mx.reset_peak_memory()
+        assert retirement_store(mgr, "exact", range(3000, 3000 + _XL), live,
+                                row=row, max_len=max_len) == n
+        mx.synchronize()
+        peak = mx.get_peak_memory() - floor
+        monkeypatch.undo()
+        copies = [(got, held) for got, held in evals if got > entry // 2]
+        assert len(copies) == 1 and copies[0][0] < entry * 3 // 2, evals
+        assert copies[0][1] + entry <= mgr.memory_max_bytes
+        assert peak <= mgr.memory_max_bytes, (peak, entry)
+        kept = list(mgr._exact_cache.values())
+        assert [e.token_ids[0] for e in kept] == [2000, 3000]
+        assert _cache_nbytes(kept[-1].prompt_cache) == entry
+        for got, want in zip(kept[-1].prompt_cache, rows):
+            assert got.offset == n
+            for name in ("keys", "values"):
+                w = _x_window(want, name)[..., :n, :]
+                g = getattr(got, name)[..., :w.shape[2], :]
+                assert mx.array_equal(g, w).item(), name
+    finally:
+        mgr.close()
+
+
+def test_a_failed_exact_retirement_copy_drains_before_the_store_declines(
+        monkeypatch):
+    """The copy an exact retirement makes reads the live batch cache, whose
+    other rows outlive a failure there: the failed copy drains through the
+    eval guard before the retirement declines, and the row stays whole."""
+    import gmlx.eval_guard as eg
+
+    seq = list(range(1, 20))
+    merged = BatchKVCache.merge([_kv_row(len(seq), 0), _kv_row(len(seq), 500)])
+    mx.eval(merged.keys, merged.values)
+    drained = []
+
+    def fail(*a, **k):
+        raise RuntimeError("[metal::malloc] simulated")
+
+    mgr = _manager()
+    try:
+        monkeypatch.delenv("GMLX_EVAL_GUARD", raising=False)
+        monkeypatch.setattr(eg, "_drain", drained.append)
+        monkeypatch.setattr(mx, "eval", fail)
+        assert retirement_store(mgr, "exact", seq, [merged], row=1) == 0
+        monkeypatch.undo()
+        assert drained == ["exact-retirement"]
+        snap, prefix_len = mgr.lookup_exact_cache(seq + [7])
+        assert prefix_len == 0 and snap is None
+        assert retirement_store(mgr, "exact", seq, [merged], row=1) == len(seq)
+    finally:
+        mgr.close()
+
+
 def test_retirement_store_guards():
     mgr = _manager()
     try:
@@ -693,6 +824,88 @@ def test_sidecar_disk_restart(tmp_path):
         assert plen == 0 and snap is None
     finally:
         mgr2.close()
+
+
+# One sidecar of 10 rows: K and V of float32 across H heads of D.
+_SIDE_BYTES = 2 * H * 10 * D * 4
+_SIDE_IDS = {"a": list(range(1, 13)), "b": list(range(101, 113)),
+             "c": list(range(201, 213))}
+
+
+def _side_keys(mgr):
+    from gmlx.cache.snapshot import _sidecar_index
+    return [k[0][0] for k in _sidecar_index(mgr)]
+
+
+@pytest.mark.parametrize("entries, budget, new, kept", [
+    (12, 2 * _SIDE_BYTES + _SIDE_BYTES // 2, "c", ["b", "c"]),
+    (2, 1 << 30, "c", ["b", "c"]),
+    (2, 2 * _SIDE_BYTES + _SIDE_BYTES // 2, "a", ["b", "a"]),
+], ids=["bytes-full", "count-full", "same-key"])
+def test_a_sidecar_store_materializes_within_the_index_bounds(
+        monkeypatch, entries, budget, new, kept):
+    """The least recently used sidecars make room before the new one
+    materializes, so the index and the copy fit both bounds together. The
+    sidecars kept are the ones insert-then-trim kept."""
+    import gmlx.cache.snapshot as cs
+    from gmlx.cache.snapshot import _caches_nbytes, _sidecar_index
+
+    monkeypatch.setattr(cs, "_SIDECAR_ENTRIES", entries)
+    monkeypatch.setattr(cs, "_SIDECAR_BUDGET_BYTES", budget)
+    mgr = _manager()
+    try:
+        for name in ("a", "b"):
+            drafter = _FakeDrafter([_kv_row(12, ord(name))])
+            assert drafter_sidecar_store(mgr, drafter, _SIDE_IDS[name], 10)
+        drafter = _FakeDrafter([_kv_row(12, 7)])
+        idx = _sidecar_index(mgr)
+        seen = []
+        real = mx.eval
+
+        def spy(*arrays):
+            seen.append((len(idx), sum(_caches_nbytes(v)
+                                       for v in idx.values())))
+            real(*arrays)
+
+        monkeypatch.setattr(mx, "eval", spy)
+        assert drafter_sidecar_store(mgr, drafter, _SIDE_IDS[new], 10)
+        monkeypatch.setattr(mx, "eval", real)
+        assert len(seen) == 1
+        held_n, held_bytes = seen[0]
+        assert held_n + 1 <= entries
+        assert held_bytes + _SIDE_BYTES <= budget
+        assert _side_keys(mgr) == [_SIDE_IDS[k][0] for k in kept]
+    finally:
+        mgr.close()
+
+
+def test_a_sidecar_loaded_from_disk_keeps_the_index_within_its_budget(
+        tmp_path, monkeypatch):
+    """A sidecar the memory budget evicted still serves from disk. Its
+    load enters the index within the byte budget, as a store does, rather
+    than past it until the next store."""
+    import gmlx.cache.snapshot as cs
+    from gmlx._vendor.mlx_vlm.apc import APCManager, DiskBlockStore
+    from gmlx.cache.snapshot import _caches_nbytes, _sidecar_index
+    from test_ckpt_tier import drain_disk
+
+    budget = 2 * _SIDE_BYTES + _SIDE_BYTES // 2
+    monkeypatch.setattr(cs, "_SIDECAR_BUDGET_BYTES", budget)
+    mgr = APCManager(num_blocks=64, block_size=16,
+                     disk=DiskBlockStore(tmp_path / "apc", namespace="t"))
+    try:
+        for name in ("a", "b", "c"):
+            drafter = _FakeDrafter([_kv_row(12, ord(name))])
+            assert drafter_sidecar_store(mgr, drafter, _SIDE_IDS[name], 10)
+        drain_disk(mgr.disk)
+        assert _side_keys(mgr) == [101, 201]     # a left memory, not disk
+        side = drafter_sidecar_lookup(mgr, _SIDE_IDS["a"] + [99], 10)
+        assert side is not None and side[0].offset == 10
+        idx = _sidecar_index(mgr)
+        assert sum(_caches_nbytes(v) for v in idx.values()) <= budget
+        assert _side_keys(mgr) == [201, 1]
+    finally:
+        mgr.close()
 
 
 def test_sidecar_store_guards():

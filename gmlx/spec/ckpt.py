@@ -272,7 +272,10 @@ def _media_safe(batch, ids) -> Callable[[int], bool]:
 
 
 def _ckpt_run_step(batch, block_size: int = 16) -> int:
-    """The step the grid follows. A resident model takes the batch's
+    """The step the grid follows, from the batch's base step: the decay
+    wrapper swaps a chunk's width in around the MTP body and keeps the
+    base in ``_gmlx_base_step``, so a schedule armed there gets the grid a
+    plain batch arms in its constructor. A resident model takes that
     step, or without recurrent state the MoE wide step its loop runs from
     in place of the stock one (``prefill_decay.moe_base_step``), so no
     boundary splits a chunk and a warm turn chunks as a cold one does.
@@ -280,17 +283,15 @@ def _ckpt_run_step(batch, block_size: int = 16) -> int:
     grid: a record there may split a wide chunk, and the gated-delta scan
     carries its state across a cut on a 64-token multiple exactly. A
     streamed one, where a cut off the loop's chunk edges costs a full
-    expert pass, takes the step the loop runs from: the batch's own (the
-    decay wrapper swaps a chunk's width in around the MTP body and keeps
-    the base in ``_gmlx_base_step``), or the arch profile's over a default
-    one (``prefill_decay._run_base``)."""
+    expert pass, takes the step the loop runs from: the base step, or the
+    arch profile's over a default one (``prefill_decay._run_base``)."""
     from gmlx.stream.expert_streaming import experts_streamed
 
     model = getattr(batch, "model", None)
-    step = int(getattr(batch, "prefill_step_size", 0) or 0)
+    step = int(getattr(batch, "_gmlx_base_step", None)
+               or getattr(batch, "prefill_step_size", 0) or 0)
     if not experts_streamed(model):
         return _resident_run_step(batch, model, step, block_size)
-    step = int(getattr(batch, "_gmlx_base_step", None) or step)
     if step <= 0:
         return step
     from gmlx.gen import prefill_decay
@@ -531,11 +532,14 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     without recurrent state. The candidates there are the grid from the
     system prefix anchor, from the restored prefix, from 0 at the step
     the loop runs, and from 0 at the batch's step, which a media prompt
-    keeps. A resident model keeps the grid from 0 at the step its loop
-    runs from (``_ckpt_run_step``). The loop's cost is known at arm time
-    only while the score cap is fixed, not while it follows the live
-    headroom. Without turn records (GMLX_APC_CKPT_TURN=0) the pick cannot
-    see which record the next turn restores, so main's grid stays."""
+    keeps. That last grid is main's own schedule at the batch's live step,
+    which on an MTP batch is the decay wrapper's width, and the pick's
+    floor and the disk skeletons key on it. A resident model keeps the
+    grid from 0 at the step its loop runs from (``_ckpt_run_step``). The
+    loop's cost is known at arm time only while the score cap is fixed,
+    not while it follows the live headroom. Without turn records
+    (GMLX_APC_CKPT_TURN=0) the pick cannot see which record the next turn
+    restores, so main's grid stays."""
     from gmlx.gen import prefill_decay
     from gmlx.stream.expert_streaming import experts_streamed
 
@@ -1021,10 +1025,14 @@ def _snap_fields(batch, manager) -> dict:
     off-grid restore is the scoped-benign case). ``snap_align`` is the
     block alignment a rotating window store requires below the window;
     ``snap_offgrid_min`` (= W) is where the store gate stops caring --
-    a wrapped window is whole blocks at any p.
+    a wrapped window is whole blocks at any p. ``layout`` is the signature
+    the request's lookup signed with, which its retirement must match to
+    be of any use (``snapshot._ckpt_retirement``); None when the live
+    cache had no supported signature, which checks nothing.
     """
     import math
     from gmlx.cache.snapshot import _DECODE_CKPT_DEFAULT
+    from gmlx.spec.engine import _LAYOUT_UNSUPPORTED
     bs = int(manager.block_size)
     tags = _ckpt_layout_live(batch, bs) or ()
     step = int(getattr(batch, "prefill_step_size", 0) or 0)
@@ -1037,6 +1045,7 @@ def _snap_fields(batch, manager) -> dict:
             rot_w = int(t.split(":")[1])
             break
     return {
+        "layout": tags if tags and tags != _LAYOUT_UNSUPPORTED else None,
         "snap_ok": bool(tags),
         "snap_grid": grid,
         "snap_align": bs if rot_w else 1,
@@ -1401,7 +1410,7 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
             manager, stash.get("mode") or "ckpt", seq, prompt_cache,
             row=0,
             extra_hash=as_salt(stash.get("extra_hash", 0)), max_len=max_len,
-            decode_snaps=stash.get("snaps"))
+            decode_snaps=stash.get("snaps"), layout=stash.get("layout"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
     except Exception:

@@ -53,9 +53,10 @@ A join over the budget does not wait for the ladder. In green and
 yellow the admission gate asks cover_admission_shortfall to evict what
 the join is short of by yellow's own test (pending shed + projection +
 K_y x rate - headroom, plus the gate's slack) from the prompt cache pool
-by bytes, the coldest first, and admits when that covers it. A pool that
-cannot cover it is not touched. Orange and red keep the pool to their
-rungs.
+by bytes, the coldest first, then what the pool cannot give from the
+drafter's prefix layer, and admits when that covers it. Caches that
+cannot cover it together are not touched. Orange and red keep both to
+their rungs.
 
 Anti-thrash: minimum dwell per band and a cap on shed actions per
 minute, or orange fights a decode loop that immediately
@@ -69,7 +70,10 @@ beyond the counters. The serve APC manager self-registers at first
 governed tick, and so does a streaming model's decode arena
 (DecodeFeeder.governor_evict shrinks it toward its pressure floor;
 it regrows only into headroom the governor is not using), so orange
-and red reclaim decode speed before they fail a row. Registered
+and red reclaim decode speed before they fail a row. A drafter's
+prefix layer (SpecPrefixCache, whole-prompt snapshots and hiddens)
+registers when it comes up (register_spec_prefix) and evicts least
+recently used first. Registered
 bytes are sampled on a slow cadence (every 16 ticks and at band
 transitions), and so is the kernel's unwired count while it sits above
 twice the floor with no prompt step near; the per-tick trajectory rides
@@ -127,6 +131,7 @@ from __future__ import annotations
 import enum
 import logging
 import os
+import threading
 import time
 import weakref
 
@@ -145,7 +150,9 @@ GREEN, YELLOW, ORANGE, RED = 0, 1, 2, 3
 _BAND_NAMES = ("green", "yellow", "orange", "red")
 
 # Registered caches: name -> (bytes_fn, evict_fn). Values may be dead
-# weakref-bound callables; a registrant that raises is dropped.
+# weakref-bound callables; a registrant that raises is dropped. Readers
+# skip a name gone since their snapshot: another model's teardown can
+# unregister while a tick is inside a registrant.
 _REG: dict = {}
 
 # Server-wide counters for /v1/metrics.
@@ -167,6 +174,7 @@ _STATS = {
     "kernel_floor_reds": 0,
     "kernel_floor": None,
     "shortfall_evictions": 0,
+    "outside_wired_bytes": None,
 }
 
 
@@ -267,6 +275,11 @@ class _GovState:
         # yellow arm/restore
         self.saved_mem_limit = None
         self.saved_cache_limit = None
+        # the limits the throttle set in their place
+        self.throttle_mem_limit = None
+        self.throttle_cache_limit = None
+        # the generator was collected unclosed (_drop_gone)
+        self.gone = False
         self.saved_prefill_step = None
         self.width_clamped = False
         # demand-rung measurement (peak rate per tick)
@@ -355,16 +368,30 @@ def _admission_shortfall(gen, st: "_GovState", projected: float):
     return st.pending_shed_bytes + projected + ky * rate - head
 
 
+def _shortfall_pool(gen):
+    """The prompt cache pool a join's shortfall can take from, or None."""
+    mgr = getattr(gen, "apc_manager", None)
+    return mgr if hasattr(mgr, "evict_bytes") else None
+
+
+def _shortfall_spec(gen):
+    """The drafter's prefix layer a join's shortfall can take from, or
+    None."""
+    spec = spec_prefix_of(gen)
+    return spec if hasattr(spec, "evict_bytes") else None
+
+
 def shortfall_eviction_due(gen) -> bool:
     """Whether ``cover_admission_shortfall`` may evict for a join now:
-    a governed batch with a prompt cache pool, in green or yellow, that
-    has not just found the pool short. Orange and red own the pool with
-    their own rungs."""
+    a governed batch with a prompt cache pool or a drafter's prefix layer,
+    in green or yellow, that has not just found them short. Orange and red
+    own both with their own rungs."""
     if not governor_enabled():
         return False
     st = getattr(gen, "_kq_governor", None)
-    mgr = getattr(gen, "apc_manager", None)
-    if st is None or st.band > YELLOW or not hasattr(mgr, "evict_bytes"):
+    if st is None or st.band > YELLOW:
+        return False
+    if _shortfall_pool(gen) is None and _shortfall_spec(gen) is None:
         return False
     missed = st.shortfall_missed_at
     return (missed is None
@@ -373,26 +400,32 @@ def shortfall_eviction_due(gen) -> bool:
 
 def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
     """Evict what a pending join is over budget from the prompt cache
-    pool, the coldest first, so the gate admits it now and not after the
-    deferral. ``slack`` is the gate's price of what the batch grows by
-    before the join lands. True when the pool gave the shortfall and the
-    join then fits.
+    pool, the coldest first, and what the pool cannot give from the
+    drafter's prefix layer, least recently used first, so the gate admits
+    the join now and not after the deferral. ``slack`` is the gate's price
+    of what the batch grows by before the join lands. True when the
+    eviction gave the shortfall and the join then fits.
 
-    Nothing is evicted when the join fits already or when the pool cannot
+    Nothing is evicted when the join fits already or when the two cannot
     cover the whole shortfall: the deferral and its handoff stand."""
     if not shortfall_eviction_due(gen):
         return False
     st = gen._kq_governor
-    mgr = gen.apc_manager
+    mgr, spec = _shortfall_pool(gen), _shortfall_spec(gen)
     short = _admission_shortfall(gen, st, projected)
     if short is None or short < 0:
         return False
     now = time.perf_counter()
     want = short + max(0.0, slack)
-    if mgr.reclaimable_bytes() < want:
+    room = ((mgr.reclaimable_bytes() if mgr is not None else 0)
+            + (spec.governor_bytes() if spec is not None else 0))
+    if room < want:
         st.shortfall_missed_at = now
         return False
-    freed = mgr.evict_bytes(want)
+    pool_freed = mgr.evict_bytes(want) if mgr is not None else 0
+    spec_freed = (spec.evict_bytes(want - pool_freed)
+                  if spec is not None and pool_freed < want else 0)
+    freed = pool_freed + spec_freed
     mx.clear_cache()
     _STATS["shortfall_evictions"] += 1
     _STATS["last_action"] = (
@@ -401,8 +434,9 @@ def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
     fits = left is not None and left < 0
     st.shortfall_missed_at = None if fits else now
     _log.info("[governor] admission shortfall %.2f GB: evicted %.2f GB of "
-              "the prompt cache pool, coldest first; the join %s",
-              short / 1e9, freed / 1e9,
+              "the prompt cache pool, coldest first, and %.2f GB of the "
+              "drafter's prefix layer; the join %s",
+              short / 1e9, pool_freed / 1e9, spec_freed / 1e9,
               "fits" if fits else "is still over budget")
     return fits
 
@@ -410,22 +444,53 @@ def cover_admission_shortfall(gen, projected: float, slack: float) -> bool:
 # ---------------------------------------------------------------- sampling
 
 def _ceiling_bytes(ws: float, margin: float) -> float:
-    from .capacity import ceiling_bytes
+    """The governed ceiling (``capacity.wired_cap_bytes``)."""
+    from .capacity import wired_cap_bytes
 
-    return ceiling_bytes(ws, margin)
+    return wired_cap_bytes(ws, margin) or 0.0
+
+
+def _read_outside_wired() -> None:
+    """Read the memory wired outside the server, live, once a tick, in a
+    process under the wired cap: the kernel's wired count (one
+    host_statistics64 call) less what the server holds wired
+    (``prefill_decay.own_wired_bytes``), booked in
+    ``capacity.note_live_outside_wired``. The wired cap, and with it the
+    headroom every reader admits against, is priced from it while it sits
+    above the startup reading."""
+    from .capacity import (cap_applies, note_live_outside_wired,
+                           priced_outside_wired_bytes)
+
+    if not cap_applies():
+        return
+    from gmlx.gen.prefill_decay import own_wired_bytes
+
+    from .kernel_vm import wired_bytes
+
+    wired = wired_bytes()
+    own = None if wired is None else own_wired_bytes()
+    if own is None:
+        return
+    note_live_outside_wired(wired, own)
+    _STATS["outside_wired_bytes"] = int(priced_outside_wired_bytes())
 
 
 def _headroom_and_ws(margin: float):
+    """The headroom under the governed ceiling, and the working set."""
     from gmlx.gen.prefill_decay import headroom_bytes
 
-    from .capacity import working_set_bytes
+    from .capacity import cap_applies, working_set_bytes
 
-    head = headroom_bytes()
+    engaged = cap_applies()
+    head = headroom_bytes(margin) if engaged else headroom_bytes()
     if head is None:
         return None, 0.0
     ws = working_set_bytes()
     if ws is None:
         return None, 0.0
+    if engaged:
+        # Measured under the wired cap already.
+        return head, ws
     # headroom_bytes is measured against the full WS; shift it down to
     # the governed ceiling
     return head - (ws - _ceiling_bytes(ws, margin)), ws
@@ -481,7 +546,10 @@ def _sample_registered(st: _GovState) -> float:
     st.reg_sampled_tick = st.tick_no
     total = 0.0
     for name in list(_REG):
-        bytes_fn, _ = _REG[name]
+        entry = _REG.get(name)
+        if entry is None:
+            continue
+        bytes_fn, _ = entry
         try:
             total += float(bytes_fn())
         except Exception:
@@ -534,49 +602,155 @@ def _pause_admission(gen, st: _GovState) -> None:
     pass  # the hold is the band itself; admit_gate reads admission_hold_reason
 
 
+# The throttles that hold a memory or cache limit they set, oldest
+# first: only the newest that holds a limit puts its saved one back
+# (_disarm_throttle). A generator's close takes its throttle off
+# (release_throttle), and one collected unclosed goes at the next arm,
+# disarm or tick of any generator, or at a model's unload
+# (drop_gone_throttles).
+_HOLDERS: list = []
+_HOLDERS_LOCK = threading.Lock()
+
+
+def _drop_gone() -> None:
+    """Disarm the throttles whose generator was collected unclosed. The
+    collection only marks them, since it can run on a thread that holds
+    a lock; the caller holds _HOLDERS_LOCK."""
+    for h in [h for h in _HOLDERS if h.gone]:
+        _disarm_locked(h)
+
+
+def drop_gone_throttles() -> None:
+    """Put back the limits of the throttles whose generator was collected
+    unclosed (``_drop_gone``). Each tick calls it, so a new generator that
+    ticks green from its start still drops them, and a model's unload
+    calls it after its collection, when no generator may tick again. The
+    caller holds no limit lock."""
+    if not any(h.gone for h in list(_HOLDERS)):
+        return
+    with _HOLDERS_LOCK:
+        _drop_gone()
+
+
 def _arm_throttle(gen, st: _GovState, ws: float, margin: float) -> None:
     from gmlx.gen.prefill_decay import streamed_tracked_bytes, untracked_weight_bytes
+    from gmlx.stream.wired_limit import LIMIT_LOCK
 
-    if st.saved_mem_limit is None:
-        # The limit speaks allocator terms: allocator-tracked streamed
-        # expert bytes sit inside it without occupying working set, so a
-        # limit that ignores them would refuse every allocation on an
-        # over-RAM streaming model.
-        limit = int(_ceiling_bytes(ws, margin) + untracked_weight_bytes()
-                    + streamed_tracked_bytes())
-        try:
-            st.saved_mem_limit = mx.set_memory_limit(limit)
-        except Exception:
-            st.saved_mem_limit = None
-            _log.warning("[governor] set_memory_limit failed", exc_info=True)
-    if st.saved_cache_limit is None:
-        # Zero here turns every prefill transient into a fresh Metal
-        # allocation; the uncached traffic re-dips the kernel floor each
-        # tick and pins the band red at large prefill cost. A small cap
-        # keeps same-shape layer buffers reusable while overgrowth is
-        # still shed (floor breaches clear the cache directly).
-        cap = int(_env_f("GMLX_GOV_THROTTLE_CACHE_GB", 2.0) * 1e9)
-        try:
-            st.saved_cache_limit = mx.set_cache_limit(cap)
-        except Exception:
-            st.saved_cache_limit = None
+    with _HOLDERS_LOCK, LIMIT_LOCK:
+        _drop_gone()
+        if st.saved_mem_limit is None:
+            # The limit speaks allocator terms: allocator-tracked streamed
+            # expert bytes sit inside it without occupying working set, so
+            # a limit that ignores them would refuse every allocation on
+            # an over-RAM streaming model.
+            limit = int(_ceiling_bytes(ws, margin) + untracked_weight_bytes()
+                        + streamed_tracked_bytes())
+            try:
+                st.saved_mem_limit = mx.set_memory_limit(limit)
+                st.throttle_mem_limit = limit
+            except Exception:
+                st.saved_mem_limit = None
+                _log.warning("[governor] set_memory_limit failed",
+                             exc_info=True)
+        if st.saved_cache_limit is None:
+            # Zero here turns every prefill transient into a fresh Metal
+            # allocation; the uncached traffic re-dips the kernel floor
+            # each tick and pins the band red at large prefill cost. A
+            # small cap keeps same-shape layer buffers reusable while
+            # overgrowth is still shed (floor breaches clear the cache
+            # directly).
+            cap = int(_env_f("GMLX_GOV_THROTTLE_CACHE_GB", 2.0) * 1e9)
+            try:
+                st.saved_cache_limit = mx.set_cache_limit(cap)
+                st.throttle_cache_limit = cap
+            except Exception:
+                st.saved_cache_limit = None
+        held = (st.saved_mem_limit is not None
+                or st.saved_cache_limit is not None)
+        if held and not any(h is st for h in _HOLDERS):
+            _HOLDERS.append(st)
+
+
+def _put_back(which: str, saved: int, ours: int) -> bool:
+    """Put the ``saved`` memory or cache limit back, over the throttle's
+    own limit ``ours`` only: a limit a later owner set (expert streaming's
+    allocator limits, a pin's MLX limit) stands. True when it went back.
+    MLX reads no cache limit back, so that one is swapped and, when the
+    limit it replaced was not ours, swapped back."""
+    from gmlx.stream.wired_limit import LIMIT_LOCK
+
+    with LIMIT_LOCK:
+        if which == "mem":
+            if int(mx.get_memory_limit()) != int(ours):
+                return False
+            mx.set_memory_limit(int(saved))
+            return True
+        cur = int(mx.set_cache_limit(int(saved)))
+        if cur == int(ours):
+            return True
+        mx.set_cache_limit(cur)
+        return False
 
 
 def _disarm_throttle(gen, st: _GovState) -> None:
-    if st.saved_mem_limit is not None:
+    """Hand back the limits the throttle saved. The newest throttle that
+    holds a limit puts its saved one back over its own; an older one
+    hands its saved limit to the next holder that saved its throttle
+    limit, and drops it when a later owner set a limit in between."""
+    with _HOLDERS_LOCK:
+        _drop_gone()
+        _disarm_locked(st)
+
+
+def _disarm_locked(st: _GovState) -> None:
+    i = next((k for k, h in enumerate(_HOLDERS) if h is st), None)
+    later = _HOLDERS[i + 1:] if i is not None else []
+    if i is not None:
+        del _HOLDERS[i]
+    for which in ("mem", "cache"):
+        saved = getattr(st, f"saved_{which}_limit")
+        ours = getattr(st, f"throttle_{which}_limit")
+        setattr(st, f"saved_{which}_limit", None)
+        setattr(st, f"throttle_{which}_limit", None)
+        if saved is None:
+            continue
+        nxt = next((h for h in later
+                    if getattr(h, f"saved_{which}_limit") is not None),
+                   None)
+        if nxt is not None:
+            if getattr(nxt, f"saved_{which}_limit") == ours:
+                setattr(nxt, f"saved_{which}_limit", saved)
+            continue
+        if ours is None:
+            continue
         try:
-            mx.set_memory_limit(st.saved_mem_limit)
+            back = _put_back(which, saved, ours)
         except Exception:
-            _log.warning("[governor] memory limit restore failed; the "
-                         "throttle limit stays", exc_info=True)
-        st.saved_mem_limit = None
-    if st.saved_cache_limit is not None:
-        try:
-            mx.set_cache_limit(st.saved_cache_limit)
-        except Exception:
-            _log.warning("[governor] cache limit restore failed; the "
-                         "throttle limit stays", exc_info=True)
-        st.saved_cache_limit = None
+            _log.warning("[governor] %s limit restore failed; the "
+                         "throttle limit stays",
+                         "memory" if which == "mem" else "cache",
+                         exc_info=True)
+            continue
+        if back and which == "mem" and wrapped_with(mx.set_wired_limit,
+                                                    "_kq_no_sweep"):
+            # The cap went back in a process pinned since: MLX's own
+            # limit is the pin's.
+            from gmlx.stream.wired_limit import _restore_mlx_memory_limit
+
+            _restore_mlx_memory_limit()
+
+
+def release_throttle(gen) -> None:
+    """Take the throttle of ``gen`` off the holders when the generator
+    closes (each batch's end, and the model's unload): its saved limits go
+    back, or pass to the next holder, as at its disarm
+    (``_disarm_throttle``), so the limits the oldest throttle found come
+    back when the last one goes. A closed generator never ticks green
+    again to disarm."""
+    st = getattr(gen, "_kq_governor", None)
+    if st is not None and (st.saved_mem_limit is not None
+                           or st.saved_cache_limit is not None):
+        _disarm_throttle(gen, st)
 
 
 def _arm_demand_rung(gen, st: _GovState) -> None:
@@ -673,7 +847,10 @@ def _shed_allowed(st: _GovState) -> bool:
 def _registered_bytes() -> float:
     total = 0.0
     for name in list(_REG):
-        bytes_fn, _ = _REG[name]
+        entry = _REG.get(name)
+        if entry is None:
+            continue
+        bytes_fn, _ = entry
         try:
             total += float(bytes_fn() or 0)
         except Exception:
@@ -698,7 +875,10 @@ def _floor_evict_fraction(recl: float, floor: float) -> float:
 def _evict_registered(fraction: float) -> float:
     freed = 0.0
     for name in list(_REG):
-        _, evict_fn = _REG[name]
+        entry = _REG.get(name)
+        if entry is None:
+            continue
+        _, evict_fn = entry
         try:
             freed += float(evict_fn(fraction) or 0)
         except Exception:
@@ -891,6 +1071,7 @@ def _kernel_sample(gen, st: "_GovState", floor: float):
 
 
 def _governor_tick(gen) -> None:
+    drop_gone_throttles()
     st = _state(gen)
     st.tick_no += 1
     margin = _env_f("GMLX_GOV_MARGIN", 0.05)
@@ -901,6 +1082,7 @@ def _governor_tick(gen) -> None:
 
     _maybe_register_apc(gen)
     _maybe_register_arena(gen)
+    _read_outside_wired()
     head, ws = _headroom_and_ws(margin)
     if head is None:
         return
@@ -1152,30 +1334,49 @@ def _harvest_tick(gen, st: _GovState, out) -> None:
     st.tok_ema = 0.8 * st.tok_ema + 0.2 * per_row if per_row else st.tok_ema
 
 
-_APC_REGISTERED = False
+def _register_weak(refs: dict, name: str, holder) -> None:
+    """Register ``holder``'s governor_bytes and governor_evict under
+    ``name`` through a weak reference, kept in ``refs``. Idempotent for a
+    live holder; a dead one at the same address is replaced."""
+    live = refs.get(name)
+    if name in _REG and live is not None and live() is holder:
+        return
+    ref = weakref.ref(holder)
+    refs[name] = ref
+
+    def _bytes():
+        h = ref()
+        return h.governor_bytes() if h is not None else 0
+
+    def _evict(fraction):
+        h = ref()
+        return h.governor_evict(fraction) if h is not None else 0
+
+    register_cache(name, _bytes, _evict)
+
+
+_APC_REFS: dict = {}       # registry name -> weakref of the manager
+
+
+def _apc_name(mgr) -> str:
+    return f"apc:{id(mgr)}"
 
 
 def _maybe_register_apc(gen) -> None:
     """Self-register the serve APC manager the first time a governed
-    tick sees one."""
-    global _APC_REGISTERED
-    if _APC_REGISTERED:
-        return
+    tick sees it: each model's own, so the pool of a model loaded after a
+    swap, or beside another, gives way too. The model's teardown
+    unregisters it (``unregister_apc``)."""
     mgr = getattr(gen, "apc_manager", None)
     if mgr is None or not hasattr(mgr, "governor_bytes"):
         return
-    ref = weakref.ref(mgr)
+    _register_weak(_APC_REFS, _apc_name(mgr), mgr)
 
-    def _bytes():
-        m = ref()
-        return m.governor_bytes() if m is not None else 0
 
-    def _evict(fraction):
-        m = ref()
-        return m.governor_evict(fraction) if m is not None else 0
-
-    register_cache("apc", _bytes, _evict)
-    _APC_REGISTERED = True
+def unregister_apc(mgr) -> None:
+    name = _apc_name(mgr)
+    unregister_cache(name)
+    _APC_REFS.pop(name, None)
 
 
 _ARENA_REFS: dict = {}     # registry name -> weakref of the feeder
@@ -1201,30 +1402,50 @@ def _maybe_register_arena(gen) -> None:
         return
     if feeder is None or not hasattr(feeder, "governor_evict"):
         return
-    name = _arena_name(feeder)
-    if name in _REG:
-        live = _ARENA_REFS.get(name)
-        if live is not None and live() is feeder:
-            return
-        unregister_cache(name)          # a dead feeder at the same address
-    ref = weakref.ref(feeder)
-    _ARENA_REFS[name] = ref
-
-    def _bytes():
-        f = ref()
-        return f.governor_bytes() if f is not None else 0
-
-    def _evict(fraction):
-        f = ref()
-        return f.governor_evict(fraction) if f is not None else 0
-
-    register_cache(name, _bytes, _evict)
+    _register_weak(_ARENA_REFS, _arena_name(feeder), feeder)
 
 
 def unregister_arena(feeder) -> None:
     name = _arena_name(feeder)
     unregister_cache(name)
     _ARENA_REFS.pop(name, None)
+
+
+_SPEC_PREFIX_REFS: dict = {}   # registry name -> weakref of the cache
+
+
+def _spec_prefix_name(cache) -> str:
+    return f"spec_prefix:{id(cache)}"
+
+
+def register_spec_prefix(cache) -> None:
+    """Register a drafter's prefix layer (``SpecPrefixCache``, its
+    whole-prompt snapshots and hiddens) when it comes up, so orange, red,
+    the kernel floor and the admit-ceiling handoff evict it, least
+    recently used first. Idempotent; a dead cache at the same address is
+    replaced."""
+    _register_weak(_SPEC_PREFIX_REFS, _spec_prefix_name(cache), cache)
+
+
+def unregister_spec_prefix(cache) -> None:
+    name = _spec_prefix_name(cache)
+    unregister_cache(name)
+    _SPEC_PREFIX_REFS.pop(name, None)
+
+
+def unregister_spec_prefix_of(model) -> None:
+    """Unregister the drafter's prefix layer of a model at its teardown.
+    It rides the generator's model, the language model on the serve
+    path."""
+    for holder in (model, getattr(model, "language_model", None)):
+        cache = getattr(holder, "_spec_prefix_cache", None)
+        if cache is not None:
+            unregister_spec_prefix(cache)
+
+
+def spec_prefix_of(gen):
+    """The drafter's prefix layer on the generator's model, or None."""
+    return getattr(getattr(gen, "model", None), "_spec_prefix_cache", None)
 
 
 def install_governor() -> bool:
@@ -1258,6 +1479,28 @@ def install_governor() -> bool:
 
     setattr(_governed_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = link(_governed_next, _orig)
+    _orig_close = _ar.BatchGenerator.close
+
+    def _governed_close(self):
+        try:
+            release_throttle(self)
+        except Exception:
+            _log.warning("[governor] throttle release at close failed",
+                         exc_info=True)
+        return _orig_close(self)
+
+    def _collected(self):
+        # A collection can run on a thread that holds a limit lock, so a
+        # generator collected unclosed takes none: it marks its throttle,
+        # and the next arm, disarm or tick, or the model's unload, drops
+        # it (drop_gone_throttles).
+        st = getattr(self, "_kq_governor", None)
+        if st is not None:
+            st.gone = True
+        _orig_close(self)
+
+    _ar.BatchGenerator.close = link(_governed_close, _orig_close)
+    _ar.BatchGenerator.__del__ = link(_collected, _ar.BatchGenerator.__del__)
     floor = _kernel_floor_bytes()
     floor_note = "off"
     if floor > 0:

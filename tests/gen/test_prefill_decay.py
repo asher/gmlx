@@ -361,6 +361,34 @@ def _active(monkeypatch, ws_gb=120):
     return box
 
 
+@pytest.mark.parametrize("engaged", [False, True])
+def test_headroom_reads_the_wired_cap_only_where_it_applies(monkeypatch,
+                                                            engaged):
+    # A process measures the headroom against the working set and counts
+    # the buffer cache as free. One under the wired cap measures it
+    # under the cap, at the margin passed, and counts the cache
+    # as used: MLX wires it beside the active bytes.
+    import gmlx.serve.capacity as capacity
+
+    _fresh_streamed(monkeypatch)
+    _active(monkeypatch)                  # 120 GB working set, 10 GB active
+    monkeypatch.setattr(pd.mx, "get_cache_memory", lambda: 3 * GB)
+    margins = []
+
+    def cap(ws=None, m=None):
+        margins.append(m)
+        return 100 * GB
+
+    monkeypatch.setattr(capacity, "wired_cap_bytes", cap)
+    monkeypatch.setattr(capacity, "_CAP", engaged)
+    if engaged:
+        assert pd.headroom_bytes(0.07) == 100 * GB - 10 * GB - 3 * GB
+        assert margins == [0.07]
+    else:
+        assert pd.headroom_bytes(0.07) == 120 * GB - 10 * GB
+        assert margins == []
+
+
 def test_build_credit_follows_active_growth_up_to_the_cap(monkeypatch):
     # Tracked regime: the walk grows active memory by the file before the
     # install credits it. The build credit covers the growth, capped at the

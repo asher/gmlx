@@ -2073,14 +2073,23 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
         manager = getattr(model, "_kq_apc_manager", None)
         if manager is None:
             return
-        from gmlx.cache.snapshot import ckpt_full_store_redundant, ckpt_store
+        from gmlx.cache.snapshot import (
+            ckpt_full_store_redundant,
+            ckpt_replay_stands_in,
+            ckpt_store,
+        )
         meta = retire_ctx.get("apc_meta")
+        extra_hash = as_salt(retire_ctx.get("extra_hash", 0))
         if ckpt_full_store_redundant(meta):
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
             return
+        if ckpt_replay_stands_in(manager, retire_ctx["full_ids"], prompt_cache,
+                                 extra_hash=extra_hash,
+                                 keep=(meta or {}).get("ckpt_p_stable")):
+            return
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
-                            extra_hash=as_salt(retire_ctx.get("extra_hash", 0)),
+                            extra_hash=extra_hash,
                             grid_truncate=True,
                             keep=(meta or {}).get("ckpt_p_stable"))
         if stored and meta is not None:
@@ -2351,7 +2360,8 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
         ok = retirement_store(
             manager, retire.get("mode"), seq, prompt_cache,
             row=0, extra_hash=as_salt(retire.get("extra_hash", 0)),
-            max_len=max_len, decode_snaps=retire.get("snaps"))
+            max_len=max_len, decode_snaps=retire.get("snaps"),
+            layout=retire.get("layout"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
         if max_len is not None:

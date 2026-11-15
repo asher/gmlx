@@ -42,7 +42,7 @@ is already running does not see a variable you export later.
 | `GMLX_FAITHFUL_HISTORY=0` | Restore mlx-vlm's stock chat-history rebuild, which drops `reasoning_content` from plain assistant turns, and its stock `/v1/messages` conversion. |
 | `GMLX_IGNORE_EOS=1` | Never stop on end-of-sequence in `serve`, as `--ignore-eos` does. |
 | `GMLX_GOV_KERNEL_FLOOR_GB` | GB of memory not wired under which the governor goes red and reclaims caches. The default is the lower of `4` and 10% of RAM, and `0` disables it. |
-| `GMLX_GOV_RESERVE_GB` | RAM left to the kernel and other processes when the server computes its memory limit. The default is the larger of `2` and 10% of RAM. |
+| `GMLX_GOV_RESERVE_GB` | RAM the server leaves to the kernel and other processes, in its memory limit and in its wired cap when it has one. Default: the larger of `2` and 10% of RAM. |
 | `MLX_VLM_RESIDENT_TTL_DISABLE` | `1`, `true`, `yes` or `on` disables the idle-TTL reaper. LRU eviction under pressure still applies. |
 | `MLX_VLM_RESIDENT_TTL_TICK` | Interval in seconds at which the idle reaper wakes. The default is `30`. |
 
@@ -92,7 +92,7 @@ layers.
 | `GMLX_APC_ANCHOR_BUDGET_MB` | Keep the exact-tier anchors within this many MB. The newest anchor is never evicted. |
 | `GMLX_APC_CKPT_TRIPWIRE` | Warn about a model that stores nothing, or that matches but adopts nothing, after this many requests. `0` silences both warnings. |
 | `GMLX_APC_CKPT_RECORDS` | Keep this many checkpoint records. |
-| `GMLX_APC_CKPT_BUDGET_MB` | Keep the checkpoint payload within this many MB. |
+| `GMLX_APC_CKPT_BUDGET_MB` | Keep the checkpoint payload within this many MB, counted apart from the pool. Unset, checkpoints and the pool's blocks share the pool's memory share. |
 | `GMLX_APC_DECODE_CKPT` | Snapshot a checkpoint-tier model at this interval in generated tokens. `0` turns it off. |
 | `GMLX_APC_RETIRE_LCP=0` | Key retirement on the forwarded ids instead of the predicted next-turn render. This also disables decode-time snapshots. |
 | `GMLX_APC_FRESH_WAIT_MS` | Admit siblings that arrive together one at a time, holding each at most this many ms. `0` disables the gate. |

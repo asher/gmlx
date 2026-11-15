@@ -863,6 +863,61 @@ def test_a_shortfall_the_pool_cannot_give_leaves_it_whole_and_defers(
     assert len(m.hash_table) == 36
 
 
+def _with_prefix_layer(monkeypatch, g, m, block, entry_blocks):
+    """Give the generator's model a drafter prefix layer of one entry per
+    ``entry_blocks`` (its size in pool blocks), stored oldest first, and
+    hand the headroom what the layer frees beside what the pool frees."""
+    from gmlx.cache.prefix_cache import SpecPrefixCache
+
+    import gmlx.serve.governor as gov
+
+    layer = SpecPrefixCache(max_entries=8, max_bytes=1 << 40)
+    for i, n in enumerate(entry_blocks):
+        layer.store(mx.arange(i * 100, i * 100 + 64)[None], [],
+                    mx.zeros((1, n * block // 4), mx.float32))
+    monkeypatch.setattr(g.model, "_spec_prefix_cache", layer, raising=False)
+    full, held = m.resident_bytes(), layer.governor_bytes()
+    monkeypatch.setattr(gov, "_headroom_and_ws", lambda margin: (
+        2 * block + full - m.resident_bytes() + held - layer.governor_bytes(),
+        100e9))
+    return layer
+
+
+def _layer_holds(layer, start) -> bool:
+    return layer.lookup(mx.arange(start, start + 65)[None]) is not None
+
+
+@pytest.mark.parametrize(
+    "projected_blocks, entry_blocks, admitted, pool_left, layer_left",
+    [(7, (8, 8, 8), [1], 30, (0, 100, 200)),
+     (50, (8, 8, 8), [1], 0, (0,)),
+     (50, (4, 4), [], 36, (0, 100))],
+    ids=["pool-covers", "layer-gives-the-rest", "both-short"])
+def test_a_join_takes_what_the_pool_cannot_give_from_the_prefix_layer(
+        gated, monkeypatch, projected_blocks, entry_blocks, admitted,
+        pool_left, layer_left):
+    """On a drafter server the drafter's prefix layer is evictable room
+    beside the pool. A join the pool covers takes nothing from the layer.
+    A join 48 blocks over the budget, with 36 in the pool and three
+    8-block entries in the layer, takes the pool and then the layer's
+    least recently used entries and is admitted at once; the entry used
+    last stays. Without the layer it would wait out the deferral and its
+    handoff. When the two cannot cover it, neither is touched."""
+    wrapped, clock = gated
+    g, m, block = _pooled_gen(monkeypatch, projected_blocks, band=0)
+    layer = _with_prefix_layer(monkeypatch, g, m, block, entry_blocks)
+    assert _layer_holds(layer, 0)           # the first turn is used again
+
+    for _ in range(1 if admitted else 3):
+        clock.advance(0.05)
+        wrapped(g)
+
+    assert g.admitted == admitted
+    assert len(m.hash_table) == pool_left
+    assert len(layer) == len(layer_left)
+    assert all(_layer_holds(layer, s) for s in layer_left)
+
+
 def test_a_join_still_held_in_yellow_keeps_its_projection_stamp(
         gated, monkeypatch):
     """Under a yellow hold the gate projects only to price an eviction. A

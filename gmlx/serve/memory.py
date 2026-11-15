@@ -16,9 +16,13 @@ Explicit values: GiB float; ``0`` disables the cache entirely (MLX semantics);
 suppress the auto policy.
 
 Auto policy: always bounded. When the largest configured model's weight
-bytes exceed ``_AUTO_PRESSURE`` of the recommended working set, cap the
-cache at a quarter of the remaining slack, clamped to [4, 12] GiB.
-Otherwise cap it at ``_AUTO_SLACK_SHARE`` of the working set, same clamp.
+bytes its load can wire (``model_weight_bytes``) exceed ``_AUTO_PRESSURE``
+of the recommended working set, cap the cache at a quarter of the
+remaining slack, clamped to [4, 12] GiB. Otherwise cap it at
+``_AUTO_SLACK_SHARE`` of the working set, same clamp. In a process under
+the wired cap (``capacity.cap_applies``), the cap
+(``capacity.wired_cap_bytes``) sets the MLX memory limit too, so the
+cache also yields there.
 MLX's own default is the memory limit (1.5x the working set), so an
 uncapped cache can hold tens of GB of wired freed buffers; the kernel
 counts those against its free pages while the process reads them as
@@ -45,17 +49,40 @@ _UNLIMITED_WORDS = ("off", "none", "unlimited")
 
 
 def model_weight_bytes(path: str) -> int:
-    """Total on-disk bytes of a GGUF (all shards). 0 when unresolvable
-    (hf: refs not yet pulled, missing files) - auto policy then treats the
-    model as weightless rather than guessing."""
+    """On-disk bytes of a GGUF (all shards) its load can wire: the file,
+    less, in a process under the wired cap (``capacity.cap_applies``),
+    the streamable tables a served load maps outside MLX's tracker
+    (``table_stream.untracked_tables_supported`` and
+    ``tables_stream_for_sure``) or reads from the file, which MLX never
+    wires. A table the load writes into a buffer of its own
+    (``table_stream.copied_table_bytes``) counts. 0 when unresolvable
+    (hf: refs not yet pulled, missing files) - auto policy then treats
+    the model as weightless rather than guessing."""
     if not path or str(path).startswith("hf:"):
         return 0
     try:
         from gmlx.load.preflight import find_split_shards
 
-        return sum(os.path.getsize(p) for p in find_split_shards(str(path)))
+        total = sum(os.path.getsize(p) for p in find_split_shards(str(path)))
     except Exception:
         return 0
+    from gmlx.stream.table_stream import (copied_table_bytes,
+                                          tables_stream_for_sure,
+                                          untracked_tables_supported)
+
+    from .capacity import cap_applies
+
+    try:
+        if (cap_applies() and untracked_tables_supported()
+                and tables_stream_for_sure(str(path))):
+            from .capacity import streamed_table_bytes
+
+            total -= (streamed_table_bytes(str(path))
+                      - copied_table_bytes(str(path)))
+    except Exception:
+        _log.debug("untracked table bytes unread; the whole file counts",
+                   exc_info=True)
+    return max(0, total)
 
 
 def auto_cache_limit_bytes(ws_bytes: float, weight_bytes: float) -> int | None:

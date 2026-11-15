@@ -142,6 +142,138 @@ def test_failed_build_after_eviction_drops_proxy_last_ref():
     assert ref() is None
 
 
+def test_unload_leaves_no_drafter_prefix_layer_with_the_governor(monkeypatch):
+    """A drafter's prefix layer registers with the governor when its model
+    serves a turn. The model's unload takes the registration with it; the
+    model that replaces it keeps its own."""
+    import gmlx.serve.governor as gov
+    import gmlx.spec.engine as eng
+
+    monkeypatch.setattr(gov, "_REG", {})
+    monkeypatch.setattr(gov, "_SPEC_PREFIX_REFS", {})
+    monkeypatch.setattr(eng, "_SPEC_APC_DISABLED", False)
+    proxy = _RuntimeProxy(_FakeOriginal())
+    layers = {}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        # The generator's model is the language model; a turn brings its
+        # prefix layer up.
+        lm = SimpleNamespace()
+        layers[model_path] = eng._get_spec_prefix_cache(lm)
+        proxy.apc_manager = f"APC:{model_path}"
+        proxy.response_generator = f"RG:{model_path}"
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": SimpleNamespace(language_model=lm),
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    acquire(pool, "A")
+    assert list(gov._REG) == [gov._spec_prefix_name(layers["A"])]
+    acquire(pool, "B")                      # A goes for B
+    assert list(gov._REG) == [gov._spec_prefix_name(layers["B"])]
+    assert list(gov._SPEC_PREFIX_REFS) == list(gov._REG)
+    _active_entry.set(None)
+
+
+class _FakeCachePool:
+    """A prompt cache pool as the governor sees it."""
+
+    def __init__(self, nbytes):
+        self.nbytes = nbytes
+        self.evicts = []
+
+    def governor_bytes(self):
+        return self.nbytes
+
+    def governor_evict(self, fraction):
+        self.evicts.append(fraction)
+        return int(self.nbytes * fraction)
+
+
+def test_a_swap_hands_the_governor_the_next_models_prompt_cache_pool(
+        monkeypatch):
+    """Each model's prompt cache pool registers with the governor at its
+    first governed tick. The unload takes the registration with it and the
+    model that replaces it registers its own, so orange and red evict the
+    pool the server holds, not the one it unloaded."""
+    import gmlx.serve.governor as gov
+
+    monkeypatch.setattr(gov, "_REG", {})
+    monkeypatch.setattr(gov, "_APC_REFS", {})
+    proxy = _RuntimeProxy(_FakeOriginal())
+    pools = {}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        pools[model_path] = proxy.apc_manager = _FakeCachePool(
+            {"A": 1e9, "B": 2e9}[model_path])
+        proxy.response_generator = f"RG:{model_path}"
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": f"M:{model_path}",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    for path in ("A", "B"):                 # B's load unloads A
+        acquire(pool, path)
+        gov._maybe_register_apc(SimpleNamespace(apc_manager=pools[path]))
+    assert gov._registered_bytes() == 2e9
+    assert gov._evict_registered(0.5) == 1e9
+    assert pools["B"].evicts == [0.5] and pools["A"].evicts == []
+    _active_entry.set(None)
+
+
+def test_a_build_that_fails_in_its_set_up_leaves_nothing_behind(monkeypatch):
+    """The untracked table check can raise (a native-fp table whose header
+    scan fails). The model's env window, the APC env, the build spec, the
+    owner window, the table declaration and the scratch the set-up had
+    opened by then are all undone, as for a load that fails."""
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.bridge_vlm as bridge
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setenv("APC_ENABLED", "1")
+    monkeypatch.delenv("GMLX_APC_ENABLED", raising=False)
+    monkeypatch.delenv("GMLX_TEST_BUILD_WINDOW", raising=False)
+    monkeypatch.setattr(pd, "_WEIGHTS_OWNER", None)
+    monkeypatch.setattr(bridge, "_current_build_spec", None)
+    monkeypatch.setattr(ts, "_INSTALL_FOLLOWS", set())
+    opened = {}
+
+    def header_scan_fails(path, env=None):
+        opened.update(
+            window=os.environ.get("GMLX_TEST_BUILD_WINDOW"),
+            apc=os.environ.get("APC_ENABLED"),
+            spec=bridge.get_build_spec(),
+            owner=pd.untracked_weights_owner() is not None,
+            declared=ts.install_follows(path),
+            scratch=_build_scratch.get(None) is not None)
+        raise RuntimeError("header scan failed")
+
+    monkeypatch.setattr(ts, "tables_load_untracked", header_scan_fails)
+    spec = SimpleNamespace(stream=None)
+    _, pool, teardowns = make_pool(25, {"A": 10})
+    with pytest.raises(RuntimeError, match="header scan failed"):
+        pool.acquire("A", None, "auto", env={"GMLX_TEST_BUILD_WINDOW": "1"},
+                     build_spec=spec)
+    assert opened == {"window": "1", "apc": "0", "spec": spec, "owner": True,
+                      "declared": True, "scratch": True}
+    assert "GMLX_TEST_BUILD_WINDOW" not in os.environ
+    assert os.environ.get("APC_ENABLED") == "1"
+    assert "GMLX_APC_ENABLED" not in os.environ
+    assert bridge.get_build_spec() is None
+    assert pd.untracked_weights_owner() is None
+    assert not ts.install_follows("A")
+    assert _build_scratch.get(None) is None
+    assert resident(pool) == set() and teardowns == []
+
+
 def test_a_plain_entry_is_priced_without_the_tables_read_from_the_file(
         tmp_path, monkeypatch):
     """A model loaded without a stream placement maps its file less the
@@ -486,6 +618,101 @@ def test_a_build_credits_no_table_it_reads_from_the_file(
                          build_spec=SimpleNamespace(stream="experts"))
     pool.release(entry)
     assert seen == [pytest.approx(credit, abs=1)]
+
+
+# Flash-Next built plain on a 128 GB M5 Max: its 28.8 GB PLE table brings
+# it under the budget, so the load maps the table, the install streams it
+# on the CPU stream and the experts stay in memory.
+@pytest.mark.parametrize("supported, decided", [
+    (True, True), (False, False), (True, False)])
+def test_a_table_only_build_with_an_untracked_table_leaves_the_limit_free(
+        monkeypatch, supported, decided):
+    """In a server that decided the wired cap at start, with an mlx-kquant
+    that maps the table outside MLX's tracker, the build puts nothing it
+    streams in a residency set: no pin before the walk, and no build
+    credit, as the table adds to no MLX count. The walk runs under the
+    hold, so a load that falls back to a tracked table wires nothing
+    before its install pins. Without that mlx-kquant, the start decides
+    no cap; nor does it for a model added after the start. Either way the
+    build pins before the walk and credits the table. Every build
+    declares the table stream's install for its load only, and gates and
+    walks in the regime the start decided, which stands after it."""
+    import contextlib
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.residency_build as rb
+    import gmlx.stream.table_stream as ts
+    import gmlx.stream.wired_limit as wired_limit
+
+    path, table, rest = "/m/Flash-Next-Q4.gguf", 28.8e9, 52.0e9
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.delenv("GMLX_STREAM_PLE_COMPOSE", raising=False)
+    for attr in ("_STREAMED_TRACKED", "_STREAMED_CAP", "_UNTRACKED_OWNERS",
+                 "_UNTRACKED_WEIGHTS", "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, attr, {})
+    box = {"active": 10e9}
+    monkeypatch.setattr(pd.mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: supported)
+    # The header the load maps: the iq4_nl table, which no cast copies.
+    monkeypatch.setattr(ts, "_mapped_tables", lambda p, env=None: [
+        SimpleNamespace(name="per_layer_token_embd.weight",
+                        type_name="IQ4_NL", nbytes=int(table))])
+    monkeypatch.setattr(cap, "_CAP", decided)
+    untracked = supported and decided
+    monkeypatch.setattr(cap, "gathered_table_bytes",
+                        lambda p, budget=None, env=None: int(table))
+    monkeypatch.setattr(cap, "held_table_bytes", lambda p: 0)
+    monkeypatch.setattr(rb, "_plain_footprint",
+                        lambda p, footprint, env=None: int(rest))
+    monkeypatch.setattr(rb, "_latch_guarded_wire", lambda *a, **k: False)
+    monkeypatch.setattr(rb, "_say_tables_offloaded", lambda *a: None)
+    monkeypatch.setattr(cap, "install_boot_table",
+                        lambda path, b, label, env=None: None)
+    seen = []
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: seen.append(
+        ("gate", cap.cap_applies())))
+    monkeypatch.setattr(wired_limit, "_neutralize_wired_limit_sweep",
+                        lambda: seen.append("pinned"))
+
+    @contextlib.contextmanager
+    def held():
+        seen.append("held")
+        yield
+        seen.append("released")
+
+    monkeypatch.setattr(wired_limit, "wired_limit_held", held)
+    proxy = _RuntimeProxy(_FakeOriginal())
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        # The walk maps the experts and every-token weights tracked, and
+        # the table too unless it is untracked.
+        box["active"] += rest + (0 if untracked else table)
+        # The bridge installs the stream on what this build loads.
+        seen.append(ts.install_follows(model_path))
+        seen.append(cap.cap_applies())
+        seen.append(pd.build_credit_bytes())
+        proxy.response_generator = SimpleNamespace(model=None)
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": "M",
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(400e9), (),
+        footprint_fn=lambda p: int(rest + table))
+    monkeypatch.setattr(pool, "_keep_check", lambda *a, **k: None)
+    monkeypatch.setattr(pool, "_tables_for_memory", lambda *a, **k: False)
+    entry = pool.acquire(path, None, "auto")
+    pool.release(entry)
+    if untracked:
+        assert seen == [("gate", True), "held", True, True, 0, "released"]
+    else:
+        assert seen == [("gate", decided), "pinned", True, decided,
+                        pytest.approx(table, abs=1)]
+    assert not ts.install_follows(path)
+    assert cap.cap_applies() == decided
 
 
 def test_release_returns_refcount_to_zero_and_entry_evictable():
@@ -1161,7 +1388,9 @@ def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
     110 GB budget it composes, as a stream build always does. No decode
     arena or prefill ring is priced. The check before a plain build reads
     ``unwired`` bytes of memory not wired and a KV room of ``room``, with
-    no kernel floor, or from ``unwired()`` when it is callable."""
+    no kernel floor, or from ``unwired()`` when it is callable. The
+    load maps the table MLX-tracked, as an mlx-kquant without untracked
+    views does, so the build credits it."""
     import gmlx.device as dev
     import gmlx.load.discovery as disc
     import gmlx.serve.capacity as cap
@@ -1178,6 +1407,7 @@ def _table_only_header(monkeypatch, budget=130 * GB, unwired=1000 * GB,
         bmod, "kv_room_bytes", lambda *a, resident=False, **k: SimpleNamespace(
             bytes=room if resident else room + 50 * GB, priced=False, depth=0))
     monkeypatch.setattr(ts, "_EXPERTS_FOR_MEMORY", {})
+    monkeypatch.setattr(ts, "untracked_tables_supported", lambda: False)
 
     monkeypatch.setattr(cap, "streamed_expert_bytes", lambda p: 100 * GB)
     monkeypatch.setattr(cap, "streamed_table_bytes", lambda p: 30 * GB)

@@ -62,10 +62,29 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A model that reads its lookup table from disk, such as Qwen3.8-Flash-Next,
+  no longer reads the whole table into memory at every load.
+- Qwen3.8-Flash-Next keeps its weights and KV cache wired while it streams
+  its lookup table, with an mlx-kquant that maps the table untracked.
+- Qwen3.8-Flash-Next's context budget counts the indexer keys its attention
+  keeps, 16% more memory per token than it priced before.
 - Running short of memory or a failed GPU command while a request was
   cancelled, or shed to free memory, no longer fails every other request.
 - A request held for memory beside others decoding starts once memory frees.
   It could wait again after its hold, and the log said it had started.
+- With a drafter, a server short of memory frees the drafter's prefix cache,
+  up to 8 GiB, before it sheds a request or holds one for up to a minute.
+- After a model swap, a server short of memory frees the new model's prompt
+  cache. It freed only the first model's and shed requests instead.
+- Saving or restoring a long prompt could take a prompt cache past its size
+  limit, and the server past its memory cap.
+- A cache reset while a prompt was being saved to or restored from the cache
+  could make a later reply restore the wrong context.
+- With a drafter, Qwen3.8-Flash-Next read a long prompt in chunks twice as
+  wide as without one, and could pass the server's memory cap.
+- On a server that streams a lookup table, memory other apps wired after it
+  started could take the Mac past its wired limit. The server's memory cap
+  now shrinks while that memory stays wired.
 - With a drafter, requests that shared a long prompt prefix decoded slower
   once one of them had restored its prefix from the prompt cache.
 - With a drafter, Qwen3.5 and Qwen3.6 requests decoding together at long
@@ -104,6 +123,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   grew, could push memory up by several gigabytes for the length of one step.
 - On Qwen3.5 and other hybrid models with a drafter, the last request left
   of a batch decoded slower than a request alone, more the longer its context.
+- After a turn restored from the prompt cache, Qwen3.8-Flash-Next held that
+  conversation's attention and indexer keys at twice their memory.
+- With two or more requests decoding at once, Qwen3.8-Flash-Next held their
+  attention keys and values at twice their memory.
+- On hybrid models such as Qwen3.8-Flash-Next, a conversation running beside
+  others could lose its deepest prompt cache entry and rerun most of its prompt.
 
 ## [0.5.5] - 2026-11-08
 

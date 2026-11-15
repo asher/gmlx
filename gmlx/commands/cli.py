@@ -2529,14 +2529,39 @@ def _ensure_stream_cb_caps(args) -> None:
     install sets back the caps it found. Also latches the
     stream flags before the load, for `run` and `chat` alike: the warm
     touch reads the latch to leave the streamable tables and the expert
-    stacks untouched."""
+    stacks untouched. And it declares the table stream's install on the
+    model of ``args.gguf`` and decides the wired cap
+    (``_decide_table_cap``), for a caller that has not yet."""
     from gmlx.stream.table_stream import force_table_stream
 
     stream = bool(getattr(args, "stream_experts", False)
                   or getattr(args, "stream_cpu", False))
     force_table_stream(stream)
+    _decide_table_cap(args)
     if stream:
         _lift_live_cb_caps()
+
+
+def _decide_table_cap(args) -> None:
+    """Declare that the placement installs the table stream on the model
+    of ``args.gguf``, so a table that streams may load outside MLX's
+    tracker (``table_stream.table_install_follows``), and decide from
+    that one model and its stream flags whether the process runs under
+    the wired cap (``capacity.decide_cap``). Before the first fit: the
+    check before the load (``preload_wire_check``) and the run preflight
+    read the decision. `run --report-only` builds no model and installs
+    nothing."""
+    if getattr(args, "report_only", False):
+        return
+    from gmlx.serve.capacity import decide_cap
+    from gmlx.stream.table_stream import table_install_follows
+
+    path = getattr(args, "gguf", None)
+    stream = ("cpu" if getattr(args, "stream_cpu", False)
+              else "experts" if getattr(args, "stream_experts", False)
+              else None)
+    table_install_follows(path)
+    decide_cap([(path, stream)])
 
 
 def _lift_live_cb_caps() -> None:
@@ -3035,6 +3060,9 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
     if why:
         print(f"error: {why}.", file=sys.stderr)
         return 2
+    # Before the first fit, so a load predicted to map a table untracked
+    # is judged against the wired cap.
+    _decide_table_cap(args)
     if not args.report_only:
         preload_wire_check(args, depth=run_room_depth(args),
                            depth_without_mtp=run_room_depth(args, mtp=False))

@@ -133,9 +133,14 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
     """Fit estimate for serving ``ctx_tokens`` of context (default: the
     model's trained context) on this box, or None when any input cannot
     be read (the caller must treat None as permit). ``limit`` is the
-    bytes judged against in place of the GPU working set: physical RAM."""
+    bytes judged against in place of the GPU working set: physical RAM.
+    A process under the wired cap (``capacity.cap_applies``: decided
+    before its load, which is predicted to map a table outside MLX's
+    tracker) is judged against the cap, where its MLX memory limit
+    sits."""
     try:
-        from gmlx.serve.capacity import deferred_table_bytes
+        from gmlx.serve.capacity import (cap_applies, deferred_table_bytes,
+                                         wired_cap_bytes)
 
         shards = _shards(gguf_path)
         # The load maps the wire bytes, less the lookup tables it reads
@@ -144,7 +149,14 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
                         - deferred_table_bytes(shards[0]))
         cfg = _synth_config(shards[0])
         costs = _kv_costs(cfg)
-        ws = working_set_bytes() if limit is None else float(limit)
+        against = "GPU working set" if limit is None else "RAM"
+        if limit is not None:
+            ws = float(limit)
+        elif cap_applies():
+            ws = wired_cap_bytes()
+            against = "wired cap"
+        else:
+            ws = working_set_bytes()
         if not (cfg and costs and ws):
             return None
         from gmlx.serve.mem_preflight import _get, _lm_config
@@ -178,7 +190,7 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
             "ctx": ctx,
             "need": need,
             "working_set": ws,
-            "against": "GPU working set" if limit is None else "RAM",
+            "against": against,
             "fits": need <= ws,
             "largest_fit_ctx": lo,
         }
@@ -190,7 +202,8 @@ def estimate(gguf_path: str, ctx_tokens: int | None = None, *,
 def refusal_text(est: dict) -> str:
     largest = est["largest_fit_ctx"]
     against = est.get("against", "GPU working set")
-    over = "RAM" if against == "RAM" else "the working set"
+    over = {"RAM": "RAM", "wired cap": "the wired cap"}.get(
+        against, "the working set")
     fit = (f"largest fitting context is ~{largest}"
            if largest > 0 else
            f"the weights alone exceed {over}")

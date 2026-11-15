@@ -2543,7 +2543,7 @@ def test_serve_unpinned_preload_is_not_retained(monkeypatch):
     import gmlx.serve.bridge_vlm as serving_mod
     calls = _stub_serving_stack(monkeypatch)
     monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
-        "m": types.SimpleNamespace(path="/m.gguf", pin=False)})
+        "m": types.SimpleNamespace(path="/m.gguf", pin=False, stream=None)})
     assert srv._serve(_one_model_cfg(), _ns(), None) == 0
     assert calls.get("preload_warm") == "m"
     assert calls.get("preload_retain") is False
@@ -2555,7 +2555,7 @@ def test_serve_pinned_preload_is_retained(monkeypatch):
     import gmlx.serve.bridge_vlm as serving_mod
     calls = _stub_serving_stack(monkeypatch)
     monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
-        "m": types.SimpleNamespace(path="/m.gguf", pin=True)})
+        "m": types.SimpleNamespace(path="/m.gguf", pin=True, stream=None)})
     cfg = ServerCfg(models={"m": ModelCfg(id="m", path="/m.gguf", pin=True)})
     assert srv._serve(cfg, _ns(), None) == 0
     assert calls.get("preload_warm") == "m"
@@ -2569,7 +2569,8 @@ def test_serve_warms_every_pinned_model_in_file_order(monkeypatch):
     import types
     import gmlx.serve.bridge_vlm as serving_mod
     calls = _stub_serving_stack(monkeypatch)
-    ns = types.SimpleNamespace
+    def ns(**kw):
+        return types.SimpleNamespace(stream=None, **kw)
     monkeypatch.setattr(serving_mod, "resolved_models", lambda: {
         "a": ns(path="/a.gguf", pin=False), "p1": ns(path="/p1.gguf", pin=True),
         "b": ns(path="/b.gguf", pin=False), "p2": ns(path="/p2.gguf", pin=True),

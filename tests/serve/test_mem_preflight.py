@@ -643,22 +643,31 @@ class _Arena:
         self.arena_bytes = nbytes
 
 
-def test_available_drained_charges_live_arena(monkeypatch):
+@pytest.mark.parametrize("engaged", [False, True])
+def test_available_drained_charges_live_arena(monkeypatch, engaged):
+    """The working set (100 GB) less the zero-copy weights, the admission
+    reserve and a live decode arena. In a process under the wired cap,
+    the cap (95 GB of it) takes the working set's place;
+    the buffer cache yields at the cap, so its limit takes no share."""
     import mlx.core as mx
 
     import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as capacity
     import gmlx.serve.memory as sm
     from gmlx.stream import installs
 
     monkeypatch.setattr(mx, "device_info", lambda: {
         "max_recommended_working_set_size": 100e9})
     monkeypatch.setattr(pd, "untracked_weight_bytes", lambda: 10e9)
+    monkeypatch.setattr(pd, "_NOTED_CACHE_LIMIT", int(4e9))
     monkeypatch.setattr(sm, "admit_reserve_bytes", lambda ws, gen=None: 2e9)
     monkeypatch.setattr(installs, "_ARENAS", [])
-    assert mp.available_drained_bytes() == pytest.approx(88e9)
+    monkeypatch.setattr(capacity, "_CAP", engaged)
+    base = 83e9 if engaged else 88e9
+    assert mp.available_drained_bytes() == pytest.approx(base)
     arena = _Arena(30e9)
     installs.record_arena(arena)
-    assert mp.available_drained_bytes() == pytest.approx(58e9)
+    assert mp.available_drained_bytes() == pytest.approx(base - 30e9)
 
 
 def test_an_id_prompt_is_priced_by_its_length(tight):
@@ -714,3 +723,37 @@ def test_a_scoring_job_prices_fp16_kv_under_a_quantized_policy(
     assert mp.prompt_kv_bytes(quarter(rg, SCORED), 6000) < 0.3e9
     with pytest.raises(PromptTooLongError):
         mp.preflight_scoring(rg, 6000)
+
+
+def test_qwen4exp_prices_the_indexer_and_block_keys_it_holds():
+    """A qwen4exp attention layer with a compress ratio holds, per token,
+    its K and V, one raw indexer key, and one finished block key per
+    ratio tokens. Flash-Next's 12 such layers hold 28,416 B a token where
+    K and V alone are 24,576 B. The price read off the config and the one
+    read off the cache stack both cover all of it."""
+    import mlx.core as mx
+
+    from gmlx.cache.kv_cache import ArraysCache
+    from gmlx.models.qwen4_exp.model import ModelArgs, QSAKVCache
+
+    args = ModelArgs(num_hidden_layers=4, full_attention_interval=2,
+                     num_key_value_heads=2, head_dim=16,
+                     indexer_head_dim=8, compress_ratios=[0, 4, 0, 4])
+    model = SimpleNamespace(config=args)
+    stack = [ArraysCache(size=2), QSAKVCache(4), ArraysCache(size=2),
+             QSAKVCache(4)]
+    tokens, held = 64, 0
+    for c in stack[1::2]:
+        rows = mx.zeros((1, 2, tokens, 16), mx.bfloat16)
+        c.append_qsa(rows, rows, mx.zeros((1, tokens, 8), mx.bfloat16))
+        c.finished_blocks(tokens // 4,
+                          lambda raw, start: raw.reshape(1, -1, 4, 8).mean(2))
+        held += sum(a.nbytes for a in c.state) + c.blocks.nbytes
+    per_token = held / tokens
+
+    def growing(costs):
+        return sum(b for w, b in costs if w is None)
+
+    assert growing(mp.kv_layer_costs(model)) == per_token
+    geometry = mp.stack_geometry(model, stack)
+    assert growing(mp.kv_layer_costs(model, geometry=geometry)) == per_token

@@ -14,6 +14,8 @@ from gmlx.serve.patches.row_failed import RowShedError
 
 # The kernel readers the rig scripts, kept to run against kernel_vm.
 _READERS = (gov._kernel_unwired,)
+# The headroom read the rig scripts, kept for the tests that price it.
+_HEADROOM_AND_WS = gov._headroom_and_ws
 
 
 class FakeGB:
@@ -69,12 +71,21 @@ def rig(monkeypatch):
     monkeypatch.setattr(gov.mx, "get_peak_memory", lambda: box["peak"])
     monkeypatch.setattr(gov.mx, "reset_peak_memory", lambda: None)
     monkeypatch.setattr(gov.mx, "clear_cache", lambda: None)
-    monkeypatch.setattr(
-        gov.mx, "set_memory_limit",
-        lambda v: (box["mem_limits"].append(v), 0)[1])
-    monkeypatch.setattr(
-        gov.mx, "set_cache_limit",
-        lambda v: (box["cache_limits"].append(v), 7)[1])
+    # The limits in force, 0 and 7 to start; each setter returns the one
+    # it replaced, as MLX's do.
+    box["mem_limit"], box["cache_limit"] = 0, 7
+
+    def _setter(name):
+        def set_limit(v):
+            box[f"{name}s"].append(v)
+            prev, box[name] = box[name], v
+            return prev
+        return set_limit
+
+    monkeypatch.setattr(gov.mx, "set_memory_limit", _setter("mem_limit"))
+    monkeypatch.setattr(gov.mx, "set_cache_limit", _setter("cache_limit"))
+    monkeypatch.setattr(gov.mx, "get_memory_limit", lambda: box["mem_limit"])
+    monkeypatch.setattr(gov, "_HOLDERS", [])
     monkeypatch.setattr(gov, "_maybe_register_apc", lambda gen: None)
     box["kernel"] = 40e9
     monkeypatch.setattr(gov, "_kernel_unwired", lambda: box["kernel"])
@@ -194,6 +205,151 @@ def test_throttle_cache_env_zero_disables_caching(rig, monkeypatch):
     gov._governor_tick(gen)
     assert st.band == gov.YELLOW
     assert rig["cache_limits"] == [0]
+
+
+def test_disarm_leaves_the_limits_a_later_owner_set(rig):
+    """A model that loads while another's throttle is armed sets its own
+    limits (expert streaming's allocator sets the memory and the cache
+    limit). The throttle's disarm puts its saved limits back only over
+    its own, so the later owner's stand."""
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gov._arm_throttle(gen, st, 120e9, 0.05)
+    gov.mx.set_memory_limit(300_000_000_000)
+    gov.mx.set_cache_limit(5_000_000_000)
+    gov._disarm_throttle(gen, st)
+    assert (rig["mem_limit"], rig["cache_limit"]) == (300_000_000_000,
+                                                      5_000_000_000)
+    assert (st.saved_mem_limit, st.saved_cache_limit) == (None, None)
+    assert gov._HOLDERS == []
+
+
+@pytest.mark.parametrize("first", [0, 1])
+def test_two_throttles_put_back_the_limits_the_first_found(rig, first):
+    """Two models' throttles armed in turn, the second over the first's
+    limits. The first to disarm leaves the limits in force, and the last
+    puts back the ones the first throttle found, in either order."""
+    gens = [FakeGen(rows=2), FakeGen(rows=2)]
+    sts = [gov._state(g) for g in gens]
+    for g, st in zip(gens, sts):
+        gov._arm_throttle(g, st, 120e9, 0.05)
+    armed = (rig["mem_limit"], rig["cache_limit"])
+    assert armed != (0, 7)
+    gov._disarm_throttle(gens[first], sts[first])
+    assert (rig["mem_limit"], rig["cache_limit"]) == armed
+    gov._disarm_throttle(gens[1 - first], sts[1 - first])
+    assert (rig["mem_limit"], rig["cache_limit"]) == (0, 7)
+    assert gov._HOLDERS == []
+
+
+@pytest.mark.parametrize("how", ["close", "collected"])
+@pytest.mark.parametrize("gone", [0, 1])
+def test_a_model_unloaded_while_armed_leaves_the_throttles(
+        rig, monkeypatch, gone, how):
+    """Two models' throttles armed in turn, then one model unloads while
+    armed: its generator closes, or is collected unclosed. Its throttle
+    leaves the holders through the installed close, or at the next disarm
+    for a collection, which takes no lock. The other throttle's disarm
+    then puts back the limits the first throttle found, as when both
+    disarm, in either order."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    # The install wraps the class, once per process; the test puts back
+    # what it found.
+    for name in ("_next", "close", "__del__"):
+        monkeypatch.setattr(ar.BatchGenerator, name,
+                            ar.BatchGenerator.__dict__[name])
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", gov._ARMED_FLOOR)
+    monkeypatch.setitem(gov._STATS, "kernel_floor",
+                        gov._STATS.get("kernel_floor"))
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
+    assert gov.install_governor()
+    gens = [FakeGen(rows=2), FakeGen(rows=2)]
+    sts = [gov._state(g) for g in gens]
+    armed = []
+    for g, st in zip(gens, sts):
+        g._wire_stack = None
+        gov._arm_throttle(g, st, 120e9, 0.05)
+        armed.append((rig["mem_limit"], rig["cache_limit"]))
+    assert armed[0] != (0, 7)
+    if how == "close":
+        ar.BatchGenerator.close(gens[gone])
+        assert len(gov._HOLDERS) == 1
+        # The newest gone, the oldest's throttle limits are back; the
+        # oldest gone, the newest's stand and it holds what it found.
+        assert (rig["mem_limit"], rig["cache_limit"]) == armed[1 - gone]
+    else:
+        ar.BatchGenerator.__del__(gens[gone])
+        assert sts[gone].gone and len(gov._HOLDERS) == 2
+    gov._disarm_throttle(gens[1 - gone], sts[1 - gone])
+    assert (rig["mem_limit"], rig["cache_limit"]) == (0, 7)
+    assert gov._HOLDERS == []
+
+
+@pytest.mark.parametrize("then", ["unload", "tick"])
+def test_a_collected_generators_throttle_goes_with_no_other_disarm(
+        rig, monkeypatch, then):
+    """A single-model server in yellow: the generation loop drops its
+    failed generator without closing it, and the collection marks the
+    throttle. The limits it found come back at the model's unload, or at
+    the first tick of the next generator, which starts green and never
+    disarms."""
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from test_residency_config import _acq, make_pool
+
+    for name in ("_next", "close", "__del__"):
+        monkeypatch.setattr(ar.BatchGenerator, name,
+                            ar.BatchGenerator.__dict__[name])
+    monkeypatch.setattr(gov, "_ARMED_FLOOR", gov._ARMED_FLOOR)
+    monkeypatch.setitem(gov._STATS, "kernel_floor",
+                        gov._STATS.get("kernel_floor"))
+    monkeypatch.setenv("GMLX_GOV_KERNEL_FLOOR_GB", "0")
+    assert gov.install_governor()
+    _proxy, pool, _seen, teardowns = make_pool()
+    pool.release(_acq(pool, "/m/a.gguf"))
+    gen = FakeGen(rows=2)
+    gen._wire_stack = None
+    st = gov._state(gen)
+    gov._arm_throttle(gen, st, 120e9, 0.05)
+    assert (rig["mem_limit"], rig["cache_limit"]) != (0, 7)
+    ar.BatchGenerator.__del__(gen)
+    assert st.gone and gov._HOLDERS == [st]
+    if then == "unload":
+        assert pool.evict("/m/a.gguf") and teardowns == ["/m/a.gguf"]
+    else:
+        nxt = FakeGen(rows=1)
+        gov._governor_tick(nxt)
+        assert gov._state(nxt).band == gov.GREEN
+    assert (rig["mem_limit"], rig["cache_limit"]) == (0, 7)
+    assert gov._HOLDERS == []
+
+
+def test_disarm_in_a_process_pinned_since_puts_back_mlx_limit(
+        rig, monkeypatch):
+    """The throttle armed over the wired cap's memory limit, then a load
+    pinned the wired limit. The pin found the throttle's limit, not the
+    cap, and left it. Disarmed, the throttle puts the cap back, and the
+    pin's restore then puts back MLX's own limit, which a pinned process
+    keeps."""
+    from gmlx.stream import wired_limit
+
+    cap, mlx_own = 100_000_000_000, 180_000_000_000
+    rig["mem_limit"] = cap
+    monkeypatch.setattr(wired_limit, "_CAP_MEMORY_LIMIT", (mlx_own, cap))
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gov._arm_throttle(gen, st, 120e9, 0.05)
+
+    def pin(*_a, **_k):
+        return 0
+
+    pin._kq_no_sweep = True
+    monkeypatch.setattr(gov.mx, "set_wired_limit", pin)
+    wired_limit._restore_mlx_memory_limit()
+    assert rig["mem_limit"] == st.throttle_mem_limit
+    gov._disarm_throttle(gen, st)
+    assert rig["mem_limit"] == mlx_own
+    assert wired_limit._CAP_MEMORY_LIMIT is None
 
 
 def test_kernel_floor_default_is_4gb(rig, monkeypatch):
@@ -1151,6 +1307,92 @@ def test_headroom_shifts_by_ceiling_gap(monkeypatch):
     assert head == pytest.approx(50e9 - 23e9)
 
 
+def test_the_governor_plans_under_the_wired_cap(monkeypatch):
+    """In a process under the wired cap, the governed ceiling is
+    the wired cap: the working set less the margin, or RAM less the
+    reserve and the memory wired outside the server at load, whichever is
+    lower. The headroom is free memory under that cap, the buffer cache
+    counted as wired beside the active bytes."""
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
+    monkeypatch.setattr(gov.mx, "device_info", lambda: {
+        "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
+    for name in ("_UNTRACKED_WEIGHTS", "_STREAMED_TRACKED", "_STREAMED_CAP",
+                 "_BUILD_CREDIT"):
+        monkeypatch.setattr(pd, name, {})
+    monkeypatch.setattr(gov.mx, "get_active_memory", lambda: 30e9)
+    monkeypatch.setattr(gov.mx, "get_cache_memory", lambda: 2e9)
+    # 137 GB of RAM less the 40 GB reserve and 6 GB wired outside the
+    # server, under the 114 GB of the working set term.
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(91e9)
+    head, ws = gov._headroom_and_ws(0.05)
+    assert ws == 120e9
+    assert head == pytest.approx(91e9 - 30e9 - 2e9)
+
+
+def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
+        rig, monkeypatch):
+    """Under the wired cap, each tick reads the memory wired outside the
+    server live: the kernel's wired count less what the server holds
+    wired (active, cache and the mapped weights outside MLX's tracker).
+    A rise lowers the headroom the governor admits against by the rise.
+    A fall lifts the cap back no further than its startup figure. A
+    count the kernel has not refreshed keeps the last reading, so the
+    server's own frees never read as memory wired outside it."""
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.kernel_vm as kvm
+
+    monkeypatch.setattr(gov, "_headroom_and_ws", _HEADROOM_AND_WS)
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
+    monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None, raising=False)
+    monkeypatch.setattr(cap, "_WIRED_SEEN", None, raising=False)
+    monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
+    monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
+    monkeypatch.setattr(gov.mx, "device_info", lambda *a, **k: {
+        "max_recommended_working_set_size": 120e9, "memory_size": 137e9})
+    box = {"wired": 0.0, "cache": 2e9}
+    monkeypatch.setattr(kvm, "wired_bytes", lambda: box["wired"])
+    monkeypatch.setattr(gov.mx, "get_cache_memory", lambda: box["cache"])
+    rig["active"] = 30e9
+    gen = FakeGen(rows=2, rate=1e6)
+    st = gov._state(gen)
+
+    def tick(outside):
+        # The server holds 30 GB active, its cache and the rig's 50 GB of
+        # mapped weights wired.
+        box["wired"] = 30e9 + box["cache"] + 50e9 + outside
+        gov._governor_tick(gen)
+        return (gov._ceiling_bytes(120e9, 0.05),
+                gov._headroom_and_ws(0.05)[0],
+                gov._admission_shortfall(gen, st, 1e9))
+
+    # 137 GB of RAM less the 40 GB reserve and the 6 GB read at startup.
+    ceiling, head, short = tick(6e9)
+    assert ceiling == pytest.approx(91e9)
+    assert head == pytest.approx(91e9 - 50e9 - 30e9 - 2e9)
+    # 2 GB more wired outside: the join is 2 GB further over.
+    ceiling2, head2, short2 = tick(8e9)
+    assert ceiling2 == pytest.approx(89e9)
+    assert head2 == pytest.approx(head - 2e9)
+    assert short2 == pytest.approx(short + 2e9)
+    assert gov._STATS["outside_wired_bytes"] == int(8e9)
+    # The server frees its 2 GB of cache before the kernel's count
+    # refreshes: the reading stands.
+    box["cache"] = 0.0
+    gov._governor_tick(gen)
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(89e9)
+    box["cache"] = 2e9
+    # Less wired outside than at startup: the cap stops at 91 GB.
+    ceiling3, head3, _ = tick(3e9)
+    assert ceiling3 == pytest.approx(91e9)
+    assert head3 == pytest.approx(head)
+
+
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda: {
@@ -1238,6 +1480,83 @@ def test_dead_arena_entry_is_replaced(rig, monkeypatch):
     assert gov._ARENA_REFS["arena:fixed"]() is arena
     gov.unregister_arena(arena)
     assert "arena:fixed" not in gov._REG and "arena:fixed" not in gov._ARENA_REFS
+
+
+@pytest.fixture
+def spec_engine(monkeypatch):
+    """The engine that brings a drafter's prefix layer up, with an empty
+    governor registry and the layer's default switches."""
+    import gmlx.spec.engine as eng
+
+    monkeypatch.setattr(gov, "_REG", {})
+    monkeypatch.setattr(gov, "_SPEC_PREFIX_REFS", {})
+    monkeypatch.setattr(eng, "_SPEC_APC_DISABLED", False)
+    monkeypatch.delenv("GMLX_SPEC_APC_ENTRIES", raising=False)
+    monkeypatch.delenv("GMLX_SPEC_APC_BUDGET_MB", raising=False)
+    return eng
+
+
+def _store(cache, start, nbytes):
+    """Store a 64-token prompt from ``start`` whose entry pins ``nbytes``:
+    its hidden alone, with no KV layers."""
+    cache.store(mx.arange(start, start + 64)[None], [],
+                mx.zeros((1, nbytes // 4), mx.float32))
+
+
+def _held(cache, start) -> bool:
+    return cache.lookup(mx.arange(start, start + 65)[None]) is not None
+
+
+def test_the_drafters_prefix_layer_counts_with_the_governor_after_a_store(
+        spec_engine):
+    """The drafter's second cache holds a whole-prompt snapshot and hidden
+    a turn. Its bytes reach the governor from the store on, so the
+    kernel floor's share and the evictions see it."""
+    cache = spec_engine._get_spec_prefix_cache(types.SimpleNamespace())
+    assert gov._registered_bytes() == 0
+    _store(cache, 0, 4096)
+    assert gov._registered_bytes() == 4096
+
+
+def test_the_governor_evicts_the_prefix_layer_least_recently_used_first(
+        spec_engine):
+    """An eviction for a quarter of the bytes takes the entry used longest
+    ago, whole, and the governor's count falls by it. A full eviction
+    empties the layer."""
+    cache = spec_engine._get_spec_prefix_cache(types.SimpleNamespace())
+    for start in (0, 100, 200):
+        _store(cache, start, 4096)
+    assert _held(cache, 0)                  # the first turn is used again
+    assert gov._evict_registered(0.25) == 4096
+    assert gov._registered_bytes() == 8192
+    assert not _held(cache, 100)
+    assert _held(cache, 0) and _held(cache, 200)
+    assert gov._evict_registered(1.0) == 8192
+    assert gov._registered_bytes() == 0 and len(cache) == 0
+
+
+@pytest.mark.parametrize("read, want", [
+    (lambda: gov._registered_bytes(), 5000),
+    (lambda: gov._sample_registered(gov._GovState()), 5000),
+    (lambda: gov._evict_registered(0.5), 4500),
+], ids=["bytes", "sample", "evict"])
+def test_a_teardown_inside_a_governor_tick_leaves_the_tick_the_other_caches(
+        monkeypatch, read, want):
+    """Another model's teardown can unregister its caches while this
+    model's tick is inside a registrant. The tick skips the name that is
+    gone and still counts or evicts the rest, so its decision stands."""
+    monkeypatch.setattr(gov, "_REG", {})
+
+    def teardown_lands(result):
+        gov.unregister_cache("b")
+        return result
+
+    gov.register_cache("a", lambda: teardown_lands(1000),
+                       lambda f: teardown_lands(500))
+    gov.register_cache("b", lambda: 2000, lambda f: 2000)
+    gov.register_cache("c", lambda: 4000, lambda f: 4000)
+    assert read() == want
+    assert list(gov._REG) == ["a", "c"]
 
 
 def test_kernel_floor_reads_every_16_ticks_above_the_floor(rig, monkeypatch):

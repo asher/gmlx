@@ -109,13 +109,14 @@ memory runs short, its band moves from `green` to `yellow`, `orange` and
 1. In `yellow`, it stops admitting requests and shrinks the
    [MLX buffer cache](memory.md#the-mlx-buffer-cache).
 2. If that is not enough, it halves the prefill chunk.
-3. In `orange`, it evicts caches such as the prompt cache.
+3. In `orange`, it evicts caches such as the prompt cache and, on a model
+   with a [drafter](#drafter), the drafter's prefix cache.
 4. As a last step, it [sheds](#shed) the largest request.
 
 A request that arrives short of memory does not wait for these steps. The
 server evicts what the request is short of from the prompt cache, the
-entries used longest ago first, and admits it. The request waits only when
-the prompt cache cannot give that much.
+entries used longest ago first, then from the drafter's prefix cache, and
+admits it. The request waits only when they cannot give that much.
 
 See [Memory](memory.md) and [Capacity and metrics](capacity.md).
 

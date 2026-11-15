@@ -11,6 +11,7 @@ Boundaries anchor to the prompt end on the chunk grid.
 from types import SimpleNamespace
 
 import mlx.core as mx
+import pytest
 from gmlx._vendor.mlx_vlm.apc import APCManager
 
 import gmlx.cache.snapshot as cs
@@ -322,6 +323,114 @@ def test_record_byte_budget_evicts_lru(monkeypatch):
     recs = list(cs._ckpt_records(man).values())
     assert len(recs) == 1 and recs[0].ids == tuple(ids_c)
     assert recs[0].nbytes > 1
+
+
+@pytest.mark.parametrize("bound", ["bytes-full", "count-full"])
+def test_a_record_payload_materializes_within_the_record_bounds(
+        monkeypatch, bound):
+    """A checkpoint's recurrent states and attention tail make room among
+    the records before they materialize, so the records and the new
+    payload fit both bounds together. The records kept are the ones
+    insert-then-trim kept."""
+    from gmlx.eval_guard import guard
+
+    man = APCManager(num_blocks=64, block_size=16)
+    ids = {"a": (list(range(100, 132)), 0), "b": (list(range(700, 732)), 5),
+           "c": (list(range(300, 332)), 9)}
+    for seed, name in enumerate(("a", "b"), 1):
+        assert ckpt_store(man, ids[name][0], make_hybrid_cache(32, seed=seed),
+                          extra_hash=ids[name][1])
+    idx = cs._ckpt_records(man)
+    each = next(iter(idx.values())).nbytes
+    entries, budget = ((cs._CKPT_RECORD_ENTRIES, 2 * each + each // 2)
+                       if bound == "bytes-full" else (2, 1 << 30))
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", entries)
+    monkeypatch.setattr(cs, "_CKPT_BUDGET_BYTES", budget)
+    seen = []
+    real = guard.eval
+
+    def spy(*arrays, **kw):
+        if kw.get("site") == "ckpt-store-clones":
+            seen.append((len(idx), sum(r.nbytes for r in idx.values())))
+        return real(*arrays, **kw)
+
+    monkeypatch.setattr(guard, "eval", spy)
+    assert ckpt_store(man, ids["c"][0], make_hybrid_cache(32, seed=3),
+                      extra_hash=ids["c"][1])
+    assert len(seen) == 1
+    held_n, held_bytes = seen[0]
+    assert held_n + 1 <= entries
+    assert held_bytes + each <= budget
+    assert [r.ids[0] for r in idx.values()] == [700, 300]
+    assert all(r.nbytes == each for r in idx.values())
+
+
+@pytest.mark.parametrize("at", ["payload copy", "clone decline"])
+def test_a_reset_during_a_checkpoint_store_leaves_the_pool_free(
+        monkeypatch, at):
+    """A cache reset that lands while a checkpoint store holds its chains:
+    the reset leaves the chains to the store, which inserts no record and
+    releases them, so the free list holds every block once and a later
+    lookup restores nothing."""
+    from gmlx.cache.apc_manager import GmlxAPCManager
+    from gmlx.eval_guard import guard
+
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    ids = list(range(100, 132))
+    if at == "payload copy":
+        real = guard.eval
+
+        def spy(*arrays, **kw):
+            if kw.get("site") == "ckpt-store-clones":
+                man.clear()
+            return real(*arrays, **kw)
+
+        monkeypatch.setattr(guard, "eval", spy)
+    else:
+        def clone(cache, eval_targets=None):
+            man.clear()
+            return None
+
+        monkeypatch.setattr(cs, "_clone_single_row", clone)
+    try:
+        assert ckpt_store(man, ids, make_hybrid_cache(32, seed=1)) == 0
+        assert not cs._ckpt_records(man)
+        free, b = [], man._free_head
+        while b is not None and len(free) <= len(man.pool):
+            free.append(id(b))
+            b = b.next
+        assert sorted(free) == sorted(id(b) for b in man.pool)
+        assert all(b.ref_cnt == 0 for b in man.pool)
+        assert ckpt_lookup(man, ids + [1], extra_hash=0)[1] == 0
+    finally:
+        man.close()
+
+
+def test_a_decode_snapshot_materializes_within_the_ring(monkeypatch):
+    """The ring holds two decode snapshots. The oldest makes room before
+    the third materializes, so a row never holds three, and the ring keeps
+    the newest two as before."""
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "96")
+    stash = _stash(list(range(40)))
+    _tick_at(stash, 136, 96, 136, monkeypatch)
+    _tick_at(stash, 232, 192, 232, monkeypatch)
+    assert [p for p, _ in stash["snaps"]] == [136, 232]
+    seen = []
+    real = mx.eval
+
+    def spy(*arrays):
+        seen.append(len(stash["snaps"]))
+        real(*arrays)
+
+    monkeypatch.setattr(retire_key, "next_turn_lcp",
+                        lambda ctx, seq, gen, **kw: 328)
+    cache = make_hybrid_cache(328, seed=328)
+    gen = list(range(9000, 9288))
+    monkeypatch.setattr(mx, "eval", spy)
+    decode_ckpt_tick(stash, cache, gen)
+    monkeypatch.setattr(mx, "eval", real)
+    assert seen and max(seen) + 1 <= 2
+    assert [p for p, _ in stash["snaps"]] == [232, 328]
 
 
 def test_sidecar_byte_budget(monkeypatch):

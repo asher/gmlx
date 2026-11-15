@@ -24,7 +24,8 @@ def _room(monkeypatch):
     monkeypatch.delenv("GMLX_PREFILL_DECAY", raising=False)
     monkeypatch.delenv("PREFILL_STEP_SIZE", raising=False)
     monkeypatch.setattr(capacity, "working_set_bytes", lambda: 100 * MIB)
-    monkeypatch.setattr(capacity, "ceiling_bytes", lambda ws, m=None: ws)
+    monkeypatch.setattr(capacity, "ceiling_bytes",
+                        lambda ws, m=None, outside=0.0: ws)
 
 
 def _model(model_type="rows_x", **cfg):

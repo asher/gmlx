@@ -240,13 +240,16 @@ def _apply_awq_calibration(
             return
         print("[INFO] AWQ: no vision/audio modality found; using text calibration.")
 
+    # gmlx: a failed probe drains through the eval guard before the next try.
+    from gmlx.eval_guard import guard
+
     probe = mx.array([tokenizer.encode(DEFAULT_CALIBRATION_TEXT[0])])
     forward = None
     for candidate in (getattr(root, "model", None), root, language_model):
         if candidate is None:
             continue
         try:
-            mx.eval(candidate(probe))
+            guard.eval(candidate(probe), site="awq-forward-probe", owner="scratch")
             forward = candidate
             break
         except Exception:

@@ -269,7 +269,8 @@ def test_manager_salts_exact_hashes(restorable):
     restorable.setattr(
         apc.APCManager,
         "store_exact_cache",
-        lambda self, token_ids, prompt_cache, *, extra_hash=0: (
+        lambda self, token_ids, prompt_cache, *, extra_hash=0,
+        materialize=None: (
             seen.append(extra_hash) or True
         ),
     )

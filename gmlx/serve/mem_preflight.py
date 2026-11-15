@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from gmlx.upstream.patching import link, wrapped_with
 
@@ -224,7 +224,10 @@ def pool_bytes_per_token(c, layers):
     them. glm5_next keeps an indexer pool on each attention layer, one row
     per ``index_kpool`` tokens. The DSA models (deepseek_v32, glm_moe_dsa,
     hy_v4) keep their indexer keys one row per token on each layer that
-    owns an indexer. Zero for any other layout."""
+    owns an indexer. qwen4_exp keeps, on each layer with a compress
+    ratio, its QSA indexer keys ``indexer_head_dim`` wide, one row per
+    token, and their finished block keys, one row per ``compress_ratio``
+    tokens. Zero for any other layout."""
     out = [0.0] * layers
     mt = _get(c, "model_type")
     width = _get(c, "head_dim") or 0
@@ -233,6 +236,13 @@ def pool_bytes_per_token(c, layers):
     if indexed is not None:
         return [index * _POOL_BYTES if i in indexed else 0.0
                 for i in range(layers)]
+    if mt == "qwen4_exp":
+        ratios = _get(c, "compress_ratios")
+        dim = _get(c, "indexer_head_dim") or 0
+        if not isinstance(ratios, (list, tuple)) or len(ratios) < layers:
+            return out
+        return [dim * _POOL_BYTES * (1 + 1 / int(r)) if int(r) > 0 else 0.0
+                for r in ratios[:layers]]
     if mt == "glm5_next":
         kpool = _get(c, "index_kpool")
         if isinstance(kpool, int) and kpool > 0 and index:
@@ -337,8 +347,12 @@ def stack_geometry(model, stack):
         has_state = (state is not None
                      and any(isinstance(m, types["state"]) for m in members))
         # The config prices a layer's pools when the stack holds them: a
-        # pooling cache, or a second growing cache (a DSA indexer's keys).
-        pooled = any(hasattr(m, "quantize_storage") for m in members)
+        # pooling cache, a cache that keeps its pools beside its KV
+        # (``holds_config_pools``), or a second growing cache (a DSA
+        # indexer's keys).
+        pooled = any(hasattr(m, "quantize_storage")
+                     or getattr(m, "holds_config_pools", False)
+                     for m in members)
         growing = sum(k in ("kv", "optout") for k in kinds)
         pool = pools[i] if pools[i] and (pooled or growing > 1) else 0.0
         # The rotating window caps the layer whatever rides beside it, as
@@ -428,6 +442,25 @@ def kv_layer_costs(model, bytes_per_elem: float = 2.0, per_layer_bpe=None,
     return costs
 
 
+# Model types whose prefix-pool block holds only the k and v of each
+# layer: their other streams ride the store's record whole (the QSA
+# indexer keys of qwen4_exp, cache.snapshot), so a block costs less per
+# token than the live cache.
+_BLOCK_KV_ONLY = ("qwen4_exp",)
+
+
+def block_costs(model):
+    """``kv_layer_costs`` for what one prefix-pool block holds per token:
+    the live price less the pools a block never stores. The pool's block
+    sizing reads this; the boot table and admission price the live cache
+    (``kv_layer_costs``)."""
+    c = _lm_config(model)
+    geometry = config_geometry(c)
+    if geometry and _get(c, "model_type") in _BLOCK_KV_ONLY:
+        geometry = [replace(g, pool=0.0) for g in geometry]
+    return kv_layer_costs(model, geometry=geometry)
+
+
 def _policy_costs(rg, model):
     """kv_layer_costs priced from rg's resolved KV policy (batched mode)
     over the stack the policy was resolved on. Without a policy, or when
@@ -460,14 +493,25 @@ def prompt_kv_bytes(costs, tokens: int) -> float:
 def available_drained_bytes():
     """Working set minus zero-copy weights, minus a streaming model's
     decode arena, minus the admission reserve: what a lone request could
-    hold with the batch drained. The arena is MLX-tracked, sized at
-    install and never drained. Other MLX-tracked weight allocations are
-    not subtracted, which only admits more."""
+    hold with the batch drained. The arena is MLX-tracked, sized at install
+    and never drained. Other MLX-tracked weight allocations are not
+    subtracted, which only admits more. In a process under the wired cap
+    (``capacity.cap_applies``), the cap takes the working set's place:
+    the buffer cache yields there, so it takes no share, and a cap of 0
+    is a known one that leaves no room. None when the device cannot be
+    read."""
     from gmlx.device import metal_value
     from gmlx.gen.prefill_decay import untracked_weight_bytes
     from gmlx.stream.installs import live_arena_bytes
+    from .capacity import cap_applies, wired_cap_bytes
     from .memory import admit_reserve_bytes
 
+    if cap_applies():
+        cap = wired_cap_bytes()
+        if cap is None:
+            return None
+        return (cap - untracked_weight_bytes() - live_arena_bytes()
+                - admit_reserve_bytes(cap))
     try:
         ws = float(metal_value("max_recommended_working_set_size"))
     except Exception:

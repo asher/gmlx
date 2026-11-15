@@ -755,8 +755,10 @@ def _serve_build(monkeypatch, tracked_parts, table_rows=8, ws=1 << 40):
     size["N"] = total - size["T"] - size["E"]
     box = {"active": 0.0}
     monkeypatch.setattr(mx, "get_active_memory", lambda: box["active"])
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
     monkeypatch.setattr(mx, "device_info",
                         lambda: {"max_recommended_working_set_size": ws})
+    monkeypatch.setattr("gmlx.serve.capacity._OUTSIDE_WIRED", 0.0)
     pd.set_untracked_weights_owner("entry")
     pd.note_build_credit("entry", float(size["T"] + size["E"]))
     tracked = sum(size[p] for p in tracked_parts)
@@ -815,6 +817,75 @@ def test_a_table_only_install_reads_the_real_free(monkeypatch, tracked_parts):
     assert not getattr(glu, "_kq_cpu_only", False)
     assert pd.build_credit_bytes() == 0
     assert pd.headroom_bytes() == ws - size["N"] - size["E"]
+
+
+# Flash-Next on a 128 GB M5 Max: the 28.8 GB PLE table brings the model
+# under the budget, so a plain load streams it and keeps the experts.
+@pytest.mark.parametrize("untracked", [False, True])
+def test_a_tracked_or_untracked_table_leaves_the_same_resident_weights(
+        monkeypatch, capsys, untracked):
+    """The loader's registration and the table-only install count the
+    same resident weights whether the load mapped the table MLX-tracked
+    or outside MLX's tracker: free is the base less the resident weights,
+    the base being the wired cap the untracked map installed, or the
+    working set for a load that maps nothing untracked. A tracked table
+    is in active memory and the install credits it back; an untracked one
+    is in no count, so nothing registers or credits it. The install
+    prints the limits an untracked table leaves
+    (``test_a_load_with_an_untracked_table_prints_the_limits_it_leaves``)."""
+    import types
+
+    from mlx.utils import tree_flatten
+
+    import gmlx.stream.budget as sbudget
+    from gmlx.load.loader import _warm_mmap_residency
+    from gmlx.serve import capacity
+
+    monkeypatch.delenv("GMLX_STREAM_PLE", raising=False)
+    monkeypatch.setenv("GMLX_GPU_RESIDENT", "0")
+    monkeypatch.setenv("GMLX_RESIDENCY_WARM", "0")
+    # No KV room: the room priced for a real model would not fit beside
+    # this tiny one under the wired cap (its leg is test_resident_wire's).
+    monkeypatch.setattr(sbudget, "kv_room_bytes",
+                        lambda p, **kw: types.SimpleNamespace(bytes=0))
+    monkeypatch.setattr(ts, "_UNTRACKED", {})
+    pd = _fresh_accounting(monkeypatch)
+    model, glu = _moe_table_model()
+    rest = mx.zeros((4096,), dtype=mx.float32)
+    params = model.parameters
+    model.parameters = lambda: {**params(), "rest": rest}
+    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
+    size = {"T": ts.table_bytes(model),
+            "E": sum(a.nbytes for _, a in tree_flatten(glu.parameters()))}
+    size["N"] = total - size["T"] - size["E"]
+    ws = int((total - size["T"] // 2) / 0.9) + 1  # over, but not post-table
+    monkeypatch.setattr(mx, "device_info",
+                        lambda: {"max_recommended_working_set_size": ws})
+    monkeypatch.setattr(mx, "get_cache_memory", lambda: 0)
+    monkeypatch.setattr("gmlx.serve.capacity._OUTSIDE_WIRED", 0.0)
+    path = "/models/Flash-Next-Q4.gguf"
+    # The untracked map installs the wired cap; a tracked load keeps the
+    # working set.
+    monkeypatch.setattr(capacity, "_CAP", untracked)
+    if untracked:
+        ts.note_untracked_load(path, ["per_layer_token_embd.weight"])
+    # The load's arrays in active memory: all of them, or all but the
+    # untracked table.
+    active = float(total - (size["T"] if untracked else 0))
+    monkeypatch.setattr(mx, "get_active_memory", lambda: active)
+    _warm_mmap_residency(model, log=lambda *a, **k: None, paths=[path],
+                         active_before=0.0)
+    capsys.readouterr()
+    install_expert_streaming(model, gguf_path=path)
+    out = capsys.readouterr().out
+    assert out.count("[memory] per_layer_token_embd.weight untracked, ") == (
+        1 if untracked else 0)
+    assert ts.table_streaming_active(model)
+    assert not getattr(glu, "_kq_cpu_only", False)
+    assert pd.untracked_weight_bytes() == 0
+    assert pd.streamed_tracked_bytes() == (0 if untracked else size["T"])
+    base = capacity.wired_cap_bytes() if untracked else ws
+    assert pd.headroom_bytes() == base - size["N"] - size["E"]
 
 
 def test_unmapped_stacks_give_back_their_credit(monkeypatch):

@@ -489,14 +489,17 @@ def _estimate_kv_reserve_bytes(model, max_kv_size: Optional[int]) -> int:
     make_cache = getattr(lm, "make_cache", None)
     if not callable(make_cache):
         return 0
+    # gmlx: a failed probe drains through the eval guard before it returns 0.
+    from gmlx.eval_guard import guard
+
     try:
         cache = make_cache()
         ids = mx.zeros((1, 3), dtype=mx.int32)
         lm(ids[:, :2], cache=cache)
-        mx.eval([c.state for c in cache])
+        guard.eval([c.state for c in cache], site="kv-reserve-probe", owner="scratch")
         bytes_at_2 = _kv_cache_bytes(cache)
         lm(ids[:, 2:3], cache=cache)
-        mx.eval([c.state for c in cache])
+        guard.eval([c.state for c in cache], site="kv-reserve-probe", owner="scratch")
         bytes_at_3 = _kv_cache_bytes(cache)
     except Exception:
         return 0

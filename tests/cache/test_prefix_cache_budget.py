@@ -9,6 +9,7 @@ layers to their window, and the cache enforces a total byte budget.
 """
 
 import mlx.core as mx
+import pytest
 
 from gmlx._vendor.mlx_lm.models.cache import KVCache, RotatingKVCache
 
@@ -205,6 +206,55 @@ class TestByteBudget:
         cache.clear()
         assert cache.total_bytes == 0
         assert len(cache) == 0
+
+    @pytest.mark.parametrize("max_entries, max_bytes, held, new, kept", [
+        (10, 9000, [(0, 64), (100, 64)], (200, 64), [100, 200]),
+        (2, 1 << 30, [(0, 64), (100, 64)], (200, 64), [100, 200]),
+        (2, 9000, [(0, 64), (100, 64)], (0, 64), [0, 100]),
+        (0, 1 << 30, [], (200, 64), []),
+        (10, 4000, [(0, 32)], (200, 64), [0]),
+    ], ids=["bytes-full", "count-full", "same-key", "count-zero",
+            "over-budget"])
+    def test_a_store_materializes_only_an_entry_its_bounds_keep(
+            self, monkeypatch, max_entries, max_bytes, held, new, kept):
+        """Every bound decides before the copy. A store the bounds would
+        not keep never materializes, and one they keep makes room first,
+        so the held entries and the copy fit both bounds together, with
+        no peak inside an engine step that a governor band cannot reach.
+        The entries kept are the ones insert-then-trim kept."""
+        import gmlx.cache.prefix_cache as pc
+
+        def entry_bytes(tokens):
+            return 64 * tokens + 16          # K and V of float32, hidden
+
+        def ids(start):
+            return mx.arange(start, start + 64)[None]
+
+        hidden = mx.zeros((1, 1, 4))
+        cache = SpecPrefixCache(max_entries=max_entries, max_bytes=max_bytes)
+        for start, tokens in held:
+            cache.store(ids(start), [_fill_kv(tokens)], hidden)
+        assert len(cache) == len(held)
+        seen = []
+        real = pc._eval_snapshot
+
+        def spy(snaps):
+            seen.append((len(cache), cache.total_bytes))
+            real(snaps)
+
+        monkeypatch.setattr(pc, "_eval_snapshot", spy)
+        start, tokens = new
+        cache.store(ids(start), [_fill_kv(tokens)], hidden)
+        assert len(seen) == (1 if start in kept else 0)
+        for held_n, held_bytes in seen:
+            assert held_n + 1 <= max_entries
+            assert held_bytes + entry_bytes(tokens) <= max_bytes
+        sizes = dict(held)
+        sizes[start] = tokens
+        assert cache.total_bytes == sum(entry_bytes(sizes[s]) for s in kept)
+        hits = [s for s in (0, 100, 200)
+                if cache.lookup(mx.arange(s, s + 65)[None]) is not None]
+        assert hits == kept
 
 
 class TestSpecPrefixStats:

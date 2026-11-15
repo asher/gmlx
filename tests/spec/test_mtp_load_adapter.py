@@ -1,8 +1,9 @@
 """An MTP load installs an adapter through ``before_wire``, before the table
 install and the wire. A table-only plan wraps every SwitchGLU in the
 streaming offload class, so an expert adapter installed after the load
-meets that wrapper and refuses. Every load stage before the wire is faked;
-no GGUF, no GPU."""
+meets that wrapper and refuses. A load whose install wires its weights in
+chunks leaves them to it, untouched by the warm touch. Every load stage
+before the wire is faked; no GGUF, no GPU."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -161,3 +162,49 @@ def test_an_adapter_failure_names_the_adapter_stage(fake_load, capsys):
     err = capsys.readouterr().err
     assert "load failed applying adapter: adapter arch llama" in err
     assert order == []
+
+
+def test_a_load_whose_install_wires_in_chunks_stays_resident_after_its_touch(
+        fake_load, monkeypatch):
+    """A direct load of an arch that gathers its tables, with room for its
+    resident set but not for the set twice. Its install judges the set
+    against memory not wired, then wires it in chunks. The load's GPU warm
+    touch wires each weight it touches, and a touch ahead of the check
+    counts the set twice, once as wired memory and once as the set to
+    wire, so the experts stream. The touch leaves the weights to the
+    install, and the set stays resident. A load with no such install
+    keeps its touch."""
+    from mlx.utils import tree_flatten
+
+    import gmlx.load.loader as loader
+    import gmlx.serve.capacity as capacity
+    import gmlx.stream.budget as budget
+    import gmlx.stream.expert_streaming as es
+    import gmlx.stream.table_stream as ts
+
+    ml, trunk, _order = fake_load
+    w = sum(a.nbytes for _, a in tree_flatten(trunk.parameters()))
+    room = budget.wire_keep_bytes(0) + w + w // 2
+    unwired = [room]
+    monkeypatch.setattr(budget, "WIRE_EXEMPT_BYTES", 0)
+    monkeypatch.setattr(budget, "unwired_ram_bytes", lambda: unwired[0])
+
+    def touch(arrays, total, **k):
+        unwired[0] -= sum(a.nbytes for a in arrays)
+
+    monkeypatch.setattr(loader, "_warm_touch_pass", touch)
+    monkeypatch.setattr(ml, "_install_and_load", lambda lm, *a, source_key, **k:
+                        loader._warm_mmap_residency(lm, log=print,
+                                                    source_key=source_key))
+    checks = []
+    monkeypatch.setattr(es, "install_unflagged_tables", lambda m, path, **k:
+                        checks.append(budget.check_resident_wire(
+                            w, room_bytes=0, budget=None)))
+    monkeypatch.setattr(capacity, "gathered_table_bytes",
+                        lambda path, *a, **k: 1 << 30)
+    ml.load_mtp_model("/m/t.gguf")
+    assert checks[-1].fits and unwired[0] == room
+    assert not ts.resident_wire_guarded("/m/t.gguf")
+    monkeypatch.setattr(capacity, "gathered_table_bytes", lambda *a, **k: 0)
+    ml.load_mtp_model("/m/t.gguf")
+    assert unwired[0] == room - w

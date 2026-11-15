@@ -384,8 +384,12 @@ class DS4PoolingCache(_BaseCache):
             if need > cap:
                 step = self.POOL_STEP
                 grow = ((need - cap + step - 1) // step) * step
+                # A grown pool keeps its scales' and biases' dtype; the
+                # write casts the new rows to it.
+                like = new if self._pbuf is None else self._pbuf
                 pads = tuple(
-                    mx.zeros((B, grow, t.shape[-1]), dtype=t.dtype) for t in new
+                    mx.zeros((B, grow, t.shape[-1]), dtype=b.dtype)
+                    for t, b in zip(new, like)
                 )
                 self._pbuf = (
                     pads
@@ -402,7 +406,8 @@ class DS4PoolingCache(_BaseCache):
             if need > cap:
                 step = self.POOL_STEP
                 grow = ((need - cap + step - 1) // step) * step
-                pad = mx.zeros((B, grow, D), dtype=px.dtype)
+                dt = px.dtype if self._pbuf is None else self._pbuf.dtype
+                pad = mx.zeros((B, grow, D), dtype=dt)
                 self._pbuf = (
                     pad if self._pbuf is None
                     else mx.concatenate([self._pbuf, pad], axis=1)
@@ -426,7 +431,10 @@ class DS4PoolingCache(_BaseCache):
                     f"pooled rows ({px.shape[-1]}-wide) cannot pack to FP4 "
                     "groups of 16"
                 )
-            self._fp4_dtype = px.dtype
+            if self._plen == 0:
+                # The first rows set what the pool unpacks to; a later
+                # wider append must not widen every row's read.
+                self._fp4_dtype = px.dtype
             codes, scales = kq.latent_fp4_pack(px)
         B, n, _ = codes.shape
         need = self._plen + n
@@ -834,8 +842,9 @@ class DS4BatchPoolingCache(_BaseCache):
                 pv_gate = mx.full((B, ratio, D2), -mx.inf, dtype=gate.dtype)
             else:
                 pv_kv, pv_gate = self._prev_kv, self._prev_gate
-            new_prev_kv = mx.zeros((B, ratio, D1), dtype=kv.dtype)
-            new_prev_gate = mx.full((B, ratio, D2), -mx.inf, dtype=gate.dtype)
+            new_prev_kv = mx.zeros((B, ratio, D1), dtype=pv_kv.dtype)
+            new_prev_gate = mx.full((B, ratio, D2), -mx.inf,
+                                    dtype=pv_gate.dtype)
             for i in range(B):
                 u = usable[i]
                 if u > 0:
@@ -878,7 +887,8 @@ class DS4BatchPoolingCache(_BaseCache):
         if self.pooled is None:
             self.pooled = mx.zeros((B, max_pool, D), dtype=px.dtype)
         elif self.pooled.shape[1] < max_pool:
-            pad = mx.zeros((B, max_pool - self.pooled.shape[1], D), dtype=px.dtype)
+            pad = mx.zeros((B, max_pool - self.pooled.shape[1], D),
+                           dtype=self.pooled.dtype)
             self.pooled = mx.concatenate([self.pooled, pad], axis=1)
 
         for i in range(B):
@@ -1091,8 +1101,12 @@ class DS4BatchPoolingCache(_BaseCache):
         if self.buf_kv is None and other.buf_kv is None:
             pass
         elif self.buf_kv is not None and other.buf_kv is not None:
-            self.buf_kv = mx.concatenate([self.buf_kv, other.buf_kv], axis=0)
-            self.buf_gate = mx.concatenate([self.buf_gate, other.buf_gate], axis=0)
+            # The join keeps this cache's dtypes.
+            self.buf_kv = mx.concatenate(
+                [self.buf_kv, other.buf_kv.astype(self.buf_kv.dtype)], axis=0)
+            self.buf_gate = mx.concatenate(
+                [self.buf_gate, other.buf_gate.astype(self.buf_gate.dtype)],
+                axis=0)
         elif self.buf_kv is None:
             B = len(self.remainder)
             D1 = other.buf_kv.shape[2]
@@ -1144,6 +1158,8 @@ class DS4BatchPoolingCache(_BaseCache):
                 def pad_pool(pooled, B, P):
                     if pooled is None:
                         return mx.zeros((B, max_P, D), dtype=dt)
+                    if pooled.dtype != dt:
+                        pooled = pooled.astype(dt)
                     if P < max_P:
                         pad = mx.zeros((pooled.shape[0], max_P - P, D), dtype=dt)
                         return mx.concatenate([pooled, pad], axis=1)
@@ -1165,7 +1181,7 @@ class DS4BatchPoolingCache(_BaseCache):
 
             def pad_prev(prev, prev_gate, B):
                 if prev is not None:
-                    return prev, prev_gate
+                    return prev.astype(src.dtype), prev_gate.astype(src_g.dtype)
                 return (
                     mx.zeros((B,) + src.shape[1:], dtype=src.dtype),
                     mx.full((B,) + src_g.shape[1:], -mx.inf, dtype=src_g.dtype),

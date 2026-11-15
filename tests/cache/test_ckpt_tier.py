@@ -572,10 +572,10 @@ def test_lookup_skips_record_released_after_selection(monkeypatch):
 
 
 def test_lookup_survives_concurrent_clear(monkeypatch):
-    """clear() while a lookup holds assembly pins: the pool free list is
-    rebuilt under the held refs, so releasing them afterwards would push
-    already-free blocks twice and corrupt the list. The generation check
-    drops the refs instead and discards the pre-clear warm result."""
+    """clear() while a lookup holds assembly pins: the clear leaves the
+    pinned blocks to the lookup, whose release frees them, so the free
+    list holds every block once. The generation check discards the
+    pre-clear warm result."""
     import gmlx.cache.snapshot as cs
     from gmlx.cache.apc_manager import GmlxAPCManager
 
@@ -602,6 +602,52 @@ def test_lookup_survives_concurrent_clear(monkeypatch):
         b = b.next
     assert len(seen) == len(man.pool)
     assert all(blk.ref_cnt == 0 for blk in man.pool)
+
+
+def _free_list(man):
+    out, b = [], man._free_head
+    while b is not None and len(out) <= len(man.pool):
+        out.append(b)
+        b = b.next
+    return out
+
+
+def test_a_reset_leaves_a_leased_block_to_its_holder():
+    """A cache reset while a request leases pool blocks, as a prompt batch
+    holds the prefix it restored: the reset frees what no one holds and
+    leaves the leased blocks to their holder. A store after the reset
+    never takes them, the holder's release frees each once, and after the
+    last release every block is on the free list exactly once."""
+    from gmlx.cache.apc_manager import GmlxAPCManager
+
+    def kv(seed):
+        k = mx.random.normal((1, 2, 64, 8), key=mx.random.key(seed))
+        return [k], [k + 1]
+
+    man = GmlxAPCManager(num_blocks=8, block_size=16)
+    a, b = list(range(100, 164)), list(range(500, 564))
+    try:
+        man.release(man.store_ckpt_blocks(a, *kv(1), disk=False))
+        lease, n = man.lookup_prefix(a)
+        assert n == 64
+        man.clear()
+        assert man.lookup_prefix(a) == ([], 0)
+        other = man.store_ckpt_blocks(b, *kv(2), disk=False)
+        assert len(other) == 4
+        assert not {id(x) for x in other} & {id(x) for x in lease}
+        man.release(lease)
+        assert all(x.ref_cnt == 1 for x in other)
+        assert not {id(x) for x in other} & {id(x) for x in _free_list(man)}
+        assert all(x.resident_bytes() == 0 for x in lease)
+        man.release(other)
+        free = _free_list(man)
+        assert sorted(map(id, free)) == sorted(map(id, man.pool))
+        assert all(x.ref_cnt == 0 for x in man.pool)
+        got, n = man.lookup_prefix(b)
+        assert n == 64
+        man.release(got)
+    finally:
+        man.close()
 
 
 def test_store_exception_after_insert_keeps_record_pinned(monkeypatch):
@@ -1455,36 +1501,34 @@ def test_anchor_kind_exempt_from_strip_and_superseded():
 
 
 def test_anchor_evicts_after_non_anchors_lru_by_hit(monkeypatch):
-    """Entry-cap pressure: non-anchors go first even when an anchor is
-    older; among anchors the least-recently-hit goes first."""
+    """Entry-cap pressure among the records a deeper one on their chain
+    superseded (each chain's head goes last, test_ckpt_budget.py): a
+    non-anchor goes first even when both anchors are older; among
+    anchors the least recently hit goes first."""
     import gmlx.cache.snapshot as cs
 
-    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 3)
+    monkeypatch.setattr(cs, "_CKPT_RECORD_ENTRIES", 5)
     man = APCManager(num_blocks=96, block_size=16)
     a = list(range(100, 148))
     b = list(range(300, 364))
-    assert ckpt_store(man, a[:32], make_hybrid_cache(32, seed=1),
-                      extra_hash=0)                       # anchor A
-    assert ckpt_store(man, b[:32], make_hybrid_cache(32, seed=2),
-                      extra_hash=1)                       # anchor B
-    assert ckpt_store(man, b[:48], make_hybrid_cache(48, seed=3),
-                      extra_hash=1)                       # plain boundary
+    for ids, p, h in ((a, 32, 0), (a, 48, 0), (b, 32, 1), (b, 48, 1),
+                      (b, 64, 1)):
+        assert ckpt_store(man, ids[:p], make_hybrid_cache(p, seed=p + h),
+                          extra_hash=h)
     warm, got = ckpt_lookup(man, a[:40], extra_hash=0)    # hit refreshes A
     assert got == 32
+
+    def kept():
+        return sorted((r.extra_hash, r.p) for r in cs._ckpt_records(man).values())
+
     assert ckpt_store(man, list(range(500, 532)),
                       make_hybrid_cache(32, seed=4), extra_hash=2)
-    idx = cs._ckpt_records(man)
-    # The plain boundary (B:48) went first despite being newer than both
-    # anchors.
-    assert [(r.p, r.extra_hash) for r in idx.values() if r.kind != "anchor"] \
-        == []
-    assert {r.extra_hash for r in idx.values()} == {0, 1, 2}
+    # B:48, the one non-anchor B:64 superseded, went before both anchors.
+    assert kept() == [(0, 32), (0, 48), (1, 32), (1, 64), (2, 32)]
     assert ckpt_store(man, list(range(700, 732)),
                       make_hybrid_cache(32, seed=5), extra_hash=3)
-    idx = cs._ckpt_records(man)
-    # All anchors now: the least-recently-hit one (B) went; the hit A
-    # record stayed.
-    assert {r.extra_hash for r in idx.values()} == {0, 2, 3}
+    # Superseded anchors only: B's, hit least recently, went; A's stayed.
+    assert kept() == [(0, 32), (0, 48), (1, 64), (2, 32), (3, 32)]
 
 
 def test_first_boundary_promotion_skips_retire_chains():

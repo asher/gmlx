@@ -426,6 +426,53 @@ def test_an_mtp_batch_arms_its_grid_from_the_base_step(monkeypatch):
     assert not hasattr(batch, "_gmlx_base_step")
 
 
+def test_a_resident_mtp_batch_cuts_its_grid_where_a_plain_batch_does(
+        monkeypatch):
+    """An arch profile's 8192 step replaces the stock 2048 in the decay
+    wrapper, which swaps it in around the MTP body that arms the schedule.
+    A resident batch arms the grid from its base step, as a plain batch
+    arms it in its constructor, so MTP chunks are cut at the same 4096
+    columns instead of running 8192 wide."""
+    import gmlx.gen.prefill_decay as pd
+    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch as P
+
+    _no_decay(monkeypatch)
+    monkeypatch.setitem(pd._SCORE_PROFILES, "grid_probe", lambda m, c: (
+        pd.ScoreTransientProfile(heads=4, bytes_per_elem=4, depth_divisor=4,
+                                 base_step=8192)))
+    model = SimpleNamespace(model_type="grid_probe", _kq_streaming=False,
+                            _kq_apc_ckpt_layout=("arr", "kv"))
+    n, guard, seen = 20000, 19998, {}
+
+    def mtp_body(batch):
+        seen["step"] = batch.prefill_step_size
+        seen["base"] = getattr(batch, "_gmlx_base_step", None)
+        meta = {"full_input_ids": list(range(n))}
+        ckpt._ckpt_arm_schedule(batch, meta, guard, 0, block_size=16)
+        seen["meta"] = meta
+
+    monkeypatch.setattr(P, "prompt_step", mtp_body)
+    monkeypatch.setattr(P, "needs_processing", P.needs_processing)
+    monkeypatch.setattr(P, pd._FLAG, False, raising=False)
+    assert pd.install_prefill_decay()
+    batch = SimpleNamespace(
+        prefill_step_size=2048, model=model, prompt_cache=[],
+        draft_model=object(), _gmlx_pinned_step=None,
+        _inputs_embeds=SimpleNamespace(shape=(1, n, 8)),
+        _next_apc_checkpoint_column=lambda: None)
+    P.prompt_step(batch)
+    assert (seen["step"], seen["base"]) == (8192, 2048)
+    plain = SimpleNamespace(prefill_step_size=2048, model=model,
+                            prompt_cache=[])
+    _, terminal, interval = ckpt._ckpt_cursor_init(
+        plain, guard=guard, restored=0, block_size=16)
+    assert (interval, terminal) == (4096, 18432)
+    meta = seen["meta"]
+    assert (meta["ckpt_interval"], meta["ckpt_terminal"]) == (4096, 18432)
+    assert [p for p, k in meta["ckpt_boundaries"] if k == "boundary"] == [
+        4096, 8192, 12288, 16384, 18432]
+
+
 def test_short_cold_prompt_keeps_the_anchor_out_of_the_turn_set(
         monkeypatch):
     """The anchor is its own record. Less than one step past it, it is

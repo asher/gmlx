@@ -91,12 +91,16 @@ def reserve_bytes(mem_size: float) -> float:
         return default
 
 
-def ceiling_bytes(ws: float, m: float | None = None) -> float:
+def ceiling_bytes(ws: float, m: float | None = None,
+                  outside: float = 0.0) -> float:
     """The one ceiling on tracked bytes: Metal's recommended working
     set less the margin, but never closer to physical RAM than the
-    reserve. Metal's recommendation assumes the GPU owns the box; a
-    serve process sharing it with the kernel and the user does not
-    (2026-08-24: WS x 0.95 = 114 GB on a 128 GB box, box panicked)."""
+    reserve plus ``outside``, the memory wired outside this process.
+    Metal's recommendation assumes the GPU owns the box; a serve
+    process sharing it with the kernel and the user does not
+    (2026-08-24: WS x 0.95 = 114 GB on a 128 GB box, box panicked).
+    ``outside`` comes off the RAM term only: Apple's stock working set
+    already leaves room for the system, so only a raised one meets it."""
     from gmlx.device import metal_value
 
     cap = ws * (1.0 - (margin() if m is None else m))
@@ -104,12 +108,133 @@ def ceiling_bytes(ws: float, m: float | None = None) -> float:
         mem = float(metal_value("memory_size"))
     except Exception:
         return cap
-    return min(cap, mem - reserve_bytes(mem))
+    return min(cap, mem - reserve_bytes(mem) - outside)
+
+
+# The kernel's wired bytes before this process wired any of its own, read
+# once per process (note_outside_wired); None until then.
+_OUTSIDE_WIRED: float | None = None
+
+
+def note_outside_wired() -> float:
+    """Read the memory wired outside this process, once: the kernel's
+    wired page count, taken by ``decide_cap`` in a process it puts under
+    the wired cap, before its first load wires anything (MLX wires
+    nothing until a wired limit is set). Later calls return the first
+    reading. 0 when the counters cannot be read."""
+    global _OUTSIDE_WIRED
+    if _OUTSIDE_WIRED is None:
+        from . import kernel_vm
+
+        snap = kernel_vm.snapshot()
+        _OUTSIDE_WIRED = float(snap["wired"]) if snap else 0.0
+    return _OUTSIDE_WIRED
+
+
+def outside_wired_bytes() -> float:
+    """The reading ``note_outside_wired`` took, 0 before it ran."""
+    return _OUTSIDE_WIRED or 0.0
+
+
+# The memory wired outside this process as the governor's tick last read it
+# live, and the kernel wired count that reading came from
+# (note_live_outside_wired); None until the first read.
+_OUTSIDE_LIVE: float | None = None
+_WIRED_SEEN: float | None = None
+
+
+def note_live_outside_wired(wired: float, own: float) -> None:
+    """Book the memory wired outside this process, read live: the kernel's
+    wired bytes ``wired`` less ``own``, the bytes the process holds wired
+    (``prefill_decay.own_wired_bytes``). The governor's tick calls it in a
+    process under the wired cap, with one host_statistics64 read and no
+    device sync. That counter refreshes about once a second, so a count
+    equal to the last one is a stale read and keeps the last figure: a
+    fresh ``own`` against a stale count would read the process's own
+    frees as memory wired outside it."""
+    global _OUTSIDE_LIVE, _WIRED_SEEN
+    if wired == _WIRED_SEEN:
+        return
+    _WIRED_SEEN = wired
+    _OUTSIDE_LIVE = max(0.0, float(wired) - float(own))
+
+
+def priced_outside_wired_bytes() -> float:
+    """The memory wired outside this process that the wired cap is priced
+    from: the startup reading (``note_outside_wired``), or the governor's
+    live one (``note_live_outside_wired``) while it is higher. A rise
+    outside lowers the cap; a fall lifts it back no further than the
+    startup figure."""
+    start = outside_wired_bytes()
+    live = _OUTSIDE_LIVE
+    return start if live is None else max(start, live)
+
+
+# Whether this process plans and limits under the wired cap, decided once
+# before its first load (decide_cap); None until then.
+_CAP: bool | None = None
+
+
+def decide_cap(loads, env=None, announce: bool = False) -> bool:
+    """Decide once, before the process loads anything, whether it plans
+    and limits under the wired cap for its whole life: when the load of
+    any of ``loads``, (path, stream placement) pairs, is predicted to map
+    a streamable table outside MLX's tracker
+    (``table_stream.predicts_untracked``). Serve passes its configured
+    models at start; a command passes its one model. The cap then goes in
+    at once (``stream.wired_limit.install_wired_cap``), after the memory
+    wired outside the process is read. Later calls keep the first
+    decision, so a model it did not predict maps its table tracked."""
+    global _CAP
+    if _CAP is None:
+        from gmlx.stream.table_stream import predicts_untracked
+
+        _CAP = any(predicts_untracked(path, stream, env)
+                   for path, stream in loads)
+        if _CAP:
+            from gmlx.stream.wired_limit import install_wired_cap
+
+            note_outside_wired()
+            install_wired_cap(announce=announce)
+    return _CAP
+
+
+def cap_applies() -> bool:
+    """Whether this process plans and limits under the wired cap
+    (``decide_cap``). Every other process plans under ``ceiling_bytes``
+    and keeps MLX's own memory limit."""
+    return bool(_CAP)
+
+
+def wired_cap_bytes(ws: float | None = None,
+                    m: float | None = None) -> float | None:
+    """The ceiling this process plans under. In a process under the wired
+    cap ``decide_cap`` decided (``cap_applies``), the cap: the lower of
+    the working set less the margin and the RAM less the reserve and the
+    memory wired outside the process (``ceiling_bytes``), read before its
+    first load and live on the governor's tick, whichever is higher
+    (``priced_outside_wired_bytes``), so the cap never rises past its
+    startup figure. The governor plans under it, and
+    ``stream.wired_limit.install_wired_cap`` clamps ``mx.set_wired_limit``
+    to it and sets the MLX memory limit to it, so the buffer cache yields
+    there instead of taking a fixed share. The memory limit is set once,
+    at the startup figure: while memory wired outside holds the cap below
+    it, the buffer cache can fill past the cap until a governor tick reads
+    yellow and its throttle sets the limit from the live cap. In any
+    other process, ``ceiling_bytes``. None when the device cannot be
+    read."""
+    if ws is None:
+        ws = working_set_bytes()
+    if ws is None:
+        return None
+    if not cap_applies():
+        return ceiling_bytes(ws, m)
+    return max(0.0, ceiling_bytes(ws, m, priced_outside_wired_bytes()))
 
 
 def working_budget_bytes() -> float | None:
-    ws = working_set_bytes()
-    return None if ws is None else ceiling_bytes(ws)
+    """The serve working budget: ``wired_cap_bytes``."""
+    return wired_cap_bytes()
 
 
 def working_set_for_ram(ram: float) -> float:
@@ -353,7 +478,7 @@ def derive_table(gguf_path: str, weight_bytes: float | None = None,
         _log.debug("capacity derivation skipped", exc_info=True)
         return None
 
-    budget = ceiling_bytes(ws)
+    budget = wired_cap_bytes(ws) or 0.0
     reserve = admit_reserve_bytes(ws)
 
     def fits(w: int, d: int) -> bool:
@@ -749,15 +874,18 @@ def preload_gate(weight_bytes: float, model_id: str, *,
     from gmlx.gen.prefill_decay import headroom_bytes
 
     head = headroom_bytes()
+    engaged = cap_applies()
     budget = working_budget_bytes()
     ws = working_set_bytes()
-    if head is not None and budget is not None and ws is not None:
+    if (not engaged and head is not None and budget is not None
+            and ws is not None):
         # headroom_bytes() is measured against Metal's full recommended
         # working set; a load is judged against the serve ceiling (margin
         # and kernel reserve, ceiling_bytes), the same ceiling the boot
         # table and request admission use. Judged raw, the gate admitted
         # an 86.7 GB load next to a pinned 31.5 GB resident (118 GB on a
         # 112 GB wire limit) and Metal OOM'd in the mmap warm (2026-08-25).
+        # Under the wired cap, the headroom is measured against the cap.
         head -= max(0.0, ws - budget)
     if head is not None and reserved_bytes > 0:
         head -= reserved_bytes
@@ -765,11 +893,14 @@ def preload_gate(weight_bytes: float, model_id: str, *,
             "resident streamed model keeps"
             if reserved_bytes > 0 else "")
     if budget is not None and weight_bytes > budget:
+        lower = (", or RAM less the reserve and the memory wired outside "
+                 "the server when lower" if engaged else "")
         raise RuntimeError(
             f"model does not fit: {model_id} {what} "
             f"{weight_bytes / GB:.1f} GB exceed this box's working "
             f"budget {budget / GB:.1f} GB (working set x "
-            f"{1 - margin():.2f}). GMLX_OVERCOMMIT=1 overrides; {fix}")
+            f"{1 - margin():.2f}{lower}). GMLX_OVERCOMMIT=1 "
+            f"overrides; {fix}")
     if head is not None and weight_bytes > head:
         _defer(
             f"model load deferred: {model_id} {what} "

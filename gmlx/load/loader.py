@@ -859,10 +859,16 @@ def _warm_mmap_residency(
             0.9 * cast(int, metal_value("max_recommended_working_set_size")))
     except Exception:
         _tbudget = None
-    from gmlx.stream.table_stream import warm_touch_exclusions
+    from gmlx.stream.table_stream import (mark_untracked_tables,
+                                          untracked_table_array_ids,
+                                          warm_touch_exclusions)
 
-    _tskip = warm_touch_exclusions(model, total, _tbudget,
-                                   paths=list(paths or source_key or ()))
+    _paths = list(paths or source_key or ())
+    # A table the load mapped outside MLX's tracker is never wired and in
+    # no MLX count: neither touched here nor registered below.
+    untracked_tables = mark_untracked_tables(model, _paths)
+    _tskip = warm_touch_exclusions(model, total, _tbudget, paths=_paths)
+    _tskip |= untracked_table_array_ids(model)
     arrays = [v for _, v in pairs if id(v) not in _tskip]
     try:
         _warm_touch_pass(arrays, total, log=log, paths=paths,
@@ -891,7 +897,9 @@ def _warm_mmap_residency(
             # install_expert_streaming reads this to deduct streamed-out
             # expert bytes from the same registration.
             object.__setattr__(model, "_kq_weights_key", key)
-        note_untracked_weights(max(0.0, total - min(tracked, total)), key=key)
+        mapped = max(0.0, total - untracked_tables)
+        note_untracked_weights(max(0.0, mapped - min(tracked, mapped)),
+                               key=key)
 
 
 def _warm_touch_pass(

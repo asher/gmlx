@@ -38,7 +38,9 @@ exist only for speculative models, and checkpoints only for
 checkpoint-tier models.
 
 - Prefix layer: An in-memory LRU holds post-prefill KV and hidden state. A
-  request that shares a prefix with an earlier one skips that prefill.
+  request that shares a prefix with an earlier one skips that prefill. When
+  memory runs short, the governor evicts its entries, the least recently
+  used first.
 - Shared pools: The block, exact and disk lookups fill the prompt cache
   before prefill, so a request can warm-start from memory or from the SSD
   tier. The longest match wins.
@@ -55,6 +57,18 @@ checkpoint-tier models.
   The system-prompt checkpoint lets parallel agents that share a prompt
   restore from it. A batched prefill takes no checkpoints, so prompt
   prefill on these models runs one request at a time.
+
+Checkpoints and the pool's blocks share the pool's memory share. When a
+save would pass it, blocks that no checkpoint holds go first. Then
+checkpoints go, each with the blocks only it held. Each conversation keeps
+its newest checkpoint, the one its next turn restores, until no other is
+left. So does a checkpoint that two or more conversations continue, such
+as a parent whose context a client forked into children, unless it is a
+system-prompt checkpoint. Among the rest the least recently used goes
+first, and system-prompt checkpoints go last.
+Any checkpoint that leaves the cache takes the blocks only it held with
+it. `GMLX_APC_CKPT_BUDGET_MB` replaces the share with a budget for
+checkpoints alone.
 
 Each layer's switches are listed in the prompt cache section of
 [Debug switches](debug-switches.md#prompt-cache).
@@ -77,6 +91,7 @@ This table gives each counter and what a change in it means.
 | `ckpt_declines` | Each save the server skips counts under its reason. When every request lands under one reason, reuse does not work for that traffic. |
 | `ckpt_missed_adoptions` | Each request that matched a saved prefix but could not use it adds one. Any growth indicates a bug. |
 | `ckpt_pool_evictions` | Each prefix discarded to make room adds one. Evictions are normal on long sessions. |
+| `ckpt_budget_evictions`, `ckpt_budget_evicted_mb` | Each checkpoint dropped to fit the pool's share adds one, and its MB with the blocks freed. Growth with a few conversations means the share is too small. |
 | `ckpt_skeleton_writes` | Each save mirrored to the disk tier adds one. Zero with `disk` on means a restart starts cold. |
 | `sidecar_writes` | Each drafter cache entry saved beside its target entry adds one. |
 | `retire_fallback_suppressed` | Each retirement store skipped because the predicted next-turn render diverged adds one. The turn checkpoint covers it. |

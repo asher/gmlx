@@ -132,6 +132,15 @@ CLAIMS: tuple[Claim, ...] = (
           "arm)",
           wrappers=("gmlx.cache.apc_pooling", "gmlx.cache.kvarn_serve",
                     "gmlx.spec.engine")),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator.close",
+          "governor.install_governor (a closed generator takes its "
+          "throttle off the holders, so the limits the oldest throttle "
+          "found come back)",
+          wrappers=("gmlx.serve.governor",)),
+    Claim("gmlx._vendor.mlx_vlm.generate.ar", "BatchGenerator.__del__",
+          "governor.install_governor (a generator collected unclosed marks "
+          "its throttle and takes no lock; the copy's calls close)",
+          wrappers=("gmlx.serve.governor",)),
     # cache.refusals relies on it too: to_batch is tried before the
     # isinstance chain.
     Claim("gmlx._vendor.mlx_vlm.generate.ar", "_make_cache",

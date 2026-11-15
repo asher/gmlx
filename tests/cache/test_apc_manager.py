@@ -411,9 +411,11 @@ def test_evict_bytes_takes_the_coldest_idle_blocks_then_a_clone(monkeypatch):
 
 
 def test_an_eviction_by_bytes_gives_the_headroom_its_bytes(monkeypatch):
-    """The admission gate reads the headroom again after it evicts. Each
+    """The admission gate reads the headroom again after it evicts and
+    clears the buffer cache (``governor.cover_admission_shortfall``). Each
     block holds its own buffers, so the bytes ``evict_bytes`` reports are
-    bytes the headroom gains at once, before any cache clear."""
+    bytes the headroom gains. The cache is wired beside the active bytes
+    under a raised limit, so the headroom counts it until the clear."""
     import mlx.core as mx
 
     from gmlx.gen.prefill_decay import headroom_bytes
@@ -429,8 +431,10 @@ def test_an_eviction_by_bytes_gives_the_headroom_its_bytes(monkeypatch):
     block = next(b.resident_bytes() for b in m.pool if b.block_hash is not None)
     assert block == 4 * k.nbytes // 32
     mx.synchronize()
+    mx.clear_cache()
     before = headroom_bytes()
     freed = m.evict_bytes(16 * block)
+    mx.clear_cache()
     gained = headroom_bytes() - before
     assert freed == 16 * block
     assert 0.9 * freed <= gained <= 1.1 * freed
@@ -577,6 +581,39 @@ def _autosize_rig(monkeypatch, budget):
 
     monkeypatch.setattr(capacity, "working_budget_bytes", lambda: budget)
     _weights_held(monkeypatch)
+
+
+def test_a_qwen4exp_block_is_priced_at_the_k_and_v_it_holds(monkeypatch):
+    """A qwen4exp prompt-cache store puts each QSA layer's K and V in the
+    pool's blocks; the indexer keys and block keys ride the store's
+    record whole. The pool sizes its blocks at what one stored block
+    holds, while the live cache price keeps the indexer and block keys."""
+    import mlx.core as mx
+
+    from gmlx.models.qwen4_exp.model import ModelArgs, QSAKVCache
+    from gmlx.serve.mem_preflight import kv_layer_costs, per_token_bytes
+
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    monkeypatch.setattr(apc, "_free_ram_bytes", lambda: 100 * GB)
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    args = ModelArgs(num_hidden_layers=4, full_attention_interval=2,
+                     num_key_value_heads=2, head_dim=16,
+                     indexer_head_dim=8, compress_ratios=[0, 4, 0, 4])
+    model = SimpleNamespace(config=args)
+    m = GmlxAPCManager(num_blocks=8, block_size=16)
+    m.autosize(model)
+    tokens = 64
+    qsa = [QSAKVCache(4), QSAKVCache(4)]
+    for c in qsa:
+        rows = mx.zeros((1, 2, tokens, 16), mx.bfloat16)
+        c.append_qsa(rows, rows, mx.zeros((1, tokens, 8), mx.bfloat16))
+    m.release(m.store_kv_blocks(list(range(tokens)),
+                                [c.keys for c in qsa],
+                                [c.values for c in qsa]))
+    block = next(b.resident_bytes() for b in m.pool
+                 if b.block_hash is not None)
+    assert block == m.block_size * m._pool_per_token_bytes
+    assert per_token_bytes(kv_layer_costs(model)) > m._pool_per_token_bytes
 
 
 def test_autosize_extends_pool_to_budget_share(monkeypatch):

@@ -48,7 +48,7 @@ class _Manager:
     def __init__(self):
         self.exact = []
 
-    def store_exact_cache(self, ids, snap, extra_hash=0):
+    def store_exact_cache(self, ids, snap, extra_hash=0, materialize=None):
         self.exact.append((list(ids), snap))
         return True
 
@@ -316,7 +316,7 @@ def _retire_setup(monkeypatch, lcp, mode="exact"):
     calls = {}
 
     def fake_store(manager, m, seq, cache, row=0, extra_hash=0,
-                   max_len=None, decode_snaps=None):
+                   max_len=None, decode_snaps=None, layout=None):
         calls["store"] = (list(seq), max_len, m)
         return True
 

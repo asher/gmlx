@@ -19,22 +19,28 @@ copied ``apc``, which the APC manager build rebinds to the mach counters
 the render functions and input builders of the copied mlx-vlm, which
 ``load_vlm_model`` and the serve patches wrap (each test module hands
 these back too, for the module fixtures that load a VLM), the limits the
-serve governor saved when it armed its throttle, and the cache limit the
-server noted for the prefill decay. A governor state that outlives the
-test goes back to the saved limits it held when the test started, and
-one the test created goes back to unarmed, as the MLX limits go back to
-their values from before the test.
+serve governor saved when it armed its throttle, the cache limit the
+server noted for the prefill decay, the table stream's latch and its
+declared installs, the reading of the memory wired outside the process
+that the first load takes for the wired cap, the MLX memory limit the
+cap replaced, and the prefill decay's weight registries (untracked and
+streamed bytes, their owners, the open build credits), which a build
+leaves keyed to a model the next test never holds. A governor state
+that outlives the test goes back to the saved limits it held when the
+test started, and one the test created goes back to unarmed, as the MLX
+limits go back to their values from before the test.
 
 Known exclusion: the rest of a governor state (its band, the halved
 prefill step and the clamped width) stays as the test left it. The next
 tick in a band that throttles arms the limits again, and the next tick in
 the green band undoes the rest.
 
-``capture`` and ``restore`` bracket every test (tests/conftest.py). MLX
-reads MLX_ENABLE_TF32 and the command buffer caps once, at the first
-matmul and the first command buffer, so ``start_session`` also runs one
-small GPU matmul: the process keeps the session's settings even when a
-test changes the environment before its own first matmul.
+``capture`` and ``restore`` bracket every test (tests/conftest.py), and
+a wider fixture that brackets its own setup with them calls ``hold``
+after it. MLX reads MLX_ENABLE_TF32 and the command buffer caps once, at
+the first matmul and the first command buffer, so ``start_session`` also
+runs one small GPU matmul: the process keeps the session's settings even
+when a test changes the environment before its own first matmul.
 
 mlx-kquant reads most of its KQ_* keys once too, each at the first call
 of the kernel route that reads it, and there is no one call that reaches
@@ -209,6 +215,70 @@ def _governor():
     return sys.modules.get("gmlx.serve.governor")
 
 
+def _capacity():
+    """gmlx.serve.capacity, or None before it is imported."""
+    return sys.modules.get("gmlx.serve.capacity")
+
+
+def _wired_limit():
+    """gmlx.stream.wired_limit, or None before it is imported."""
+    return sys.modules.get("gmlx.stream.wired_limit")
+
+
+# The prefill decay's weight registries: dicts handed back in place, so a
+# reference a module took stays live.
+_DECAY_REGISTRIES = ("_UNTRACKED_WEIGHTS", "_UNTRACKED_OWNERS",
+                     "_STREAMED_TRACKED", "_STREAMED_CAP", "_BUILD_CREDIT")
+_WIRED_LIMIT_FIELDS = {"_CAP_MEMORY_LIMIT": None, "_CLAMP_LOGGED": False,
+                       "_ANNOUNCE": False}
+
+
+# A governor state's throttle fields: the limits it saved and the ones it
+# set in their place.
+_THROTTLE_FIELDS = ("saved_mem_limit", "saved_cache_limit",
+                    "throttle_mem_limit", "throttle_cache_limit")
+
+
+def _throttle_fields(st) -> tuple:
+    return tuple(getattr(st, name, None) for name in _THROTTLE_FIELDS)
+
+
+def _decay_registries(decay) -> dict | None:
+    """A copy of the weight registries, one level deep, and the weights
+    owner, or None before the module is imported."""
+    if decay is None:
+        return None
+    out = {name: {k: (set(v) if isinstance(v, set) else
+                      dict(v) if isinstance(v, dict) else v)
+                  for k, v in getattr(decay, name).items()}
+           for name in _DECAY_REGISTRIES}
+    out["_WEIGHTS_OWNER"] = decay._WEIGHTS_OWNER
+    return out
+
+
+def _put_back_decay_registries(decay, saved: dict | None) -> bool:
+    """Hand the weight registries back as ``saved`` holds them (empty
+    when the module was imported during the test). True when any had
+    changed."""
+    if decay is None:
+        return False
+    if saved is None:
+        saved = {name: {} for name in _DECAY_REGISTRIES}
+        saved["_WEIGHTS_OWNER"] = None
+    changed = False
+    with decay._UNTRACKED_LOCK:
+        for name in _DECAY_REGISTRIES:
+            reg = getattr(decay, name)
+            if reg != saved[name]:
+                changed = True
+                reg.clear()
+                reg.update(saved[name])
+        if decay._WEIGHTS_OWNER is not saved["_WEIGHTS_OWNER"]:
+            changed = True
+            decay._WEIGHTS_OWNER = saved["_WEIGHTS_OWNER"]
+    return changed
+
+
 def vlm_bindings() -> list:
     """(module, name, function) for each of _VLM_BINDINGS in an imported
     module."""
@@ -254,16 +324,34 @@ def capture() -> dict:
             (mod, getattr(mod, "_free_ram_bytes", _MISSING))
             for mod in [sys.modules.get(_APC_MODULE)] if mod],
         "vlm_bindings": vlm_bindings(),
-        "governor": {st: (st.saved_mem_limit, st.saved_cache_limit)
-                     for st in _governor_states},
+        "governor": {st: _throttle_fields(st) for st in _governor_states},
+        "throttle_holders": list(getattr(_governor(), "_HOLDERS", ())),
         "noted_cache_limit": getattr(decay, "_NOTED_CACHE_LIMIT", None),
         "table_stream_latch": getattr(_table_stream(), "_FORCED", False),
+        "table_install_follows": set(getattr(_table_stream(),
+                                             "_INSTALL_FOLLOWS", ())),
         "armed_floor": getattr(_governor(), "_ARMED_FLOOR", 0.0),
+        "outside_wired": getattr(_capacity(), "_OUTSIDE_WIRED", None),
+        "outside_live": (getattr(_capacity(), "_OUTSIDE_LIVE", None),
+                         getattr(_capacity(), "_WIRED_SEEN", None)),
+        "cap_decision": getattr(_capacity(), "_CAP", None),
+        "wired_limit_fields": {
+            name: getattr(_wired_limit(), name)
+            for name in _WIRED_LIMIT_FIELDS if _wired_limit() is not None},
+        "decay_registries": _decay_registries(decay),
     }
     devices = [mx.cpu] + ([mx.gpu] if _gpu() else [])
     for d in devices:
         state["streams"][d] = mx.default_stream(d)
     return state
+
+
+def hold(state: dict) -> None:
+    """Keep in ``state`` the first value each MLX limit setter and the RNG
+    seed replaced since its capture. Each test's capture starts that record
+    afresh, so a class, module or session fixture that captures before its
+    setup holds after it, and its restore puts those values back."""
+    state["prior"] = dict(_prior)
 
 
 def note_kq_env(state: dict, nodeid: str) -> None:
@@ -310,6 +398,8 @@ def restore(state: dict) -> list:
         if getattr(owner, name) is not state[name]:
             changed.append(f"{owner.__name__}.{name}")
             setattr(owner, name, state[name])
+    # What hold kept predates any value recorded since.
+    _prior.update(state.get("prior", {}))
     for name in _LIMITS:
         if name in _prior and _setters[name](_prior[name]) != _prior[name]:
             changed.append(name.removeprefix("set_").replace("_", " "))
@@ -341,13 +431,17 @@ def restore(state: dict) -> list:
     changed += put_back(state["vlm_bindings"])
     governor = False
     for st in list(_governor_states):
-        saved = state["governor"].get(st, (None, None))
-        if (st.saved_mem_limit, st.saved_cache_limit) != saved:
+        saved = state["governor"].get(st, (None,) * len(_THROTTLE_FIELDS))
+        if _throttle_fields(st) != saved:
             governor = True
-            st.saved_mem_limit, st.saved_cache_limit = saved
+            for name, value in zip(_THROTTLE_FIELDS, saved):
+                setattr(st, name, value)
     if governor:
         changed.append("governor saved limits")
     gov = _governor()
+    if gov is not None and gov._HOLDERS != state["throttle_holders"]:
+        changed.append("governor throttle holders")
+        gov._HOLDERS[:] = state["throttle_holders"]
     if gov is not None and gov._ARMED_FLOOR != state["armed_floor"]:
         changed.append("governor armed floor")
         gov._ARMED_FLOOR = state["armed_floor"]
@@ -363,6 +457,33 @@ def restore(state: dict) -> list:
     if tables is not None and tables._FORCED != state["table_stream_latch"]:
         changed.append("table stream latch")
         tables._FORCED = state["table_stream_latch"]
+    if tables is not None and \
+            tables._INSTALL_FOLLOWS != state["table_install_follows"]:
+        changed.append("table install declarations")
+        tables._INSTALL_FOLLOWS.clear()
+        tables._INSTALL_FOLLOWS.update(state["table_install_follows"])
+    capacity = _capacity()
+    if capacity is not None and \
+            capacity._OUTSIDE_WIRED != state["outside_wired"]:
+        changed.append("outside wired reading")
+        capacity._OUTSIDE_WIRED = state["outside_wired"]
+    if capacity is not None and (
+            capacity._OUTSIDE_LIVE, capacity._WIRED_SEEN) \
+            != state["outside_live"]:
+        changed.append("live outside wired reading")
+        capacity._OUTSIDE_LIVE, capacity._WIRED_SEEN = state["outside_live"]
+    if capacity is not None and capacity._CAP != state["cap_decision"]:
+        changed.append("wired cap decision")
+        capacity._CAP = state["cap_decision"]
+    wired = _wired_limit()
+    if wired is not None:
+        for name, fresh in _WIRED_LIMIT_FIELDS.items():
+            want = state["wired_limit_fields"].get(name, fresh)
+            if getattr(wired, name) != want:
+                changed.append(f"wired_limit.{name}")
+                setattr(wired, name, want)
+    if _put_back_decay_registries(decay, state["decay_registries"]):
+        changed.append("prefill decay weight registries")
     for d, stream in state["streams"].items():
         if mx.default_stream(d) != stream:
             changed.append(f"stream {getattr(d, 'name', d)}")

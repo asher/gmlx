@@ -249,11 +249,13 @@ def test_i_a_server_notes_its_cache_limit_and_arms_the_governor(monkeypatch):
 
     monkeypatch.delenv("GMLX_CACHE_LIMIT_GB", raising=False)
     _MIRRORS["noted_cache_limit"] = prefill_decay._NOTED_CACHE_LIMIT
+    _MIRRORS["throttle_holders"] = list(governor._HOLDERS)
     memory.apply_cache_limit(SimpleNamespace(cache_limit_gb=3, models={}))
     st = governor._state(_GEN)
     governor._arm_throttle(_GEN, st, 64e9, 0.1)
     assert st.saved_mem_limit is not None
     assert st.saved_cache_limit is not None
+    assert any(h is st for h in governor._HOLDERS)
     assert prefill_decay._NOTED_CACHE_LIMIT == 3 * (1 << 30)
 
 
@@ -267,8 +269,44 @@ def test_j_the_next_test_finds_the_governor_unarmed():
     # it saved would take its throttle for armed and never arm it again.
     st = governor._state(_GEN)
     assert (st.saved_mem_limit, st.saved_cache_limit) == (None, None)
+    assert (st.throttle_mem_limit, st.throttle_cache_limit) == (None, None)
+    # A throttle left among the holders would take every later disarm's
+    # saved limits.
+    assert governor._HOLDERS == _MIRRORS["throttle_holders"]
     assert prefill_decay._NOTED_CACHE_LIMIT == _MIRRORS["noted_cache_limit"]
 
+
+def test_k_a_build_leaves_its_credit_owner_and_table_declaration():
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.serve import capacity
+    from gmlx.stream import table_stream as ts
+
+    _MIRRORS["build_credit"] = dict(pd._BUILD_CREDIT)
+    _MIRRORS["weights_owner"] = pd._WEIGHTS_OWNER
+    _MIRRORS["install_follows"] = set(ts._INSTALL_FOLLOWS)
+    _MIRRORS["cap"] = capacity._CAP
+    owner = ("a", None, "auto")
+    pd.set_untracked_weights_owner(owner)
+    pd.note_build_credit(owner, 3.5e11)
+    ts.table_install_follows("/m/a.gguf")
+    capacity._CAP = True
+    assert owner in pd._BUILD_CREDIT
+
+
+def test_l_the_next_test_finds_none_of_them():
+    if "build_credit" not in _MIRRORS:
+        pytest.skip("runs after test_k")
+    from gmlx.gen import prefill_decay as pd
+    from gmlx.stream import table_stream as ts
+
+    from gmlx.serve import capacity
+
+    # A stale credit would lift every later test's headroom by its bytes.
+    assert pd._BUILD_CREDIT == _MIRRORS["build_credit"]
+    assert pd._WEIGHTS_OWNER == _MIRRORS["weights_owner"]
+    assert ts._INSTALL_FOLLOWS == _MIRRORS["install_follows"]
+    # A stale decision would put every later test under the wired cap.
+    assert capacity._CAP == _MIRRORS["cap"]
 
 
 # The harness itself, run in a fresh pytest process on the CPU device over
@@ -476,6 +514,26 @@ def test_the_state_report_names_a_module_hand_back(tmp_path):
     names = ", ".join(f"{m}.{n}" for m, n in process_state._VLM_BINDINGS)
     assert f"test_vlm_load.py (module end): {names}" in r.stdout, (
         r.stdout[-4000:])
+
+
+def test_a_module_fixture_holds_the_limits_its_load_set():
+    # A module fixture's capture and a load that sets a limit, then a test's
+    # capture and restore as the conftest brackets it, which start the
+    # record of the limits afresh, and a value recorded after that. The
+    # fixture held its record after the load, so its restore at the end of
+    # the module puts the limit back as it was before the load.
+    outer = process_state.capture()
+    before = mx.set_cache_limit(123 << 20)
+    try:
+        process_state.hold(outer)
+        inner = process_state.capture()
+        mx.set_cache_limit(456 << 20)
+        process_state.restore(inner)
+        assert mx.set_cache_limit(123 << 20) == 123 << 20
+        process_state.restore(outer)
+        assert mx.set_cache_limit(before) == before
+    finally:
+        mx.set_cache_limit(before)
 
 
 _KVARN_TESTS = '''
