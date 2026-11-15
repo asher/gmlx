@@ -415,23 +415,13 @@ class Rope(nn.Module):
         self.inv_freq = mx.zeros((freqs,))
 
 
-class H3Transformer(nn.Module):
-    def __init__(self, config: dict):
-        super().__init__()
-        cfg = H3Config.from_dict(config)
-        self.cfg = cfg
-        self.act_dtype = mx.bfloat16
-        self.attention = "dense"
-        self._linears = "file"
-        self.video_patch_proj = nn.Linear(cfg.patch_dim, cfg.dim)
-        self.audio_patch_proj = nn.Linear(cfg.audio, cfg.dim)
-        self.condition_proj = nn.Linear(cfg.text_dim, cfg.dim)
-        self.adaln_t_table = mx.zeros((cfg.grid, cfg.basis))
-        self.rope = Rope(cfg.freqs)
-        self.token_refiner = TokenRefiner(cfg)
-        block = VsaDiTBlock if cfg.vsa_sparsity else DiTBlock
-        self.blocks = [block(cfg) for _ in range(cfg.depth)]
-        self.final_layer = FinalLayer(cfg)
+class H3Core(nn.Module):
+    """What an H3 DiT runs beside its blocks: its activation dtype, its
+    attention and linears, the text rows and the curve rows. A subclass
+    holds ``title``, the refiner, ``condition_proj`` and the curve
+    table."""
+
+    title: str
 
     @property
     def act_dtype(self) -> mx.Dtype:
@@ -440,7 +430,7 @@ class H3Transformer(nn.Module):
     @act_dtype.setter
     def act_dtype(self, dtype: mx.Dtype) -> None:
         if dtype not in (mx.bfloat16, _F32):
-            raise H3DtypeError(f"{fam.TITLE} runs in bfloat16 or float32, "
+            raise H3DtypeError(f"{self.title} runs in bfloat16 or float32, "
                                f"not {dtype}")
         self._act_dtype = dtype
 
@@ -453,7 +443,7 @@ class H3Transformer(nn.Module):
     @attention.setter
     def attention(self, kind: str) -> None:
         if kind not in ATTENTION:
-            raise ValueError(f"{fam.TITLE} runs {' or '.join(ATTENTION)} "
+            raise ValueError(f"{self.title} runs {' or '.join(ATTENTION)} "
                              f"attention, not {kind!r}")
         self._attention = kind
 
@@ -498,6 +488,27 @@ class H3Transformer(nn.Module):
         w = (pos - i0)[:, None]
         i0 = i0.astype(mx.int32)
         return _lerp(tab[i0], tab[i0 + 1], w)
+
+
+class H3Transformer(H3Core):
+    title = fam.TITLE
+
+    def __init__(self, config: dict):
+        super().__init__()
+        cfg = H3Config.from_dict(config)
+        self.cfg = cfg
+        self.act_dtype = mx.bfloat16
+        self.attention = "dense"
+        self._linears = "file"
+        self.video_patch_proj = nn.Linear(cfg.patch_dim, cfg.dim)
+        self.audio_patch_proj = nn.Linear(cfg.audio, cfg.dim)
+        self.condition_proj = nn.Linear(cfg.text_dim, cfg.dim)
+        self.adaln_t_table = mx.zeros((cfg.grid, cfg.basis))
+        self.rope = Rope(cfg.freqs)
+        self.token_refiner = TokenRefiner(cfg)
+        block = VsaDiTBlock if cfg.vsa_sparsity else DiTBlock
+        self.blocks = [block(cfg) for _ in range(cfg.depth)]
+        self.final_layer = FinalLayer(cfg)
 
     def cond_rows(self, anchors, seed: int, *, noise=None) -> tuple:
         """``cond_rows`` of placed anchors at this DiT's patch."""
