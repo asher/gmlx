@@ -70,6 +70,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   context attended to all of it and answered unlike a request decoding alone.
 - Two Qwen3.8-Flash-Next conversations with images failed when they decoded
   together.
+- With the vision tower loaded, a Qwen3.8-Flash-Next request decoding after
+  another request's image prefill failed, or read that prompt's positions.
 - A model that reads its lookup table from disk, such as Qwen3.8-Flash-Next,
   no longer reads the whole table into memory at every load.
 - Qwen3.8-Flash-Next keeps its weights and KV cache wired while it streams

@@ -124,8 +124,13 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
                 position_ids = position_ids[:, :, offset:offset + L]
             return position_ids
         pids = self._position_ids
-        if pids is not None and pids.ndim == 3 and pids.shape[1] == B \
-                and pids.shape[-1] >= offset + L:
+        # The stored block is the last image prefill's, read by that
+        # prompt's own windows. A decode step passes each row's delta,
+        # which places the row exactly, where the block may be another
+        # request's; a decode batch's offset is an array no slice takes.
+        if pids is not None and rope_deltas is None \
+                and isinstance(offset, int) and pids.ndim == 3 \
+                and pids.shape[1] == B and pids.shape[-1] >= offset + L:
             return pids[:, :, offset:offset + L]
         deltas = rope_deltas if rope_deltas is not None else self._rope_deltas
         if deltas is None:

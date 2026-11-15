@@ -314,3 +314,55 @@ def test_batched_decode_after_image_turns_takes_each_rows_delta():
         scale = float(mx.abs(alone[i]).max())
         # the batched projections round unlike a one-row GEMV
         assert float(mx.abs(got[i:i + 1] - alone[i]).max()) < 2e-3 * scale
+
+
+def test_text_rows_after_an_image_prefill_take_their_own_positions():
+    """An image prefill leaves its mrope block on the model. A text row
+    decoding after it, alone, as the one row left in a decode batch, or
+    beside another, sits at its own offset plus its zero delta, as it does
+    with no block left: the block is the image prompt's, and a decode
+    batch's offsets are an array."""
+    from gmlx._vendor.mlx_lm.generate import _merge_caches
+
+    model = _tiny_vlm()
+    lm = model.language_model
+    _peaked_qsa(lm)
+    vocab = lm.args.vocab_size
+    mx.random.seed(11)
+    lens = (15, 13)
+    prompts = [mx.random.randint(0, vocab, (1, n)) for n in lens]
+    nxt = mx.random.randint(0, vocab, (2, 1))
+
+    def zero(rows):
+        return mx.zeros((rows, 1), dtype=mx.int32)
+
+    def prefilled(i):
+        c = lm.make_cache()
+        lm(prompts[i], cache=c)
+        return c
+
+    def image_block(rows):
+        # Past an image the positions run behind the token index.
+        p = mx.arange(40, dtype=mx.int32) // 2
+        return mx.broadcast_to(p[None, None], (3, rows, 40))
+
+    alone = [lm(nxt[i:i + 1], cache=prefilled(i), rope_deltas=zero(1)).logits
+             for i in range(2)]
+    # The text prompts prefill first; the image prefill comes after them.
+    solo_c, one_c = prefilled(0), _merge_caches([prefilled(0)])
+    two_c = _merge_caches([prefilled(0), prefilled(1)])
+    try:
+        lm._position_ids = image_block(1)
+        solo = lm(nxt[:1], cache=solo_c, rope_deltas=zero(1)).logits
+        one = lm(nxt[:1], cache=one_c, rope_deltas=zero(1)).logits
+        lm._position_ids = image_block(2)
+        two = lm(nxt, cache=two_c, rope_deltas=zero(2)).logits
+    finally:
+        lm._position_ids = None
+    # Alone on its own cache the row runs the same forward as with no block.
+    assert mx.array_equal(solo, alone[0])
+    for got, want in ((one, alone[0]), (two[:1], alone[0]),
+                      (two[1:], alone[1])):
+        scale = float(mx.abs(want).max())
+        # the batched projections round unlike a one-row GEMV
+        assert float(mx.abs(got - want).max()) < 2e-3 * scale
