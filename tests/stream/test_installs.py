@@ -87,6 +87,24 @@ def test_release_closes_every_helper_and_drops_the_record():
     assert installs.live_wired_bytes() == 0
 
 
+def test_releasing_the_served_wrapper_drops_the_owner_s_record():
+    # The loader records the wired bytes on the module it hangs the
+    # helpers on, under the wrapper a caller holds. Its release gives
+    # them back while the caller still holds the wrapper.
+    inner = _Holder()
+    inner._kq_weights_pin = _Helper()
+    installs.record(inner, 90)
+
+    class _Wrapper:
+        pass
+
+    outer = _Wrapper()
+    outer.language_model = inner
+    installs.release(outer)
+    assert inner._kq_weights_pin is None
+    assert installs.live_wired_bytes() == 0
+
+
 def test_release_survives_a_helper_that_raises(caplog):
     # One failing close must not leak the others' arenas and fds. The
     # failed helper stays attached and the model keeps its wired charge:

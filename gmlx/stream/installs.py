@@ -161,7 +161,8 @@ def release(model) -> None:
     # A model with an un-closed helper keeps its wired-byte charge; the
     # arena prune already keeps open feeders via _open.
     if not close_failed:
-        _LIVE[:] = [(r, n) for r, n in _LIVE if r() is not model]
+        _LIVE[:] = [(r, n) for r, n in _LIVE
+                    if r() is not model and r() is not owner]
     _ARENAS[:] = [r for r in _ARENAS if _open(r())]
     del owner, model
     gc.collect()
