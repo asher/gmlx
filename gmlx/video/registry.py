@@ -16,12 +16,12 @@ import pkgutil
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from gmlx.image import int8 as neutral
+from gmlx.image.int8 import (ATTENTION, INT8, LINEARS,  # noqa: F401
+                             int8_parts, int8_request_refusal, int8_served)
 from gmlx.image.registry import ConstantsRow
 
-from . import int8 as neutral
 from .anchors import AnchorRule
-from .int8 import (ATTENTION, INT8, LINEARS, int8_parts,  # noqa: F401
-                   int8_request_refusal, int8_served)
 from .layout import Timeline
 
 

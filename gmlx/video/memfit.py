@@ -42,7 +42,7 @@ import math
 import os
 from dataclasses import dataclass
 
-from . import int8 as neutral
+from gmlx.image import int8 as neutral
 
 GiB = 1 << 30
 PHASES = ("encode", "anchors", "denoise", "audio", "decode")
