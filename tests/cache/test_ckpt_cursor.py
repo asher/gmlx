@@ -473,47 +473,6 @@ def test_a_resident_mtp_batch_cuts_its_grid_where_a_plain_batch_does(
         4096, 8192, 12288, 16384, 18432]
 
 
-def test_a_streamed_mtp_batch_without_turn_records_keeps_the_plain_grid(
-        monkeypatch):
-    """Without turn records (GMLX_APC_CKPT_TURN=0) a streamed layout
-    without recurrent state keeps the grid from 0 at the batch's step.
-    The decay wrapper holds this chunk's merged width, 8999, in the MTP
-    body that arms the schedule, so the grid comes from the base step
-    and the batch is cut where a plain batch is."""
-    import gmlx.gen.prefill_decay as pd
-    from gmlx._vendor.mlx_vlm.generate.ar import PromptProcessingBatch as P
-
-    _no_decay(monkeypatch)
-    _stub_p_stable(monkeypatch, 8986)
-    monkeypatch.setenv("GMLX_APC_CKPT_TURN", "0")
-    model = SimpleNamespace(_kq_streaming=True, _kq_apc_ckpt_layout=("kv",))
-    seen = {}
-
-    def mtp_body(batch):
-        seen["step"] = batch.prefill_step_size
-        meta = {"full_input_ids": list(range(9000))}
-        ckpt._ckpt_arm_schedule(batch, meta, 8984, 0, block_size=16)
-        seen["meta"] = meta
-
-    monkeypatch.setattr(P, "prompt_step", mtp_body)
-    monkeypatch.setattr(P, "needs_processing", P.needs_processing)
-    monkeypatch.setattr(P, pd._FLAG, False, raising=False)
-    assert pd.install_prefill_decay()
-    batch = SimpleNamespace(
-        prefill_step_size=8192, model=model, prompt_cache=[],
-        draft_model=object(), _gmlx_pinned_step=None,
-        _inputs_embeds=SimpleNamespace(shape=(1, 9000, 8)),
-        _next_apc_checkpoint_column=lambda: None)
-    P.prompt_step(batch)
-    plain = {"full_input_ids": list(range(9000))}
-    ckpt._ckpt_arm_schedule(SimpleNamespace(prefill_step_size=8192,
-                                            model=model, prompt_cache=[]),
-                            plain, 8984, 0, block_size=16)
-    assert seen["step"] == 8999
-    assert seen["meta"]["ckpt_boundaries"] == plain["ckpt_boundaries"]
-    assert (8192, "boundary") in plain["ckpt_boundaries"]
-
-
 def test_short_cold_prompt_keeps_the_anchor_out_of_the_turn_set(
         monkeypatch):
     """The anchor is its own record. Less than one step past it, it is

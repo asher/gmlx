@@ -531,22 +531,17 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     (``_ckpt_drop_tail_cuts``): on a streamed text prompt over a layout
     without recurrent state. The candidates there are the grid from the
     system prefix anchor, from the restored prefix, from 0 at the step
-    the loop runs, and from 0 at the batch's base step, which a media
-    prompt keeps. On an MTP batch the decay wrapper holds this chunk's
-    width in ``prefill_step_size`` and the base in ``_gmlx_base_step``,
-    so that last grid is the one a plain batch arms. A resident model
-    keeps the grid from 0 at the step its loop runs from
-    (``_ckpt_run_step``). The loop's cost is known at arm time only while
-    the score cap is fixed, not while it follows the live headroom.
-    Without turn records (GMLX_APC_CKPT_TURN=0) the pick cannot see which
-    record the next turn restores, so the grid from 0 at the base step
-    stays."""
+    the loop runs, and from 0 at the batch's step, which a media prompt
+    keeps. A resident model keeps the grid from 0 at the step its loop
+    runs from (``_ckpt_run_step``). The loop's cost is known at arm time
+    only while the score cap is fixed, not while it follows the live
+    headroom. Without turn records (GMLX_APC_CKPT_TURN=0) the pick cannot
+    see which record the next turn restores, so main's grid stays."""
     from gmlx.gen import prefill_decay
     from gmlx.stream.expert_streaming import experts_streamed
 
-    batch_unit = _lcm_unit(int(getattr(batch, "_gmlx_base_step", None)
-                               or getattr(batch, "prefill_step_size", 0)
-                               or 0), block_size)
+    batch_unit = _lcm_unit(int(getattr(batch, "prefill_step_size", 0) or 0),
+                           block_size)
     if not experts_streamed(getattr(batch, "model", None)):
         return [(0, _ckpt_unit(batch, block_size))], False
     run_unit = _ckpt_unit(batch, block_size)
