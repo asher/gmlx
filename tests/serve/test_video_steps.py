@@ -27,6 +27,7 @@ from gmlx.serve.image_service import ServedImage  # noqa: E402
 from gmlx.serve.image_steps_client import (MissingTensors,  # noqa: E402
                                            StepsClient, StepsClientError,
                                            array_hash)
+from gmlx.image.h3 import blocks  # noqa: E402
 from gmlx.serve.video_service import WORKER  # noqa: E402
 from gmlx.serve.patches import image_steps as routes  # noqa: E402
 from gmlx.serve.video_service import ServedVideo, VideoEntryPlan  # noqa: E402
@@ -511,7 +512,7 @@ def _int8_calls(monkeypatch) -> list:
     def spy(q, k, v, chunk):
         calls.append(tuple(q.shape))
         return dense(q, k, v, chunk)
-    monkeypatch.setattr(hm, "attend_int8", spy)
+    monkeypatch.setattr(blocks, "attend_int8", spy)
     return calls
 
 

@@ -11,6 +11,7 @@ import pytest
 from mlx.utils import tree_flatten
 
 from gmlx.image import ops, pacing
+from gmlx.image.h3 import blocks
 from gmlx.video import api, layout, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
@@ -227,7 +228,7 @@ def test_the_stock_feed_forward_pauses_after_each_row_chunk(tiny,
     """Off the fused kernel, as under a live LoRA, the feed-forward runs
     ``MLP_ROWS`` rows a product with a pause point after each, so a
     paced forward holds one product at a time."""
-    monkeypatch.setattr(hm, "MLP_ROWS", 16)
+    monkeypatch.setattr(blocks, "MLP_ROWS", 16)
     blk = tiny.blocks[0]
     h = mx.random.normal((1, 40, TINY["hidden_size"]))
     seen = []
