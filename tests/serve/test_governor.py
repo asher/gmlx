@@ -1394,22 +1394,11 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     assert head3 == pytest.approx(head)
 
 
-@pytest.mark.parametrize("own2, wired2, wired3, want2, want3", [
-    # A yellow trim frees 6.5 GB of cache: the server stops counting it
-    # before the kernel's count does, and the next count read refreshed
-    # only partway.
-    (87.09e9, 103.03e9, 96.5e9, 9.43e9, 9.41e9),
-    # The server holds the same and 6 GB more is wired outside it.
-    (93.6e9, 109.0e9, 109.0e9, 15.4e9, 15.4e9),
-], ids=["own-trim", "outside-rise"])
-def test_the_live_outside_reading_is_not_moved_by_the_servers_own_trim(
-        monkeypatch, own2, wired2, wired3, want2, want3):
-    """The tick reads memory wired outside the server as the kernel's
-    wired count less what the server holds wired. A trim the governor
-    makes leaves the server's count before the kernel's: a count read in
-    between is priced against the most the server held since the last
-    count, so the trim is not booked as memory wired outside. A real rise
-    outside still shows at once."""
+@pytest.fixture
+def read_outside(monkeypatch):
+    """``read(wired, own)``: the tick's reading of memory wired outside the
+    server for the kernel's wired count and what the server holds wired,
+    as the cap prices it, from no reading yet and 6 GB at startup."""
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
     import gmlx.serve.kernel_vm as kvm
@@ -1428,10 +1417,39 @@ def test_the_live_outside_reading_is_not_moved_by_the_servers_own_trim(
         box["wired"], box["own"] = wired, own
         gov._read_outside_wired()
         return cap.priced_outside_wired_bytes()
+    return read
 
-    assert read(103.0e9, 93.6e9) == pytest.approx(9.4e9)
-    assert read(wired2, own2) == pytest.approx(want2)
-    assert read(wired3, own2) == pytest.approx(want3)
+
+@pytest.mark.parametrize("own2, wired2, wired3, want2, want3", [
+    # A yellow trim frees 6.5 GB of cache: the server stops counting it
+    # before the kernel's count does, and the next count read refreshed
+    # only partway.
+    (87.09e9, 103.03e9, 96.5e9, 9.43e9, 9.41e9),
+    # The server holds the same and 6 GB more is wired outside it.
+    (93.6e9, 109.0e9, 109.0e9, 15.4e9, 15.4e9),
+], ids=["own-trim", "outside-rise"])
+def test_the_live_outside_reading_is_not_moved_by_the_servers_own_trim(
+        read_outside, own2, wired2, wired3, want2, want3):
+    """The tick reads memory wired outside the server as the kernel's
+    wired count less what the server holds wired. A trim the governor
+    makes leaves the server's count before the kernel's: a count read in
+    between is priced against the most the server held since the last
+    count, so the trim is not booked as memory wired outside. A real rise
+    outside still shows at once."""
+    assert read_outside(103.0e9, 93.6e9) == pytest.approx(9.4e9)
+    assert read_outside(wired2, own2) == pytest.approx(want2)
+    assert read_outside(wired3, own2) == pytest.approx(want3)
+
+
+def test_a_read_of_the_same_count_keeps_what_the_server_held(read_outside):
+    """Decode ticks far more often than the kernel refreshes its wired
+    count, so most reads see the count the last one saw, and the server
+    can hold more by the time it moves. Such a read leaves the reading as
+    it is and keeps the most the server held, which the next count is
+    read against."""
+    assert read_outside(103.0e9, 87.0e9) == pytest.approx(16.0e9)
+    assert read_outside(103.0e9, 93.6e9) == pytest.approx(16.0e9)
+    assert read_outside(103.03e9, 87.09e9) == pytest.approx(9.43e9)
 
 
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
