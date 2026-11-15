@@ -546,6 +546,64 @@ def test_spec_state_bytes_split():
     assert sm.spec_state_bytes(plain) == (0.0, 0.0)
 
 
+def _shared_view_gen():
+    """A spec batch whose shared KV views its cache's buffers, as a target's
+    last full-attention layer hands its K and V to the drafter."""
+    g = _spec_gen()
+    kv = g._generation_batch.prompt_cache[0]
+    g._generation_batch.shared_kv_states = {
+        "full_attention": (kv.keys[..., :50, :], kv.values[..., :50, :])}
+    return g
+
+
+def _ids_by_object(*groups):
+    """A stand-in for mlx_kquant.buffer_id: the arrays of a group share
+    one id, and any other array has none yet."""
+    ids = {id(a): n for n, group in enumerate(groups) for a in group}
+    return lambda a: ids.get(id(a))
+
+
+def test_spec_state_skips_shared_kv_a_cache_holds(monkeypatch):
+    import mlx_kquant as kq
+
+    g = _shared_view_gen()
+    kv = g._generation_batch.prompt_cache[0]
+    k_view, v_view = g._generation_batch.shared_kv_states["full_attention"]
+    dkv = g.draft_model._cache[0]
+    drafter = dkv.keys.nbytes + dkv.values.nbytes
+    views = k_view.nbytes + v_view.nbytes
+    monkeypatch.setattr(kq, "buffer_id", _ids_by_object(
+        (kv.keys, k_view), (kv.values, v_view)), raising=False)
+    assert sm.spec_state_bytes(g)[0] == drafter
+    # A view kq cannot place yet counts in full.
+    monkeypatch.setattr(kq, "buffer_id", _ids_by_object(
+        (kv.keys,), (kv.values,)), raising=False)
+    assert sm.spec_state_bytes(g)[0] == drafter + views
+    # So does every view with a release that has no buffer_id.
+    monkeypatch.delattr(kq, "buffer_id", raising=False)
+    assert sm.spec_state_bytes(g)[0] == drafter + views
+
+
+def test_spec_state_shared_kv_on_kq_buffer_ids():
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "buffer_id"):
+        pytest.skip("the installed mlx-kquant has no buffer_id")
+    g = _shared_view_gen()
+    kv = g._generation_batch.prompt_cache[0]
+    k_view, v_view = g._generation_batch.shared_kv_states["full_attention"]
+    dkv = g.draft_model._cache[0]
+    drafter = dkv.keys.nbytes + dkv.values.nbytes
+    mx.eval(kv.keys, kv.values, k_view, v_view)
+    assert sm.spec_state_bytes(g)[0] == drafter
+    # A cache that moved to new memory leaves the views holding the old
+    # buffer, which the cache walk no longer counts.
+    kv.keys = kv.keys + 0
+    kv.values = kv.values + 0
+    mx.eval(kv.keys, kv.values)
+    assert sm.spec_state_bytes(g)[0] == drafter + k_view.nbytes + v_view.nbytes
+
+
 def test_update_kv_rates_folds_spec_state():
     g = _spec_gen()
     sm.update_kv_rates(g)

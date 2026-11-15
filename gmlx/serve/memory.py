@@ -307,21 +307,52 @@ def _cache_arrays(c):
                 yield a
 
 
+def _held_buffer_ids(prompt_cache, buffer_id) -> set:
+    """The ids (``mlx_kquant.buffer_id``) of the memory a batch's caches
+    hold. An array not yet evaluated has none and adds nothing."""
+    from .memtrace import _leaf_caches
+
+    held = set()
+    for c in _leaf_caches(prompt_cache):
+        for a in _cache_arrays(c):
+            bid = buffer_id(a)
+            if bid is not None:
+                held.add(bid)
+    return held
+
+
 def spec_state_bytes(gen):
     """Speculative-batch resident bytes the cache walk cannot see:
     the parked batch attrs (hidden, shared KV snapshot, prompt tokens,
     first tokens) and the drafter's own head KV. Returns
     ``(depth_scaled, row_const)``: bytes that grow with context depth
     (the shared KV snapshot and the drafter cache) and bytes that are
-    per-row constants. Both zero when the batch is not speculative."""
+    per-row constants. Both zero when the batch is not speculative.
+
+    The shared KV snapshot views the KV cache of the last layer of each
+    attention type until that cache moves to new memory, and the cache
+    walk already counts that memory. A snapshot array whose memory a
+    cache holds counts nothing; one that mlx-kquant cannot place (a
+    release without ``buffer_id``, or an array not yet evaluated)
+    counts in full."""
     from .memtrace import _arrays
 
     batch = gen._generation_batch
     depth_scaled = 0.0
     row_const = 0.0
-    for name in ("shared_kv_states",):
-        depth_scaled += sum(a.nbytes for a in _arrays(
-            getattr(batch, name, None), 3))
+    shared = list(_arrays(getattr(batch, "shared_kv_states", None), 3))
+    if shared:
+        import mlx_kquant as kq
+
+        buffer_id = getattr(kq, "buffer_id", None)
+        held: set = set()
+        if buffer_id is not None:
+            held = _held_buffer_ids(getattr(batch, "prompt_cache", None),
+                                    buffer_id)
+        for a in shared:
+            if held and buffer_id is not None and buffer_id(a) in held:
+                continue
+            depth_scaled += a.nbytes
     for name in ("hidden", "prompt_tokens", "first_tokens"):
         row_const += sum(a.nbytes for a in _arrays(
             getattr(batch, name, None), 3))

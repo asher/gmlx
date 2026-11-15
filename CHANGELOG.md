@@ -93,6 +93,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   freed its caches and requeued it, after a request joins or leaves its batch.
 - A server near its memory cap no longer holds back requests it has room for:
   it counted the KV cache of the requests decoding twice.
+- With mlx-kquant 0.5.12 or later, a Gemma 4 server with a drafter no longer
+  counts one attention layer's KV cache twice after each prompt.
 - A model that reads its lookup table from disk, such as Qwen3.8-Flash-Next,
   no longer reads the whole table into memory at every load.
 - Qwen3.8-Flash-Next keeps its weights and KV cache wired while it streams
