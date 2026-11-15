@@ -334,7 +334,8 @@ def capture() -> dict:
         "outside_wired": getattr(_capacity(), "_OUTSIDE_WIRED", None),
         "outside_live": (getattr(_capacity(), "_OUTSIDE_LIVE", None),
                          getattr(_capacity(), "_WIRED_SEEN", None),
-                         getattr(_capacity(), "_OWN_PEAK", None)),
+                         getattr(_capacity(), "_OWN_PEAK", None),
+                         tuple(getattr(_capacity(), "_LIVE_READS", ()))),
         "cap_decision": getattr(_capacity(), "_CAP", None),
         "wired_limit_fields": {
             name: getattr(_wired_limit(), name)
@@ -470,10 +471,13 @@ def restore(state: dict) -> list:
         capacity._OUTSIDE_WIRED = state["outside_wired"]
     if capacity is not None and (
             capacity._OUTSIDE_LIVE, capacity._WIRED_SEEN,
-            capacity._OWN_PEAK) != state["outside_live"]:
+            capacity._OWN_PEAK, tuple(capacity._LIVE_READS)) \
+            != state["outside_live"]:
         changed.append("live outside wired reading")
         (capacity._OUTSIDE_LIVE, capacity._WIRED_SEEN,
-         capacity._OWN_PEAK) = state["outside_live"]
+         capacity._OWN_PEAK, reads) = state["outside_live"]
+        capacity._LIVE_READS.clear()
+        capacity._LIVE_READS.extend(reads)
     if capacity is not None and capacity._CAP != state["cap_decision"]:
         changed.append("wired cap decision")
         capacity._CAP = state["cap_decision"]
