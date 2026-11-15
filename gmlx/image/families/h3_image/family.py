@@ -18,6 +18,7 @@ import numpy as np
 
 from gmlx.image.fingerprint import HeaderView, ImageModelError, Match, Refusal
 from gmlx.image.h3.encoder import spec
+from gmlx.image.h3.layout import Timeline
 from gmlx.image.registry import ConstantsRow, Family, SamplingRow, VariantRow
 
 TITLE = "MiniMax-H3-Image"
@@ -93,7 +94,15 @@ CONSTANTS = ConstantsRow(
     revision=_REVISION,
 )
 
-# Modality tags of the adaLN rows, as H3's: image, text.
+# The packed sequence: text, then the target image as one latent frame
+# after it on H3's clock, patchified (1, 2, 2); spatial positions span
+# GRID_SCALE over the square-root area. Text and target run at the step's
+# time, reference images at least at REF_TIME.
+TIMELINE = Timeline((1, 4, 4, 4, 4), 5.0 / 3.0, 32.0, _PATCH[1],
+                    ("text", "anchors", "audio", "video"))
+REF_TIME = 0.999
+# Modality tags of the adaLN rows, as H3's: image, text. A prompt's vision
+# rows take the image tag.
 TAGS = {"video": 0, "text": 1}
 ATTENTION_CHUNK = 4096
 
@@ -225,6 +234,12 @@ def synth_config(view: HeaderView) -> dict:
     }
 
 
+def build(config: dict):
+    from .model import H3ImageDiT
+
+    return H3ImageDiT(config)
+
+
 FAMILY = Family(
     name="h3_image",
     title=TITLE,
@@ -236,7 +251,7 @@ FAMILY = Family(
     fingerprint=fingerprint,
     synth_config=synth_config,
     constants=CONSTANTS,
-    build=None,
+    build=build,
     encoder=spec,
     fp32_keep=("adaln_t_table", "adaln_proj.", "rope.inv_freq",
                "video_patch_proj.", "final_layer.video_out."),
