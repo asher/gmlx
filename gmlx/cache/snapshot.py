@@ -2898,17 +2898,20 @@ def _snap_assemble(prompt_cache: list[Any], states: list[Any],
         if _qsa_tag(c) is not None:
             # K, V, indexer keys and positions to p, as the prefix arm of
             # the layer's merge takes them, so the record tags "qsa:R" as
-            # the lookups sign. Views: the store's per-block copy is the
-            # only copy.
+            # the lookups sign. Views of the live row, set past the state
+            # setter, which copies and evaluates each stream: the store
+            # copies what it keeps, so its copies are the only ones.
             if int(c.offset) < p:
                 return None
             st = c.state
             if st[0] is None or st[2] is None:
                 return None
-            head = (st[0][..., :p, :], st[1][..., :p, :], st[2][:, :p])
-            out.append(type(c).from_state(
-                head if len(st) == 3 else head + (st[3][:, :, :p],),
-                c.meta_state))
+            q = type(c)(c.ratio)
+            q._kb, q._vb = st[0][..., :p, :], st[1][..., :p, :]
+            q._ib = st[2][:, :p]
+            q.pos = None if len(st) == 3 else st[3][:, :, :p]
+            q.offset = p
+            out.append(q)
             continue
         if isinstance(c, KVCache) and not isinstance(c, RotatingKVCache):
             if c.keys is None or int(getattr(c, "offset", 0) or 0) < p:

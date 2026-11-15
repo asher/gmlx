@@ -183,6 +183,30 @@ def test_a_snapshot_takes_a_qsa_layer_to_its_p_with_its_positions():
         assert mx.array_equal(x, y).item()
 
 
+def test_a_snapshots_qsa_layer_shares_the_live_rows_buffers():
+    """The QSA layer a retirement assembles from a decode snapshot reads
+    the live row's streams in place. The store copies the rows it keeps,
+    so a copy here, 1.1 GB at 40k tokens on Qwen3.8-Flash-Next, would be
+    a second one, made on the engine thread and priced nowhere."""
+    from gmlx.models.qwen4_exp.model import QSAKVCache
+
+    n, p, heads, dim = 4096, 4000, 2, 64
+    mx.random.seed(47)
+    c = QSAKVCache(ratio=4)
+    c.update_and_fetch_qsa(
+        mx.random.normal((1, heads, n, dim)).astype(mx.float16),
+        mx.random.normal((1, heads, n, dim)).astype(mx.float16),
+        mx.random.normal((1, n, dim)).astype(mx.float16))
+    mx.eval(c._kb, c._vb, c._ib)
+    before = mx.get_active_memory()
+    (got,) = cs._snap_assemble([c], [], p)
+    grown = mx.get_active_memory() - before
+    assert grown < p * heads * dim * 2 // 8, grown
+    k, v, ik = c.state
+    for x, y in zip(got.state, (k[..., :p, :], v[..., :p, :], ik[:, :p])):
+        assert mx.array_equal(x, y).item()
+
+
 def test_retirement_uses_newest_snap_at_or_below_lcp():
     man = APCManager(num_blocks=64, block_size=16)
     full = 96
