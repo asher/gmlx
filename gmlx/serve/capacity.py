@@ -137,26 +137,35 @@ def outside_wired_bytes() -> float:
 
 
 # The memory wired outside this process as the governor's tick last read it
-# live, and the kernel wired count that reading came from
-# (note_live_outside_wired); None until the first read.
+# live, the kernel wired count that reading came from, and the most this
+# process held wired since that count (note_live_outside_wired); None until
+# the first read.
 _OUTSIDE_LIVE: float | None = None
 _WIRED_SEEN: float | None = None
+_OWN_PEAK: float | None = None
 
 
 def note_live_outside_wired(wired: float, own: float) -> None:
     """Book the memory wired outside this process, read live: the kernel's
-    wired bytes ``wired`` less ``own``, the bytes the process holds wired
-    (``prefill_decay.own_wired_bytes``). The governor's tick calls it in a
-    process under the wired cap, with one host_statistics64 read and no
-    device sync. That counter refreshes about once a second, so a count
-    equal to the last one is a stale read and keeps the last figure: a
-    fresh ``own`` against a stale count would read the process's own
-    frees as memory wired outside it."""
-    global _OUTSIDE_LIVE, _WIRED_SEEN
+    wired bytes ``wired`` less what the process holds wired
+    (``prefill_decay.own_wired_bytes``, passed as ``own``). The governor's
+    tick calls it in a process under the wired cap, with one
+    host_statistics64 read and no device sync. That counter refreshes
+    about once a second, and the kernel frees a buffer the process
+    released a few hundred ms after the process stops counting it. A
+    count equal to the last one is a stale read and keeps the last
+    figure, and a new count is read against the most the process held
+    since the last one, so its own frees never read as memory wired
+    outside it. A rise outside that lands with such a free shows at the
+    next count."""
+    global _OUTSIDE_LIVE, _WIRED_SEEN, _OWN_PEAK
+    peak = own if _OWN_PEAK is None else max(_OWN_PEAK, own)
     if wired == _WIRED_SEEN:
+        _OWN_PEAK = peak
         return
     _WIRED_SEEN = wired
-    _OUTSIDE_LIVE = max(0.0, float(wired) - float(own))
+    _OWN_PEAK = own
+    _OUTSIDE_LIVE = max(0.0, float(wired) - float(peak))
 
 
 def priced_outside_wired_bytes() -> float:
