@@ -1684,15 +1684,26 @@ def test_apc_hit_on_injected_request(mtp_model):
 # ---------------------------------------------------------------------------
 
 _LP_K = 20
-# A verify block and a one-token decode step differ in GEMM width, and the
-# logits are bf16, whose step is 0.125 between 16 and 32.
+# The floor of the bound on a value MTP and plain decode both report. A
+# verify block and a one-token decode step differ in GEMM width, and the
+# logits are bf16, whose step is 0.125 between 16 and 32: 0.25 nats, or
+# 0.02 probability deep in the tail, where a bf16 step is a large move in
+# nats. On a MoE the same rounding flips routing near ties (the top-10 of
+# Qwen3.8-Flash-Next's 512 experts sit 1e-5 to 5e-3 apart), and an
+# alternative moves by up to 2 nats. Plain decode moves it as far against
+# itself when only its prefill chunk changes, so a row's bound is twice the
+# largest gap a plain run with a _LP_ALT_STEP prefill chunk shows against
+# the plain run over the compared steps, and never under the floor, where
+# a dense model stays.
 _LP_TOL = 0.25
 _LP_PROB_TOL = 0.02
+_LP_ALT_STEP = 64
 
 
-def _run_lp(model, drafter, tokenizer, ids_list, n):
+def _run_lp(model, drafter, tokenizer, ids_list, n, step=_ENGINE_STEP):
     """Greedy rows that want logprobs: (tokens, entries) per row, every
-    response included. ``drafter`` None runs plain decode."""
+    response included. ``drafter`` None runs plain decode; ``step`` is the
+    prefill chunk."""
     from gmlx._vendor.mlx_vlm.generate.ar import BatchGenerator
     from gmlx.serve.row_sampling import RowSettings
 
@@ -1700,7 +1711,7 @@ def _run_lp(model, drafter, tokenizer, ids_list, n):
     gen = BatchGenerator(
         model, _make_processor(tokenizer), sampler=GREEDY,
         draft_model=drafter, draft_kind="mtp" if drafter is not None else None,
-        greedy_sampling=True, max_tokens=n, prefill_step_size=_ENGINE_STEP,
+        greedy_sampling=True, max_tokens=n, prefill_step_size=step,
         logprobs_cap=_LP_K)
     rs = RowSettings(logprobs=True, top_k=_LP_K)
     uids = gen.insert(ids_list, [n] * len(ids_list),
@@ -1718,34 +1729,61 @@ def _run_lp(model, drafter, tokenizer, ids_list, n):
     return [out[u] for u in uids]
 
 
+def _lp_gap(a, b, n):
+    """The largest gap between two runs of one row over its first ``n``
+    steps and the step after, in units of the floor: the chosen token's
+    value over _LP_TOL while both runs emit it, and each shared
+    alternative's nats over _LP_TOL or its probability over _LP_PROB_TOL,
+    whichever is smaller. At the first divergence the emitted tokens
+    differ, but the alternatives still describe the same position."""
+    (a_toks, a_lps), (b_toks, b_lps) = a, b
+    k = _first_divergence(a_toks, b_toks)
+    m = n if k is None else min(n, k)
+    worst = 0.0
+    for i, ((a_lp, a_top), (b_lp, b_top)) in enumerate(
+            zip(a_lps[:m + 1], b_lps[:m + 1])):
+        if i < m:
+            worst = max(worst, abs(a_lp - b_lp) / _LP_TOL)
+        a_d, b_d = dict(a_top), dict(b_top)
+        for t in a_d.keys() & b_d.keys():
+            worst = max(worst, min(
+                abs(a_d[t] - b_d[t]) / _LP_TOL,
+                abs(math.exp(a_d[t]) - math.exp(b_d[t])) / _LP_PROB_TOL))
+    return worst
+
+
 @pytest.mark.parametrize("rows", [1, 2])
 def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
-    """Every MTP token carries its entry, and on the shared greedy tokens
-    the values match a run without speculation."""
+    """Every MTP token carries its entry, its top entry is the greedy token
+    at the token's own value, and on the shared greedy tokens the values
+    match a run without speculation within the row's bound (see _LP_TOL)."""
     model, drafter, _config, tokenizer = mtp_model
     ids_list = [_build_prompt(tokenizer, 120 + 40 * i) for i in range(rows)]
     spec = _run_lp(model, drafter, tokenizer, ids_list, 24)
     plain = _run_lp(model, None, tokenizer, ids_list, 24)
-    for (s_toks, s_lps), (p_toks, p_lps) in zip(spec, plain):
+    alt = _run_lp(model, None, tokenizer, ids_list, 24, step=_LP_ALT_STEP)
+    for r, (s, p, q) in enumerate(zip(spec, plain, alt)):
+        (s_toks, s_lps), (p_toks, p_lps) = s, p
         assert len(s_toks) == 24
         assert all(lp is not None and len(top) == _LP_K for lp, top in s_lps)
+        for toks, lps in (s, p, q):
+            for t, (lp, top) in zip(toks, lps):
+                assert top[0][1] == lp and dict(top).get(t) == lp, t
         k = _first_divergence(s_toks, p_toks)
         n = len(s_toks) if k is None else k
         assert n >= 4, (s_toks, p_toks)
-        # At the first divergence the emitted tokens differ, but the
-        # alternatives still describe the same position.
-        for i, ((s_lp, s_top), (p_lp, p_top)) in enumerate(
-                zip(s_lps[:n + 1], p_lps[:n + 1])):
-            if i < n:
-                assert abs(s_lp - p_lp) <= _LP_TOL
-            # An alternative gets the chosen token's bound in nats. Deep in
-            # the tail a bf16 step is a large move in nats but no move in
-            # probability, so it may pass on probability instead.
-            s_d, p_d = dict(s_top), dict(p_top)
-            for t in s_d.keys() & p_d.keys():
-                assert (abs(s_d[t] - p_d[t]) <= _LP_TOL
-                        or abs(math.exp(s_d[t]) - math.exp(p_d[t]))
-                        <= _LP_PROB_TOL), t
+        bound = max(1.0, 2 * _lp_gap(p, q, n))
+        gap = _lp_gap(s, p, n)
+        # A divergence: the step, the tokens of MTP, plain and the other
+        # chunk there, and plain's top-2 margin.
+        fork = None if k is None else (
+            k, s_toks[k], p_toks[k], q[0][k] if k < len(q[0]) else None,
+            round(p_lps[k][1][0][1] - p_lps[k][1][1][1], 4))
+        print(f"[lp] rows={rows} row {r}: {n} steps, gap {gap:.3f}, bound "
+              f"{bound:.3f} (x {_LP_TOL} nats or {_LP_PROB_TOL} prob); "
+              f"fork {fork}; plain against the {_LP_ALT_STEP} chunk parts at "
+              f"{_first_divergence(p_toks, q[0])}")
+        assert gap <= bound, (gap, bound)
 
 
 def _first_divergence(a, b):
