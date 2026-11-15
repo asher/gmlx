@@ -1507,36 +1507,60 @@ def test_demand_rate_seeds_from_boot_table(rig, monkeypatch):
     assert gov._demand_bytes(gen, st)[0] == 0.0
 
 
+def _joined_caches():
+    """A prompt batch's caches holding 2.56 GB, never materialized."""
+    from gmlx.cache.kv_cache import KVCache
+
+    caches = []
+    for _ in range(2):
+        c = KVCache()
+        c.state = (mx.zeros((1, 8, 312500, 128), dtype=mx.float16),
+                   mx.zeros((1, 8, 312500, 128), dtype=mx.float16))
+        caches.append(c)
+    return caches
+
+
 def test_a_join_in_flight_is_charged_the_room_its_caches_do_not_hold(rig):
     """The admission projection is the newest join's room. Queued, the
     join holds none of it and is charged all of it. Once its prompt batch
     runs, what the batch's caches hold is already out of the headroom, so
     the tick charges only the rest, read from the caches' array sizes
-    with nothing evaluated."""
-    from gmlx.cache.kv_cache import KVCache
-
+    with nothing evaluated. The gate projects no join while a batch runs,
+    so a request waiting beside the batch leaves the charge as it is."""
     gen = FakeGen(rows=2)
     st = gov._state(gen)
     gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9)
     gen._unprocessed_sequences = [("u", None)]
     assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9)
-    caches = []
-    for _ in range(2):
-        c = KVCache()
-        # 0.64 GB of keys and of values each, never materialized.
-        c.state = (mx.zeros((1, 8, 312500, 128), dtype=mx.float16),
-                   mx.zeros((1, 8, 312500, 128), dtype=mx.float16))
-        caches.append(c)
     gen._unprocessed_sequences = []
-    gen._prompt_batch = types.SimpleNamespace(prompt_cache=caches)
+    gen._prompt_batch = types.SimpleNamespace(prompt_cache=_joined_caches())
     assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
     # A join that already holds more than it was priced for adds nothing.
     gen._kq_admit_last_projection = (time.perf_counter(), 2e9)
     assert gov._demand_bytes(gen, st)[1] == 0.0
-    # Another join queued behind the batch: the projection is that one's.
     gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9)
     gen._unprocessed_sequences = [("v", None)]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
+
+
+def test_the_projection_charges_only_the_join_it_priced(rig):
+    """The projection names its join's candidates. That join is charged
+    all of it while it waits and the rest once its batch runs. A batch
+    the gate formed without a projection, as it does with no row
+    decoding, is another join, and so is a request after the priced one
+    has gone: the stamp charges neither."""
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9, ("u",))
+    gen._unprocessed_sequences = [("u", None)]
     assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9)
+    gen._unprocessed_sequences = [("v", None)]
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    gen._prompt_batch = types.SimpleNamespace(
+        uids=["w"], prompt_cache=_joined_caches())
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    gen._prompt_batch.uids = ["u"]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
 
 
 def test_dead_arena_entry_is_replaced(rig, monkeypatch):

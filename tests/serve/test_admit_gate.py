@@ -299,6 +299,8 @@ def test_update_kv_rates_and_projection(monkeypatch):
         kv_new + pd.score_transient_bytes(g.model, None, 500)
         + sm.admit_reserve_bytes(0), rel=0.05)
     assert "kv" in parts and "reserve" in parts
+    # The governor's charge for it names the join it priced.
+    assert g._kq_admit_last_projection[1:] == (projected, (2,))
 
 
 class FakeBatchKV(FakeKV):

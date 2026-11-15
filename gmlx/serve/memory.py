@@ -535,10 +535,12 @@ def project_admission(gen, candidates):
              f" + reserve {reserve / 1e9:.1f}")
     # Stash for the governor's per-tick demand model: while a join is
     # pending (or its prompt batch is in flight) the declared next-tick
-    # peak includes this projection, without re-walking anything.
+    # peak includes this projection, without re-walking anything. The
+    # candidates' uids tie it to that join.
     import time
 
-    gen._kq_admit_last_projection = (time.perf_counter(), projected)
+    gen._kq_admit_last_projection = (time.perf_counter(), projected,
+                                     tuple(c[0] for c in candidates))
     return projected, head, parts
 
 
