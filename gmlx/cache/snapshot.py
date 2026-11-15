@@ -917,9 +917,11 @@ class _CkptRecord:
     # _record_insert's strip-on-extend rules and eviction order;
     # adoption gates only ever test for "replay". spared: a record
     # strip-on-extend kept for the next turn (see _record_insert).
+    # stood_in: a replay that stands in beside its prompt's render-stable
+    # boundary, a replay again once a record past it lands.
     __slots__ = ("ids", "extra_hash", "p", "b_full", "layout",
                  "main_blocks", "bounded_blocks", "rot_meta", "states",
-                 "tails", "qsa", "nbytes", "kind", "spared")
+                 "tails", "qsa", "nbytes", "kind", "spared", "stood_in")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -1067,7 +1069,9 @@ def ckpt_full_store_redundant(meta) -> bool:
     With that record live, N-1 covers identical resend, p_stable covers
     turn-2 and branch prefixes, and retirement covers continuation --
     the near-identical adjacent records at N-1/N are exactly what
-    strip-on-extend was fighting over."""
+    strip-on-extend was fighting over. A replay that landed stands in
+    first all the same (``ckpt_replay_stands_in``): it covers the
+    continuation a retirement leaves unstored, and adds no record."""
     if not meta:
         return False
     stored = meta.get("ckpt_stored_boundaries") or ()
@@ -1075,7 +1079,8 @@ def ckpt_full_store_redundant(meta) -> bool:
 
 
 def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
-                          extra_hash: int = 0, keep: int | None = None) -> bool:
+                          extra_hash: int = 0, keep: int | None = None,
+                          beside_turn: bool = False) -> bool:
     """Whether the request's N-1 replay record stands in for the p=N
     post-prefill store, which then is skipped. The two sit one token
     apart and differ only in the lookups they serve: the replay the
@@ -1091,8 +1096,15 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
     p=N store would have written, and on a kvarn layout its window chain
     goes to disk as the p=N chain would have (``rot_disk``), so a restart
     restores the prompt record as before. A replay on an attention-only
-    layout already adopts on extension and keeps its kind. False when no
-    replay landed: the p=N store runs."""
+    layout already adopts on extension and keeps its kind.
+    ``beside_turn``: the request's render-stable boundary landed. That
+    boundary sits on the grid below p_stable, up to a unit short of the
+    prompt, so where no retirement stores, the next turn restores from the
+    replay rather than from it. Once a record past the replay lands, the
+    replay is a replay again (``_record_insert``): it serves the resend,
+    and strip-on-extend keeps the boundary for the branches it serves.
+    False when no replay landed: the p=N store runs unless the boundary
+    makes it redundant."""
     if manager is None or token_ids is None:
         return False
     try:
@@ -1112,6 +1124,7 @@ def ckpt_replay_stands_in(manager, token_ids, prompt_cache=None, *,
                 # Out of the index unreleased, then in again as a boundary.
                 idx.pop(key)
                 rec.kind = "boundary"
+                rec.stood_in = bool(beside_turn)
                 _record_insert(manager, rec, keep)
             snap = _CkptRecord(
                 **{k: getattr(rec, k) for k in _CkptRecord.__slots__})
@@ -1654,6 +1667,11 @@ def _record_insert(manager, rec, keep: int | None = None,
         chain = [k for k, r in idx.items()
                  if r.extra_hash == rec.extra_hash and r.p < rec.p
                  and rec.ids[:r.p] == r.ids]
+        if rec.kind != "decision":
+            for k in chain:
+                if idx[k].stood_in:
+                    # Its continuation is past it now: back to the resend.
+                    idx[k].kind, idx[k].stood_in = "replay", False
         if rec.kind == "replay":
             # One replay per chain: the newer one supersedes outright.
             for k in [k for k in chain if idx[k].kind == "replay"]:

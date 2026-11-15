@@ -417,20 +417,36 @@ def _replay(man, stash, cache):
                       extra_hash=stash["extra_hash"], kind="replay")
 
 
-def _plain_post_prefill(man, ids, seed, replay):
+def _turn_landed(man, stash, cache, turn):
+    """The chain's anchor at 16, then a render-stable boundary at ``turn``
+    landed during the prefill, the whole prompt render-stable."""
+    ids, meta = stash["full_ids"], stash["apc_meta"]
+    for p in (16, turn):
+        assert ckpt_store(man, ids[:p], _trim_kv(cache, p),
+                          extra_hash=stash["extra_hash"])
+    meta.update(ckpt_p_stable=len(ids) - 1, ckpt_p_stable_bounds=[turn],
+                ckpt_stored_boundaries=[turn])
+
+
+def _plain_post_prefill(man, ids, seed, replay, turn=None):
     from gmlx.spec.mtp_prefill import _ckpt_plain_post_prefill
 
     b = _plain_armed(man, ids, make_hybrid_cache, seed)
+    stash = b.prompt_cache[0]._kq_apc_retire
+    if turn:
+        _turn_landed(man, stash, b.prompt_cache, turn)
     if replay:
-        _replay(man, b.prompt_cache[0]._kq_apc_retire, b.prompt_cache)
+        _replay(man, stash, b.prompt_cache)
     _ckpt_plain_post_prefill(b)
     return b._apc_meta[0]
 
 
-def _mtp_post_prefill(man, ids, seed, replay):
+def _mtp_post_prefill(man, ids, seed, replay, turn=None):
     from gmlx.spec.speculative import _ckpt_post_prefill
 
     model, cache, ctx = _mtp_armed(man, ids, make_hybrid_cache, seed)
+    if turn:
+        _turn_landed(man, ctx, cache, turn)
     if replay:
         _replay(man, ctx, cache)
     _ckpt_post_prefill(model, cache, ctx)
@@ -452,6 +468,37 @@ def test_the_post_prefill_skips_the_store_its_replay_covers(post):
     recs = {r.ids[0]: (r.p, r.kind) for r in cs._ckpt_records(man).values()}
     assert recs == {a[0]: (n, "anchor"), b[0]: (n - 1, "anchor")}
     assert man.stats_snapshot()["ckpt_stores"] == 2
+
+
+@pytest.mark.parametrize("post", [_plain_post_prefill, _mtp_post_prefill],
+                         ids=["plain", "mtp"])
+def test_the_replay_stands_in_beside_a_landed_turn_boundary(post):
+    """A prompt whose render-stable boundary landed on the grid below its
+    end skips the p=N store, and its N-1 replay still becomes a boundary.
+    A next turn that extends the prompt, with no retirement record,
+    restores at N-1, not at the turn boundary, which stays. Once the
+    retirement lands past it, the N-1 record is a replay again: it serves
+    the resend, and the turn boundary keeps its place on the chain for a
+    branch the retirement does not reach."""
+    man = GmlxAPCManager(num_blocks=64, block_size=16)
+    n = 52
+    ids = _ids(3, n)
+    meta = post(man, ids, 3, replay=True, turn=32)
+    assert meta["ckpt_stored_boundaries"] == [32]
+    recs = [(r.p, r.kind) for r in cs._ckpt_records(man).values()]
+    assert recs == [(16, "anchor"), (32, "boundary"), (n - 1, "boundary")]
+    _, got = ckpt_lookup(man, ids + [7, 8], extra_hash=0)
+    assert got == n - 1
+    seq = ids + [9001, 9002, 9003, 9004]
+    assert ckpt_store(man, seq, make_hybrid_cache(len(seq), seed=8),
+                      kind="retire")
+    recs = sorted((r.p, r.kind) for r in cs._ckpt_records(man).values())
+    assert recs == [(16, "anchor"), (32, "boundary"), (n - 1, "replay"),
+                    (n + 4, "retire")]
+    _, got = ckpt_lookup(man, ids + [7, 8], extra_hash=0)
+    assert got == 32
+    _, got = ckpt_lookup(man, ids, extra_hash=0)
+    assert got == n - 1
 
 
 def _decode_qsa(cache, tok):

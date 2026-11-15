@@ -63,6 +63,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fresh prompt.
 - A Qwen3.8-Flash-Next chat turn after a reply that decoded beside other
   requests no longer prefills that reply again.
+- A chat turn on a model with recurrent layers, such as Qwen3.8-Flash-Next,
+  whose last reply left nothing cached restores to the end of the previous
+  prompt, where it stopped up to one prefill chunk short.
 
 ### Fixed
 

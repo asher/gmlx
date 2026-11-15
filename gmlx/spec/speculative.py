@@ -2080,13 +2080,14 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
         )
         meta = retire_ctx.get("apc_meta")
         extra_hash = as_salt(retire_ctx.get("extra_hash", 0))
+        if ckpt_replay_stands_in(manager, retire_ctx["full_ids"], prompt_cache,
+                                 extra_hash=extra_hash,
+                                 keep=(meta or {}).get("ckpt_p_stable"),
+                                 beside_turn=ckpt_full_store_redundant(meta)):
+            return
         if ckpt_full_store_redundant(meta):
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
-            return
-        if ckpt_replay_stands_in(manager, retire_ctx["full_ids"], prompt_cache,
-                                 extra_hash=extra_hash,
-                                 keep=(meta or {}).get("ckpt_p_stable")):
             return
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
                             extra_hash=extra_hash,
