@@ -41,6 +41,7 @@ from gmlx.image.vae.group_norm import group_norm
 from gmlx.image.vae.reader import VAEError
 from gmlx.image import float32 as f32
 from gmlx.image import pacing
+from gmlx.image.h3 import vit
 from gmlx.video.vae import chunking, h3_audio, h3_video
 from gmlx.video.vae import tiny as taeh3
 from gmlx.video.vae import reader as vr
@@ -297,7 +298,7 @@ def _zero_pad(mp):
         widths = [(0, 0)] * x.ndim
         widths[axis] = (before, after)
         return mx.pad(x, widths)
-    mp.setattr(h3_video, "reflect_pad", pad)
+    mp.setattr(vit, "reflect_pad", pad)
 
 
 def _front_frames_replicated(mp):
@@ -330,7 +331,7 @@ def _rotate_half_over_the_head(mp):
         c, s = c[None, :, None, :], s[None, :, None, :]
         x1, x2 = x[..., :half], x[..., half:]
         return mx.concatenate([x1 * c - x2 * s, x1 * s + x2 * c], axis=-1)
-    mp.setattr(h3_video, "split_half_rope", rope)
+    mp.setattr(vit, "split_half_rope", rope)
 
 
 def _tiles_blend_raw_neighbors(mp):
