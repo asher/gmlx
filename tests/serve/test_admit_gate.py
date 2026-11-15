@@ -146,16 +146,20 @@ def test_an_idle_server_prices_the_lone_join_it_admits(gated, monkeypatch):
 
     wrapped, _ = gated
     monkeypatch.setattr(pd, "headroom_bytes", lambda: 10e9)
+    # 100 KB per row token over an 80000-token prompt and 2000 more to
+    # write, 82176 tokens on the block grid: 8.2 GB of KV in the stamp.
+    rate, kv = 100e3, 100e3 * 82176
     stamps = []
     for left in ({}, {"_kq_admit_live_bytes": 20e9,
                       "_kq_admit_live_depth": 100000}):
-        g = FakeGen(rows=0)
-        g._kq_admit_kv_rates = {"FakeKV": {"rate": 64.0, "window": None}}
+        g = FakeGen(rows=0, pending=())
+        g._unprocessed_sequences = [_pending(1, 80000, 2000)]
+        g._kq_admit_kv_rates = {"FakeKV": {"rate": rate, "window": None}}
         vars(g).update(left)
         wrapped(g)
         assert g.admitted == [1]
         stamps.append(g._kq_admit_last_projection)
-    assert stamps[0][2] == (1,) and stamps[0][1] >= 64.0 * 512
+    assert stamps[0][2] == (1,) and stamps[0][1] >= kv
     assert stamps[1][1:] == stamps[0][1:]
 
 

@@ -171,6 +171,175 @@ def test_static_box_never_sheds_sweep(rig):
         gov._STATS["orange_evictions"] = 0
 
 
+class _KV:
+    """One layer's KV of a padded decode batch: ``rows`` rows of
+    ``length`` slots, ``offset`` tokens deep."""
+
+    def __init__(self, rows, length, offset):
+        self.keys = mx.zeros((rows, 2, length, 8), dtype=mx.float16)
+        self.values = mx.zeros((rows, 2, length, 8), dtype=mx.float16)
+        self.offset = offset
+
+
+def _land(gen, uids, depth):
+    """Put a decode batch of ``uids`` at ``depth`` tokens, two layers, on
+    ``gen``, and return the bytes its caches hold."""
+    caches = [_KV(len(uids), depth + 128, depth) for _ in range(2)]
+    gen._generation_batch = FakeGB(uids, [4] * len(uids))
+    gen._generation_batch.prompt_cache = caches
+    return sum(a.nbytes for c in caches for a in (c.keys, c.values))
+
+
+def _shed(live, rows):
+    # The extract of the largest row, at most twice the mean, then one
+    # layer's filter gather, over the two layers.
+    return 2.0 * live / rows + live / (rows * 2)
+
+
+def test_a_row_joined_at_an_idle_server_prices_its_shed_at_the_first_tick(
+        rig, monkeypatch):
+    # The gate projects a join at an idle server before any row decodes,
+    # and that walk zeroes the live bytes the last batch left. The first
+    # tick after the row lands walks it, once, so orange prices the shed
+    # from the row's own caches rather than 0 until another request.
+    import gmlx.serve.memory as sm
+
+    gen = FakeGen(rows=0, live=20e9)
+    sm.update_kv_rates(gen)
+    assert gen._kq_admit_live_bytes == 0.0
+    live = _land(gen, [7], 1000)
+    walks = []
+    walk = sm.update_kv_rates
+    monkeypatch.setattr(sm, "update_kv_rates",
+                        lambda g, **kw: walks.append(1) or walk(g, **kw))
+    st = gov._state(gen)
+    for _ in range(3):
+        gov._governor_tick(gen)
+    assert gov._shed_transient_bytes(gen, st) == _shed(live, 1)
+    assert walks == [1]
+
+
+@pytest.mark.parametrize("before, after", [
+    (([7], 80000), ([7, 8], 80000)),
+    (([7, 8], 80000), ([8], 1000)),
+    (([7], 1000), ([8], 80000)),
+], ids=["join", "leave", "swap"])
+def test_the_shed_follows_the_batch_through_a_join_or_a_leave(
+        rig, before, after):
+    # The gate walked the batch while a request waited. The first tick
+    # after a second 80k row joins, after the 80k row leaves the 1k one,
+    # or after a leave and a join in one step walks it again, so orange
+    # prices the rows decoding now. The rates still fold only at the
+    # gate's walks.
+    import gmlx.serve.memory as sm
+
+    gen = FakeGen(rows=0)
+    _land(gen, *before)
+    sm.update_kv_rates(gen)
+    rates = gen._kq_admit_kv_rates
+    live = _land(gen, *after)
+    st = gov._state(gen)
+    gov._governor_tick(gen)
+    assert gov._shed_transient_bytes(gen, st) == _shed(live, len(after[0]))
+    assert gen._kq_admit_kv_rates is rates
+
+
+class _SpecGB(FakeGB):
+    """A speculative batch: rows counted from ``_finished``. A finish or
+    an injection moves its uids at once, and the round sheds or merges
+    the cache rows at its end."""
+
+    def __init__(self, uids):
+        super().__init__(uids, [4] * len(uids))
+        self._finished = [False] * len(uids)
+
+    def refresh(self):
+        self.uids = [u for u, done in zip(self._all_uids, self._finished)
+                     if not done]
+
+
+class _RowCaches:
+    """A layer that holds one single-row cache per batch row."""
+
+    holds_row_caches = True
+
+    def __init__(self, rows):
+        self.rows = rows
+
+
+def _spec_caches(kind, rows, depth):
+    if kind == "padded":
+        return [_KV(rows, depth + 128, depth) for _ in range(2)]
+    return [_RowCaches([_KV(1, depth + 128, depth) for _ in range(rows)])
+            for _ in range(2)]
+
+
+def _shed_rows(caches, keep):
+    for c in caches:
+        if isinstance(c, _RowCaches):
+            c.rows = [c.rows[i] for i in keep]
+        else:
+            idx = mx.array(keep)
+            c.keys, c.values = c.keys[idx], c.values[idx]
+
+
+def _merge_row(caches, depth):
+    for c in caches:
+        if isinstance(c, _RowCaches):
+            c.rows.append(_KV(1, depth + 128, depth))
+        else:
+            row = _KV(1, c.keys.shape[2], depth)
+            c.keys = mx.concatenate([c.keys, row.keys])
+            c.values = mx.concatenate([c.values, row.values])
+
+
+@pytest.mark.parametrize("kind", ["padded", "row_caches"])
+@pytest.mark.parametrize("change", ["leave", "join"])
+def test_a_spec_batch_s_shed_follows_its_cache_through_the_round_end(
+        rig, change, kind):
+    # On the MTP batch a finish or an injection moves the uids at once,
+    # and the round sheds or merges the cache rows at its end. The tick
+    # after the uids move walks the cache as it is, and the tick after
+    # the round's end walks it again, so orange prices the rows the
+    # cache holds rather than the moment before the round caught up.
+    import gmlx.serve.memory as sm
+
+    gen = FakeGen(rows=0)
+    batch = _SpecGB([7, 8] if change == "leave" else [7])
+    batch.prompt_cache = _spec_caches(kind, len(batch.uids), 1000)
+    gen._generation_batch = batch
+    sm.update_kv_rates(gen)
+    rates = gen._kq_admit_kv_rates
+    st = gov._state(gen)
+
+    def walked():
+        # What a walk of the cache as it is now prices.
+        fresh = FakeGen(rows=0)
+        fresh._generation_batch = batch
+        sm.update_kv_rates(fresh, fold=False)
+        return gov._shed_transient_bytes(fresh, st)
+
+    if change == "leave":
+        batch._finished[1] = True
+    else:
+        batch._all_uids.append(9)
+        batch._finished.append(False)
+    batch.refresh()
+    gov._governor_tick(gen)
+    before = gov._shed_transient_bytes(gen, st)
+    assert before == walked()
+    if change == "leave":
+        _shed_rows(batch.prompt_cache, [0])
+    else:
+        _merge_row(batch.prompt_cache, 1000)
+    gov._governor_tick(gen)
+    after = gov._shed_transient_bytes(gen, st)
+    assert after == walked() and after != before
+    gov._governor_tick(gen)
+    assert gov._shed_transient_bytes(gen, st) == after
+    assert gen._kq_admit_kv_rates is rates
+
+
 def test_yellow_arms_throttle_and_restores(rig, monkeypatch):
     monkeypatch.setenv("GMLX_GOV_MIN_DWELL_S", "0")
     gen = FakeGen(rows=2, rate=1e6)

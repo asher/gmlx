@@ -1141,8 +1141,11 @@ def _governor_tick(gen) -> None:
     # pending one-shot lands
     ttc = max(0.0, head - oneshot) / max(rate, 1.0)
 
-    from .memory import admit_reserve_bytes
+    from .memory import admit_reserve_bytes, walk_changed_batch
 
+    # The live figures the reserve and the shed price read follow the batch
+    # through every join and leave, not only the next projection.
+    walk_changed_batch(gen)
     reserve = admit_reserve_bytes(ws, gen)
     # escalation clock is rate-only: an oversized pending one-shot is
     # the admission gate's problem (it declines), and tight-but-stable

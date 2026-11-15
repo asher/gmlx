@@ -87,6 +87,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt cache, which took back most of the memory the failure freed.
 - A server near its memory cap frees the checkpoints its running requests
   keep for their next turn before it fails a request to free memory.
+- A server near its memory cap no longer fails a request where it would have
+  freed its caches and requeued it, after a request joins or leaves its batch.
 - A model that reads its lookup table from disk, such as Qwen3.8-Flash-Next,
   no longer reads the whole table into memory at every load.
 - Qwen3.8-Flash-Next keeps its weights and KV cache wired while it streams
