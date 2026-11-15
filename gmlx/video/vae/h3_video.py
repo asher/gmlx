@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import mlx.nn as nn
 
+from gmlx.image import pacing
 from gmlx.image.vae.group_norm import group_norm
 
 from .chunking import TimeChunks, split_tiles
@@ -322,6 +323,18 @@ class Block(nn.Module):
         return x + self.scale2.astype(mx.float32) * o.astype(mx.float32)
 
 
+def run_blocks(blocks, x: mx.array, cos: mx.array,
+               sin: mx.array) -> mx.array:
+    """``x`` through ``blocks`` in turn, evaluated after each block and
+    then given to a pacing point, so a forward holds one block's working
+    set at a time."""
+    for block in blocks:
+        x = block(x, cos, sin)
+        mx.eval(x)
+        pacing.point(x)
+    return x
+
+
 class Decoder(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
@@ -345,8 +358,7 @@ class Decoder(nn.Module):
         coords = mx.concatenate([token_coords(t, hh, ww),
                                  mx.zeros((cfg.registers + 1, 3))], axis=0)
         cos, sin = rope_tables(cfg, coords)
-        for block in self.transformer_blocks:
-            x = block(x, cos, sin)
+        x = run_blocks(self.transformer_blocks, x, cos, sin)
         x = self.norm_out(x[:, :n]).astype(dt)
         out = self.proj_out(x).astype(mx.float32)
         p, f = cfg.spatial, cfg.frames

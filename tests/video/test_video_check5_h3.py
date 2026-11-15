@@ -40,6 +40,7 @@ from video_oracle_fixture import (ROOT, committed, committed_fixture,
 from gmlx.image.vae.group_norm import group_norm
 from gmlx.image.vae.reader import VAEError
 from gmlx.image import float32 as f32
+from gmlx.image import pacing
 from gmlx.video.vae import chunking, h3_audio, h3_video
 from gmlx.video.vae import tiny as taeh3
 from gmlx.video.vae import reader as vr
@@ -450,6 +451,30 @@ def test_a_wrong_model_misses_a_gate(tiny, request, monkeypatch, name):
     assert max(got.values()) > 2, got
 
 
+class _Evaluating:
+    def __init__(self):
+        self.points = 0
+
+    def __call__(self, arrays):
+        self.points += 1
+        mx.eval(*arrays)
+
+
+def test_the_decoder_pauses_per_block_with_the_same_frames(tiny):
+    """A pacer sees one point after each decoder block of each of the 2x2
+    tiles, and the frames equal those of a decode with no pacer, bit for
+    bit."""
+    vae = vr.load_vae(tiny[0]["vae"], family="h3", dtype=mx.float32)
+    z = mx.random.normal((1, 24, 1, 17, 17), key=mx.random.key(1))
+    with mx.stream(mx.cpu):
+        plain = vae.decode(z)
+        pacer = _Evaluating()
+        with pacing.paced(pacer):
+            paced = vae.decode(z)
+    assert pacer.points == 4 * vae.cfg.layers
+    assert np.array_equal(np.array(plain), np.array(paced))
+
+
 # The reader.
 
 def test_the_audio_vae_runs_in_float32_alone(tiny):
@@ -787,13 +812,14 @@ def test_taeh3_holds_one_run_at_a_time(tiny, settled_evals):
 @metal_only
 def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
                                                            settled_evals):
-    """Three runs of 2x3 tiles peak under 2 run canvases over one tile's
-    peak, at 1.68, and between yields hold under half a canvas: the tail
-    the next run fades from, and at the last run the tail's finished
-    frames. A slice that keeps the row above alive reads 2.35, one that
-    keeps the canvas alive copies it at each tile write and reads over 3,
-    and one that keeps the run before alive holds a canvas between
-    runs."""
+    """Three runs of 2x3 tiles peak under 2.7 run canvases over one
+    tile's peak, at 2.32, and between yields hold under half a canvas: the
+    tail the next run fades from, and at the last run the tail's finished
+    frames. The decoder evaluates one block at a time, so a tile peaks at
+    0.83 canvases and the decode peaks as a run finishes. A slice that
+    keeps the row above alive reads 3.15, one that keeps the canvas alive
+    copies it at each tile write and reads 3.32, and one that keeps the
+    run before alive holds a canvas between runs."""
     vae = vr.load_vae(tiny[0]["vae"], family="h3", dtype=mx.float16)
     mx.eval(vae.parameters())
     z = mx.random.normal((1, 24, 17, 24, 33), key=mx.random.key(0))
@@ -802,13 +828,13 @@ def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
     canvas = run * c.ratio * 24 * 33 * SPATIAL ** 2 * 3 * 4
     zt = z[:, :, :run, :16, :16].transpose(0, 2, 3, 4, 1)
     mx.eval(zt)
-    # A tile first: one that builds its kernels reads 1.42 canvases, not
-    # 1.47, and the gate reads the decode over the tile.
+    # A tile first, so its kernels are built, and the gate reads the
+    # decode over the tile.
     vae._tile(zt)
     tile = _peak(lambda: vae._tile(zt))
     peak, held = _decode(vae, z)
     print(f"h3 check5 decode peak: tile {tile / canvas:.2f}, decode "
           f"{peak / canvas:.2f}, over the tile {(peak - tile) / canvas:.2f} "
           f"run canvases; held {held / canvas:.2f}")
-    assert peak - tile < 2 * canvas, (peak, tile, canvas)
+    assert peak - tile < 2.7 * canvas, (peak, tile, canvas)
     assert held < 0.5 * canvas, (held, canvas)
