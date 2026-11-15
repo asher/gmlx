@@ -2786,13 +2786,19 @@ def decode_ckpt_tick(stash: dict, prompt_cache: list[Any],
         if interval <= 0 or ctx is None:
             return
         full_ids = stash["full_ids"]
+        nxt = stash.get("snap_next")
+        if nxt is not None and len(full_ids) + len(generated) < nxt:
+            # The row's cache holds at most its tokens so far. A batch
+            # class keeps its offsets in arrays, and reading one waits
+            # for the step in flight, so they are read once a boundary
+            # is due.
+            return
         p = _cache_offset_max(prompt_cache)
         # The render retokenizes the whole sequence, so its cost grows
         # with p; widening the interval with p keeps prediction a bounded
         # fraction of decode time.
         eff = max(interval, p >> 6)
         grid = int(stash.get("snap_grid") or 1)
-        nxt = stash.get("snap_next")
         if nxt is None:
             nxt = _grid_ceil(len(full_ids) + eff, grid)
             stash["snap_next"] = nxt

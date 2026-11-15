@@ -66,6 +66,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A chat turn on a model with recurrent layers, such as Qwen3.8-Flash-Next,
   whose last reply left nothing cached restores to the end of the previous
   prompt, where it stopped up to one prefill chunk short.
+- A request on a model with recurrent layers, left alone in its batch, no
+  longer waits for each decode step to finish before queuing the next.
 
 ### Fixed
 

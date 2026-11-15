@@ -509,6 +509,39 @@ def test_row_alone_on_batch_classes_then_leaves_a_batch(monkeypatch):
     assert_warm_matches(warm, truth, 40)
 
 
+def test_a_lone_row_on_batch_classes_reads_its_offsets_at_boundaries(
+        monkeypatch):
+    # A row left alone after a join keeps its batch classes, whose offsets
+    # are arrays, and reading one waits for the step in flight. The tick
+    # reads them at the row's first step and once a boundary is due, not
+    # on the steps between.
+    import gmlx.cache.snapshot as cs
+
+    monkeypatch.setenv("GMLX_APC_DECODE_CKPT", "16")
+    ckpt._install_plain_ckpt_decode()
+    man = APCManager(num_blocks=64, block_size=16)
+    truth = make_hybrid_cache(40, seed=71)
+    full = list(range(1900, 1924))
+    gen = []
+    stash = {"full_ids": full, "extra_hash": 0, "mode": "ckpt",
+             "manager": man, "render_ctx": {"stub": True}, "snap_ok": True,
+             "gen": gen}
+    monkeypatch.setattr(retire_key, "next_turn_lcp", _replays)
+    gb = _one_row(7, _row_prefix(truth, 24))
+    gb.prompt_cache[0]._kq_apc_retire = stash
+    _join_and_leave(gb, stash, 24, seed=72)
+    reads = []
+    real = cs._cache_offset_max
+    monkeypatch.setattr(cs, "_cache_offset_max",
+                        lambda c: reads.append(len(gen)) or real(c))
+    for p in range(25, 41):
+        _decode_to(gb.prompt_cache, truth, p, truth)
+        ckpt._plain_step_tick(gb, ([p], None, None, None))
+    assert reads == [1, 16]
+    (p, _), = stash["snaps"]
+    assert p == 40
+
+
 def test_gen_batch_extend_carries_stash():
     from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
