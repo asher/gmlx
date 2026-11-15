@@ -1378,6 +1378,8 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
     Offset invariants mirror ``speculative._retire_b1``: the stock step
     loop forwards each token as it emits it, so a clean finish leaves
     ``offset == len(seq)`` (an abort between steps leaves the same).
+    A step on which every row ends skips that forward, so its finish
+    leaves ``offset == len(seq) - 1`` and the key drops the last token.
     ``stash["mode"]`` picks the tier arm: "ckpt" stores blocks +
     sidecar, "exact" a whole-row snapshot (DeepSeek-V4-class pooling
     stacks).

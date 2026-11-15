@@ -1338,24 +1338,39 @@ class GenerationBatch:
         # about to return. Before S1, so the new sample stays next.
         owed = getattr(self, "_kq_owed", None)
         if owed is not None:
-            mx.async_eval(
-                *[
-                    a
-                    for a in (
-                        self._next_tokens,
-                        self._next_lps,
-                        self._next_top_idx,
-                        self._next_top_lp,
-                    )
-                    if a is not None
-                ]
-            )
+            pending = [
+                a
+                for a in (
+                    self._next_tokens,
+                    self._next_lps,
+                    self._next_top_idx,
+                    self._next_top_lp,
+                )
+                if a is not None
+            ]
+            # gmlx: a step that skipped its forward has none.
+            if pending:
+                mx.async_eval(*pending)
             out = self._emit(*owed)
             self._kq_owed = None
             return out
         self._current_tokens = self._next_tokens
         self._current_lps = self._next_lps
         inputs = self._current_tokens
+
+        # gmlx: every row ends on this emit, so no row needs a next token.
+        if self._ends_on_this_emit():
+            prev_top_idx = self._next_top_idx
+            prev_top_lp = self._next_top_lp
+            self._next_tokens = None
+            self._next_lps = None
+            self._next_top_idx = None
+            self._next_top_lp = None
+            self._next_raw = None
+            self._kq_owed = (inputs, self._current_lps, prev_top_idx, prev_top_lp)
+            out = self._emit(inputs, self._current_lps, prev_top_idx, prev_top_lp)
+            self._kq_owed = None
+            return out
 
         fwd_kwargs = {}
         if self._rope_deltas is not None:
@@ -1429,6 +1444,13 @@ class GenerationBatch:
         out = self._emit(inputs, self._current_lps, prev_top_idx, prev_top_lp)
         self._kq_owed = None
         return out
+
+    def _ends_on_this_emit(self) -> bool:
+        # gmlx: host counters, so no sync. A speaking row ends on its reply
+        # state, not on its count.
+        return all(
+            n + 1 >= m for n, m in zip(self._num_tokens, self.max_tokens)
+        ) and not _speech_rows.rows_of(self)
 
     def _forward_and_sample(self, inputs, fwd_kwargs, wants_lp, k):
         # gmlx: a batch that holds a speaking row runs the text model for
@@ -1810,6 +1832,10 @@ class GenerationBatch:
         return responses
 
     def _force_next_tokens(self, forced_next_tokens) -> None:
+        if self._next_tokens is None:
+            # gmlx: the rows end on this emit; there is no next token.
+            self._next_raw = None
+            return
         has_forced_next_tokens = any(token is not None for token in forced_next_tokens)
         if has_forced_next_tokens:
             force_mask = mx.array(

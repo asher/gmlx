@@ -120,12 +120,12 @@ def test_the_last_chunk_and_the_first_token_run_in_one_forward(monkeypatch):
     assert model.language_model.supports_logits_to_keep
     seen = _Forwards(monkeypatch)
     _first_tokens(model, [[3, 9, 4, 7, 1]])
-    # The prompt's forwards, then the decode step queued with the first
-    # token.
-    assert (seen.trunk, seen.head) == ([5, 1], [1, 1])
+    # The prompt's forwards only: a one-token request ends on its first
+    # token, so no decode step is queued.
+    assert (seen.trunk, seen.head) == ([5], [1])
     seen.trunk.clear(), seen.head.clear()
     _first_tokens(model, [list(range(1, 13))])
-    assert (seen.trunk, seen.head) == ([8, 4, 1], [8, 1, 1])
+    assert (seen.trunk, seen.head) == ([8, 4], [8, 1])
 
 
 @pytest.mark.parametrize("arch", ["llama", "gemma4_text"])
@@ -146,7 +146,7 @@ def test_a_model_that_projects_every_column_runs_the_last_column_alone(
     _unflagged(monkeypatch)
     seen = _Forwards(monkeypatch)
     _first_tokens(model, [[3, 9, 4, 7, 1]])
-    assert (seen.trunk, seen.head) == ([4, 1, 1], [4, 1, 1])
+    assert (seen.trunk, seen.head) == ([4, 1], [4, 1])
 
 
 def test_a_speculative_batch_keeps_the_last_column_alone():
@@ -237,16 +237,15 @@ class _LayerWidths:
 def _folded_layer_widths(model, seen, n, shared):
     _first_tokens(model, [list(range(1, 13))])
     last_writer = n - shared - 1
-    # A prompt chunk, the folded last chunk with the first token, and the
-    # decode step queued with it. The folded forward runs its KV-writing
-    # layers on the chunk, the last of them returns the last column, and
-    # the KV-shared layers run that column alone.
-    chunk, folded, decode = seen.forwards(n)
+    # A prompt chunk and the folded last chunk with the first token. The
+    # folded forward runs its KV-writing layers on the chunk, the last of
+    # them returns the last column, and the KV-shared layers run that
+    # column alone.
+    chunk, folded = seen.forwards(n)
     assert set(chunk.values()) == {(8, 8)}
     assert {folded[i] for i in range(last_writer)} == {(4, 4)}
     assert folded[last_writer] == (4, 1)
     assert {folded[i] for i in range(last_writer + 1, n)} <= {(1, 1)}
-    assert set(decode.values()) == {(1, 1)}
 
 
 def _folds_to_the_last_column_alone(monkeypatch, model):
@@ -435,12 +434,11 @@ def test_a_gemma4_gguf_served_as_text_builds_the_owned_model_and_folds(
     assert issubclass(layer_cls, language.DecoderLayer)
     seen = _LayerWidths(monkeypatch, layer_cls)
     folded = _first_tokens(model, [prompt])
-    # A prompt chunk, the folded last chunk with the first token, and the
-    # decode step queued with it. The last layer writes its cache from the
-    # chunk and returns the last column.
-    chunk, last, decode = seen.forwards(_G4_LAYERS)
+    # A prompt chunk and the folded last chunk with the first token. The
+    # last layer writes its cache from the chunk and returns the last
+    # column.
+    chunk, last = seen.forwards(_G4_LAYERS)
     assert set(chunk.values()) == {(8, 8)}
     assert (last[0], last[1], last[2]) == ((4, 4), (4, 4), (4, 1))
-    assert set(decode.values()) == {(1, 1)}
     _unflagged(monkeypatch)
     _close(folded, _first_tokens(model, [prompt]))
