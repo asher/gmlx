@@ -78,8 +78,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache. It freed only the first model's and shed requests instead.
 - Saving or restoring a long prompt could take a prompt cache past its size
   limit, and the server past its memory cap.
-- A cache reset while a prompt was saved to or restored from the cache could
-  make a later reply restore the wrong context.
+- A cache reset while a prompt was being saved to or restored from the cache
+  could make a later reply restore the wrong context.
 - With a drafter, Qwen3.8-Flash-Next read a long prompt in chunks twice as
   wide as without one, and could pass the server's memory cap.
 - On a server that streams a lookup table, memory other apps wired after it
