@@ -55,6 +55,8 @@ def test_the_plan_tags_text_one_and_the_image_zero():
     assert np.array_equal(lay.positions[:10, 0], np.arange(10))
     assert not lay.positions[:10, 1:].any()
     assert (lay.positions[10:, 0] == 10).all()
+    assert him.layout(10, 4, 6, ((2, 5),)) is lay
+    assert not lay.positions.flags.writeable
     tags = [r for *_, r in _plan(10, 4, 6, ((2, 5),)).segs]
     assert tags == [1, 0, 1, 0]
 

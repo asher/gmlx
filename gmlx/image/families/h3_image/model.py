@@ -124,7 +124,9 @@ def layout(text_len: int, lat_h: int, lat_w: int, spans: tuple = ()):
     p = lay.video_positions(tl, 1, frame, float(text_len))
     segs.append(lay.Segment(text_len, text_len + p.shape[0], "video"))
     pos.append(p)
-    return lay.Layout(segments=tuple(segs), positions=np.concatenate(pos),
+    positions = np.concatenate(pos)
+    positions.setflags(write=False)
+    return lay.Layout(segments=tuple(segs), positions=positions,
                       signature=(text_len, lat_h, lat_w, spans))
 
 
