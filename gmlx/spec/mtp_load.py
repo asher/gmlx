@@ -2466,9 +2466,16 @@ def _touch_left_to_install(gguf_path: str, wire: bool):
     that chunked wire (``table_stream.guard_resident_wire``), so the
     load's GPU warm touch leaves the weights alone. The touch wires them
     in one burst, and the install's check then counts them as wired
-    memory the set cannot take, and streams the experts. Serve and the
-    CLI latch it before the load (``preload_wire_check``); this covers a
-    direct call. A latch already set is left as it is."""
+    memory the set cannot take, and streams the experts. Serve latches
+    it before the load of a plain build
+    (``residency_build._latch_guarded_wire``), and the CLI, the TUI chat
+    and capture latch it in ``cli.preload_wire_check``; this covers a
+    direct call. A latch already set is left as it is. It also fires on
+    serve's MTP build streamed for memory, whose latch serve clears on
+    purpose. There it only skips the trunk's warm touch, which costs
+    nothing: ``force_table_stream(True)`` already keeps the touch off the
+    tables and the expert stacks, and the trunk wires lazily at its
+    first forward."""
     from gmlx.serve.capacity import gathered_table_bytes
     from gmlx.stream.table_stream import (guard_resident_wire,
                                           resident_wire_guarded)
