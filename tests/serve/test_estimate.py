@@ -160,14 +160,14 @@ def test_warm_tokens_probes_and_releases():
     released = []
 
     class _Mgr:
+        block_size = 16
+        disk = SimpleNamespace(find_exact_prefix=lambda ids, **kw: (0xabc, 700))
+
         def lookup_prefix(self, ids, extra_hash=0):
             return ["b1", "b2"], 512
 
         def release(self, blocks):
             released.extend(blocks)
-
-        def find_exact_prefix(self, ids, extra_hash=0):
-            return (0xabc, 700)                    # (cache_hash, prefix_len)
 
     assert est._warm_tokens(_Mgr(), list(range(1000)), 0) == (700, "exact")
     assert released == ["b1", "b2"]
@@ -177,8 +177,14 @@ def test_warm_tokens_probes_and_releases():
 def test_warm_tokens_salts_the_exact_probe():
     seen = []
 
+    def find_exact_prefix(ids, **kw):
+        seen.append(kw)
+        return (0xabc, 700) if kw["extra_hash"] == 3 ^ 5 else None
+
     class _Mgr:
         _exact_extra_salt = 5
+        block_size = 64
+        disk = SimpleNamespace(find_exact_prefix=find_exact_prefix)
 
         def lookup_prefix(self, ids, extra_hash=0):
             return [], 0
@@ -186,12 +192,9 @@ def test_warm_tokens_salts_the_exact_probe():
         def release(self, blocks):
             pass
 
-        def find_exact_prefix(self, ids, extra_hash=0):
-            seen.append(extra_hash)
-            return (0xabc, 700) if extra_hash == 3 ^ 5 else None
-
     assert est._warm_tokens(_Mgr(), list(range(1000)), 3) == (700, "exact")
-    assert seen == [3 ^ 5]
+    assert seen == [{"extra_hash": 3 ^ 5, "max_prefix_tokens": None,
+                     "min_prefix_tokens": 0, "block_size": 64}]
 
 
 def test_estimate_validation_and_non_resident():
@@ -229,9 +232,6 @@ def test_estimate_resident_prices_like_the_preflight(monkeypatch):
 
         def release(self, blocks):
             released.extend(blocks)
-
-        def find_exact_prefix(self, ids, extra_hash=0):
-            return None
 
     entry = SimpleNamespace(response_generator=rg, apc_manager=_Mgr(),
                             model_cache={"model": model, "processor": None, "config": cfg})
@@ -664,7 +664,6 @@ def test_ckpt_peek_reports_deepest_pinned_record_without_assembly():
     # and the estimate's probe prefers it over a shallower block-chain match
     man.lookup_prefix = lambda ids, extra_hash=0: ([], 16)
     man.release = lambda blocks: None
-    man.find_exact_prefix = lambda ids, extra_hash=0: None
     model = SimpleNamespace(_kq_apc_ckpt_layout=("kv", "arr"))
     assert est._warm_tokens(man, ids, 0, model) == (64, "ckpt")
     assert est._warm_tokens(man, ids, 0, None) == (16, "block")
@@ -685,7 +684,6 @@ def test_ckpt_estimate_probe_signs_with_the_kvarn_layout():
         _kq_ckpt_gen = 0
         lookup_prefix = staticmethod(lambda ids, extra_hash=0: ([], 0))
         release = staticmethod(lambda blocks: None)
-        find_exact_prefix = staticmethod(lambda ids, extra_hash=0: None)
 
     man = _Man()
     ids = list(range(100, 200))
@@ -732,9 +730,6 @@ def test_exact_peek_reads_the_in_memory_exact_tier():
 
         def release(self, blocks):
             pass
-
-        def find_exact_prefix(self, ids, extra_hash=0):
-            return None
 
     man = _Man()
     ids = list(range(100, 200))
@@ -819,9 +814,6 @@ def test_the_warm_probe_salts_an_adapted_request(tmp_path, monkeypatch, loaded):
 
         def release(self, blocks):
             pass
-
-        def find_exact_prefix(self, ids, extra_hash=0):
-            return None
 
     entry = SimpleNamespace(response_generator=rg, apc_manager=_Mgr(),
                             model_cache={"model": model, "processor": None,
