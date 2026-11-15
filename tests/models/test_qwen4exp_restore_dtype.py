@@ -322,8 +322,9 @@ def _conv_states(cache):
 
 def test_prefill_after_a_retire_restore_runs_in_the_activation_dtype(
         model, retired, monkeypatch):
-    """The retire record keeps the float32 conv states decode left (every
-    layer's after the first, whose input is the bf16 embedding). The
+    """The retire record keeps the float32 conv states decode left (on
+    this fixture's eager hc path every layer's after the first, whose
+    input is the bf16 embedding; on the real model the PLE's). The
     follow-up prefill casts them to the activation dtype, so it runs bf16
     as a fresh prefill does and every hc combine takes the prefill
     kernel."""

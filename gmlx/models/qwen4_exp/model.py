@@ -642,12 +642,15 @@ def _hc_combine(h: mx.array, out: mx.array, inject: mx.array,
 
 def _conv_state_in(state: mx.array, dtype) -> mx.array:
     """A conv state in the activation dtype of the call it feeds. Decode
-    runs the hc residual float32 and leaves float32 conv states, which a
-    retire record keeps. A prefill after its restore would concatenate
-    them into its bf16 rows and run float32 from there on, where the hc
-    prefill kernels decline; the cast keeps it in the dtype a fresh
-    prefill runs. A float32 call (decode, a verify block) gets the state
-    the concatenation promoted before."""
+    runs the hc residual float32, and a conv state whose input follows it
+    is float32: on the real model the PLE's, and a GDN's after a step
+    wider than the hc kernel's 8 rows (the kq low-rank mixer emits bf16
+    up to that, the eager hc path float32). A retire record keeps them. A
+    prefill after its restore would concatenate them into its bf16 rows
+    and run float32 from there on, where the hc prefill kernels decline;
+    the cast keeps it in the dtype a fresh prefill runs. A bf16 call
+    always runs bf16, and a float32 call (decode, a verify block) gets
+    the state the concatenation promoted before."""
     return state if state.dtype == dtype else state.astype(dtype)
 
 
