@@ -42,6 +42,8 @@ import math
 import os
 from dataclasses import dataclass
 
+from . import int8 as neutral
+
 GiB = 1 << 30
 PHASES = ("encode", "anchors", "denoise", "audio", "decode")
 
@@ -442,41 +444,19 @@ def tower_bytes(mmproj: str) -> int:
 
 
 def _int8_matrices(fam, view) -> list:
-    """(out, in, file bytes) of each tensor that the family's int8
-    linears convert, from a DiT header, its names with or without one of
-    the family's prefixes."""
-    import fnmatch
-
-    from gmlx.image.memfit import tensor_bytes
-
-    out = []
-    for name, t in view.tensors.items():
-        for pre in fam.strip_prefixes:
-            if name.startswith(pre):
-                name = name[len(pre):]
-                break
-        path, _, kind = name.rpartition(".")
-        if kind != "weight" or len(t.shape) != 2 or not any(
-                fnmatch.fnmatchcase(path, pat) for pat in fam.int8_linears):
-            continue
-        k, n = t.shape
-        out.append((int(n), int(k), t.nbytes or tensor_bytes(t.shape,
-                                                             t.codec)))
-    return out
+    """``int8.int8_matrices`` of the family's prefixes and int8 linears."""
+    return neutral.int8_matrices(view, fam.strip_prefixes, fam.int8_linears)
 
 
 def int8_delta(fam, view) -> int:
-    """The bytes a DiT with int8 linears holds over its file: each
-    converted matrix's int8 weight and float32 scale a row, less its file
-    bytes, from the header ``view``. Exact, not a fit."""
-    return sum(n * k + 4 * n - b for n, k, b in _int8_matrices(fam, view))
+    """``int8.int8_delta`` of the family's prefixes and int8 linears."""
+    return neutral.int8_delta(view, fam.strip_prefixes, fam.int8_linears)
 
 
 def int8_transient(fam, view) -> int:
-    """The bytes a conversion holds beside the loaded DiT: the largest
-    converted matrix at float32, its int8 codes and its scales."""
-    return max((4 * n * k + n * k + 4 * n
-                for n, k, _ in _int8_matrices(fam, view)), default=0)
+    """``int8.int8_transient`` of the family's prefixes and int8
+    linears."""
+    return neutral.int8_transient(view, fam.strip_prefixes, fam.int8_linears)
 
 
 def dit_bytes(fam, path: str, linears: str = "file") -> int:
