@@ -2472,9 +2472,9 @@ def _touch_left_to_install(gguf_path: str, wire: bool):
     and capture latch it in ``cli.preload_wire_check``; this covers a
     direct call. A latch already set is left as it is. It also fires on
     serve's MTP build streamed for memory, whose latch serve clears on
-    purpose. There it only skips the trunk's warm touch, which costs
-    nothing: ``force_table_stream(True)`` already keeps the touch off the
-    tables and the expert stacks, and the trunk wires lazily at its
+    purpose. There it only skips the trunk's warm touch, which is
+    near-free: ``force_table_stream(True)`` already keeps the touch off
+    the tables and the expert stacks, and the trunk wires lazily at its
     first forward."""
     from gmlx.serve.capacity import gathered_table_bytes
     from gmlx.stream.table_stream import (guard_resident_wire,

@@ -536,10 +536,10 @@ def _ckpt_grids(batch, restored: int, block_size: int, anchor: int | None,
     which on an MTP batch is the decay wrapper's width, and the pick's
     floor and the disk skeletons key on it. A resident model keeps the
     grid from 0 at the step its loop runs from (``_ckpt_run_step``). The
-    loop's cost is known at arm time
-    only while the score cap is fixed, not while it follows the live
-    headroom. Without turn records (GMLX_APC_CKPT_TURN=0) the pick cannot
-    see which record the next turn restores, so main's grid stays."""
+    loop's cost is known at arm time only while the score cap is fixed,
+    not while it follows the live headroom. Without turn records
+    (GMLX_APC_CKPT_TURN=0) the pick cannot see which record the next turn
+    restores, so main's grid stays."""
     from gmlx.gen import prefill_decay
     from gmlx.stream.expert_streaming import experts_streamed
 
