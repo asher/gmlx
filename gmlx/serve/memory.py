@@ -307,21 +307,64 @@ def _cache_arrays(c):
                 yield a
 
 
+def _held_buffers(prompt_cache, buffer_id) -> dict:
+    """The memory a batch's caches hold, by ``mlx_kquant.buffer_id``: the
+    most bytes one cache array counts of each. An array not yet evaluated
+    has no id and adds nothing."""
+    from .memtrace import _leaf_caches
+
+    held: dict = {}
+    for c in _leaf_caches(prompt_cache):
+        for a in _cache_arrays(c):
+            bid = buffer_id(a)
+            if bid is not None:
+                held[bid] = max(held.get(bid, 0), a.nbytes)
+    return held
+
+
 def spec_state_bytes(gen):
     """Speculative-batch resident bytes the cache walk cannot see:
     the parked batch attrs (hidden, shared KV snapshot, prompt tokens,
     first tokens) and the drafter's own head KV. Returns
     ``(depth_scaled, row_const)``: bytes that grow with context depth
     (the shared KV snapshot and the drafter cache) and bytes that are
-    per-row constants. Both zero when the batch is not speculative."""
+    per-row constants. Both zero when the batch is not speculative.
+    The snapshot bytes the cache walk already counts are left out
+    (``_spec_state``)."""
+    return _spec_state(gen)[:2]
+
+
+def _spec_state(gen):
+    """``spec_state_bytes`` and the shared KV snapshot bytes it leaves
+    out, as ``(depth_scaled, row_const, shared_held)``.
+
+    The shared KV snapshot views the KV cache of the last layer of each
+    attention type until that cache moves to new memory, and the cache
+    walk already counts that memory. A snapshot array whose memory a
+    cache array holds, at no fewer bytes, goes to ``shared_held``; one
+    that mlx-kquant cannot place (a release without ``buffer_id``, or an
+    array not yet evaluated) counts in full."""
     from .memtrace import _arrays
 
     batch = gen._generation_batch
     depth_scaled = 0.0
     row_const = 0.0
-    for name in ("shared_kv_states",):
-        depth_scaled += sum(a.nbytes for a in _arrays(
-            getattr(batch, name, None), 3))
+    shared_held = 0.0
+    shared = list(_arrays(getattr(batch, "shared_kv_states", None), 3))
+    if shared:
+        import mlx_kquant as kq
+
+        buffer_id = getattr(kq, "buffer_id", None)
+        held: dict = {}
+        if buffer_id is not None:
+            held = _held_buffers(getattr(batch, "prompt_cache", None),
+                                 buffer_id)
+        for a in shared:
+            if (held and buffer_id is not None
+                    and held.get(buffer_id(a), 0) >= a.nbytes):
+                shared_held += a.nbytes
+            else:
+                depth_scaled += a.nbytes
     for name in ("hidden", "prompt_tokens", "first_tokens"):
         row_const += sum(a.nbytes for a in _arrays(
             getattr(batch, name, None), 3))
@@ -334,7 +377,7 @@ def spec_state_bytes(gen):
                 depth_scaled += nbytes
             else:
                 row_const += nbytes
-    return depth_scaled, row_const
+    return depth_scaled, row_const, shared_held
 
 
 def _cache_depth(c) -> int:
@@ -393,7 +436,10 @@ def update_kv_rates(gen, fold: bool = True) -> None:
     state is folded in the same pass: depth-scaled spec bytes (shared KV
     snapshot, drafter head KV) become a synthetic per-kind rate so the
     projection prices their growth, and per-row constants land in
-    ``_kq_admit_spec_row_const``. Offset-less caches (recurrent and conv
+    ``_kq_admit_spec_row_const``. The rate prices the shared KV snapshot
+    in full, since a join or a leave copies it out of the cache it views,
+    while the live bytes leave out the part the cache walk already counts
+    (``_kq_admit_spec_shared``). Offset-less caches (recurrent and conv
     state) are constant-size: they join the per-row constant, never the
     rate map. A cache that owns its accounting (``admit_bytes``, the kvarn
     classes) supplies its record rate, depth and per-row bytes directly,
@@ -410,6 +456,7 @@ def update_kv_rates(gen, fold: bool = True) -> None:
     if rows <= 0:
         gen._kq_admit_live_bytes = 0.0
         gen._kq_admit_live_depth = 0
+        gen._kq_admit_spec_shared = 0.0
         return
     if not pc:
         return
@@ -481,11 +528,13 @@ def update_kv_rates(gen, fold: bool = True) -> None:
                      kind["grid"])
     if not fresh:
         return
-    spec_depth_bytes, spec_row_const = spec_state_bytes(gen)
-    if spec_depth_bytes and live_depth > 0:
+    spec_depth_bytes, spec_row_const, spec_shared = _spec_state(gen)
+    if (spec_depth_bytes or spec_shared) and live_depth > 0:
         fresh["_spec_state"] = {
-            "rate": spec_depth_bytes / live_depth / rows, "window": None}
+            "rate": (spec_depth_bytes + spec_shared) / live_depth / rows,
+            "window": None}
     live_bytes += spec_depth_bytes + spec_row_const
+    gen._kq_admit_spec_shared = spec_shared
     if fold:
         prev = getattr(gen, "_kq_admit_kv_rates", None) or {}
         merged = {}
@@ -563,6 +612,9 @@ def project_admission(gen, candidates):
     # depth to price at, whatever the last walk left.
     live_bytes = getattr(gen, "_kq_admit_live_bytes", 0.0) if rows else 0.0
     live_depth = getattr(gen, "_kq_admit_live_depth", 0) if rows else 0
+    # The rates price the whole shared KV snapshot, and the join copies the
+    # part that now views the cache into memory of its own.
+    shared = getattr(gen, "_kq_admit_spec_shared", 0.0) if rows else 0.0
     width = rows + len(cand_tokens)
     tokens = max([live_depth] + cand_tokens)
     kv_total = 0.0
@@ -578,14 +630,15 @@ def project_admission(gen, candidates):
             live_depth, _round_block(k["window"]))
         model_now += k["rate"] * rows * capped
     scale = 1.0
-    if live_bytes > 0 and model_now > 0 and not (
-            live_bytes / _MODEL_NOW_TOL <= model_now
-            <= _MODEL_NOW_TOL * live_bytes):
-        scale = live_bytes / model_now
+    measured = live_bytes + shared
+    if measured > 0 and model_now > 0 and not (
+            measured / _MODEL_NOW_TOL <= model_now
+            <= _MODEL_NOW_TOL * measured):
+        scale = measured / model_now
         kv_total *= scale
         _log.warning(
             "[admit] projection rescaled x%.3f: model %.1f GB vs measured"
-            " %.1f GB", scale, model_now / 1e9, live_bytes / 1e9)
+            " %.1f GB", scale, model_now / 1e9, measured / 1e9)
     kv_new = max(0.0, kv_total - live_bytes)
     transient = score_transient_bytes(
         gen.model, getattr(gen._generation_batch, "prompt_cache", None),
