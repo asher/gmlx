@@ -315,3 +315,48 @@ def test_the_layer_on_a_batch_wires_the_rows_cores(monkeypatch):
         out = mx.concatenate(cores, axis=0).transpose(0, 2, 1, 3)
         want = layer.o_proj(out.reshape(4, 1, -1) * mx.sigmoid(gate))
         assert mx.array_equal(got, want).item()
+
+
+def test_a_model_whose_first_attention_layer_is_qsa_beside_a_plain_one_decodes_batched():
+    """The batch mask comes from the first attention layer's cache. Where
+    that layer is QSA and a later one is plain, the QSA rows join the padded
+    batch class, so the plain layer masks its padding, and two rows decode
+    together as each does alone. Both rows here are restored: their QSA
+    caches are rebuilt from state, as a lookup rebuilds them, before the
+    last prompt token runs. The rows sit inside the indexer budget, where
+    the QSA attention is dense either way."""
+    ensure_registered()
+    meta = _qwen4exp_meta(True, False)
+    meta["qwen4exp.full_attention_interval"] = 2
+    meta["qwen4exp.attention.compress_ratios"] = [0, 4, 0, 0]
+    m = Model(ModelArgs.from_dict(synthesize_config(meta, _QWEN4EXP_SHAPES)))
+    mx.random.seed(0)
+    m.load_weights([(k, mx.random.normal(v.shape) * 0.1)
+                    for k, v in nn.utils.tree_flatten(m.parameters())],
+                   strict=False)
+    mx.eval(m.parameters())
+    V = m.args.vocab_size
+    mx.random.seed(3)
+    prompts = [mx.random.randint(3, V, (n,)).tolist() for n in (6, 4)]
+    nxt = mx.random.randint(3, V, (2,)).tolist()
+
+    def restored(p):
+        cache = m.make_cache()
+        m(mx.array([p[:-1]]), cache=cache)
+        q = cache[1]
+        cache[1] = QSAKVCache.from_state(q.state, q.meta_state)
+        m(mx.array([p[-1:]]), cache=cache)
+        return cache
+
+    alone = [m(mx.array([[t]]), cache=restored(p))[0, -1]
+             for p, t in zip(prompts, nxt)]
+    batch = _merge_caches([restored(p) for p in prompts])
+    got = m(mx.array([[t] for t in nxt]), cache=batch)[:, -1]
+    for i in range(2):
+        scale = float(mx.abs(alone[i]).max())
+        # the batched projections round unlike a one-row GEMV
+        assert float(mx.abs(got[i] - alone[i]).max()) < 2e-3 * scale
+    assert isinstance(batch[1], BatchKVCache)
+    fresh = m.make_cache()
+    assert [type(c) for c in fresh[1::2]] == [QSAKVCache, q4.KVCache]
+    assert fresh[1].dense_lift

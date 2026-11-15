@@ -1241,6 +1241,9 @@ class QSAKVCache(KVCache):
     _tail_cap = None
     _bt = None              # finished blocks after the first _nbb
     _nbb = 0                # finished blocks live in ``blocks``
+    # Set by a model whose decode batch cannot keep its rows on their own
+    # caches (Qwen4ExpModel._qsa_dense_batch): merge lifts such rows dense.
+    dense_lift = False
 
     def __init__(self, ratio: int = 4):
         super().__init__()
@@ -1508,6 +1511,10 @@ class QSAKVCache(KVCache):
         # Single-request batches only; multi-row joins decline to the cold
         # path rather than guess at row padding for the indexer stream.
         if prefix_lens is None:
+            if any(getattr(e, "dense_lift", False) for e in entries):
+                # The padded batch class: keys and values only, each row
+                # dense over its whole context.
+                return super().merge(entries)
             return BatchQSAKVCache.merge(entries)
         if len(entries) != 1:
             return None
@@ -2578,8 +2585,14 @@ class Qwen4ExpModel(nn.Module):
             (i for i, t in enumerate(args.layer_types) if t == "linear_attention"), 0)
         self.fa_idx = next(
             (i for i, t in enumerate(args.layer_types) if t == "full_attention"), 0)
-        self._all_qsa = all(layer.self_attn.ratio > 0 for layer in self.layers
-                            if not layer.is_linear)
+        attn = [layer.self_attn for layer in self.layers if not layer.is_linear]
+        self._all_qsa = all(a.ratio > 0 for a in attn)
+        # The batch mask comes from the first attention layer's cache. Where
+        # that layer is QSA and another is plain, a cache of one cache per
+        # row on it would build no mask for the plain layer's padding, so
+        # the QSA rows join the padded batch class (QSAKVCache.dense_lift).
+        self._qsa_dense_batch = (bool(attn) and attn[0].ratio > 0
+                                 and not self._all_qsa)
 
     def __call__(self, inputs: mx.array, cache=None, input_embeddings=None,
                  return_streams: bool = False, gdn_sink=None, position_ids=None):
@@ -2588,6 +2601,13 @@ class Qwen4ExpModel(nn.Module):
         h = mx.broadcast_to(h[:, :, None, :], (B, T, self.hc, D))
         if cache is None:
             cache = [None] * len(self.layers)
+        if self._qsa_dense_batch:
+            # A restored row's QSA caches are rebuilt from its record, not
+            # by make_cache, and every row runs at least its last prompt
+            # token here before it joins a batch.
+            for c in cache:
+                if isinstance(c, QSAKVCache):
+                    c.dense_lift = True
         if isinstance(cache[self.fa_idx], BatchQSAKVCache) and not self._all_qsa:
             # The batch mask comes from that layer's cache, which builds
             # none: a plain attention layer would attend its padding.
@@ -2635,7 +2655,9 @@ class Model(nn.Module):
             if layer.is_linear:
                 caches.append(ArraysCache(size=4 if "ple" in layer else 2))
             elif layer.self_attn.ratio > 0:
-                caches.append(QSAKVCache(layer.self_attn.ratio))
+                c = QSAKVCache(layer.self_attn.ratio)
+                c.dense_lift = self.model._qsa_dense_batch
+                caches.append(c)
             else:
                 caches.append(KVCache())
         return caches
