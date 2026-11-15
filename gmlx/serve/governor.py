@@ -578,11 +578,27 @@ def _demand_bytes(gen, st: _GovState) -> tuple:
     proj = getattr(gen, "_kq_admit_last_projection", None)
     if proj is not None:
         stamp, projected = proj
-        join_relevant = (gen._unprocessed_sequences
-                         or gen._prompt_batch is not None)
-        if join_relevant and time.perf_counter() - stamp < 30.0:
-            oneshot += projected
+        pending = gen._unprocessed_sequences
+        batch = gen._prompt_batch
+        if (pending or batch is not None) \
+                and time.perf_counter() - stamp < 30.0:
+            # The projection is the newest join's. Once that join's prompt
+            # batch runs, what its caches hold already came out of the
+            # headroom: only the rest is still to come.
+            joined = 0.0 if pending else _joined_bytes(batch)
+            oneshot += max(0.0, projected - joined)
     return rate, oneshot
+
+
+def _joined_bytes(batch) -> float:
+    """Bytes the caches of an in-flight prompt batch hold, from array
+    metadata (no eval, no sync)."""
+    from gmlx.cache.kv_cache import cache_nbytes
+
+    try:
+        return float(cache_nbytes(getattr(batch, "prompt_cache", None)))
+    except Exception:
+        return 0.0
 
 
 def _shed_transient_bytes(gen, st: _GovState) -> float:

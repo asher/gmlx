@@ -1507,6 +1507,38 @@ def test_demand_rate_seeds_from_boot_table(rig, monkeypatch):
     assert gov._demand_bytes(gen, st)[0] == 0.0
 
 
+def test_a_join_in_flight_is_charged_the_room_its_caches_do_not_hold(rig):
+    """The admission projection is the newest join's room. Queued, the
+    join holds none of it and is charged all of it. Once its prompt batch
+    runs, what the batch's caches hold is already out of the headroom, so
+    the tick charges only the rest, read from the caches' array sizes
+    with nothing evaluated."""
+    from gmlx.cache.kv_cache import KVCache
+
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9)
+    gen._unprocessed_sequences = [("u", None)]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9)
+    caches = []
+    for _ in range(2):
+        c = KVCache()
+        # 0.64 GB of keys and of values each, never materialized.
+        c.state = (mx.zeros((1, 8, 312500, 128), dtype=mx.float16),
+                   mx.zeros((1, 8, 312500, 128), dtype=mx.float16))
+        caches.append(c)
+    gen._unprocessed_sequences = []
+    gen._prompt_batch = types.SimpleNamespace(prompt_cache=caches)
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
+    # A join that already holds more than it was priced for adds nothing.
+    gen._kq_admit_last_projection = (time.perf_counter(), 2e9)
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    # Another join queued behind the batch: the projection is that one's.
+    gen._kq_admit_last_projection = (time.perf_counter(), 10.4e9)
+    gen._unprocessed_sequences = [("v", None)]
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9)
+
+
 def test_dead_arena_entry_is_replaced(rig, monkeypatch):
     # A feeder freed without unregister_arena leaves a dead entry; a new
     # feeder at the same address must still register.
