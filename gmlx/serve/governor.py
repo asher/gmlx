@@ -576,9 +576,13 @@ def _demand_bytes(gen, st: _GovState) -> tuple:
     rate = rate_sum * rows * max(st.tok_ema, 1.0)
     oneshot = st.pending_shed_bytes
     proj = getattr(gen, "_kq_admit_last_projection", None)
-    if proj is not None and time.perf_counter() - proj[0] < 30.0:
+    if proj is not None:
         oneshot += _join_charge(gen, proj)
     return rate, oneshot
+
+
+# How long a projection prices a join that has not started.
+_JOIN_WAIT_S = 30.0
 
 
 def _join_charge(gen, proj) -> float:
@@ -587,14 +591,20 @@ def _join_charge(gen, proj) -> float:
     the uids those of the join's candidates. The gate projects no join
     while a prompt batch runs, so the batch is that join's when it holds
     one of them: what its caches hold already came out of the headroom,
-    and only the rest is still to come. A join the gate admitted without
-    a projection is not the one priced, and neither is a join that has
-    gone: the stamp charges for neither."""
+    and only the rest is still to come, however long its prefill runs. A
+    join the gate admitted without a projection is not the one priced,
+    and neither is a join that has gone: the stamp charges for neither.
+    A join still waiting, or a stamp with no uids, charges for
+    ``_JOIN_WAIT_S`` after it."""
     projected = proj[1]
     uids = set(proj[2]) if len(proj) > 2 else None
     batch = gen._prompt_batch
-    if batch is not None and (
-            uids is None or uids & set(getattr(batch, "uids", ()) or ())):
+    if batch is not None and uids is not None and uids & set(
+            getattr(batch, "uids", ()) or ()):
+        return max(0.0, projected - _joined_bytes(batch))
+    if time.perf_counter() - proj[0] >= _JOIN_WAIT_S:
+        return 0.0
+    if batch is not None and uids is None:
         return max(0.0, projected - _joined_bytes(batch))
     pending = gen._unprocessed_sequences
     if pending and (uids is None or uids & {s[0] for s in pending}):

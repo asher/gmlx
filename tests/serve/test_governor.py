@@ -1621,6 +1621,28 @@ def test_the_projection_charges_only_the_join_it_priced(rig):
     assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
 
 
+def test_a_join_prefilling_past_the_wait_window_keeps_its_charge(rig):
+    """A paced deep join can prefill for longer than a waiting join is
+    priced for: its batch is charged the rest of its projection however
+    old the stamp is. The window still ends the charge of a join that
+    waits, and of a stamp that names no join."""
+    gen = FakeGen(rows=2)
+    st = gov._state(gen)
+    old = time.perf_counter() - 31.0
+    gen._kq_admit_last_projection = (old, 10.4e9, ("u",))
+    gen._prompt_batch = types.SimpleNamespace(
+        uids=["u"], prompt_cache=_joined_caches())
+    assert gov._demand_bytes(gen, st)[1] == pytest.approx(10.4e9 - 2.56e9)
+    gen._prompt_batch = None
+    gen._unprocessed_sequences = [("u", None)]
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+    gen._unprocessed_sequences = []
+    gen._kq_admit_last_projection = (old, 10.4e9)
+    gen._prompt_batch = types.SimpleNamespace(
+        uids=["u"], prompt_cache=_joined_caches())
+    assert gov._demand_bytes(gen, st)[1] == 0.0
+
+
 def test_dead_arena_entry_is_replaced(rig, monkeypatch):
     # A feeder freed without unregister_arena leaves a dead entry; a new
     # feeder at the same address must still register.
