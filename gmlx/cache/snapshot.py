@@ -3043,6 +3043,12 @@ def retirement_blocked():
         _RETIRE_BLOCKED[0] -= 1
 
 
+def retirement_is_blocked() -> bool:
+    """Whether a ``retirement_blocked`` scope is open: a caller skips the
+    work it does for a retirement store, which would store nothing."""
+    return _RETIRE_BLOCKED[0] > 0
+
+
 def retirement_store(
     manager: Any,
     mode: str | None,

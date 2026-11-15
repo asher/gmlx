@@ -1460,6 +1460,8 @@ def _install_plain_ckpt_decode() -> None:
 
     def _filter_with_ckpt(self, keep):
         try:
+            from gmlx.cache.snapshot import retirement_is_blocked
+
             _lift_cache_stash(self)
             reg = getattr(self, "_kq_apc_retire_rows", None)
             if reg and self.prompt_cache:
@@ -1471,7 +1473,9 @@ def _install_plain_ckpt_decode() -> None:
                     if i in keep_set:
                         continue
                     stash = reg.pop(uid, None)
-                    if stash is None:
+                    if stash is None or retirement_is_blocked():
+                        # A blocked retirement stores nothing, so the row
+                        # is neither extracted nor offered.
                         continue
                     if solo and _retires_live(stash, self.prompt_cache):
                         _plain_retire(stash, self.prompt_cache)

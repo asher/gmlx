@@ -337,6 +337,37 @@ def test_gen_batch_filter_retires_leaving_row_batched():
     assert got == 40
 
 
+def test_a_blocked_retirement_neither_extracts_nor_offers_the_row(
+        monkeypatch):
+    """Under a block a retirement stores nothing, so a row leaving the
+    batch is not extracted, which syncs on a QSA row with a decode tail,
+    and is not offered, which logs a retire that never happens. Its stash
+    goes with it."""
+    import gmlx.cache.snapshot as cs
+    from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
+
+    ckpt._install_plain_ckpt_decode()
+    calls = []
+    extract = cs.row_snapshot
+    monkeypatch.setattr(cs, "row_snapshot", lambda c, i: (
+        calls.append("extract"), extract(c, i))[1])
+    monkeypatch.setattr(ckpt, "_plain_retire",
+                        lambda stash, cache: calls.append("retire"))
+    man = APCManager(num_blocks=64, block_size=16)
+    stash = {"full_ids": list(range(700, 724)), "extra_hash": 0,
+             "mode": "ckpt", "manager": man, "render_ctx": None,
+             "snap_ok": True, "gen": list(range(970, 986))}
+    gb = GenerationBatch.empty(model=None, sampler=None, stop_criteria=None)
+    gb.uids = [7, 8]
+    gb.max_tokens = [64, 64]
+    gb._num_tokens = [0, 0]
+    gb.prompt_cache = _batched_hybrid_cache([48, 40], 48)
+    gb._kq_apc_retire_rows = {8: stash}
+    with cs.retirement_blocked():
+        gb.filter([0])
+    assert (calls, gb.uids, gb._kq_apc_retire_rows) == ([], [7], {})
+
+
 def _one_row(uid, cache):
     from gmlx._vendor.mlx_vlm.generate.ar import GenerationBatch
 
