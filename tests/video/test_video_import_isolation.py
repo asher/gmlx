@@ -36,6 +36,7 @@ def test_identifying_a_video_file_loads_no_mlx():
         "import gmlx.video.encoder, gmlx.video.images\n"
         "import gmlx.video.vae.chunking\n"
         "import gmlx.image.int8, gmlx.image.h3.layout\n"
+        "import gmlx.image.h3.encoder\n"
         "assert vfp.identify(fixture_view(H3_HEADER)).family.name == 'h3'\n"
         "bad = sorted(m for m in sys.modules if m.split('.')[0] == 'mlx')\n"
         "assert not bad, bad\n"
