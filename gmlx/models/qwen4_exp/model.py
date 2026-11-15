@@ -1490,8 +1490,9 @@ class QSAKVCache(KVCache):
     def merge(cls, entries, prefix_lens=None):
         # Two callers share this name. mlx_lm's batch lift calls
         # merge(caches): delegate to the inherited KVCache.merge; the
-        # resulting BatchKVCache drops ik, so that request decodes dense
-        # (exact math, sparse-attention perf lost). mlx-vlm's APC
+        # resulting BatchKVCache drops the indexer stream, so a batched row
+        # decodes dense over its whole context, which differs from
+        # single-stream QSA attention past the indexer budget. mlx-vlm's APC
         # merge_cache_entries calls merge(entries, prefix_lens) and
         # dispatches on the class's own __dict__, so the arm must live
         # here, not on a parent. Single-request batches only; multi-row
