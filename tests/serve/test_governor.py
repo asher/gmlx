@@ -1351,6 +1351,7 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
     monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None, raising=False)
     monkeypatch.setattr(cap, "_WIRED_SEEN", None, raising=False)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None, raising=False)
     monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda *a, **k: {
@@ -1391,6 +1392,46 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     ceiling3, head3, _ = tick(3e9)
     assert ceiling3 == pytest.approx(91e9)
     assert head3 == pytest.approx(head)
+
+
+@pytest.mark.parametrize("own2, wired2, wired3, want2, want3", [
+    # A yellow trim frees 6.5 GB of cache: the server stops counting it
+    # before the kernel's count does, and the next count read refreshed
+    # only partway.
+    (87.09e9, 103.03e9, 96.5e9, 9.43e9, 9.41e9),
+    # The server holds the same and 6 GB more is wired outside it.
+    (93.6e9, 109.0e9, 109.0e9, 15.4e9, 15.4e9),
+], ids=["own-trim", "outside-rise"])
+def test_the_live_outside_reading_is_not_moved_by_the_servers_own_trim(
+        monkeypatch, own2, wired2, wired3, want2, want3):
+    """The tick reads memory wired outside the server as the kernel's
+    wired count less what the server holds wired. A trim the governor
+    makes leaves the server's count before the kernel's: a count read in
+    between is priced against the most the server held since the last
+    count, so the trim is not booked as memory wired outside. A real rise
+    outside still shows at once."""
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.serve.capacity as cap
+    import gmlx.serve.kernel_vm as kvm
+
+    monkeypatch.setattr(cap, "_CAP", True)
+    monkeypatch.setattr(cap, "_OUTSIDE_WIRED", 6e9)
+    monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None)
+    monkeypatch.setattr(cap, "_WIRED_SEEN", None)
+    monkeypatch.setattr(cap, "_OWN_PEAK", None, raising=False)
+    monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
+    box = {}
+    monkeypatch.setattr(kvm, "wired_bytes", lambda: box["wired"])
+    monkeypatch.setattr(pd, "own_wired_bytes", lambda: box["own"])
+
+    def read(wired, own):
+        box["wired"], box["own"] = wired, own
+        gov._read_outside_wired()
+        return cap.priced_outside_wired_bytes()
+
+    assert read(103.0e9, 93.6e9) == pytest.approx(9.4e9)
+    assert read(wired2, own2) == pytest.approx(want2)
+    assert read(wired3, own2) == pytest.approx(want3)
 
 
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
