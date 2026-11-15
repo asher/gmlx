@@ -8,9 +8,9 @@ server uses.
 ``integration`` + ``slow``; skips unless ``KQUANT_TEST_MTP_GGUF`` points at a
 GGUF with MTP support. For assistant-model drafters (gemma-4), also set
 ``KQUANT_TEST_MTP_DRAFT_GGUF`` to the companion drafter GGUF.
-``KQUANT_TEST_MTP_STREAM=experts`` loads the target as ``--stream-experts``
-does, for a model over the GPU budget: a declared lookup table or the
-routed experts stream from the file.
+``KQUANT_TEST_MTP_STREAM=experts`` loads the target through the CLI's own
+``--stream-experts`` setup: the routed experts and any declared lookup
+table stream from the file, on a model that fits too.
 """
 from __future__ import annotations
 
@@ -99,16 +99,28 @@ def mtp_draft_gguf():
 @pytest.fixture(scope="session")
 def mtp_model(mtp_gguf, mtp_draft_gguf):
     from gmlx.spec.mtp_load import load_mtp_model
-    stream = os.environ.get("KQUANT_TEST_MTP_STREAM") == "experts"
-    loaded = load_mtp_model(
-        mtp_gguf, draft_gguf_path=mtp_draft_gguf, verbose=False,
-        wire=not stream,
-    )
-    if stream:
-        from gmlx.stream.expert_streaming import install_expert_streaming
-        model = loaded[0]
-        install_expert_streaming(getattr(model, "language_model", model),
-                                 gguf_path=mtp_gguf, explicit=True)
+    if os.environ.get("KQUANT_TEST_MTP_STREAM") != "experts":
+        return load_mtp_model(mtp_gguf, draft_gguf_path=mtp_draft_gguf,
+                              verbose=False, wire=True)
+    from types import SimpleNamespace
+
+    from gmlx.commands import cli
+    from gmlx.stream.table_stream import force_table_stream
+
+    # The CLI's own --stream-experts calls, so the two cannot drift: the
+    # stream latch, the cap decision and the buffer caps before the load,
+    # so its warm touch leaves the experts and tables alone, and the
+    # explicit stream install after it. The latch is process state, read
+    # only at a load, so it goes off once this one is done.
+    args = SimpleNamespace(gguf=mtp_gguf, stream_experts=True)
+    try:
+        cli._ensure_stream_cb_caps(args)
+        loaded = load_mtp_model(mtp_gguf, draft_gguf_path=mtp_draft_gguf,
+                                verbose=False, wire=False)
+        cli._apply_placement(args, getattr(loaded[0], "language_model",
+                                           loaded[0]))
+    finally:
+        force_table_stream(False)
     return loaded
 
 
