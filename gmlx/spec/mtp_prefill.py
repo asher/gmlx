@@ -44,6 +44,7 @@ from gmlx.spec.engine import (
     _resolve_l1,
     _trim_prompt_columns,
 )
+from gmlx.stream.table_readahead import read_ahead
 from gmlx.upstream.patching import link, wrapped_with
 
 _log = logging.getLogger(__name__)
@@ -612,6 +613,9 @@ def install_full_prompt_mtp_prefill() -> None:
         n = prefill_decay.fit_cut(self, n_span) if n_span < n else n_span
         if n <= 0:
             return 0
+        # The table rows the chunk reads go to the page cache beside its
+        # forward, after the restore above trimmed what the cache holds.
+        read_ahead(self, n)
         prompt_kwargs = self._prompt_kwargs_for_step(n)
         prompt_kwargs = _widen_prompt_rope_state(self, prompt_kwargs)
         with lora_rows.published(getattr(self, "uids", [])):

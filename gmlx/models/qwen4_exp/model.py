@@ -2294,6 +2294,58 @@ def _ple_hash():
     return _ple_hash_kernel or None
 
 
+@dataclass(frozen=True)
+class PLEHostHash:
+    """``PLEEmbedding.row_ids`` in numpy, for a reader that needs a
+    prompt's table rows before its prefill runs (the table read-ahead).
+    Called with ``[B, context_len + T]`` token ids, the first
+    ``context_len`` of them the history before the T tokens, it returns
+    their ``[B, T, n_heads]`` rows as int64. Plain values only, so it
+    holds nothing of the model."""
+
+    context_len: int
+    ngram_size: int
+    heads_per_ngram: int
+    eos_token_id: int
+    mults: tuple
+    sizes: tuple
+    offsets: tuple
+
+    def __call__(self, hist):
+        import numpy as np
+
+        hist = np.asarray(hist, dtype=np.int64)
+        if hist.ndim == 1:
+            hist = hist[None]
+        B, L = hist.shape
+        eos = self.eos_token_id
+        pos = np.arange(L)
+        eos_pos = np.where(hist == eos, pos[None], -1)
+        prev_eos = np.concatenate(
+            [np.full((B, 1), -1, np.int64),
+             np.maximum.accumulate(eos_pos, axis=1)[:, :-1]], axis=1)
+        shifted = []
+        for s in range(self.ngram_size):
+            src = pos - s
+            g = hist[:, np.maximum(src, 0)]
+            valid = (src[None] > prev_eos) & (src[None] >= 0)
+            shifted.append(np.where(valid, g, eos).astype(np.uint64))
+        mults = [np.uint64(m) for m in self.mults]
+        sizes = np.asarray(self.sizes, dtype=np.uint64)
+        offs = np.asarray(self.offsets, dtype=np.uint64)
+        blocks = []
+        with np.errstate(over="ignore"):
+            for n in range(2, self.ngram_size + 1):
+                lo = (n - 2) * self.heads_per_ngram
+                hi = lo + self.heads_per_ngram
+                mixed = shifted[0] * mults[0]
+                for p in range(1, n):
+                    mixed = mixed ^ (shifted[p] * mults[p])
+                blocks.append(mixed[..., None] % sizes[lo:hi] + offs[lo:hi])
+        rows = np.concatenate(blocks, axis=-1)[:, self.context_len:]
+        return rows.astype(np.int64)
+
+
 class PLEEmbedding(nn.Module):
     """Hash the token history into per-head row ids and gather the rows.
 
@@ -2320,6 +2372,14 @@ class PLEEmbedding(nn.Module):
                                dtype=mx.uint64)
         self._offsets = mx.array([int(o) for o in args.ple_head_offsets],
                                  dtype=mx.uint64)
+
+    def host_hash(self) -> PLEHostHash:
+        """This hash on the host (``PLEHostHash``)."""
+        return PLEHostHash(
+            self.context_len, self.ngram_size, self.heads_per_ngram,
+            int(self.eos_token_id), tuple(int(m) for m in self._mults),
+            tuple(int(v) for v in self._sizes.tolist()),
+            tuple(int(v) for v in self._offsets.tolist()))
 
     def _shift_right_ignore_eos(self, tokens: mx.array, shift: int) -> mx.array:
         if shift == 0:
@@ -2651,6 +2711,15 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.model.layers
+
+    def table_row_hashes(self) -> dict:
+        """The host hash of each lookup table's rows, by the table's path:
+        a reader computes what a prompt's prefill reads from it."""
+        ple = next((layer.ple for layer in self.layers if "ple" in layer),
+                   None)
+        if ple is None or "ple_embed" not in self.model:
+            return {}
+        return {"model.ple_embed": ple.embedding.host_hash()}
 
     def make_cache(self):
         caches: List[Any] = []

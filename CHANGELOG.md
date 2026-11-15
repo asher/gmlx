@@ -68,6 +68,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt, where it stopped up to one prefill chunk short.
 - A request on a model with recurrent layers, left alone in its batch, no
   longer waits for each decode step to finish before queuing the next.
+- A Qwen3.8-Flash-Next server reading its lookup table from disk prefills a
+  prompt whose table rows are not in the page cache faster.
 - A chat turn whose template renders the last reply differently restores from
   inside a reply decoded beside other requests too, unless `--kv-bits` is set.
 

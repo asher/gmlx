@@ -27,6 +27,7 @@ STREAM_ATTRS = (
     "_kq_feeder",
     "_kq_decode_feeder",
     "_kq_weights_pin",
+    "_kq_table_readahead",
 )
 
 # (weakref to the owner module, committed wired bytes).

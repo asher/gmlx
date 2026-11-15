@@ -771,6 +771,10 @@ def install_expert_streaming(
             tracked_total, "table")
         # The experts stay resident, so this was the last streamed share.
         end_build_credit(getattr(model, "_kq_weights_key", None))
+    if plan.tables:
+        from gmlx.stream.table_readahead import attach_table_readahead
+
+        attach_table_readahead(model, gguf_path)
 
     streaming = force_stream or over_budget
     # the verdict itself: a CPU-only expert codec marks its modules the way

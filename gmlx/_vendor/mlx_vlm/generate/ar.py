@@ -71,6 +71,9 @@ from gmlx.serve import speech_rows as _speech_rows
 # gmlx: what the process held before each clear prices the next count of
 # memory wired outside it.
 from gmlx.serve.capacity import note_own_before_clear as _note_own_before_clear
+# gmlx: a streamed lookup table's rows for the chunk are read into the page
+# cache beside its forward.
+from gmlx.stream.table_readahead import read_ahead as _table_read_ahead
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
 
@@ -2532,6 +2535,8 @@ class PromptProcessingBatch:
             n = min(n, checkpoint_col - self._processed_prompt_columns)
         if n <= 0:
             return 0
+        # gmlx: queue the table rows the chunk reads before its forward.
+        _table_read_ahead(self, n)
         prompt_kwargs = {
             **self._prompt_kwargs_for_step(n),
             **self._speculative_prefill.kwargs,

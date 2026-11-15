@@ -234,6 +234,8 @@ other layer adds its delta on stock ops.
 | `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, as `--stream-experts` and `--stream-cpu` do. |
 | `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. The default is the device limit, and a larger table is read row by row. |
 | `GMLX_TABLE_PREAD_WORKERS` | Reader threads for each file-backed lookup table. The default is `32`. |
+| `GMLX_TABLE_READAHEAD=0` | Stop reading the rows of a lookup table mapped outside MLX's tracker into the page cache ahead of each prefill chunk. Needs a prompt cache. |
+| `GMLX_TABLE_READAHEAD_WORKERS` | Reader threads for the table read-ahead. The default is `16`. |
 | `GMLX_DECODE_FAST_DISK` | The `stream_fast_disk` policy, `auto`, `on` or `off`, as `--stream-fast-disk` sets. |
 | `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it with the prompt's most routed experts. |
 | `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
