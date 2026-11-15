@@ -5,9 +5,11 @@
       [--fixtures <dir>] [--threads N] [--log <file>] <script> [args...]
 
 The oracle environment holds torch, diffusers at the pinned revision,
-transformers, gguf, safetensors and numpy, and never gmlx or mlx. The
-runner refuses an interpreter that can import gmlx or mlx, that cannot
-import torch or diffusers, or that is the interpreter running the runner.
+transformers, gguf, safetensors and numpy, and never gmlx or mlx. A script
+that runs in another environment, such as ComfyUI's, names the modules it
+needs in a module-level ``ORACLE_NEEDS`` tuple. The runner refuses an
+interpreter that can import gmlx or mlx, that cannot import what the
+script needs, or that is the interpreter running the runner.
 
 The child runs with HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1, without
 PYTHONPATH or the user site directory, and with GMLX_IMAGE_FIXTURES set to
@@ -19,6 +21,7 @@ scripts/image_oracle/.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import subprocess
@@ -91,6 +94,23 @@ def preflight(python: str, env: dict | None = None,
     return None
 
 
+def script_needs(script: Path) -> tuple[str, ...]:
+    """The script's ``ORACLE_NEEDS`` tuple, read from its source without
+    running it, or NEEDS when it declares none."""
+    tree = ast.parse(script.read_text(), str(script))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "ORACLE_NEEDS"
+                        for t in node.targets)):
+            value = ast.literal_eval(node.value)
+            if (isinstance(value, tuple) and value
+                    and all(isinstance(v, str) for v in value)):
+                return value
+            raise SystemExit(f"error: {script.name}: ORACLE_NEEDS is not a "
+                             "tuple of module names")
+    return NEEDS
+
+
 def resolve_script(script: str) -> Path:
     p = Path(script)
     if not p.is_file() and not p.is_absolute():
@@ -141,11 +161,12 @@ def main(argv=None) -> int:
     fixtures = Path(a.fixtures).expanduser().resolve()
     fixtures.mkdir(parents=True, exist_ok=True)
     env = child_env(fixtures, a.threads)
-    why = preflight(a.python, env)
+    script = resolve_script(a.script)
+    why = preflight(a.python, env, script_needs(script))
     if why:
         print(f"error: {why}", file=sys.stderr)
         return 2
-    return run(a.python, resolve_script(a.script), a.args, env, a.log)
+    return run(a.python, script, a.args, env, a.log)
 
 
 if __name__ == "__main__":

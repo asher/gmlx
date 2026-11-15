@@ -208,6 +208,29 @@ def test_the_runner_resolves_a_bare_script_name_in_its_directory():
         runner.resolve_script("no_such_oracle.py")
 
 
+def test_a_script_names_its_environment_or_takes_the_default(tmp_path):
+    """A ComfyUI oracle needs torch and no diffusers; a script that names
+    nothing needs the diffusers environment."""
+    s = tmp_path / "s.py"
+    s.write_text('ORACLE_NEEDS = ("torch", "comfy_kitchen")\n')
+    assert runner.script_needs(s) == ("torch", "comfy_kitchen")
+    s.write_text("import torch\n")
+    assert runner.script_needs(s) == runner.NEEDS
+    s.write_text('ORACLE_NEEDS = "torch"\n')
+    with pytest.raises(SystemExit):
+        runner.script_needs(s)
+
+
+def test_the_runner_probes_what_the_script_needs(monkeypatch):
+    report = {"prefix": "/elsewhere", "torch": True, "diffusers": False,
+              "gguf": True, "gmlx": False, "mlx": False}
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(
+                            cmd, 0, json.dumps(report), ""))
+    assert runner.preflight(sys.executable, needs=("torch",)) is None
+    assert "diffusers" in runner.preflight(sys.executable)
+
+
 # The fixtures whose reference script loads the Qwen-Image 2.1 DiT file.
 QWEN_DIT_MANIFESTS = (
     "check3_qwen_image21_512", "check3_qwen_image21_1024",

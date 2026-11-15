@@ -1,0 +1,121 @@
+{
+ "schema": 1,
+ "name": "check4_h3_image",
+ "check": 4,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check4_h3_image.py",
+ "argv": ["check4_h3_image.py", "--comfy-dir", "ComfyUI-h3-image", "--dit", "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf", "--pdd-config", "pdd_config.json"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "pdd_config": {
+   "name": "pdd_config.json",
+   "size": 174,
+   "sha256": "cbc0cf1fbb7a7f9525987db453c1bf8218b95ebc686c9c5b74cbb5bbc4852e0b"
+  },
+  "oracle_dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf",
+   "size": 13607429024,
+   "sha256": "99df1f83bdccc8c1823c2fdfad8500be4a1333d0a4df5dac9beb2983935cc273"
+  }
+ },
+ "inputs": {
+  "steps": 6,
+  "pdd_sigmas": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0],
+  "scheduler": "simple",
+  "comfy": "2aa4d535a76e4b6acf6a94f263bc482430c396dd",
+  "comfy_gguf": "373048b8403a7820620065210a691263d4da0a61",
+  "model_sampling": "MiniMaxH3ImageModelSampling",
+  "config_key": "{\"transformer\": {\"pdd_steps\": 6, \"pdd_sigmas\": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0]}}"
+ },
+ "results": {
+  "simple_off_grid": 0.0008689165115356445,
+  "head_weights": {
+   "simple_6": [
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0]
+   ],
+   "grid": [
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0]
+   ]
+  }
+ },
+ "tolerances": {
+  "grid": "bitwise",
+  "heads": "exact",
+  "rule": "the sampling row's sigmas and final zero equal ComfyUI's PDD grid bit for bit; each step reads the head ComfyUI's PDD rule picks, one grid interval with weight 1, on the simple schedule and on the grid"
+ },
+ "notes": ["oracle: ComfyUI 2aa4d535a76e4b6acf6a94f263bc482430c396dd, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61; the model config from the GGUF's config key"],
+ "created": "2026-11-15T22:31:54Z",
+ "npz": "check4_h3_image.npz",
+ "tensors": {
+  "grid": {
+   "shape": [7],
+   "dtype": "float32",
+   "sha256": "a974c89ae39ca1cfc6d6bb8236dbc6ce3c339b229809cb075c5c4f5a859b09cd"
+  },
+  "heads_grid": {
+   "shape": [6, 2],
+   "dtype": "int64",
+   "sha256": "fcd96ad0a85098e3e7de021b201afab23c72deca8d90c181d67fd6cc48222c5b"
+  },
+  "heads_simple_6": {
+   "shape": [6, 2],
+   "dtype": "int64",
+   "sha256": "fcd96ad0a85098e3e7de021b201afab23c72deca8d90c181d67fd6cc48222c5b"
+  },
+  "simple_6": {
+   "shape": [7],
+   "dtype": "float32",
+   "sha256": "58169f7a68f29c0b2d7cc93b661e208041228000229d7d18cd47279ea1c991a4"
+  },
+  "timesteps_grid": {
+   "shape": [6],
+   "dtype": "float32",
+   "sha256": "0c82805eb8220e38462c1804bcf0d26732278e69dfe6eaa4dc088e45c986d777"
+  },
+  "timesteps_simple_6": {
+   "shape": [6],
+   "dtype": "float32",
+   "sha256": "68c791ee4f03bec3e8f9084101e21d61908c4f151b9e848a6bdb12f0f01ba58c"
+  }
+ }
+}

@@ -322,5 +322,27 @@
     "file": "vae/config.json",
     "size": 838,
     "sha256": "cc77f3f0ce0357039c71018dc19edaa4fcceb0c2f7488fdc2b9c0580d6baafa1"
+  },
+  "h3_image_pruned_ud_q4_k_xl.header.json": {
+    "repo": "unsloth/MiniMax-H3-Image-GGUF",
+    "revision": "2eda8f761a1625818e2933e7e726e337d197bc27",
+    "file": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+    "size": 13607428832,
+    "sha256": "90616d8cef7d4c234485c17ba63db85db1cbe38f50400e66e704060c2494ffdd",
+    "kv_kept": "general.architecture"
+  },
+  "h3_image_transformer_config.json": {
+    "repo": "MiniMaxAI/MiniMax-H3-Image",
+    "revision": "5f90473023975e6271b0ed1dd84c4e88e4bbc6d3",
+    "file": "transformer/config.json",
+    "size": 630,
+    "sha256": "67ceb1d7752942ee984405c26c1187ff58c073b698839ea0ca289e34b8dc61a9"
+  },
+  "h3_image_pdd_config.json": {
+    "repo": "MiniMaxAI/MiniMax-H3-Image",
+    "revision": "5f90473023975e6271b0ed1dd84c4e88e4bbc6d3",
+    "file": "pdd_config.json",
+    "size": 174,
+    "sha256": "cbc0cf1fbb7a7f9525987db453c1bf8218b95ebc686c9c5b74cbb5bbc4852e0b"
   }
 }

@@ -19,6 +19,7 @@ def test_the_image_and_serve_paths_leave_gmlx_video_unloaded():
         "import gmlx.serve.image_service, gmlx.serve.image_steps\n"
         "import gmlx.serve.server, gmlx.serve.patches.image_steps\n"
         "import gmlx.commands.cli, gmlx.commands.image\n"
+        "import gmlx.image.families.h3_image.family\n"
         "bad = sorted(m for m in sys.modules if m.startswith('gmlx.video'))\n"
         "assert not bad, bad\n"
     )
