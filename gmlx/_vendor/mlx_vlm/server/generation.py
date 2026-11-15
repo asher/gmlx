@@ -2047,8 +2047,12 @@ class ResponseGenerator:
 
                     # Vision encoder runs on the GPU thread; text tokenization
                     # already happened on the caller thread.
+                    # gmlx: only a media request makes room here, before its
+                    # encoder allocates. The prompt batch makes room for text.
                     coordinator = getattr(batch_gen, "apc", None)
-                    if coordinator is not None:
+                    if coordinator is not None and (
+                        request.images or request.videos or request.audio
+                    ):
                         coordinator.prepare_prefill(
                             prompt_tokens,
                             prefill_step_size=self._effective_prefill_step_size(),

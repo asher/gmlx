@@ -3180,6 +3180,18 @@ class BatchGenerator:
         if self.apc_manager is None:
             return None
 
+        # gmlx: a lookup sees every queued disk write, and a restore inside
+        # it sizes its room from this admission's rows, not the last one's.
+        # The prompt batch makes room once the rows are known.
+        manager = self.apc_manager
+        coordinator = getattr(self, "apc", None)
+        if coordinator is not None and coordinator.enabled:
+            manager._prefill_reserve_bytes = manager.memory_plan.prepare(
+                [len(s[1]) for s in sequences],
+                chunk_size=self.prefill_step_size,
+            )
+        if manager.disk is not None:
+            manager.disk.flush()
         picks: List[Optional[dict]] = [self._apc_pick_for(s) for s in sequences]
         any_warm = any(p is not None for p in picks)
         if not any_warm:
@@ -3278,6 +3290,8 @@ class BatchGenerator:
             warm_cache, _ = coordinator.merge_rows(
                 picks,
                 prefix_lens,
+                lengths=[len(ids) for ids in full_ids],
+                prefill_step_size=self.prefill_step_size,
                 kv_quant_config=_quant_cfg,
             )
         elif apc_mode == "exact":
@@ -3709,12 +3723,6 @@ class BatchGenerator:
             # warm and cold rows prefill in a single forward pass.
             n = min(self.prefill_batch_size, len(self._unprocessed_sequences))
             sequences = self._unprocessed_sequences[:n]
-            coordinator = getattr(self, "apc", None)
-            if coordinator is not None:
-                coordinator.prepare_prefill(
-                    [len(s[1]) for s in sequences],
-                    prefill_step_size=self.prefill_step_size,
-                )
             if logger.isEnabledFor(logging.DEBUG) and os.environ.get("APC_DEBUG"):
                 logger.warning(
                     "APC admit n=%d (pending=%d)",
