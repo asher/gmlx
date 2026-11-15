@@ -108,7 +108,7 @@ def mtp_model(mtp_gguf, mtp_draft_gguf):
         from gmlx.stream.expert_streaming import install_expert_streaming
         model = loaded[0]
         install_expert_streaming(getattr(model, "language_model", model),
-                                 gguf_path=mtp_gguf)
+                                 gguf_path=mtp_gguf, explicit=True)
     return loaded
 
 
