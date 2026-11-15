@@ -516,6 +516,26 @@ def test_the_state_report_names_a_module_hand_back(tmp_path):
         r.stdout[-4000:])
 
 
+def test_a_module_fixture_holds_the_limits_its_load_set():
+    # A module fixture's capture and a load that sets a limit, then a test's
+    # capture and restore as the conftest brackets it, which start the
+    # record of the limits afresh, and a value recorded after that. The
+    # fixture held its record after the load, so its restore at the end of
+    # the module puts the limit back as it was before the load.
+    outer = process_state.capture()
+    before = mx.set_cache_limit(123 << 20)
+    try:
+        process_state.hold(outer)
+        inner = process_state.capture()
+        mx.set_cache_limit(456 << 20)
+        process_state.restore(inner)
+        assert mx.set_cache_limit(123 << 20) == 123 << 20
+        process_state.restore(outer)
+        assert mx.set_cache_limit(before) == before
+    finally:
+        mx.set_cache_limit(before)
+
+
 _KVARN_TESTS = '''
 import pytest
 

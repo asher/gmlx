@@ -35,11 +35,12 @@ prefill step and the clamped width) stays as the test left it. The next
 tick in a band that throttles arms the limits again, and the next tick in
 the green band undoes the rest.
 
-``capture`` and ``restore`` bracket every test (tests/conftest.py). MLX
-reads MLX_ENABLE_TF32 and the command buffer caps once, at the first
-matmul and the first command buffer, so ``start_session`` also runs one
-small GPU matmul: the process keeps the session's settings even when a
-test changes the environment before its own first matmul.
+``capture`` and ``restore`` bracket every test (tests/conftest.py), and
+a wider fixture that brackets its own setup with them calls ``hold``
+after it. MLX reads MLX_ENABLE_TF32 and the command buffer caps once, at
+the first matmul and the first command buffer, so ``start_session`` also
+runs one small GPU matmul: the process keeps the session's settings even
+when a test changes the environment before its own first matmul.
 
 mlx-kquant reads most of its KQ_* keys once too, each at the first call
 of the kernel route that reads it, and there is no one call that reaches
@@ -345,6 +346,14 @@ def capture() -> dict:
     return state
 
 
+def hold(state: dict) -> None:
+    """Keep in ``state`` the first value each MLX limit setter and the RNG
+    seed replaced since its capture. Each test's capture starts that record
+    afresh, so a class, module or session fixture that captures before its
+    setup holds after it, and its restore puts those values back."""
+    state["prior"] = dict(_prior)
+
+
 def note_kq_env(state: dict, nodeid: str) -> None:
     """Record each KQ_* key outside _KQ_READ_EACH_CALL whose value now
     differs from the one ``state`` captured."""
@@ -389,6 +398,8 @@ def restore(state: dict) -> list:
         if getattr(owner, name) is not state[name]:
             changed.append(f"{owner.__name__}.{name}")
             setattr(owner, name, state[name])
+    # What hold kept predates any value recorded since.
+    _prior.update(state.get("prior", {}))
     for name in _LIMITS:
         if name in _prior and _setters[name](_prior[name]) != _prior[name]:
             changed.append(name.removeprefix("set_").replace("_", " "))

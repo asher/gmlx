@@ -17,6 +17,7 @@ a model that fits too.
 from __future__ import annotations
 
 import contextlib
+import gc
 import logging
 import math
 import os
@@ -105,6 +106,8 @@ def mtp_model(mtp_gguf, mtp_draft_gguf):
 
     from gmlx.commands import cli
     from gmlx.spec.mtp_load import load_mtp_model
+    from gmlx.stream.expert_streaming import _unwire
+    from gmlx.stream.installs import release
     from gmlx.stream.table_stream import (force_table_stream,
                                           guard_resident_wire,
                                           stream_tables_for_memory,
@@ -119,13 +122,15 @@ def mtp_model(mtp_gguf, mtp_draft_gguf):
     # the check's latches for the path are read only at a load, so they end
     # once this one is done. The cap decision with its clamp, the wired
     # limit or the streaming pin and the allocator limits stay set while
-    # the module runs, as for the CLI's whole run, and the teardown puts
-    # them back with the rest of the process state.
+    # the module runs, as for the CLI's whole run. The teardown closes the
+    # streaming install (the prefetcher, the feeders with their read pools
+    # and arena, the weights pin), takes the weights out of the GPU
+    # residency set, and then puts the process state back.
     args = SimpleNamespace(
         gguf=mtp_gguf, draft_gguf=mtp_draft_gguf, speculative=True,
         stream_experts=os.environ.get("KQUANT_TEST_MTP_STREAM") == "experts")
     state = process_state.capture()
-    load_prior = None
+    loaded = None
     try:
         try:
             cli._decide_table_cap(args)
@@ -143,14 +148,14 @@ def mtp_model(mtp_gguf, mtp_draft_gguf):
             table_install_follows(mtp_gguf, False)
             stream_tables_for_memory(mtp_gguf, False)
             guard_resident_wire(mtp_gguf, False)
-        # Each test's capture starts its own record of the MLX limits a
-        # setter replaced, so the load's record waits for the teardown.
-        load_prior = dict(process_state._prior)
+        process_state.hold(state)
         yield loaded
     finally:
-        if load_prior is not None:
-            process_state._prior.clear()
-            process_state._prior.update(load_prior)
+        if loaded is not None:
+            release(loaded[0])
+            _unwire(getattr(loaded[0], "language_model", loaded[0]))
+            del loaded
+            gc.collect()
         process_state.restore(state)
 
 
@@ -1725,8 +1730,8 @@ _LP_K = 20
 # a _LP_ALT_STEP prefill chunk shows against the plain run over the
 # compared steps, and never under the floor, where a dense model stays.
 # That gap of plain's own stays within _LP_ALT_CEIL floor units, the 2
-# nats of the largest move measured: past it the chunked prefill itself
-# moved the values, a plain-path defect that would widen the bound.
+# nats of the largest move measured: past it the plain path is the first
+# suspect, since a defect in its chunked prefill would widen the bound.
 _LP_TOL = 0.25
 _LP_PROB_TOL = 0.02
 _LP_ALT_STEP = 64
@@ -1820,8 +1825,8 @@ def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
               f"{alt_gap:.3f}, parts at {_first_divergence(p_toks, q[0])}")
         assert alt_gap <= _LP_ALT_CEIL, (
             f"plain decode moves {alt_gap:.3f} floor units against itself "
-            f"with only its prefill chunk changed, past {_LP_ALT_CEIL}: a "
-            f"plain-path defect, not an MTP one")
+            f"with only its prefill chunk changed, past the largest move "
+            f"measured ({_LP_ALT_CEIL}): check the plain path first")
         assert gap <= bound, (gap, bound)
 
 
