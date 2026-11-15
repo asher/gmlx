@@ -2388,6 +2388,53 @@ def test_a_reload_turns_a_service_on_and_off(monkeypatch, tmp_path):
     assert calls == [("prewarm", model), ("release",)]
 
 
+def test_a_reload_that_moves_a_service_frees_the_old_model(
+        monkeypatch, tmp_path, frozen_startup_heap):
+    import gc
+    import weakref
+
+    import gmlx.load.loader as loader
+    from gmlx.serve import rerank as rr
+    from gmlx.serve import server as srv
+
+    class _Model:
+        def __init__(self, path):
+            self.path = path
+            self.self = self
+
+    futures = []
+
+    def keep(fn):
+        return lambda *a: futures.append(fn(*a)) or futures[-1]
+
+    monkeypatch.setattr(serving, "register_resolved_models", lambda cfg: None)
+    monkeypatch.setattr(rr, "resolve_rerank_model",
+                        lambda v, dirs: str(tmp_path / f"{v}.gguf"))
+    monkeypatch.setattr(loader, "load_model",
+                        lambda path, verbose=False: (_Model(path), None, object()))
+    monkeypatch.setattr(rr, "prewarm", keep(rr.prewarm))
+    monkeypatch.setattr(rr, "release", keep(rr.release))
+    for name in ("model", "tokenizer", "model_path"):
+        monkeypatch.setattr(rr._GGUFRerankHolder, name, None)
+    conf = tmp_path / "gmlx.yaml"
+    reload_fn = srv._make_reload_fn(str(conf), types.SimpleNamespace(config=str(conf)))
+
+    conf.write_text("server:\n  rerank: one\n" + _MODELS_BLOCK)
+    reload_fn()
+    futures.pop().result()
+    old = weakref.ref(rr._GGUFRerankHolder.model)
+    assert old().path == str(tmp_path / "one.gguf")
+
+    conf.write_text("server:\n  rerank: two\n" + _MODELS_BLOCK)
+    reload_fn()
+    released, warmed = futures
+    released.result()
+    warmed.result()
+    gc.collect()
+    assert old() is None
+    assert rr._GGUFRerankHolder.model.path == str(tmp_path / "two.gguf")
+
+
 def test_a_reload_whose_service_fails_changes_nothing(monkeypatch, tmp_path):
     from gmlx.config import ConfigError
     from gmlx.serve import stt

@@ -2160,8 +2160,8 @@ class ResponseGenerator:
                 _notify_queues(error_queues.values(), e, None)
                 active.clear()
                 batch_gen = None
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
 
         if batch_gen is not None and callable(getattr(batch_gen, "close", None)):
             batch_gen.close()
@@ -2212,8 +2212,8 @@ class ResponseGenerator:
                     mx.clear_cache()
             except Exception:
                 logger.exception("Error in diffusion generation thread")
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
 
     def _generate_diffusion(
         self,
