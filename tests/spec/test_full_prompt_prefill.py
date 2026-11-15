@@ -8,9 +8,11 @@ server uses.
 ``integration`` + ``slow``; skips unless ``KQUANT_TEST_MTP_GGUF`` points at a
 GGUF with MTP support. For assistant-model drafters (gemma-4), also set
 ``KQUANT_TEST_MTP_DRAFT_GGUF`` to the companion drafter GGUF.
-``KQUANT_TEST_MTP_STREAM=experts`` loads the target through the CLI's own
-``--stream-experts`` setup: the routed experts and any declared lookup
-table stream from the file, on a model that fits too.
+The target loads as an MTP ``gmlx run`` loads it: in memory when its
+resident set fits, else with its experts streamed.
+``KQUANT_TEST_MTP_STREAM=experts`` loads it as ``--stream-experts`` does:
+the routed experts and any declared lookup table stream from the file, on
+a model that fits too.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ import re
 import warnings
 
 import host_box
+import process_state
 import pytest
 
 import mlx.core as mx
@@ -96,32 +99,59 @@ def mtp_draft_gguf():
     return path
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def mtp_model(mtp_gguf, mtp_draft_gguf):
-    from gmlx.spec.mtp_load import load_mtp_model
-    if os.environ.get("KQUANT_TEST_MTP_STREAM") != "experts":
-        return load_mtp_model(mtp_gguf, draft_gguf_path=mtp_draft_gguf,
-                              verbose=False, wire=True)
     from types import SimpleNamespace
 
     from gmlx.commands import cli
-    from gmlx.stream.table_stream import force_table_stream
+    from gmlx.spec.mtp_load import load_mtp_model
+    from gmlx.stream.table_stream import (force_table_stream,
+                                          guard_resident_wire,
+                                          stream_tables_for_memory,
+                                          table_install_follows)
 
-    # The CLI's own --stream-experts calls, so the two cannot drift: the
-    # stream latch, the cap decision and the buffer caps before the load,
-    # so its warm touch leaves the experts and tables alone, and the
-    # explicit stream install after it. The latch is process state, read
-    # only at a load, so it goes off once this one is done.
-    args = SimpleNamespace(gguf=mtp_gguf, stream_experts=True)
+    # The load of an MTP `gmlx run`, through the CLI's own helpers in its
+    # order: the wired cap decision and the table install declaration, the
+    # check before the load (a resident set that does not fit streams its
+    # experts), the stream latch and the buffer caps, the load, and the
+    # placement. It leaves out the phase steps of the CLI's generate loops,
+    # since the tests drive BatchGenerator. The latch, the declaration and
+    # the check's latches for the path are read only at a load, so they end
+    # once this one is done. The cap decision with its clamp, the wired
+    # limit or the streaming pin and the allocator limits stay set while
+    # the module runs, as for the CLI's whole run, and the teardown puts
+    # them back with the rest of the process state.
+    args = SimpleNamespace(
+        gguf=mtp_gguf, draft_gguf=mtp_draft_gguf, speculative=True,
+        stream_experts=os.environ.get("KQUANT_TEST_MTP_STREAM") == "experts")
+    state = process_state.capture()
+    load_prior = None
     try:
-        cli._ensure_stream_cb_caps(args)
-        loaded = load_mtp_model(mtp_gguf, draft_gguf_path=mtp_draft_gguf,
-                                verbose=False, wire=False)
-        cli._apply_placement(args, getattr(loaded[0], "language_model",
-                                           loaded[0]))
+        try:
+            cli._decide_table_cap(args)
+            cli.preload_wire_check(
+                args, depth=cli.run_room_depth(args),
+                depth_without_mtp=cli.run_room_depth(args, mtp=False))
+            cli._ensure_stream_cb_caps(args)
+            loaded = load_mtp_model(mtp_gguf, draft_gguf_path=args.draft_gguf,
+                                    verbose=False,
+                                    wire=not args.stream_experts)
+            cli._apply_placement(args, getattr(loaded[0], "language_model",
+                                               loaded[0]))
+        finally:
+            force_table_stream(False)
+            table_install_follows(mtp_gguf, False)
+            stream_tables_for_memory(mtp_gguf, False)
+            guard_resident_wire(mtp_gguf, False)
+        # Each test's capture starts its own record of the MLX limits a
+        # setter replaced, so the load's record waits for the teardown.
+        load_prior = dict(process_state._prior)
+        yield loaded
     finally:
-        force_table_stream(False)
-    return loaded
+        if load_prior is not None:
+            process_state._prior.clear()
+            process_state._prior.update(load_prior)
+        process_state.restore(state)
 
 
 def _build_prompt(tokenizer, n_tokens, seed=_SEED):
@@ -374,9 +404,8 @@ def _install_patches():
 # (verify fold, batched-verify SDPA, bf16 verify linear). Later files in the
 # same process (test_qwen35_verify_fold) install against the pristine
 # functions, so snapshot them and restore at module teardown. The snapshot
-# runs at import (collection) time: the session-scoped mtp_model fixture
-# instantiates before module-scoped fixtures, so a setup_module hook would
-# capture the already-patched seams.
+# runs at import (collection) time, before the mtp_model fixture loads a
+# model.
 def _snapshot_q35_seams():
     # AttributeError guard: a renamed upstream seam must not break collection
     # of this file (the tests themselves skip without the env var).
@@ -1688,16 +1717,20 @@ _LP_K = 20
 # verify block and a one-token decode step differ in GEMM width, and the
 # logits are bf16, whose step is 0.125 between 16 and 32: 0.25 nats, or
 # 0.02 probability deep in the tail, where a bf16 step is a large move in
-# nats. On a MoE the same rounding flips routing near ties (the top-10 of
-# Qwen3.8-Flash-Next's 512 experts sit 1e-5 to 5e-3 apart), and an
-# alternative moves by up to 2 nats. Plain decode moves it as far against
-# itself when only its prefill chunk changes, so a row's bound is twice the
-# largest gap a plain run with a _LP_ALT_STEP prefill chunk shows against
-# the plain run over the compared steps, and never under the floor, where
-# a dense model stays.
+# nats. On a MoE the same rounding flips routing near ties (at one measured
+# position, the top-10 of Qwen3.8-Flash-Next's 512 experts sit 1e-5 to
+# 5e-3 apart in router probability), and an alternative moves by up to 2
+# nats. Plain decode moves it as far against itself when only its prefill
+# chunk changes, so a row's bound is twice the largest gap a plain run with
+# a _LP_ALT_STEP prefill chunk shows against the plain run over the
+# compared steps, and never under the floor, where a dense model stays.
+# That gap of plain's own stays within _LP_ALT_CEIL floor units, the 2
+# nats of the largest move measured: past it the chunked prefill itself
+# moved the values, a plain-path defect that would widen the bound.
 _LP_TOL = 0.25
 _LP_PROB_TOL = 0.02
 _LP_ALT_STEP = 64
+_LP_ALT_CEIL = 8.0
 
 
 def _run_lp(model, drafter, tokenizer, ids_list, n, step=_ENGINE_STEP):
@@ -1731,11 +1764,12 @@ def _run_lp(model, drafter, tokenizer, ids_list, n, step=_ENGINE_STEP):
 
 def _lp_gap(a, b, n):
     """The largest gap between two runs of one row over its first ``n``
-    steps and the step after, in units of the floor: the chosen token's
-    value over _LP_TOL while both runs emit it, and each shared
-    alternative's nats over _LP_TOL or its probability over _LP_PROB_TOL,
-    whichever is smaller. At the first divergence the emitted tokens
-    differ, but the alternatives still describe the same position."""
+    steps, or up to where the two runs part when that comes first, and
+    the step after, in units of the floor: the chosen token's value over
+    _LP_TOL while both runs emit it, and each shared alternative's nats
+    over _LP_TOL or its probability over _LP_PROB_TOL, whichever is
+    smaller. At the first divergence the emitted tokens differ, but the
+    alternatives still describe the same position."""
     (a_toks, a_lps), (b_toks, b_lps) = a, b
     k = _first_divergence(a_toks, b_toks)
     m = n if k is None else min(n, k)
@@ -1772,7 +1806,8 @@ def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
         k = _first_divergence(s_toks, p_toks)
         n = len(s_toks) if k is None else k
         assert n >= 4, (s_toks, p_toks)
-        bound = max(1.0, 2 * _lp_gap(p, q, n))
+        alt_gap = _lp_gap(p, q, n)
+        bound = max(1.0, 2 * alt_gap)
         gap = _lp_gap(s, p, n)
         # A divergence: the step, the tokens of MTP, plain and the other
         # chunk there, and plain's top-2 margin.
@@ -1781,8 +1816,12 @@ def test_mtp_logprobs_match_a_plain_run(mtp_model, rows):
             round(p_lps[k][1][0][1] - p_lps[k][1][1][1], 4))
         print(f"[lp] rows={rows} row {r}: {n} steps, gap {gap:.3f}, bound "
               f"{bound:.3f} (x {_LP_TOL} nats or {_LP_PROB_TOL} prob); "
-              f"fork {fork}; plain against the {_LP_ALT_STEP} chunk parts at "
-              f"{_first_divergence(p_toks, q[0])}")
+              f"fork {fork}; plain against the {_LP_ALT_STEP} chunk: gap "
+              f"{alt_gap:.3f}, parts at {_first_divergence(p_toks, q[0])}")
+        assert alt_gap <= _LP_ALT_CEIL, (
+            f"plain decode moves {alt_gap:.3f} floor units against itself "
+            f"with only its prefill chunk changed, past {_LP_ALT_CEIL}: a "
+            f"plain-path defect, not an MTP one")
         assert gap <= bound, (gap, bound)
 
 
