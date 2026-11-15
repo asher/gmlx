@@ -96,6 +96,53 @@ def test_verify_rollback_matches_prefix_forward(prompt_len):
     assert mx.abs(logits_a - logits_b).max() < 2e-3
 
 
+
+def test_a_preempted_row_verifies_and_rolls_back_on_its_lifted_caches():
+    """The owned spec engine's preempt lifts a B=1 row through
+    lift_single_cache, each layer by its class's merge: a QSA layer becomes
+    a one-row BatchQSAKVCache and keeps the cascade stamp. Re-armed at B=1
+    the row verifies a block of 3 on the lifted caches, rolls 2 back
+    through the container's trim and decodes on, as the row on its own
+    caches does."""
+    from gmlx.models.qwen4_exp.model import BatchQSAKVCache, QSAKVCache
+    from gmlx.spec.kv_quant import lift_single_cache
+
+    args = _args()
+    lm = Qwen4ExpSpecLM(args)
+    _randomize(lm)
+    vocab = args.vocab_size
+    mx.random.seed(2)
+    prompt = mx.random.randint(0, vocab, (1, 9))
+    block = mx.random.randint(0, vocab, (1, 3))
+    nxt = mx.random.randint(0, vocab, (1, 1))
+
+    def prefilled():
+        c = lm.make_cache()
+        lm(prompt, cache=c)
+        return c
+
+    own, host = prefilled(), prefilled()
+    qsa = [i for i, c in enumerate(host) if isinstance(c, QSAKVCache)]
+    assert qsa
+    stamp = object()
+    for i in qsa:
+        host[i]._gmlx_cascade = stamp
+    lifted = [lift_single_cache(c) for c in host]
+    for i in qsa:
+        assert type(lifted[i]) is BatchQSAKVCache
+        assert lifted[i]._gmlx_cascade is stamp
+    out = []
+    for cache in (own, lifted):
+        streams, _, sink = lm.speculative_verify_hidden(block, cache)
+        lm.rollback_speculative_cache(cache, sink, 0, 3)
+        out.append((lm.speculative_logits_from_hidden(streams),
+                    lm(nxt, cache=cache).logits))
+    for i in qsa:
+        assert int(own[i].offset) == lifted[i].rows[0].offset == 11
+    for a, b in zip(*out):
+        assert mx.array_equal(a, b).item()
+
+
 def test_logits_from_hidden_matches_forward():
     args = _args()
     lm = Qwen4ExpSpecLM(args)
