@@ -1379,10 +1379,13 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     """Under the wired cap, each tick reads the memory wired outside the
     server live: the kernel's wired count less what the server holds
     wired (active, cache and the mapped weights outside MLX's tracker).
-    A rise lowers the headroom the governor admits against by the rise.
-    A fall lifts the cap back no further than its startup figure. A
-    count the kernel has not refreshed keeps the last reading, so the
-    server's own frees never read as memory wired outside it."""
+    A rise held for the window lowers the headroom the governor admits
+    against by the rise. A fall lifts the cap back no further than its
+    startup figure. A count the kernel has not refreshed keeps the last
+    reading, so the server's own frees never read as memory wired
+    outside it."""
+    from collections import deque
+
     import gmlx.serve.capacity as cap
     import gmlx.serve.kernel_vm as kvm
 
@@ -1392,6 +1395,9 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None, raising=False)
     monkeypatch.setattr(cap, "_WIRED_SEEN", None, raising=False)
     monkeypatch.setattr(cap, "_OWN_PEAK", None, raising=False)
+    monkeypatch.setattr(cap, "_LIVE_READS", deque())
+    clock = {"t": 0.0}
+    monkeypatch.setattr(cap, "_now", lambda: clock["t"])
     monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
     monkeypatch.setenv("GMLX_GOV_RESERVE_GB", "40")
     monkeypatch.setattr(gov.mx, "device_info", lambda *a, **k: {
@@ -1403,10 +1409,11 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     gen = FakeGen(rows=2, rate=1e6)
     st = gov._state(gen)
 
-    def tick(outside):
+    def tick(outside, t=0.0):
         # The server holds 30 GB active, its cache and the rig's 50 GB of
         # mapped weights wired.
         box["wired"] = 30e9 + box["cache"] + 50e9 + outside
+        clock["t"] = t
         gov._governor_tick(gen)
         return (gov._ceiling_bytes(120e9, 0.05),
                 gov._headroom_and_ws(0.05)[0],
@@ -1416,8 +1423,11 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     ceiling, head, short = tick(6e9)
     assert ceiling == pytest.approx(91e9)
     assert head == pytest.approx(91e9 - 50e9 - 30e9 - 2e9)
-    # 2 GB more wired outside: the join is 2 GB further over.
-    ceiling2, head2, short2 = tick(8e9)
+    # 2 GB more wired outside, held for the window: the join is 2 GB
+    # further over.
+    tick(8e9, 0.25)
+    assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(91e9)
+    ceiling2, head2, short2 = tick(8e9, 1.25)
     assert ceiling2 == pytest.approx(89e9)
     assert head2 == pytest.approx(head - 2e9)
     assert short2 == pytest.approx(short + 2e9)
@@ -1428,17 +1438,22 @@ def test_the_tick_prices_the_cap_from_memory_wired_outside_the_server_now(
     gov._governor_tick(gen)
     assert gov._ceiling_bytes(120e9, 0.05) == pytest.approx(89e9)
     box["cache"] = 2e9
-    # Less wired outside than at startup: the cap stops at 91 GB.
-    ceiling3, head3, _ = tick(3e9)
+    # Less wired outside than at startup prices at once: the cap stops at
+    # 91 GB.
+    ceiling3, head3, _ = tick(3e9, 1.5)
     assert ceiling3 == pytest.approx(91e9)
     assert head3 == pytest.approx(head)
 
 
 @pytest.fixture
 def read_outside(monkeypatch):
-    """``read(wired, own)``: the tick's reading of memory wired outside the
-    server for the kernel's wired count and what the server holds wired,
-    as the cap prices it, from no reading yet and 6 GB at startup."""
+    """``read(wired, own, t)``: the tick's reading of memory wired outside
+    the server for the kernel's wired count and what the server holds
+    wired at ``t`` seconds (where the last read left the clock when
+    omitted), as the cap prices it, from no reading yet and 6 GB at
+    startup."""
+    from collections import deque
+
     import gmlx.gen.prefill_decay as pd
     import gmlx.serve.capacity as cap
     import gmlx.serve.kernel_vm as kvm
@@ -1448,13 +1463,17 @@ def read_outside(monkeypatch):
     monkeypatch.setattr(cap, "_OUTSIDE_LIVE", None)
     monkeypatch.setattr(cap, "_WIRED_SEEN", None)
     monkeypatch.setattr(cap, "_OWN_PEAK", None, raising=False)
+    monkeypatch.setattr(cap, "_LIVE_READS", deque())
     monkeypatch.setitem(gov._STATS, "outside_wired_bytes", None)
-    box = {}
+    box = {"t": 0.0}
     monkeypatch.setattr(kvm, "wired_bytes", lambda: box["wired"])
     monkeypatch.setattr(pd, "own_wired_bytes", lambda: box["own"])
+    monkeypatch.setattr(cap, "_now", lambda: box["t"])
 
-    def read(wired, own):
+    def read(wired, own, t=None):
         box["wired"], box["own"] = wired, own
+        if t is not None:
+            box["t"] = t
         gov._read_outside_wired()
         return cap.priced_outside_wired_bytes()
     return read
@@ -1475,10 +1494,13 @@ def test_the_live_outside_reading_is_not_moved_by_the_servers_own_trim(
     makes leaves the server's count before the kernel's: a count read in
     between is priced against the most the server held since the last
     count, so the trim is not booked as memory wired outside. A real rise
-    outside still shows at once."""
-    assert read_outside(103.0e9, 93.6e9) == pytest.approx(9.4e9)
-    assert read_outside(wired2, own2) == pytest.approx(want2)
-    assert read_outside(wired3, own2) == pytest.approx(want3)
+    outside shows once it has held for the window, as each count read
+    here prices once the next read finds it held."""
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    read_outside(wired2, own2, 0.25)
+    assert read_outside(wired2, own2, 1.25) == pytest.approx(want2)
+    read_outside(wired3, own2, 1.5)
+    assert read_outside(wired3, own2, 2.5) == pytest.approx(want3)
 
 
 def test_a_read_of_the_same_count_keeps_what_the_server_held(read_outside):
@@ -1490,6 +1512,29 @@ def test_a_read_of_the_same_count_keeps_what_the_server_held(read_outside):
     assert read_outside(103.0e9, 87.0e9) == pytest.approx(16.0e9)
     assert read_outside(103.0e9, 93.6e9) == pytest.approx(16.0e9)
     assert read_outside(103.03e9, 87.09e9) == pytest.approx(9.43e9)
+
+
+def test_a_free_no_tick_saw_is_not_priced_while_the_driver_holds_it(
+        read_outside):
+    """A prefill chunk allocates and frees its transients inside one step,
+    so no tick sees the server hold them, and the driver releases them a
+    few hundred ms after the server stops counting them. A count read in
+    between holds them as if wired outside. The reading priced is the
+    least over the last second, so the spike is never priced."""
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    assert read_outside(109.5e9, 93.6e9, 0.05) == pytest.approx(9.4e9)
+    assert read_outside(103.1e9, 93.6e9, 0.4) == pytest.approx(9.4e9)
+    assert read_outside(103.1e9, 93.6e9, 1.4) == pytest.approx(9.5e9)
+
+
+def test_a_rise_outside_prices_once_it_has_held_for_the_window(read_outside):
+    """More wired outside the server, read at each count from 0.1 s on,
+    prices once it has held for the window, and a fall prices at once."""
+    assert read_outside(103.0e9, 93.6e9, 0.0) == pytest.approx(9.4e9)
+    assert read_outside(109.0e9, 93.6e9, 0.1) == pytest.approx(9.4e9)
+    assert read_outside(109.1e9, 93.7e9, 0.6) == pytest.approx(9.4e9)
+    assert read_outside(109.2e9, 93.8e9, 1.2) == pytest.approx(15.4e9)
+    assert read_outside(103.3e9, 93.8e9, 1.3) == pytest.approx(9.5e9)
 
 
 def test_arm_throttle_limit_uses_ceiling(rig, monkeypatch):
