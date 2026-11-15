@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Self
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -56,7 +56,8 @@ class H3DtypeError(ValueError):
 
 
 @dataclass(frozen=True)
-class H3Config:
+class H3BlockConfig:
+    """H3's config less the audio stream and VSA: what the blocks read."""
     dim: int
     heads: int
     head_dim: int
@@ -64,7 +65,6 @@ class H3Config:
     depth: int
     refiner_depth: int
     latent: int
-    audio: int
     patch: tuple
     text_dim: int
     freqs: int
@@ -73,7 +73,6 @@ class H3Config:
     final_eps: float
     grid: int
     basis: int
-    vsa_sparsity: float = 0.0
 
     @property
     def inner(self) -> int:
@@ -90,17 +89,28 @@ class H3Config:
         return 2 * 3 * self.freqs
 
     @classmethod
-    def from_dict(cls, c: dict) -> "H3Config":
+    def from_dict(cls, c: dict, **extra) -> Self:
         return cls(
             dim=c["hidden_size"], heads=c["num_attention_heads"],
             head_dim=c["attention_head_dim"], ffn=c["ffn_dim"],
             depth=c["num_layers"], refiner_depth=c["num_refiner_layers"],
-            latent=c["in_channels"], audio=c["audio_in_channels"],
-            patch=tuple(c["patch_size"]), text_dim=c["text_dim"],
-            freqs=c["rope_freq_dim"], eps=c["norm_eps"],
-            qk_eps=c["qk_norm_eps"], final_eps=c["final_norm_eps"],
-            grid=c["adaln_grid"], basis=c["adaln_basis"],
-            vsa_sparsity=float(c.get("vsa_sparsity", 0.0)))
+            latent=c["in_channels"], patch=tuple(c["patch_size"]),
+            text_dim=c["text_dim"], freqs=c["rope_freq_dim"],
+            eps=c["norm_eps"], qk_eps=c["qk_norm_eps"],
+            final_eps=c["final_norm_eps"], grid=c["adaln_grid"],
+            basis=c["adaln_basis"], **extra)
+
+
+@dataclass(frozen=True)
+class H3Config(H3BlockConfig):
+    audio: int
+    vsa_sparsity: float = 0.0
+
+    @classmethod
+    def from_dict(cls, c: dict, **extra) -> Self:
+        return super().from_dict(
+            c, audio=c["audio_in_channels"],
+            vsa_sparsity=float(c.get("vsa_sparsity", 0.0)), **extra)
 
 
 @dataclass(frozen=True)
@@ -227,7 +237,7 @@ def attend_int8(q: mx.array, k: mx.array, v: mx.array,
 
 
 class Attention(nn.Module):
-    def __init__(self, cfg: H3Config):
+    def __init__(self, cfg: H3BlockConfig):
         super().__init__()
         self.qkv_proj = nn.Linear(cfg.dim, 3 * cfg.inner, bias=False)
         self.q_norm = ops.RMSNorm(cfg.head_dim, cfg.qk_eps)
@@ -236,7 +246,7 @@ class Attention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, cfg: H3Config):
+    def __init__(self, cfg: H3BlockConfig):
         super().__init__()
         self.fc1 = nn.Linear(cfg.dim, 2 * cfg.ffn, bias=False)
         self.fc2 = nn.Linear(cfg.ffn, cfg.dim, bias=False)
@@ -249,7 +259,7 @@ class AdalnProj(nn.Module):
 
 
 class _Block(nn.Module):
-    def __init__(self, cfg: H3Config):
+    def __init__(self, cfg: H3BlockConfig):
         super().__init__()
         self.heads, self.head_dim = cfg.heads, cfg.head_dim
         self.norm1 = ops.RMSNorm(cfg.dim, cfg.eps)
@@ -300,7 +310,7 @@ class RefinerBlock(_Block):
 
 
 class TokenRefiner(nn.Module):
-    def __init__(self, cfg: H3Config):
+    def __init__(self, cfg: H3BlockConfig):
         super().__init__()
         self.blocks = [RefinerBlock(cfg) for _ in range(cfg.refiner_depth)]
         self.final_norm = ops.RMSNorm(cfg.dim, cfg.final_eps)
