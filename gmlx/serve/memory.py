@@ -355,11 +355,17 @@ def update_kv_rates(gen) -> None:
     state) are constant-size: they join the per-row constant, never the
     rate map. A cache that owns its accounting (``admit_bytes``, the kvarn
     classes) supplies its record rate, depth and per-row bytes directly,
-    because its arrays' time axis is not its token count."""
+    because its arrays' time axis is not its token count. With no row
+    decoding, the live bytes and depth go to 0: the batch they measured
+    has finished."""
     batch = gen._generation_batch
     rows = batch_rows(gen)
     pc = getattr(batch, "prompt_cache", None)
-    if rows <= 0 or not pc:
+    if rows <= 0:
+        gen._kq_admit_live_bytes = 0.0
+        gen._kq_admit_live_depth = 0
+        return
+    if not pc:
         return
     from .memtrace import _arrays, _leaf_caches
 
@@ -493,18 +499,20 @@ def project_admission(gen, candidates):
         cand_tokens.append(prompt_toks + max_toks)
     if not cand_tokens:
         return None
-    width = batch_rows(gen) + len(cand_tokens)
-    tokens = max([getattr(gen, "_kq_admit_live_depth", 0)] + cand_tokens)
+    rows = batch_rows(gen)
+    # With no row decoding there is no live KV to subtract and no batch
+    # depth to price at, whatever the last walk left.
+    live_bytes = getattr(gen, "_kq_admit_live_bytes", 0.0) if rows else 0.0
+    live_depth = getattr(gen, "_kq_admit_live_depth", 0) if rows else 0
+    width = rows + len(cand_tokens)
+    tokens = max([live_depth] + cand_tokens)
     kv_total = 0.0
     for k in rates.values():
         kv_total += _priced_rate(k) * width * _span(k, tokens)
     kv_total += getattr(gen, "_kq_admit_spec_row_const", 0.0) * width
-    live_bytes = getattr(gen, "_kq_admit_live_bytes", 0.0)
     # Self-consistency: the rate model evaluated at the live batch must
     # reproduce the measured bytes. A model that overstates the present
     # overstates the future by the same factor; rescale and say so.
-    rows = batch_rows(gen)
-    live_depth = getattr(gen, "_kq_admit_live_depth", 0)
     model_now = getattr(gen, "_kq_admit_spec_row_const", 0.0) * rows
     for k in rates.values():
         capped = live_depth if k["window"] is None else min(
