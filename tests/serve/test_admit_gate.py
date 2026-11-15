@@ -366,6 +366,27 @@ def test_update_kv_rates_reads_the_batch_watermark():
     assert g._kq_admit_spec_row_const == 0
 
 
+def test_update_kv_rates_counts_a_decoding_cache_once():
+    # A decode step appends in place and keeps a second handle on the
+    # cache's buffers. The walk counts them once, or the gate and the
+    # governor price the KV of every row decoding twice.
+    from gmlx.cache.kv_cache import BatchKVCache, KVCache
+
+    row = KVCache()
+    prompt = mx.zeros((1, 4, 1000, 8), dtype=mx.float16)
+    row.update_and_fetch(prompt, prompt)
+    kv = BatchKVCache.merge([row])
+    step = mx.zeros((1, 4, 1, 8), dtype=mx.float16)
+    kv.update_and_fetch(step, step)
+    g = FakeGen(rows=1)
+    g._generation_batch.prompt_cache = [kv]
+    sm.update_kv_rates(g)
+    held = sum(a.nbytes for a in (kv.keys, kv.values, kv.offset,
+                                  kv.left_padding))
+    assert g._kq_admit_live_bytes == held
+    assert g._kq_admit_kv_rates["BatchKVCache"]["rate"] == held / 1001
+
+
 def test_update_kv_rates_takes_the_cache_accounting(monkeypatch, caplog):
     import gmlx.gen.prefill_decay as pd
 

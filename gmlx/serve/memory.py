@@ -294,6 +294,19 @@ class cache_release_gate:
         return False
 
 
+def _cache_arrays(c):
+    """The arrays a cache holds, each once: the in-place append keeps a
+    second handle on a cache's buffers (``_kv_own``)."""
+    from .memtrace import _arrays
+
+    seen = set()
+    for v in vars(c).values():
+        for a in _arrays(v):
+            if id(a) not in seen:
+                seen.add(id(a))
+                yield a
+
+
 def spec_state_bytes(gen):
     """Speculative-batch resident bytes the cache walk cannot see:
     the parked batch attrs (hidden, shared KV snapshot, prompt tokens,
@@ -316,8 +329,7 @@ def spec_state_bytes(gen):
     dcache = getattr(draft, "_cache", None)
     if dcache:
         for c in dcache:
-            nbytes = sum(a.nbytes for v in vars(c).values()
-                         for a in _arrays(v))
+            nbytes = sum(a.nbytes for a in _cache_arrays(c))
             if _cache_depth(c) > 0:
                 depth_scaled += nbytes
             else:
@@ -401,7 +413,7 @@ def update_kv_rates(gen, fold: bool = True) -> None:
         return
     if not pc:
         return
-    from .memtrace import _arrays, _leaf_caches
+    from .memtrace import _leaf_caches
 
     fresh: dict = {}
     live_bytes = 0.0
@@ -436,11 +448,10 @@ def update_kv_rates(gen, fold: bool = True) -> None:
             continue
         nbytes = 0
         alen = 0
-        for v in vars(c).values():
-            for a in _arrays(v):
-                nbytes += a.nbytes
-                if a.ndim >= 3:
-                    alen = max(alen, int(a.shape[-2]))
+        for a in _cache_arrays(c):
+            nbytes += a.nbytes
+            if a.ndim >= 3:
+                alen = max(alen, int(a.shape[-2]))
         if not nbytes:
             continue
         live_bytes += nbytes
