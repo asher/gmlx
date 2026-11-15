@@ -481,6 +481,7 @@ class QuantizedKVCache(_BaseCache):
 
     @state.setter
     def state(self, v):
+        release(self)
         self.keys, self.values = v
 
     @property
@@ -636,6 +637,7 @@ class KVCache(_BaseCache):
 
     @state.setter
     def state(self, v):
+        release(self)
         self.keys, self.values = v
         self.offset = 0 if self.keys is None else self.keys.shape[2]
 
@@ -1767,6 +1769,7 @@ class ChunkedKVCache(_BaseCache):
 
     @state.setter
     def state(self, v):
+        release(self)
         self.keys, self.values = v
         # from_state builds the cache with __new__.
         self.offset = getattr(self, "start_position", 0) + self.keys.shape[2]
@@ -2128,6 +2131,7 @@ class BatchKVCache(_BaseCache):
 
     @state.setter
     def state(self, v):
+        release(self)
         self.keys, self.values, self.offset, self.left_padding = v
         self._idx = 0 if self.keys is None else self.keys.shape[2]
         self._clear_row_ends()
@@ -3154,6 +3158,7 @@ class BatchQuantizedKVCache(_BaseCache):
 
     @state.setter
     def state(self, val):
+        release(self)
         self.keys, self.values, self.offset, self.left_padding = val
         if self.keys is not None:
             self._idx = self.keys[0].shape[2]
