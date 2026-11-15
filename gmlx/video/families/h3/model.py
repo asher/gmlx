@@ -317,13 +317,9 @@ class TokenRefiner(nn.Module):
 
 
 class DiTBlock(_Block):
-    def __init__(self, cfg: H3Config):
+    def __init__(self, cfg: H3BlockConfig):
         super().__init__(cfg)
         self.dim, self.rot = cfg.dim, cfg.rot
-        self.vsa_sparsity = cfg.vsa_sparsity
-        if cfg.vsa_sparsity:
-            self.attn.to_gate_compress = nn.Linear(cfg.dim, cfg.inner,
-                                                   bias=False)
         self.adaln_proj = AdalnProj(cfg.basis, 6 * 3 * cfg.dim)
 
     def modulation(self, t_emb: mx.array, dtype: mx.Dtype) -> tuple:
@@ -333,54 +329,75 @@ class DiTBlock(_Block):
         y = self.adaln_proj.linear(t_emb).reshape(-1, 6, self.dim)
         return tuple(y[:, i].astype(dtype) for i in range(6))
 
-    def attention(self, h: mx.array, cos: mx.array, sin: mx.array,
-                  chunk: int | None = None, vsa=None,
-                  attention: str = "dense") -> mx.array:
-        """The attention rows (B, L, inner) that ``out_proj`` takes. A
-        pause point after qkv keeps a LoRA delta's second product out of
-        the RoPE step's peak. With a VSA geometry ``vsa`` (B = 1) the
-        rows run video sparse attention with the gate of ``h``, packed
-        [L, heads, head dim], with a pause point after the call, so its
-        transients are gone before ``out_proj`` and the feed-forward run.
-        Else ``attention`` ``"int8"`` runs ``attend_int8`` in place of
-        ``attend``."""
-        b, n, _ = h.shape
-        q, k, v = self.qkv(h)
-        gate = None
-        if vsa is None:
-            pacing.point(q, k, v)
-        else:
-            gate = self.attn.to_gate_compress(h).reshape(n, self.heads,
-                                                         self.head_dim)
-            pacing.point(q, k, v, gate)
+    def rotate(self, q: mx.array, k: mx.array, cos: mx.array,
+               sin: mx.array) -> tuple:
+        """q and k (B, L, H, D) after the qk norms and RoPE, (B, H, L,
+        D)."""
         a, r = self.attn, self.rot
-        q, k = ops.qk_norm_rope(
+        return ops.qk_norm_rope(
             rope.pair_halves(q, r), rope.pair_halves(k, r),
             rope.pair_halves(a.q_norm.weight, r),
             rope.pair_halves(a.k_norm.weight, r), cos, sin, a.q_norm.eps)
-        if gate is not None:
-            # squeeze, not [0]: an integer index is a gather, and MLX's GPU
-            # gather reads a view of more than INT32_MAX elements of extent
-            # with 32-bit offsets (v of the fused qkv from 99,866 rows). See
-            # docs/upstream-defects.md.
-            o = h3vsa.attend(q.squeeze(0).transpose(1, 0, 2),
-                             k.squeeze(0).transpose(1, 0, 2), v.squeeze(0),
-                             gate, vsa, self.vsa_sparsity)
-            pacing.point(o)
-            return o.reshape(b, n, -1)
+
+    def attention(self, h: mx.array, cos: mx.array, sin: mx.array,
+                  chunk: int | None = None,
+                  attention: str = "dense") -> mx.array:
+        """The attention rows (B, L, inner) that ``out_proj`` takes. A
+        pause point after qkv keeps a LoRA delta's second product out of
+        the RoPE step's peak. ``attention`` ``"int8"`` runs
+        ``attend_int8`` in place of ``attend``."""
+        b, n, _ = h.shape
+        q, k, v = self.qkv(h)
+        pacing.point(q, k, v)
+        q, k = self.rotate(q, k, cos, sin)
         run = attend_int8 if attention == "int8" else attend
         o = run(q, k, v.transpose(0, 2, 1, 3), chunk)
         return o.transpose(0, 2, 1, 3).reshape(b, n, -1)
 
     def __call__(self, x: mx.array, mod: tuple, segs: tuple, cos: mx.array,
-                 sin: mx.array, chunk: int | None = None,
-                 vsa=None, attention: str = "dense") -> mx.array:
+                 sin: mx.array, **kw) -> mx.array:
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = mod
         h = modulated(self.norm1(x), shift_a, scale_a, segs)
-        rows = self.attention(h, cos, sin, chunk, vsa, attention)
+        rows = self.attention(h, cos, sin, **kw)
         x = gated(x, gate_a, self.attn.out_proj(rows), segs)
         h = modulated(self.norm2(x), shift_f, scale_f, segs)
         return gated(x, gate_f, self.mlp.fc2(self.hidden(h)), segs)
+
+
+class VsaDiTBlock(DiTBlock):
+    """A FastH3 block: the gate of ``to_gate_compress`` on the qkv rows."""
+
+    def __init__(self, cfg: H3Config):
+        super().__init__(cfg)
+        self.vsa_sparsity = cfg.vsa_sparsity
+        self.attn.to_gate_compress = nn.Linear(cfg.dim, cfg.inner,
+                                               bias=False)
+
+    def attention(self, h: mx.array, cos: mx.array, sin: mx.array,
+                  chunk: int | None = None, attention: str = "dense",
+                  vsa=None) -> mx.array:
+        """With a VSA geometry ``vsa`` (B = 1) the rows run video sparse
+        attention with the gate of ``h``, packed [L, heads, head dim],
+        with a pause point after the call, so its transients are gone
+        before ``out_proj`` and the feed-forward run. Else the dense
+        block's."""
+        if vsa is None:
+            return super().attention(h, cos, sin, chunk, attention)
+        b, n, _ = h.shape
+        q, k, v = self.qkv(h)
+        gate = self.attn.to_gate_compress(h).reshape(n, self.heads,
+                                                     self.head_dim)
+        pacing.point(q, k, v, gate)
+        q, k = self.rotate(q, k, cos, sin)
+        # squeeze, not [0]: an integer index is a gather, and MLX's GPU
+        # gather reads a view of more than INT32_MAX elements of extent
+        # with 32-bit offsets (v of the fused qkv from 99,866 rows). See
+        # docs/upstream-defects.md.
+        o = h3vsa.attend(q.squeeze(0).transpose(1, 0, 2),
+                         k.squeeze(0).transpose(1, 0, 2), v.squeeze(0),
+                         gate, vsa, self.vsa_sparsity)
+        pacing.point(o)
+        return o.reshape(b, n, -1)
 
 
 class FinalLayer(nn.Module):
@@ -412,7 +429,8 @@ class H3Transformer(nn.Module):
         self.adaln_t_table = mx.zeros((cfg.grid, cfg.basis))
         self.rope = Rope(cfg.freqs)
         self.token_refiner = TokenRefiner(cfg)
-        self.blocks = [DiTBlock(cfg) for _ in range(cfg.depth)]
+        block = VsaDiTBlock if cfg.vsa_sparsity else DiTBlock
+        self.blocks = [block(cfg) for _ in range(cfg.depth)]
         self.final_layer = FinalLayer(cfg)
 
     @property
@@ -604,9 +622,11 @@ class H3Transformer(nn.Module):
         if taps is not None:
             taps["in.blocks.0"] = x
             taps["t_emb"] = t_emb
+        kw = {} if plan.vsa is None else {"vsa": plan.vsa}
         for i, blk in enumerate(self.blocks):
             x = blk(x, blk.modulation(t_emb, self.act_dtype), plan.segs,
-                    plan.cos, plan.sin, chunk, plan.vsa, self.attention)
+                    plan.cos, plan.sin, chunk=chunk,
+                    attention=self.attention, **kw)
             pacing.point(x)
             if taps is not None:
                 taps[f"blocks.{i}"] = x
