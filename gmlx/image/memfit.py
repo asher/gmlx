@@ -579,8 +579,7 @@ MOSS_VAE_DECODE = {"exact": {2: VaeFit(base=1.44 * GiB, k=19.7),
 # line through the 2048 and 4096 pixel cells, raised 10 percent, the base
 # 0.25 GiB over every tiled cell. At 4096 pixels a tiled decode reads 0.32
 # GiB against 0.58 priced in float16, 0.33 against 0.58 in float32, and a
-# tiled encode 1.36 against 1.65 and 2.27 against 2.54. The cells are in
-# the lab's results/image/h3-image/b2/cells.
+# tiled encode 1.36 against 1.65 and 2.27 against 2.54.
 _H3_IMAGE_DECODE = {2: VaeFit(base=0.25 * GiB, k=0.2441),
                     4: VaeFit(base=0.26 * GiB, k=0.1385)}
 _H3_IMAGE_ENCODE = {2: VaeFit(base=0.46 * GiB, k=53.87),
