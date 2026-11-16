@@ -440,13 +440,22 @@ def companion_bytes(r: Recipe, ram_bytes: int | None) -> int:
 # The image size an entry pulled with the class default DiT gets in its
 # defaults, where that DiT makes images smaller than the family's size.
 DEFAULT_SIZES = {"krea-2-turbo": {16: "512x512"}}
-# Every family's image size when a request names none.
+# The image size when a request names none, for a variant whose sampling
+# row names no other.
 IMAGE_SIZE = "1024x1024"
 
 
 def image_size(r: Recipe, ram_bytes: int | None) -> str:
-    """The image size a pull of ``r`` at its class default makes here."""
-    return DEFAULT_SIZES.get(r.name, {}).get(memory_class(ram_bytes), IMAGE_SIZE)
+    """The image size a pull of ``r`` at its class default makes here: the
+    class's size where the recipe sets one, else the size of its variant's
+    sampling row."""
+    size = DEFAULT_SIZES.get(r.name, {}).get(memory_class(ram_bytes))
+    if size:
+        return size
+    from .registry import get_family
+
+    row = get_family(r.family).sampling_row(r.variant)
+    return IMAGE_SIZE if row is None else f"{row.size[0]}x{row.size[1]}"
 
 
 def dit_bytes(r: Recipe, quant: str) -> int:

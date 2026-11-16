@@ -47,6 +47,19 @@ def test_default_size_takes_the_entry_then_the_family(size, want):
     assert image_service.default_size(spec, fam) == want
 
 
+@pytest.mark.parametrize("family, want", [("h3_image", (2048, 2048)),
+                                          ("z_image", (1024, 1024))])
+def test_an_entry_without_a_size_takes_its_sampling_row_size(family, want):
+    from gmlx.image.api import sampler_defaults
+    from gmlx.image.registry import get_family
+
+    fam = get_family(family)
+    variant = next(iter(fam.sampling))
+    spec = SimpleNamespace(defaults={})
+    assert image_service.default_size(
+        spec, sampler_defaults(family, variant)) == want
+
+
 def test_request_fields_map_and_aliases_reach_the_default():
     req = image_service.parse_request("generations", {
         "prompt": " a cat ", "model": "gpt-image-1", "n": "3", "size": "768x512",

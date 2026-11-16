@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -392,3 +394,57 @@ def test_open_webui_takes_the_image_size_of_the_default_entry(
     rc, calls = _run(["open-webui", "--config-path", str(tmp_path)])
     assert rc == 0
     assert calls["env"]["IMAGE_SIZE"] == size
+
+
+@pytest.mark.parametrize("entry, server, found, size", [
+    ({"family": "minimax-h3-image"}, {}, None, "2048x2048"),
+    ({"path": "h3.gguf"}, {"model_dirs": ["{root}"]}, "h3_image", "2048x2048"),
+    ({"path": "zit.gguf"}, {"model_dirs": ["{root}"]}, "z_image", "1024x1024"),
+    ({"path": "h3.gguf"}, {}, "h3_image", "1024x1024"),
+], ids=["family", "header", "other-family", "unresolved"])
+def test_open_webui_takes_the_row_size_of_an_entry_without_a_size(
+        monkeypatch, tmp_path, entry, server, found, size):
+    """An entry without defaults.size takes its sampling row's size: by
+    its family key, else by its DiT's header, found under the server's
+    model_dirs, so MiniMax-H3-Image gets 2048x2048."""
+    from gmlx.image import catalog
+
+    root = tmp_path / "models"
+    root.mkdir()
+    for name in ("h3.gguf", "zit.gguf"):
+        (root / name).write_bytes(b"x")
+    seen = []
+
+    def identity(path):
+        seen.append(path)
+        return (found, "pruned" if found == "h3_image" else "turbo")
+
+    monkeypatch.setattr(catalog, "dit_identity", identity)
+    monkeypatch.setattr(launch.shutil, "which", lambda name: f"/usr/bin/{name}")
+    srv = {k: [d.format(root=root) for d in v] for k, v in server.items()}
+    served = ("/srv.yaml", {"server": srv,
+                            "image_models": {"z-image-turbo": entry}})
+    monkeypatch.setattr(launch, "_launch_served", lambda a: served)
+    rc, calls = _run(["open-webui", "--config-path", str(tmp_path)])
+    assert rc == 0
+    assert calls["env"]["IMAGE_SIZE"] == size
+    assert seen == ([str(root / entry["path"])] if srv else [])
+
+
+def test_the_row_size_of_an_entry_reads_without_mlx(tmp_path):
+    """The launch finds an entry's row size, by its family or its DiT's
+    header, without importing mlx."""
+    missing = str(tmp_path / "none.gguf")
+    code = (
+        "import sys\n"
+        "from gmlx.commands import launch\n"
+        "assert launch._row_size({'family': 'minimax-h3-image'}, []) == "
+        "'2048x2048'\n"
+        f"assert launch._row_size({{'path': {missing!r}}}, []) == "
+        "'1024x1024'\n"
+        "bad = sorted(m for m in sys.modules if m.split('.')[0] == 'mlx')\n"
+        "assert not bad, bad\n")
+    r = subprocess.run([sys.executable, "-c", code],
+                       cwd=Path(__file__).resolve().parents[2],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-2000:]

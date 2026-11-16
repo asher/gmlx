@@ -82,7 +82,7 @@ def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
     if row is None:
         return None
     return SamplerDefaults(steps=row.steps, cfg=row.cfg, shift=row.shift,
-                           neg_skip=tuple(row.neg_skip))
+                           size=tuple(row.size), neg_skip=tuple(row.neg_skip))
 
 
 def fixed_steps(family, variant: str) -> int | None:

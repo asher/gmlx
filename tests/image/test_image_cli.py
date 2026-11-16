@@ -728,6 +728,32 @@ def test_a_default_size_outside_the_family_limits_names_the_size_flag(
     assert env.checks == [] and env.pipes == []
 
 
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_an_h3_image_run_by_path_takes_its_row_size(env, tmp_path,
+                                                    monkeypatch, command):
+    """A MiniMax-H3-Image DiT run by its path with no size, so with no
+    entry's defaults.size, plans 2048x2048, its sampling row's size."""
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+
+    def check(*a, **k):
+        env.checks.append(k)
+        raise RuntimeError("planned")
+
+    monkeypatch.setattr(image_preflight, "check", check)
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:]
+    assert umbrella_main(args) != 0
+    assert [(k["width"], k["height"]) for k in env.checks] == [(2048, 2048)]
+    assert env.pipes == []
+
+
 @pytest.mark.parametrize("flags, code, text", [
     ([], 2, "--prompt or --prompt-file is required"),
     (["--prompt", "p", "--size", "40x32"], 2, "multiples of 16"),

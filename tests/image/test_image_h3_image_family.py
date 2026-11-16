@@ -72,6 +72,19 @@ def test_the_sampling_row_is_the_release_grid():
     assert fam.constants.values["pdd_sigmas"] == pdd["sigmas"]
 
 
+def test_a_request_without_a_size_takes_the_release_size():
+    """The row gives every H3-Image file, of any identity, 2048x2048 when
+    a request names no size; the other families keep 1024x1024."""
+    from gmlx.image import api
+    from gmlx.image.registry import families
+
+    for variant in ("pruned", "unknown"):
+        assert api.sampler_defaults("h3_image", variant).size == (2048, 2048)
+    for fam in families():
+        if fam is not hi.FAMILY:
+            assert {r.size for r in fam.sampling.values()} <= {(1024, 1024)}
+
+
 def test_the_label_rule_takes_hyvid_or_none():
     assert hi.FAMILY.arch_strings == frozenset({None})
     assert hi.FAMILY.shared_arch_strings == frozenset({"hyvid"})

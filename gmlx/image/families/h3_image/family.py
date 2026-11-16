@@ -117,9 +117,10 @@ VARIANTS = {
     "09989a5803d8d2cd0cf236a4c9a73d48ab2cfbac06c72812e3bad034bb6a0c12":
         _PRUNED,
 }
+# The release's size, 2048x2048 pixels, which the model is tuned for.
 SAMPLING = {
     "pruned": SamplingRow(STEPS, 1.0, 1.0, _REPO, _REVISION,
-                          sigmas=PDD_SIGMAS[:-1]),
+                          sigmas=PDD_SIGMAS[:-1], size=(2048, 2048)),
 }
 
 

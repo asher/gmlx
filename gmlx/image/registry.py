@@ -33,7 +33,8 @@ class SamplingRow:
     ``sigmas`` is a fixed schedule without its final zero, for a variant
     distilled to it: such a variant runs that many steps and no other
     count. ``neg_skip`` holds the blocks, zero-based, that the negative
-    pass of a guided step skips."""
+    pass of a guided step skips. ``size`` is the (width, height) of a
+    request that names none."""
     steps: int
     cfg: float
     shift: float
@@ -42,6 +43,7 @@ class SamplingRow:
     quality: tuple = ()
     sigmas: tuple = ()
     neg_skip: tuple = ()
+    size: tuple = (1024, 1024)
 
 
 @dataclass(frozen=True)
