@@ -388,18 +388,26 @@ def _image_only(served, what: str) -> None:
 
 def _check_size(hold, width: int, height: int, *, what: str,
                 cfg: float = 1.0, init: bool = False, phase: str):
-    """Refuse a step or a VAE pass over the size limits of the image
-    routes with 413, and one whose memory plan does not fit beside the
-    models loaded with 400. ``phase`` is the phase of the plan the call
-    runs, which alone counts the held conditioning states. Returns the
-    budget it planned against."""
-    from ..image_service import MAX_PIXELS, MAX_SIDE, size_fits
+    """Refuse a step or a VAE pass over the size limits of the entry's
+    family (the image routes' where it sets none) with 413, a step at a
+    size the family refuses otherwise with 400, and one whose memory plan
+    does not fit beside the models loaded with 400. ``phase`` is the phase
+    of the plan the call runs, which alone counts the held conditioning
+    states. Returns the budget it planned against."""
+    from gmlx.image.registry import limits_text, size_limits, size_refusal
+
+    from ..image_service import size_fits
     from ..image_steps import StepError
 
-    if width * height > MAX_PIXELS or max(width, height) > MAX_SIDE:
-        raise StepError(413, f"{what} of {width}x{height} pixels is over the "
-                        f"limit of {MAX_PIXELS} pixels (2048x2048) and a "
-                        f"side of {MAX_SIDE}")
+    fam = _served(hold).pipe.family
+    pixels, side = size_limits(fam)
+    if (pixels and width * height > pixels) or (side and
+                                                max(width, height) > side):
+        raise StepError(413, f"{what} of {width}x{height} pixels is over "
+                        f"{limits_text(fam)}")
+    why = size_refusal(fam, width, height) if phase == "denoise" else None
+    if why:
+        raise StepError(400, f"{what}: {why}")
     budget_fn = getattr(SETTINGS.host, "budget", None)
     budget = budget_fn(hold) if budget_fn is not None else None
     if not size_fits(_served(hold), width, height, budget, cfg=cfg,

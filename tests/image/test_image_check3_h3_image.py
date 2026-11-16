@@ -105,8 +105,11 @@ def test_sample_gives_each_step_the_sigma_it_goes_to(tiny, monkeypatch):
     arrays, _ = cases[TINY_CASES[0]]
     c4, m4 = committed_fixture("check4_h3_image")
     s = c4["simple_3"]
+    # The tiny model runs at 64x64, under the family's least pixels.
     pipe = api.ImagePipeline(dit=hg.tiny_model(weights, config),
-                             family=hi.FAMILY, variant="pruned")
+                             family=dataclasses.replace(hi.FAMILY,
+                                                        min_pixels=None),
+                             variant="pruned")
     real = him.H3ImageDiT.modulation
     seen = []
 

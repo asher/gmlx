@@ -332,6 +332,11 @@ def entry_plan(spec) -> EntryPlan:
                 f"image model {spec.id!r}: defaults.steps: {e}") from None
     defaults = sampler_defaults(fam.name, ident.variant)
     width, height = default_size(spec, defaults)
+    from gmlx.image.registry import size_refusal
+
+    why = size_refusal(fam, width, height)
+    if why:
+        raise ImageModelError(f"image model {spec.id!r}: defaults.size {why}")
     cfg = (spec.defaults or {}).get("guidance")
     if cfg is None:
         cfg = defaults.cfg if defaults is not None else 1.0
@@ -711,8 +716,10 @@ def _choice(fields: dict, name: str, allowed, default: str) -> str:
     return text
 
 
-def parse_size(value) -> tuple | None:
-    """``WxH`` as (width, height), or None for ``auto`` and no value."""
+def parse_size(value, family=None) -> tuple | None:
+    """``WxH`` as (width, height), or None for ``auto`` and no value. A
+    size is held to the limits of ``family``, the entry's, where it sets
+    its own, else to the image limits."""
     if value is None or value == "" or str(value).strip().lower() == "auto":
         return None
     w, sep, h = str(value).strip().lower().partition("x")
@@ -724,15 +731,60 @@ def parse_size(value) -> tuple | None:
         raise _bad(f"size must be WxH or auto, not {value!r}", "size") from None
     if min(size) <= 0:
         raise _bad(f"size {value!r} is not a positive width and height", "size")
-    if not _in_limits(size):
-        raise _bad(f"size {size[0]}x{size[1]} is over the limit of "
-                   f"{MAX_PIXELS} pixels (2048x2048) and a side of "
-                   f"{MAX_SIDE}", "size")
+    from gmlx.image.registry import limited, limits_text, size_refusal
+
+    if limited(family):
+        why = size_refusal(family, *size)
+        if why:
+            raise _bad(f"size {why}", "size")
+    elif not _in_limits(size):
+        raise _bad(f"size {size[0]}x{size[1]} is over {limits_text(None)}",
+                   "size")
     return size
 
 
 def _in_limits(size) -> bool:
     return size[0] * size[1] <= MAX_PIXELS and max(size) <= MAX_SIDE
+
+
+# The family of each configured entry a request names, by (id, load
+# signature), for its size limits at parse time; a reload clears it.
+_FAMILIES: dict = {}
+_FAMILIES_LOCK = threading.Lock()
+
+
+def clear_request_families() -> None:
+    with _FAMILIES_LOCK:
+        _FAMILIES.clear()
+
+
+def request_family(model_field):
+    """The family of the entry a request's ``model`` field names: its
+    configured ``family``, else its DiT header's. None with no config, or
+    when the entry does not resolve or its DiT does not identify, which
+    acquire then refuses as it does."""
+    from gmlx.image.loader import identify_dit
+    from gmlx.image.registry import family_named
+
+    from . import bridge_vlm
+
+    try:
+        _path, spec = bridge_vlm.resolve_image_request(model_field)
+        key = (spec.id, spec.load_signature())
+    except Exception:  # noqa: BLE001 - acquire answers every resolve failure
+        return None
+    with _FAMILIES_LOCK:
+        if key in _FAMILIES:
+            return _FAMILIES[key]
+    try:
+        fam = family_named(spec.family) if spec.family else None
+        if fam is None:
+            fam = identify_dit(spec.path, variant=spec.variant).family
+    except Exception:  # noqa: BLE001 - acquire answers every identify failure
+        return None
+    with _FAMILIES_LOCK:
+        _FAMILIES[key] = fam
+    return fam
 
 
 def _adapters(value) -> list:
@@ -806,12 +858,15 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
         raise _bad(surrogate_message(field), field)
     q = fields.get("quality")
     q = _QUALITY_ALIASES.get(str(q).strip().lower(), q) if q else q
+    model = default_model_field(fields.get("model"))
+    size = fields.get("size")
+    family = None if size in (None, "") else request_family(model)
     req = ImageRequest(
         route=route,
-        model=default_model_field(fields.get("model")),
+        model=model,
         prompt=prompt,
         n=_int(fields, "n", 1, MAX_N) or 1,
-        size=parse_size(fields.get("size")),
+        size=parse_size(size, family),
         quality=_choice({"quality": q}, "quality", QUALITIES, "auto"),
         steps=_int(fields, "steps", 1, 200),
         seed=_int(fields, "seed", 0, (1 << 63) - 1),
@@ -1115,8 +1170,9 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     """(width, height) of the request: its size, else the size the family
     gives its prepared references, else the first image's for an edit or
     a variation, else the entry's default. A size the request does not
-    give is scaled into the image limits."""
-    from gmlx.image.registry import edit_size
+    give is scaled into the family's limits, and one a limited family
+    refuses is refused; the request's own size was held at parse time."""
+    from gmlx.image.registry import edit_size, fit_size, size_refusal
 
     pipe = served.pipe
     unit = _stride(served)
@@ -1136,10 +1192,13 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     if req.images:
         h, w = req.images[0].shape[:2]
         # A large image gives the largest size of its shape in the limits.
-        scale = min(1.0, (MAX_PIXELS / (w * h)) ** 0.5, MAX_SIDE / max(w, h))
-        w, h = int(w * scale) // unit * unit, int(h * scale) // unit * unit
+        w, h = fit_size(w, h, unit, pipe.family)
         if min(w, h) <= 0:
             raise _bad(f"image is smaller than {unit} pixels", "image")
+        why = size_refusal(pipe.family, w, h)
+        if why:
+            raise _bad(f"the first image sizes the result: {why}; give "
+                       "the request a size", "size")
         return w, h
     return tuple(served.plan.size)
 

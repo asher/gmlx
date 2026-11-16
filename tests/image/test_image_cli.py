@@ -675,6 +675,31 @@ def test_a_flow_map_refuses_guidance_before_the_preflight_and_the_loads(
     assert env.checks == [] and env.pipes == []
 
 
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_a_size_outside_the_family_limits_is_refused_before_the_loads(
+        env, tmp_path, monkeypatch, capsys, command):
+    """MiniMax-H3-Image refuses a size under its least pixels after the
+    identify, naming the smallest size of the shape, before the memory
+    preflight and before any file loads."""
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--size", "512x512", "--output",
+                           str(tmp_path / "a.png")]
+        flag = "--size"
+    else:
+        args = ["image", "bench"] + env.base[2:] + ["--sizes", "512x512"]
+        flag = "--sizes"
+    assert umbrella_main(args) == 2
+    assert (f"{flag} 512x512 is 262,144 pixels, under the 655,360 that "
+            "MiniMax-H3-Image takes; the smallest size of its shape is "
+            "832x832") in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
+
+
 @pytest.mark.parametrize("flags, code, text", [
     ([], 2, "--prompt or --prompt-file is required"),
     (["--prompt", "p", "--size", "40x32"], 2, "multiples of 16"),

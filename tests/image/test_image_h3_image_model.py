@@ -127,3 +127,23 @@ def test_what_the_model_does_not_run_is_refused(config):
         model(lat, 1.0, mx.zeros((1, 2, 5120)), refs=[lat])
     with pytest.raises(ValueError, match="one frame square"):
         him.H3ImageConfig.from_dict({**config, "patch_size": [2, 2, 2]})
+
+
+def test_sample_refuses_a_size_outside_the_family_limits():
+    """The API holds a sample to MiniMax-H3-Image's limits, by name,
+    before any step runs."""
+    from types import SimpleNamespace
+
+    from gmlx.image import api
+
+    pipe = SimpleNamespace(
+        family=hi.FAMILY, variant="pruned", default_table="", patch_tables={
+            "": None}, defaults=SimpleNamespace(cfg=1.0, steps=6),
+        dit=SimpleNamespace(cfg=SimpleNamespace(), reads_target=True),
+        size_multiple=32)
+    for (w, h), why in (((512, 512), "the smallest size of its shape is "
+                                     "832x832"),
+                        ((7744, 1024), "a side over the 7712"),
+                        ((2048, 640), "1:3 to 3:1")):
+        with pytest.raises(api.RequestRefusal, match=why):
+            api.sample(pipe, None, height=h, width=w)

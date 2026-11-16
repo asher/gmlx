@@ -1358,6 +1358,11 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     if height <= 0 or width <= 0 or height % unit or width % unit:
         raise ValueError(f"height and width must be positive multiples of "
                          f"{unit}, not {height}x{width}")
+    from .registry import size_refusal
+
+    why = size_refusal(pipe.family, width, height)
+    if why:
+        raise RequestRefusal(why)
     if not 0.0 < denoise <= 1.0:
         raise RequestRefusal(f"denoise must lie in (0, 1], not {denoise}")
     if init_latents is None and (denoise < 1.0 or mask is not None):

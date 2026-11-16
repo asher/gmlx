@@ -190,6 +190,35 @@ def test_generations_answer_b64_by_default(served):
     assert served.released == [1]
 
 
+def test_a_size_the_entry_family_refuses_is_a_400_before_admission(
+        served, monkeypatch):
+    """A MiniMax-H3-Image entry refuses 512x512 at parse time, naming the
+    smallest size of its shape, before the queue and the model acquire,
+    and takes 4096x4096, past the image limits. A reload clears the
+    families read."""
+    from gmlx.image.registry import get_family
+
+    acquired = []
+    real = residency.acquire_image_model
+    monkeypatch.setattr(residency, "acquire_image_model", lambda model: (
+        acquired.append(model) or real(model)))
+    monkeypatch.setattr(svc, "request_family",
+                        lambda model: get_family("h3_image"))
+    r = _client().post("/v1/images/generations",
+                       json={"prompt": "a cat", "size": "512x512"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["param"] == "size"
+    assert "832x832" in r.json()["error"]["message"]
+    assert acquired == [] and served.jobs == []
+    r = _client().post("/v1/images/generations",
+                       json={"prompt": "a cat", "size": "4096x4096"})
+    assert r.status_code == 200, r.text
+    assert served.jobs[0][0].size == (4096, 4096) and acquired == [""]
+    svc._FAMILIES[("zit", ())] = None
+    images.install_image_routes(build_config(_DOC))
+    assert svc._FAMILIES == {}
+
+
 def test_url_answers_read_back_without_the_key_and_expire(served, monkeypatch):
     from gmlx.serve.patches import hardening
 

@@ -1747,6 +1747,35 @@ def test_a_step_or_vae_pass_over_the_size_limits_is_413(host, path, tensors,
     assert host.held == 0
 
 
+def test_a_limited_family_holds_the_step_routes_to_its_limits(monkeypatch):
+    """A MiniMax-H3-Image entry takes a 4096x4096 step, past the image
+    limits, refuses one over its own with 413, and a step under its least
+    pixels with 400 naming the smallest size of the shape. A VAE pass is
+    held to the upper limits alone."""
+    import gmlx.serve.image_service as svc
+
+    hold = SimpleNamespace(_entry=SimpleNamespace(pipeline=SimpleNamespace(
+        pipe=SimpleNamespace(family=get_family("h3_image")))))
+    monkeypatch.setattr(svc, "size_fits", lambda *a, **k: True)
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    kw = dict(what="a step", phase="denoise")
+    routes._check_size(hold, 4096, 4096, **kw)
+    with pytest.raises(steps.StepError, match="a step of 8000x2000 pixels is "
+                       "over the 20,000,000 pixels and a side of 7712 that "
+                       "MiniMax-H3-Image takes") as e:
+        routes._check_size(hold, 8000, 2000, **kw)
+    assert e.value.status == 413
+    with pytest.raises(steps.StepError, match="a step: 512x512 is 262,144 "
+                       "pixels.*832x832") as e:
+        routes._check_size(hold, 512, 512, **kw)
+    assert e.value.status == 400
+    routes._check_size(hold, 512, 512, what="a VAE decode", phase="decode")
+    with pytest.raises(steps.StepError) as e:
+        routes._check_size(hold, 8000, 2000, what="a VAE decode",
+                           phase="decode")
+    assert e.value.status == 413
+
+
 @pytest.mark.parametrize("path, tensors, fields", [
     ("step", {"x": np.zeros(SHAPE, np.float32),
               "timestep": np.zeros((1,), np.float32)},

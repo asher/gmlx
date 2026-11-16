@@ -359,6 +359,26 @@ def test_a_refusal_names_a_change_that_makes_the_entry_fit(
     assert "encoder_release: always" not in str(e.value)
 
 
+def test_a_limited_family_holds_the_default_size_to_its_limits(
+        plan_stubs, monkeypatch):
+    """An entry of MiniMax-H3-Image whose default size its limits refuse
+    does not load; a Z-Image entry at 4096x4096 still does."""
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    assert image_service.entry_plan(_spec(defaults={"size": "4096x4096"}))
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        get_family("h3_image"), "pruned"))
+    assert image_service.entry_plan(_spec(id="h3", defaults={
+        "size": "4096x4096"}))
+    with pytest.raises(ImageModelError, match="image model 'h3': "
+                       "defaults.size 512x512 is 262,144 pixels, under the "
+                       "655,360 that MiniMax-H3-Image takes; the smallest "
+                       "size of its shape is 832x832"):
+        image_service.entry_plan(_spec(id="h3", defaults={"size": "512x512"}))
+
+
 def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
     from gmlx.image import loader
     from gmlx.image.fingerprint import ImageModelError
@@ -1021,6 +1041,113 @@ def test_a_size_inside_the_limits_is_taken(size):
     assert image_service.parse_size(size) == (w, h)
 
 
+def test_a_limited_family_holds_a_size_to_its_own_limits():
+    """MiniMax-H3-Image's limits stand in for the image limits: 4096x4096
+    is taken, and a size under its least pixels or outside its shapes is
+    refused by name."""
+    from gmlx.image.registry import get_family
+
+    h3 = get_family("h3_image")
+    assert image_service.parse_size("4096x4096", h3) == (4096, 4096)
+    assert image_service.parse_size("7712x2592", h3) == (7712, 2592)
+    for size, why in (("512x512", "the smallest size of its shape is "
+                                  "832x832"),
+                      ("1024x320", "1:3 to 3:1"),
+                      ("4480x4480", "over the 20,000,000")):
+        with pytest.raises(image_service.ImageRequestError,
+                           match=why) as e:
+            image_service.parse_size(size, h3)
+        assert e.value.param == "size"
+    # Another family keeps the image limits.
+    with pytest.raises(image_service.ImageRequestError,
+                       match="limit of 4194304 pixels"):
+        image_service.parse_size("4096x4096", get_family("z_image"))
+
+
+def _entry(monkeypatch, family=None, signature=("a",), resolves=True):
+    """A configured entry that ``request_family`` resolves, and the calls
+    its DiT header identify gets."""
+    from gmlx.image import loader
+    from gmlx.image.registry import get_family
+    from gmlx.serve import bridge_vlm
+
+    spec = SimpleNamespace(id="h3", path="/h3.gguf", family=family,
+                           variant=None, load_signature=lambda: signature)
+
+    def resolve(model):
+        if not resolves:
+            raise bridge_vlm.ModelNotFound(model, {})
+        return spec.path, spec
+
+    calls = []
+    monkeypatch.setattr(bridge_vlm, "resolve_image_request", resolve)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
+        calls.append(path) or SimpleNamespace(family=get_family("h3_image"))))
+    image_service.clear_request_families()
+    return spec, calls
+
+
+def test_a_request_size_is_held_to_its_entry_family_at_parse_time(
+        monkeypatch):
+    """The entry's family, by its configured name or else its header,
+    once per entry and load signature until a reload clears it."""
+    spec, calls = _entry(monkeypatch)
+    fields = {"prompt": "x", "model": "h3"}
+    req = image_service.parse_request("generations",
+                                      fields | {"size": "4096x4096"})
+    assert req.size == (4096, 4096)
+    with pytest.raises(image_service.ImageRequestError,
+                       match="832x832") as e:
+        image_service.parse_request("generations", fields | {"size": "512x512"})
+    assert e.value.param == "size" and calls == ["/h3.gguf"]
+    # No size asks for no family.
+    image_service.parse_request("generations", fields)
+    assert calls == ["/h3.gguf"]
+    spec.load_signature = lambda: ("b",)
+    image_service.parse_request("generations", fields | {"size": "4096x4096"})
+    image_service.clear_request_families()
+    image_service.parse_request("generations", fields | {"size": "4096x4096"})
+    assert calls == ["/h3.gguf"] * 3
+    # A configured family name is read without the header.
+    _spec, calls = _entry(monkeypatch, family="h3_image")
+    image_service.parse_request("generations", fields | {"size": "4096x4096"})
+    assert calls == []
+
+
+def test_a_request_whose_entry_does_not_resolve_keeps_the_image_limits(
+        monkeypatch):
+    _spec, calls = _entry(monkeypatch, resolves=False)
+    with pytest.raises(image_service.ImageRequestError,
+                       match="limit of 4194304 pixels"):
+        image_service.parse_request("generations", {
+            "prompt": "x", "model": "h3", "size": "4096x4096"})
+    assert calls == []
+
+
+def test_a_derived_size_is_held_to_a_limited_family():
+    """A size from the first image scales into MiniMax-H3-Image's limits
+    at its shape, and one under its least pixels is refused."""
+    import numpy as np
+
+    from gmlx.image.registry import get_family
+
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(family=get_family("h3_image")),
+        facts=_facts(size_multiple=32), plan=SimpleNamespace(size=(2048,
+                                                                   2048)))
+    req = image_service.parse_request("variations", {})
+    req.images = [np.zeros((3000, 9000, 3), np.uint8)]
+    assert image_service.target_size(req, served) == (7680, 2560)
+    req.images = [np.zeros((512, 512, 3), np.uint8)]
+    with pytest.raises(image_service.ImageRequestError,
+                       match="the first image sizes the result: 512x512 is "
+                             "262,144 pixels, under the 655,360") as e:
+        image_service.target_size(req, served)
+    assert e.value.param == "size"
+    req.images = []
+    assert image_service.target_size(req, served) == (2048, 2048)
+
+
 def _fit_served(monkeypatch, fits_px: int):
     """A served entry whose plan fits sizes of at most ``fits_px`` pixels,
     counting the plans it makes."""
@@ -1505,7 +1632,10 @@ def test_a_size_off_the_family_stride_is_refused():
 def test_a_large_edit_image_gives_the_largest_size_of_its_shape():
     import numpy as np
 
-    served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
+    from gmlx.image.registry import get_family
+
+    served = SimpleNamespace(pipe=SimpleNamespace(
+        size_multiple=16, family=get_family("z_image")),
                              plan=SimpleNamespace(size=(1024, 1024)),
                              facts=_facts())
     req = image_service.parse_request("edits", {"prompt": "x"})

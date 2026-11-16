@@ -925,7 +925,11 @@ def is_file_path(path: str, method: str) -> bool:
 def install_image_routes(cfg) -> None:
     """Replace mlx-vlm's image routes with gmlx's, at both prefixes, with
     or without an image model in ``cfg``, and serve the URL-response
-    files. A reload calls it again with the new config."""
+    files. A reload calls it again with the new config, which drops the
+    families the requests' size checks read."""
+    from ..image_service import clear_request_families
+
+    clear_request_families()
     STATE.configure(cfg)
     if STATE.store is not None:
         STATE.store.sweep()

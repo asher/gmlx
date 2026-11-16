@@ -70,6 +70,17 @@ def _size(text: str) -> tuple[int, int]:
     return size
 
 
+def _check_limits(fam, width: int, height: int, flag: str | None) -> None:
+    """Refuse a size the family's own limits refuse, naming ``flag`` when
+    the size came from it."""
+    from gmlx.image.registry import size_refusal
+
+    why = size_refusal(fam, width, height)
+    if why:
+        raise _Usage(f"{flag} {why}" if flag else
+                     f"the image size {why}; give one with --size")
+
+
 def _positive(text: str) -> int:
     try:
         n = int(text)
@@ -852,6 +863,7 @@ def _generate(a) -> int:
     if width % stride or height % stride:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")
+    _check_limits(fam, width, height, "--size" if a.size else None)
     mask = read_mask(a.mask, (width, height)) if a.mask else None
     text_only = edit is not None and edit.text_only
     revised = _upsample(a, fam, prompt, refs, log)
@@ -1330,6 +1342,7 @@ def _bench(a) -> int:
         if w % stride or h % stride:
             raise _Usage(f"--sizes {w}x{h}: width and height must be "
                          f"multiples of {stride}")
+        _check_limits(fam, w, h, "--sizes" if a.sizes else None)
     big = max(sizes, key=lambda s: s[0] * s[1])
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
