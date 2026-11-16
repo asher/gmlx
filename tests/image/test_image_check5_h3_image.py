@@ -232,11 +232,95 @@ def _pixels_not_denormalized(mp):
                lambda self, raw: mx.clip(raw, 0.0, 1.0) * 2.0 - 1.0)
 
 
+def _decoded_tiles_blend_raw(mp):
+    """Each decoded tile blends with its neighbors as decoded, as encoded
+    tiles blend, in place of the canvas as blended."""
+    def tiled_decode(self, z, per_forward=hv.TILES_PER_FORWARD):
+        sp = self.config.spatial
+        b, h, w = z.shape[0], z.shape[1] * sp, z.shape[2] * sp
+        ys, ylen, yo = tiles.split_tiles(h, tiles.TILE, tiles.MIN_OVERLAP, sp)
+        xs, xlen, xo = tiles.split_tiles(w, tiles.TILE, tiles.MIN_OVERLAP, sp)
+        canvas, above = mx.zeros((b, h, w, 3)), None
+        for i, (y, yl) in enumerate(zip(ys, ylen)):
+            raw = list(self._row(z[:, y // sp:(y + yl) // sp], xs, xlen,
+                                 per_forward))
+            for j, (x, xl) in enumerate(zip(xs, xlen)):
+                tile = raw[j]
+                if i > 0:
+                    tile = vit.blend(above[j], tile, yo[i - 1], axis=1)
+                if j > 0:
+                    tile = vit.blend(raw[j - 1], tile, xo[j - 1], axis=2)
+                canvas[:, y:y + yl, x:x + xl] = tile
+            above = raw
+        return canvas
+    mp.setattr(hv.H3ImageVAE, "tiled_decode", tiled_decode)
+
+
+def _decoder_tokens(mp, grid: bool, zero: bool):
+    """The decoder with its registers, and the zero token if ``zero``, at
+    the first grid coordinates if ``grid``, else at 0."""
+    def call(self, z):
+        cfg, (b, hh, ww, c) = self.cfg, z.shape
+        dt, n = self.x_embedder.weight.dtype, hh * ww
+        x = self.x_embedder(z.reshape(b, n, c).astype(dt)).astype(mx.float32)
+        extra = cfg.registers + int(zero)
+        regs = mx.broadcast_to(self.register_tokens.astype(mx.float32),
+                               (b, cfg.registers, cfg.dim))
+        x = mx.concatenate([x, regs, mx.zeros((b, int(zero), cfg.dim))],
+                           axis=1)
+        tok = vit.token_coords(hh, ww)
+        coords = mx.concatenate(
+            [tok, tok[:extra] if grid else mx.zeros((extra, 2))], axis=0)
+        x = vit.run_blocks(self.transformer_blocks, x,
+                           *vit.rope_tables(cfg, coords))
+        out = self.proj_out(self.norm_out(x[:, :n]).astype(dt))
+        p = cfg.spatial
+        out = out.astype(mx.float32).reshape(b, hh, ww, 3, p, p)
+        return out.transpose(0, 1, 4, 2, 5, 3).reshape(b, hh * p, ww * p, 3)
+    mp.setattr(hv.Decoder, "__call__", call)
+
+
+def _encoded_tiles_blend_blended(mp):
+    """Each encoded tile blends with its neighbors as blended, as decoded
+    tiles blend, in place of as encoded."""
+    def tiled_moments(x, moments, sp):
+        ys, ylen, yo = tiles.split_tiles(x.shape[2], tiles.TILE,
+                                         tiles.MIN_OVERLAP, sp)
+        xs, xlen, xo = tiles.split_tiles(x.shape[3], tiles.TILE,
+                                         tiles.MIN_OVERLAP, sp)
+        rows = []
+        for i, (y, yl) in enumerate(zip(ys, ylen)):
+            row = []
+            for j, (x0, xl) in enumerate(zip(xs, xlen)):
+                m = moments(x[:, :, y:y + yl, x0:x0 + xl])
+                if i > 0:
+                    m = vit.blend(rows[i - 1][j], m, yo[i - 1] // sp, axis=2)
+                if j > 0:
+                    m = vit.blend(row[j - 1], m, xo[j - 1] // sp, axis=3)
+                row.append(m)
+            rows.append(row)
+        cut_y = [yo[i] // sp if i < len(ys) - 1 else 0
+                 for i in range(len(ys))]
+        cut_x = [xo[j] // sp if j < len(xs) - 1 else 0
+                 for j in range(len(xs))]
+        return mx.concatenate([mx.concatenate(
+            [m[:, :, :m.shape[2] - cut_y[i], :m.shape[3] - cut_x[j]]
+             for j, m in enumerate(row)], axis=3)
+            for i, row in enumerate(rows)], axis=2)
+    mp.setattr(vit, "tiled_moments", tiled_moments)
+
+
 WRONG = {"zero pad": _zero_pad,
          "rotate half over the head": _rotate_half_over_the_head,
          "positions unscaled": _positions_unscaled,
          "tiles not blended": _tiles_not_blended,
-         "pixels not denormalized": _pixels_not_denormalized}
+         "pixels not denormalized": _pixels_not_denormalized,
+         "decoded tiles blend raw": _decoded_tiles_blend_raw,
+         "registers at grid coordinates":
+             lambda mp: _decoder_tokens(mp, grid=True, zero=True),
+         "no zero token": lambda mp: _decoder_tokens(mp, grid=False,
+                                                     zero=False),
+         "encoded tiles blend as blended": _encoded_tiles_blend_blended}
 
 
 @pytest.mark.parametrize("name", list(WRONG))
