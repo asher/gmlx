@@ -1,0 +1,235 @@
+{
+ "schema": 1,
+ "name": "check6_h3_image_1024",
+ "check": 6,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check6_h3_image.py",
+ "argv": ["check6_h3_image.py", "--dit", "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf", "--source", "minimax_h3_image_pruned-UD-Q4_K_XL.gguf", "--features", "check2_h3_image.npz", "--prompt", "plain", "--sizes", "1024", "--bf16", "1024"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+   "size": 13607428832,
+   "sha256": "90616d8cef7d4c234485c17ba63db85db1cbe38f50400e66e704060c2494ffdd"
+  },
+  "oracle_dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf",
+   "size": 13607429024,
+   "sha256": "99df1f83bdccc8c1823c2fdfad8500be4a1333d0a4df5dac9beb2983935cc273"
+  },
+  "features": {
+   "name": "check2_h3_image.npz",
+   "size": 197819810,
+   "sha256": "bb78f1182e6c4890e5bb6a1eaff6b1ada31334ade479bec0b19fe4cc197ff1c6"
+  }
+ },
+ "inputs": {
+  "size": 1024,
+  "steps": 6,
+  "guidance": 1.0,
+  "seed": 6,
+  "prompt": "plain",
+  "features": "check 2 fp32 tap of 'plain'",
+  "text_rows": 28,
+  "gate_size": 1024,
+  "sigmas": "the PDD grid of pdd_config.json, the sampler's sigmas and the step sigmas",
+  "timestep": "sigma x 1000 in float32",
+  "euler": "x + (sigma_next - sigma) v in float32, the velocity in float32",
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 24, size / 16, size / 16)",
+  "latents": "(1, 24, size / 16, size / 16) float32 in model space, after the step",
+  "dequant": "ComfyUI-GGUF dequantize_tensor with dequant_dtype float32: K-quant block math in float32, on every call",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "attention": "attention_pytorch"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_features": "the fp32 tap cast to bfloat16"
+  },
+  "steps_run": 6,
+  "fp32_step_s": [33.1, 46.9, 49.3, 49.9, 49.3, 47.6],
+  "fp32_s": 276.0,
+  "bf16_step_s": [101.0, 90.4, 111.4, 112.7, 102.8, 98.9],
+  "bf16_s": 617.1,
+  "latents_bf16_vs_fp32": {
+   "rel_l2": 0.17700482362410946,
+   "cosine": 0.9843060340774218,
+   "max_abs": 3.1496940553188324
+  },
+  "bf16_vs_fp32_by_step": [0.0008300438403005306, 0.004116028896877383, 0.029890557377808314, 0.09489999836844493, 0.16292101218057353, 0.17700482362410946],
+  "comfyui_sampler": {
+   "rel_l2": 0.000190584814405336,
+   "cosine": 0.9999999818387286,
+   "max_abs": 0.007864654064178467,
+   "seconds": 285.9,
+   "what": "comfy.sample.sample_custom, euler on the grid, guidance 1, fp32, final latents against the loop's"
+  },
+  "max_rss_gib": 17.11
+ },
+ "tolerances": {
+  "rule": "latents after every step. At 1024: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at the larger of exact_rel_l2 and twice gmlx's own exact floor, and its bf16 run read as a share of the 1024 gate of the step, not gated",
+  "latents_rel_l2": 0.35400964724821893,
+  "step1_rel_l2": 0.0016600876806010612,
+  "step2_rel_l2": 0.008232057793754766,
+  "step3_rel_l2": 0.05978111475561663,
+  "step4_rel_l2": 0.18979999673688985,
+  "step5_rel_l2": 0.32584202436114706,
+  "step6_rel_l2": 0.35400964724821893
+ },
+ "notes": ["oracle: ComfyUI 2aa4d535a76e4b6acf6a94f263bc482430c396dd, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32", "oracle_dit is dit with the config key {\"transformer\": {\"pdd_steps\": 6, \"pdd_sigmas\": [...]}} and every tensor unchanged"],
+ "created": "2026-11-16T04:18:43Z",
+ "npz": "check6_h3_image_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [28, 5120],
+   "dtype": "float32",
+   "sha256": "5b6a80b80b0afc63049168b46716b91cbfe1e66df7cf3c698368216fb1a02a00"
+  },
+  "latents": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "3d02c67b45a3bbfca00019d6fc4165d2e45bdc67b118311d3a58b5583d463e8b"
+  },
+  "latents_bf16": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "854529f5c1ecd0c7c84c1b4027161ea9505f574a5fe8f65d9c5720374bcd4096"
+  },
+  "latents_bf16_step1": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "463a453f9e2da7677d228fee0773b880915d5b2bacd4ea79209547c443643fea"
+  },
+  "latents_bf16_step2": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "d8d2fdacd52759f59ac8bd4be901688367bfe04eaea232d9eecfa53ea0d9c481"
+  },
+  "latents_bf16_step3": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "3f2b293327a031808d5e3af3e034041a53087e7eeb740a8bf6020c210ffd6e63"
+  },
+  "latents_bf16_step4": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "1b24e9afb5e58605aeba724fa059dd14b39dddd6ab373f0d6e69b3a3a3e1bf71"
+  },
+  "latents_bf16_step5": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "216861c1f7e42b0f2dd808b450d1a61c6f4dcf9986ab18cf090c86291c63568b"
+  },
+  "latents_bf16_step6": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "854529f5c1ecd0c7c84c1b4027161ea9505f574a5fe8f65d9c5720374bcd4096"
+  },
+  "latents_step1": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "894c1ad11cd6ed23dba4a15ef82bd3a1e805fb98ffe1286ce9533ddb72a4992d"
+  },
+  "latents_step2": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "b573ac598a3d425216178614dac00e0a82e376ee6156e6eacd0b213c8112d3ec"
+  },
+  "latents_step3": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "4bc657818ba284bf13b3ef8f91371e8c1666377d5f35a9a211857a2e0b1d40f3"
+  },
+  "latents_step4": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "321c156a7894ad72a6d1c99d0af9f55efc9d7317cb5b6e0df8670be3b987c3cb"
+  },
+  "latents_step5": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "2e38e0afd0c105fea8171d036621fa1c62dcbb8269bdae5b1ec170c832f3b6eb"
+  },
+  "latents_step6": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "3d02c67b45a3bbfca00019d6fc4165d2e45bdc67b118311d3a58b5583d463e8b"
+  },
+  "noise": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "1f23f84c20eeb68ca96534e49aa79e0cc30733aca5d800df09390d04329bd281"
+  },
+  "sigmas": {
+   "shape": [7],
+   "dtype": "float32",
+   "sha256": "a974c89ae39ca1cfc6d6bb8236dbc6ce3c339b229809cb075c5c4f5a859b09cd"
+  },
+  "timesteps": {
+   "shape": [6],
+   "dtype": "float32",
+   "sha256": "0c82805eb8220e38462c1804bcf0d26732278e69dfe6eaa4dc088e45c986d777"
+  },
+  "velocity_step1": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "dd31c21f1561da18d29a670729619ccff91f879fe76d1ebc5bbb0ca45ab1a98c"
+  },
+  "velocity_step2": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "3688e7bac8f7813cc5329c4c6657aa1c04910c053ea3646ebfa22d0d5a089f40"
+  },
+  "velocity_step3": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "a0a4217d147b8c5d30532e018feb75ba80d116f9409e2208fcb3f694e8bb30df"
+  },
+  "velocity_step4": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "8e6b1728e678d47af58463fc8e35672e67217a7fdccfc29457ecd262c04d2942"
+  },
+  "velocity_step5": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "503913f05cfbff7123bfb202f5f871fd7984866321b2631b8eab4610485f6a9d"
+  },
+  "velocity_step6": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "62279fac0ee9ff12caf20cf055176dff49da0f38e9e4f01091a51537903e7e06"
+  }
+ }
+}

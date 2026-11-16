@@ -1,0 +1,318 @@
+{
+ "schema": 1,
+ "name": "check6_h3_image_2048",
+ "check": 6,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check6_h3_image.py",
+ "argv": [
+  "check6_h3_image.py",
+  "--dit",
+  "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf",
+  "--source",
+  "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+  "--features",
+  "check2_h3_image.npz",
+  "--prompt",
+  "plain",
+  "--sizes",
+  "2048"
+ ],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+   "size": 13607428832,
+   "sha256": "90616d8cef7d4c234485c17ba63db85db1cbe38f50400e66e704060c2494ffdd"
+  },
+  "oracle_dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf",
+   "size": 13607429024,
+   "sha256": "99df1f83bdccc8c1823c2fdfad8500be4a1333d0a4df5dac9beb2983935cc273"
+  },
+  "features": {
+   "name": "check2_h3_image.npz",
+   "size": 197819810,
+   "sha256": "bb78f1182e6c4890e5bb6a1eaff6b1ada31334ade479bec0b19fe4cc197ff1c6"
+  }
+ },
+ "inputs": {
+  "size": 2048,
+  "steps": 6,
+  "guidance": 1.0,
+  "seed": 6,
+  "prompt": "plain",
+  "features": "check 2 fp32 tap of 'plain'",
+  "text_rows": 28,
+  "gate_size": 1024,
+  "sigmas": "the PDD grid of pdd_config.json, the sampler's sigmas and the step sigmas",
+  "timestep": "sigma x 1000 in float32",
+  "euler": "x + (sigma_next - sigma) v in float32, the velocity in float32",
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 24, size / 16, size / 16)",
+  "latents": "(1, 24, size / 16, size / 16) float32 in model space, after the step",
+  "dequant": "ComfyUI-GGUF dequantize_tensor with dequant_dtype float32: K-quant block math in float32, on every call",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "attention": "attention_pytorch"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_features": "the fp32 tap cast to bfloat16"
+  },
+  "steps_run": 6,
+  "fp32_step_s": [
+   158.7,
+   158.1,
+   128.6,
+   110.6,
+   111.7,
+   133.1
+  ],
+  "fp32_s": 800.7,
+  "max_rss_gib": 17.09,
+  "gmlx_exact_floor": {
+   "1": {
+    "rel_l2": 2.313098982799601e-07,
+    "run": "nudge 0",
+    "measured": "the largest relative L2 between gmlx's exact run and the same run from the noise and features nudged by one float32 step (4 seeds), after the step; tests/image/test_image_check6_h3_image.py _floor on minimax_h3_image_pruned-UD-Q4_K_XL.gguf 90616d8c, Apple M5 Max"
+   },
+   "2": {
+    "rel_l2": 4.526646097503747e-06,
+    "run": "nudge 0",
+    "measured": "the largest relative L2 between gmlx's exact run and the same run from the noise and features nudged by one float32 step (4 seeds), after the step; tests/image/test_image_check6_h3_image.py _floor on minimax_h3_image_pruned-UD-Q4_K_XL.gguf 90616d8c, Apple M5 Max"
+   },
+   "3": {
+    "rel_l2": 3.914459662567347e-05,
+    "run": "nudge 0",
+    "measured": "the largest relative L2 between gmlx's exact run and the same run from the noise and features nudged by one float32 step (4 seeds), after the step; tests/image/test_image_check6_h3_image.py _floor on minimax_h3_image_pruned-UD-Q4_K_XL.gguf 90616d8c, Apple M5 Max"
+   },
+   "4": {
+    "rel_l2": 0.00046749370844588,
+    "run": "nudge 1",
+    "measured": "the largest relative L2 between gmlx's exact run and the same run from the noise and features nudged by one float32 step (4 seeds), after the step; tests/image/test_image_check6_h3_image.py _floor on minimax_h3_image_pruned-UD-Q4_K_XL.gguf 90616d8c, Apple M5 Max"
+   },
+   "5": {
+    "rel_l2": 0.0012508266481731215,
+    "run": "nudge 1",
+    "measured": "the largest relative L2 between gmlx's exact run and the same run from the noise and features nudged by one float32 step (4 seeds), after the step; tests/image/test_image_check6_h3_image.py _floor on minimax_h3_image_pruned-UD-Q4_K_XL.gguf 90616d8c, Apple M5 Max"
+   },
+   "6": {
+    "rel_l2": 0.001420710283436917,
+    "run": "nudge 1",
+    "measured": "the largest relative L2 between gmlx's exact run and the same run from the noise and features nudged by one float32 step (4 seeds), after the step; tests/image/test_image_check6_h3_image.py _floor on minimax_h3_image_pruned-UD-Q4_K_XL.gguf 90616d8c, Apple M5 Max"
+   }
+  }
+ },
+ "tolerances": {
+  "rule": "latents after every step. At 1024: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at the larger of exact_rel_l2 and twice gmlx's own exact floor, and its bf16 run read as a share of the 1024 gate of the step, not gated",
+  "exact_rel_l2": 0.001,
+  "exact_by_step": {
+   "1": 0.001,
+   "2": 0.001,
+   "3": 0.001,
+   "4": 0.001,
+   "5": 0.002501653296346243,
+   "6": 0.002841420566873834
+  }
+ },
+ "notes": [
+  "oracle: ComfyUI 2aa4d535a76e4b6acf6a94f263bc482430c396dd, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32",
+  "oracle_dit is dit with the config key {\"transformer\": {\"pdd_steps\": 6, \"pdd_sigmas\": [...]}} and every tensor unchanged"
+ ],
+ "created": "2026-11-16T04:32:22Z",
+ "npz": "check6_h3_image_2048.npz",
+ "tensors": {
+  "features": {
+   "shape": [
+    28,
+    5120
+   ],
+   "dtype": "float32",
+   "sha256": "5b6a80b80b0afc63049168b46716b91cbfe1e66df7cf3c698368216fb1a02a00"
+  },
+  "latents": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "949a5431f342d6ca66fe8a2f46a19c2ed21a5e3ee07b7d85e80b005f57ac4c66"
+  },
+  "latents_step1": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "bdc67943938f3543ddd63700ff607778204b90c8ef3e18235c14f2169fe71519"
+  },
+  "latents_step2": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "5bf1b1e4ae9d1e8e3a80569cdf0c081f79bc9ab8eb21bf465cbf4a3ef9585951"
+  },
+  "latents_step3": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "062987c20133e6e9975ec05066084e75ab9dcb54bf415535bdc2a9ac9454e614"
+  },
+  "latents_step4": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "3964784fa4a36033d6356b2761ca4aee649b28353a186715e7c7804cbb135048"
+  },
+  "latents_step5": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "c709714f131b0500403b78428b8f61d3febd2d9a6e88e983b97dd5274ec4012c"
+  },
+  "latents_step6": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "949a5431f342d6ca66fe8a2f46a19c2ed21a5e3ee07b7d85e80b005f57ac4c66"
+  },
+  "noise": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "1c04b7a8fd1403a82d6c100c834df170fda1535f769696cf1cacd668836debf3"
+  },
+  "sigmas": {
+   "shape": [
+    7
+   ],
+   "dtype": "float32",
+   "sha256": "a974c89ae39ca1cfc6d6bb8236dbc6ce3c339b229809cb075c5c4f5a859b09cd"
+  },
+  "timesteps": {
+   "shape": [
+    6
+   ],
+   "dtype": "float32",
+   "sha256": "0c82805eb8220e38462c1804bcf0d26732278e69dfe6eaa4dc088e45c986d777"
+  },
+  "velocity_step1": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "cd1f5bb18979f88b3c0d2e1d331d26de32af9f1c693685e9c895df05a70128e6"
+  },
+  "velocity_step2": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "7f3e1359db894547a29e175fe6ff4841ef39aab885fd02d52f9f117aa915027d"
+  },
+  "velocity_step3": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "e31cf33dc5245d516e521abdcfe5ae938fc6ff0ac0b9e1a07172654be0ffe8f2"
+  },
+  "velocity_step4": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "c05df4c132c26ee78b14d3a902385237f98d39c9e29a90c80f5ddd58ee0deb5c"
+  },
+  "velocity_step5": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "9f747826bbe47c253a0aeb3eb68cdf3525d18d7b2240cf242c3390a8ec637d4d"
+  },
+  "velocity_step6": {
+   "shape": [
+    1,
+    24,
+    128,
+    128
+   ],
+   "dtype": "float32",
+   "sha256": "91b1f21b4ec98a84bbb1cc9cf1b833ddfec1b1ed18a15f3b566b5523bfa8c64e"
+  }
+ }
+}
