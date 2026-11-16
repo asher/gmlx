@@ -261,6 +261,59 @@ def test_an_h3_image_batch_decode_adds_each_image_after_the_first():
                                                 row.channels["encode"], size)
 
 
+# The passes measured on the published MiniMax-H3-Image VAE, on an M5 Max,
+# one process a cell and three runs each: what a pass added over the
+# settled process with the weights loaded, in GiB rounded up, as (growth
+# of the process footprint, MLX peak over the active bytes at the start),
+# each the largest of its runs. (op, side of a square image, itemsize,
+# batch). A pass past one tile of 256 pixels runs in tiles. The decodes
+# from 1024 pixels ran on 17532fe9, whose canvas writes are all in place;
+# the rest on 36170bf1, whose one tile decode and encode are the same.
+H3_CELLS = {
+    ("decode", 128, 2, 1): (0.01, 0.01),
+    ("decode", 256, 2, 1): (0.04, 0.03),
+    ("decode", 1024, 2, 1): (0.15, 0.13),
+    ("decode", 2048, 2, 1): (0.25, 0.16),
+    ("decode", 4096, 2, 1): (0.35, 0.30),
+    ("decode", 128, 4, 1): (0.01, 0.01),
+    ("decode", 256, 4, 1): (0.03, 0.04),
+    ("decode", 1024, 4, 1): (0.16, 0.14),
+    ("decode", 2048, 4, 1): (0.27, 0.17),
+    ("decode", 4096, 4, 1): (0.36, 0.33),
+    ("decode", 2048, 2, 2): (0.39, 0.20),
+    ("decode", 4096, 2, 2): (1.03, 0.75),
+    ("decode", 2048, 4, 2): (0.40, 0.22),
+    ("decode", 4096, 4, 2): (1.07, 0.75),
+    ("encode", 128, 2, 1): (0.42, 0.42),
+    ("encode", 256, 2, 1): (1.00, 0.88),
+    ("encode", 1024, 2, 1): (1.04, 0.93),
+    ("encode", 2048, 2, 1): (1.11, 0.91),
+    ("encode", 4096, 2, 1): (1.49, 1.08),
+    ("encode", 128, 4, 1): (0.84, 0.84),
+    ("encode", 256, 4, 1): (1.99, 1.75),
+    ("encode", 1024, 4, 1): (2.08, 1.76),
+    ("encode", 2048, 4, 1): (2.14, 1.81),
+    ("encode", 4096, 4, 1): (2.39, 1.99),
+}
+# What every cell keeps under its price: the fit keeps 0.25 GiB over the
+# growth reading of each cell (batch 2's rule), and the MLX peak of a one
+# tile float32 decode stands 0.249 under, so 0.24 holds both readings at
+# the table's rounding. No price stands more than H3_SLACK over its cell.
+H3_MARGIN = 0.24
+H3_SLACK = 0.5
+
+
+@pytest.mark.parametrize("cell", list(H3_CELLS), ids=lambda c: "-".join(
+    map(str, c)))
+def test_the_h3_image_row_covers_every_measured_pass(cell):
+    op, px, item, batch = cell
+    added = max(H3_CELLS[cell])
+    price = memfit.vae_peak(op, px, px, family="h3_image", itemsize=item,
+                            batch=batch, tiled=px > 256) / GiB
+    assert added - 0.01 + H3_MARGIN <= price <= added + H3_SLACK, (cell,
+                                                                    price)
+
+
 def test_the_tile_layout_follows_the_scale_of_the_vae():
     for px in range(16, 4112, 16):
         lat = px // 16
