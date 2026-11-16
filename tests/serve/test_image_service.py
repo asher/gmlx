@@ -1194,6 +1194,55 @@ def test_the_fit_check_names_the_largest_fitting_size_in_few_plans(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("size, fits_px, named", [
+    # No size MiniMax-H3-Image takes fits: the largest that fits, 800x800
+    # and 1120x544, is under its least pixels.
+    ((1024, 1024), 680_000, None),
+    ((2048, 1024), 650_000, None),
+    ((1024, 1024), 800_000, (864, 864)),
+])
+def test_the_fit_check_names_only_a_size_the_family_takes(
+        monkeypatch, size, fits_px, named):
+    from gmlx.image import memfit
+    from gmlx.image.registry import get_family, size_refusal, smallest_size
+
+    def plan_memory(*, height, width, _hint=True, **k):
+        ok = width * height <= fits_px
+        if not ok and _hint:
+            raise memfit.ImageMemoryError("no room")
+        return SimpleNamespace(fits=ok)
+
+    monkeypatch.setattr(memfit, "plan_memory", plan_memory)
+    nb = SimpleNamespace(bytes=0)
+    h3 = get_family("h3_image")
+    pipe = SimpleNamespace(
+        encoder=None, dit=SimpleNamespace(act_dtype="bfloat16"),
+        weights={"dit": 1, "vae": 1}, adapters=nb, tables=nb, family=h3,
+        vae=None, conditionings=nb, modulations=nb, size_multiple=32,
+        variant="pruned")
+    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
+        keep_encoder=True, cfg=1.0), spec=SimpleNamespace(
+            id="h3", defaults={}, upsampler=None, upsample=True,
+            upsample_prompt=None, encoder_model=None),
+        facts=_facts(act_dtype="bfloat16", size_multiple=32))
+    req = image_service.parse_request("generations", {
+        "prompt": "x", "size": f"{size[0]}x{size[1]}"})
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.fit_check(req, served, req.size, 1)
+    assert e.value.param == "size"
+    msg = str(e.value)
+    if named is None:
+        w, h = smallest_size(h3, *size)
+        assert msg.endswith(f"no size of its shape that MiniMax-H3-Image "
+                            f"takes does; the smallest it takes is "
+                            f"{w}x{h}"), msg
+    else:
+        w, h = named
+        assert msg.endswith(f"the largest size of its shape that fits is "
+                            f"{w}x{h}"), msg
+    assert size_refusal(h3, w, h) is None, msg
+
+
 def test_the_fit_check_passes_without_a_budget(monkeypatch):
     served, calls = _fit_served(monkeypatch, 0)
     req = image_service.parse_request("generations", {"prompt": "x"})

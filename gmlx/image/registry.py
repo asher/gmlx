@@ -175,8 +175,8 @@ def limited(family) -> bool:
     """Whether ``family`` sets size limits of its own, which hold on every
     path in place of the image limits."""
     return family is not None and any(
-        v is not None for v in (family.max_pixels, family.max_side,
-                                family.min_pixels, family.aspect))
+        getattr(family, k, None) is not None
+        for k in ("max_pixels", "max_side", "min_pixels", "aspect"))
 
 
 def size_limits(family) -> tuple:
@@ -238,8 +238,17 @@ def fit_size(width: int, height: int, unit: int, family=None) -> tuple:
     pixels, side = size_limits(family)
     scale = min(1.0, (pixels / (width * height)) ** 0.5 if pixels else 1.0,
                 side / max(width, height) if side else 1.0)
-    w, h = (int(width * scale) // unit * unit,
-            int(height * scale) // unit * unit)
+    return in_shape(family, width, height,
+                    int(width * scale) // unit * unit,
+                    int(height * scale) // unit * unit, unit)
+
+
+def in_shape(family, width: int, height: int, w: int, h: int,
+             unit: int) -> tuple:
+    """(w, h), a size scaled from ``width`` x ``height`` and floored to
+    ``unit``, with its longer side floored further while the floors leave
+    it outside the shapes of ``family`` that ``width`` x ``height`` is
+    inside."""
     if limited(family) and family.aspect is not None and min(w, h) > 0:
         (lw, lh), (hw, hh) = family.aspect
         if width * lh >= lw * height and width * hh <= hw * height:
