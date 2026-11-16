@@ -383,6 +383,54 @@ def test_a_batch_decodes_one_image_at_a_time(tiny, monkeypatch):
             assert np.array_equal(both[i:i + 1], one), i
 
 
+def test_the_decode_blends_from_the_tiles_and_never_reads_its_canvas(
+        tiny, monkeypatch):
+    """Over 3x3 tiles each tile blends with the whole tile to its left,
+    the very array written, and with the strip of the row above, so no
+    blend reads the canvas: a read of the canvas holds its buffer until
+    the read's command buffer completes, and the write after it copies
+    the whole canvas (17532fe9)."""
+    vae = _load(tiny[0], mx.float32)
+    calls, raw = [], []
+    real_blend, real_row = vit.blend, hv.H3ImageVAE._row
+
+    def blend(a, b, extent, axis):
+        out = real_blend(a, b, extent, axis)
+        calls.append((a, b, extent, axis, out))
+        return out
+
+    def row(self, *args):
+        for t in real_row(self, *args):
+            raw.append(t)
+            yield t
+    monkeypatch.setattr(vit, "blend", blend)
+    monkeypatch.setattr(hv.H3ImageVAE, "_row", row)
+    z = mx.random.normal((1, 29, 29, 24), key=mx.random.key(3))
+    with mx.stream(mx.cpu):
+        vae.decode(z)
+    ys, ylen, yo = tiles.split_tiles(29 * SPATIAL, tiles.TILE,
+                                     tiles.MIN_OVERLAP, SPATIAL)
+    xs, xlen, xo = tiles.split_tiles(29 * SPATIAL, tiles.TILE,
+                                     tiles.MIN_OVERLAP, SPATIAL)
+    assert (len(ys), len(xs)) == (3, 3) and len(raw) == 9
+    order = iter(calls)
+    written = {}
+    for i in range(3):
+        for j in range(3):
+            tile = raw[3 * i + j]
+            if i:
+                a, b, extent, axis, tile = next(order)
+                assert (axis, extent) == (1, yo[i - 1])
+                assert a.shape == (1, yo[i - 1], xlen[j], 3)
+            if j:
+                a, b, extent, axis, tile = next(order)
+                assert (axis, extent) == (2, xo[j - 1])
+                assert a is written[i, j - 1], (i, j)
+                assert a.shape == (1, ylen[i], xlen[j - 1], 3)
+            written[i, j] = tile
+    assert next(order, None) is None
+
+
 def test_the_mask_token_is_read_and_left_unused(tiny):
     """The file's decoder.mask_token is the one tensor of the file the
     module holds no parameter for, as ComfyUI keeps it unused."""
