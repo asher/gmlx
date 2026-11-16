@@ -6,8 +6,9 @@ A picture enters the encoder's prompt as a vision block after its label
 and before the prompt text, and its rows of the features come from the
 vision tower. The DiT runs each block with its markers at the video tag;
 ``spans`` are those blocks, (start, stop) rows of the prefix. A caller
-gives the label, with the picture's count in ``{i}``, and the bounds in
-pixels of the image processor.
+gives the label, with the picture's count in ``{i}``, the bounds in
+pixels of the image processor, and the noun its errors name a picture
+by: video's keyframe functions say keyframe.
 
 Importing this module loads no mlx.
 """
@@ -20,7 +21,8 @@ from .encoder import (IMAGE_PAD, VISION_END, VISION_PX, VISION_START,
                       vision_tokens)
 
 
-def picture_ids(spec, tokenizer, prompt: str, sizes, label: str) -> tuple:
+def picture_ids(spec, tokenizer, prompt: str, sizes, label: str, *,
+                noun: str = "picture") -> tuple:
     """(ids, spans) of ``prompt`` with images of ``sizes`` (width,
     height) in the order given, each after ``label`` with its count in
     ``{i}``. A prompt with no images and no tokens is the spec's empty
@@ -31,7 +33,7 @@ def picture_ids(spec, tokenizer, prompt: str, sizes, label: str) -> tuple:
     spans = []
     for i, (w, h) in enumerate(sizes, 1):
         if w % VISION_PX or h % VISION_PX:
-            raise ValueError(f"a picture of {w}x{h} pixels is not on the "
+            raise ValueError(f"a {noun} of {w}x{h} pixels is not on the "
                              f"vision tower's {VISION_PX}-pixel grid")
         ids += te._encode(spec, tokenizer, label.format(i=i))
         start = len(ids)
@@ -60,7 +62,8 @@ def spans_of(tags) -> tuple:
     return tuple((int(a), int(b)) for a, b in zip(edges[::2], edges[1::2]))
 
 
-def picture_pixels(handle, image: np.ndarray, bounds: tuple):
+def picture_pixels(handle, image: np.ndarray, bounds: tuple, *,
+                   noun: str = "picture"):
     """The tower's input for one picture, (H, W, 3) uint8 at the size the
     tower reads it, and its grid (1, h, w) in patches, by the encoder's
     image processor at ``bounds``, (least, most) pixels, and ComfyUI's
@@ -82,13 +85,13 @@ def picture_pixels(handle, image: np.ndarray, bounds: tuple):
     patch = int(proc.patch_size)
     h, w = image.shape[:2]
     if grid != [1, h // patch, w // patch]:
-        raise ValueError(f"the image processor resized a picture of {w}x{h} "
+        raise ValueError(f"the image processor resized a {noun} of {w}x{h} "
                          f"pixels to a grid of {grid[2]}x{grid[1]} patches")
     return mx.array(np.asarray(out["pixel_values"], np.float32)), grid
 
 
 def encode_pictures(handle, prompt: str, images, label: str,
-                    bounds: tuple) -> tuple:
+                    bounds: tuple, *, noun: str = "picture") -> tuple:
     """(features, spans): the encoder features (1, L, D) float32 of
     ``prompt`` with images, each (H, W, 3) uint8 at the size the tower
     reads it, after ``label`` at the image processor's ``bounds``, and
@@ -101,13 +104,13 @@ def encode_pictures(handle, prompt: str, images, label: str,
         raise RuntimeError(f"the {handle.spec.name} text encoder was "
                            "released")
     if getattr(handle.model, "vision_tower", None) is None:
-        raise ValueError("pictures need the encoder's vision tower; load "
+        raise ValueError(f"{noun}s need the encoder's vision tower; load "
                          "the encoder with the entry's mmproj")
     sizes = [(int(im.shape[1]), int(im.shape[0])) for im in images]
     ids, spans = picture_ids(handle.spec, handle.tokenizer, prompt, sizes,
-                             label)
+                             label, noun=noun)
     feats, _ = vision_tap.tap(handle, ids,
-                              (picture_pixels(handle, im, bounds)
+                              (picture_pixels(handle, im, bounds, noun=noun)
                                for im in images),
                               pad=IMAGE_PAD)
     out = feats[None].astype(mx.float32)
