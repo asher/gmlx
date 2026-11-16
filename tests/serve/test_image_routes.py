@@ -1886,3 +1886,42 @@ def test_an_edit_forms_text_part_past_a_mib_is_read(served, monkeypatch):
     assert r.status_code == 200, r.text
     (req, _), = served.jobs
     assert req.prompt == prompt
+
+
+@pytest.mark.parametrize("family, warned", [("flux3_klein", True),
+                                            ("h3_image", False)])
+def test_an_edit_gives_its_images_seed_and_size_to_the_rewrite(
+        served, monkeypatch, caplog, family, warned):
+    """The rewrite gets the edit's images, the size it asks for and the
+    seed the image samples at, drawn first when the request sends none.
+    prompt_upsampling is ignored with a warning on a family whose
+    upsampler does not see the images."""
+    from gmlx.image.registry import get_family
+    from gmlx.serve import image_upsample
+
+    seen = []
+    monkeypatch.setattr(image_upsample, "revise", lambda *a, **kw: (
+        seen.append((a, kw)) or None))
+    monkeypatch.setattr(_SERVED, "pipe",
+                        SimpleNamespace(family=get_family(family)))
+    with caplog.at_level(logging.WARNING):
+        r = _client().post("/v1/images/edits", files=[
+            ("image[]", ("a.png", _png(), "image/png")),
+            ("image[]", ("b.png", _png(48, 16), "image/png"))],
+            data={"prompt": "swap them", "size": "64x32",
+                  "prompt_upsampling": "true"})
+    assert r.status_code == 200, r.text
+    ((args, kw),) = seen
+    req, _ = served.jobs[0]
+    assert args == ("", "swap them", True, True)
+    assert [i.shape for i in kw["pictures"]] == [(32, 32, 3), (16, 48, 3)]
+    assert kw["canvas"] == (64, 32)
+    assert kw["seed"] == req.seed and req.seed is not None
+    ignored = [m for m in caplog.messages if "ignoring unsupported" in m]
+    assert bool(ignored) == warned
+    if warned:
+        assert "prompt_upsampling" in ignored[0]
+    # A generation gives the rewrite no pictures, and keeps its seed.
+    _client().post("/v1/images/generations",
+                   json={"prompt": "x", "seed": 9})
+    assert "pictures" not in seen[-1][1] and seen[-1][1]["seed"] == 9

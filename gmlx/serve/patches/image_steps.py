@@ -1494,9 +1494,12 @@ async def encode(request: Request):
         try:
             # Without the clip's frames, a prompt with images runs as
             # typed: a video entry's keyframe task names the clip's length.
+            # An image family whose upsampler sees the references gets
+            # them as its pictures.
+            seen = {"pictures": images} if images else {}
             revised = await asyncio.to_thread(
                 revise, fields.get("model"), text, requested, bool(images),
-                **clip)
+                **clip, **seen)
         except JobStopped:
             raise StepError(409, "the encode was interrupted",
                             code="interrupted") from None

@@ -6,7 +6,10 @@ from the server's own chat generation on the upsampler, a ``models:``
 entry acquired from the residency pool as a chat request acquires it.
 A bounded table maps (upsampler, the family's turn, the system prompt
 by its sha256, typed prompt) to the caption: decoding is greedy, so a rerun with another seed writes the
-same caption, skips the rewrite, and finds its conditioning cached. The
+same caption, skips the rewrite, and finds its conditioning cached. A
+family whose upsampler samples keys its captions by the seed too, and one
+whose upsampler sees the references by their digests and the requested
+size; a sampled rewrite the request gives no seed for is not kept. The
 entry's ``upsample_prompt`` file is read on each request, so an edit to
 it writes new captions.
 """
@@ -16,6 +19,7 @@ from __future__ import annotations
 import contextvars
 import importlib
 import logging
+import secrets
 import threading
 import time
 from collections import OrderedDict
@@ -101,7 +105,8 @@ def upsampler_for(spec, family, requested: bool | None,
 def revise(model_field, prompt: str, requested: bool | None = None,
            has_refs: bool = False, *, stop=None, resolve=None,
            frames: int | None = None, first: bool = False,
-           last: bool = False) -> str | None:
+           last: bool = False, pictures=None, seed: int | None = None,
+           canvas: tuple | None = None) -> str | None:
     """The caption of ``prompt`` for the image or video model
     ``model_field``, or None when it runs as typed. ``resolve(model_field)``
     gives the entry's ``(path, spec)``, the server's image models by
@@ -110,9 +115,14 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     it. ``stop`` is a threading.Event that ends the rewrite between tokens.
     A video family's system prompt names the clip's ``frames``, when
     known, and its keyframes, ``first`` and ``last``; with ``frames``,
-    a video family's images are keyframes and ``has_refs`` is unread."""
-    from gmlx.image.upsample import (UpsampleError, cache_key, system_prompt,
-                                     upsample)
+    a video family's images are keyframes and ``has_refs`` is unread.
+    ``pictures`` are the request's reference images, uint8 (H, W, 3 or 4),
+    which an image family whose upsampler sees them gives it through the
+    upsampler's vision tower, with ``canvas``, the (width, height) the
+    request asks for, if it asks. ``seed`` seeds an upsampler that
+    samples."""
+    from gmlx.image.upsample import (Picture, UpsampleError, cache_key,
+                                     system_prompt, takes_pictures, upsample)
 
     from .image_service import ImageRequestError
     from .image_steps import family_of
@@ -125,12 +135,22 @@ def revise(model_field, prompt: str, requested: bool | None = None,
     except Exception:  # noqa: BLE001 - the acquire refuses it with its status
         return None
     video = getattr(family, "upsample_system", None) is not None
+    sees = bool(pictures) and not video and takes_pictures(family)
     # A video clip's images are its keyframes, which the system prompt
     # names with the clip's length.
     up = upsampler_for(spec, family, requested,
-                       has_refs and not (video and frames is not None))
+                       has_refs and not (video and frames is not None)
+                       and not sees)
     if up is None:
         return None
+    pics = tuple(Picture.of(i) for i in pictures) if sees else ()
+    if pics:
+        _need_tower(up, family)
+    if seed is None and family.upsample.temperature > 0:
+        # A new caption each time, which the table does not keep.
+        seed, keep = secrets.randbelow(1 << 32), False
+    else:
+        keep = True
     t0 = time.monotonic()
     try:
         path = getattr(spec, "upsample_prompt", None)
@@ -141,20 +161,43 @@ def revise(model_field, prompt: str, requested: bool | None = None,
                                      first=first, last=last)
         else:
             system = system_prompt(family, path)
-        key = cache_key(_upsampler_identity(up), family, prompt, system)
-        caption = CAPTIONS.get(key)
+        key = cache_key(_upsampler_identity(up), family, prompt, system,
+                        seed=seed, pictures=pics, canvas=canvas) \
+            if keep else None
+        caption = None if key is None else CAPTIONS.get(key)
         if caption is not None:
             return caption
         caption = upsample(family, prompt,
                            lambda req: _chat(up, req, stop),
-                           name=f"the upsampler {up!r}", system=system)
+                           name=f"the upsampler {up!r}", system=system,
+                           seed=seed, pictures=pics, canvas=canvas)
     except UpsampleError as e:
         raise ImageRequestError(500, str(e), err_type="server_error") from e
-    CAPTIONS.put(key, caption)
+    if key is not None:
+        CAPTIONS.put(key, caption)
     tag = "video" if video else "image"
     _log.info("[%s] prompt upsampled by %s in %.1f s, %d words", tag, up,
               time.monotonic() - t0, len(caption.split()))
     return caption
+
+
+def _need_tower(up: str, family) -> None:
+    """Refuse an upsampler whose models: entry loads no vision tower, for
+    a family whose upsampler sees the references."""
+    from .image_service import ImageRequestError
+    from .residency import _http_from_resolver_error
+
+    try:
+        spec = serving.resolve_request_model(up)[1]
+    except (serving.ModelNotFound, serving.ModelFileMissing,
+            serving.UnknownProfile, serving.NoModelSpecified) as e:
+        raise (_http_from_resolver_error(e) or e) from e
+    if not getattr(spec, "mmproj", None):
+        raise ImageRequestError(
+            500, f"the {family.title} upsampler sees the reference images "
+            f"through its vision tower, and the models: entry {up!r} has no "
+            "mmproj; set mmproj on it, or send prompt_upsampling false",
+            err_type="server_error")
 
 
 def _upsampler_identity(up: str) -> tuple:
@@ -202,24 +245,44 @@ def _chat_in_context(up: str, req, stop) -> str:
     try:
         # Every sampling field is set, so no profile of the chat model
         # changes the decode. A null budget still takes the environment's.
+        seeded = {} if req.seed is None else {"seed": req.seed}
+        # The request schema takes no bare image part, and the sampling
+        # it builds reads no message, so it gets the turn's text.
+        texts = [m if isinstance(m["content"], str) else
+                 {**m, "content": [c for c in m["content"]
+                                   if c.get("type") == "text"]}
+                 for m in messages]
         request = schemas.ChatRequest(
-            model=up, messages=messages, max_tokens=req.max_tokens,
-            temperature=req.temperature, top_p=1.0, top_k=0, min_p=0.0,
-            presence_penalty=req.presence_penalty, repetition_penalty=None,
-            frequency_penalty=None, xtc_probability=0.0,
-            thinking_budget=None, thinking_budget_message=None,
-            thinking=req.thinking, stream=False)
+            model=up, messages=texts, max_tokens=req.max_tokens,
+            temperature=req.temperature, top_p=req.top_p, top_k=req.top_k,
+            min_p=req.min_p, presence_penalty=req.presence_penalty,
+            repetition_penalty=None, frequency_penalty=None,
+            xtc_probability=0.0, thinking_budget=None,
+            thinking_budget_message=None, thinking=req.thinking,
+            stream=False, **seeded)
         gen_args = app_mod._build_gen_args(request, processor)
         gen_args.logprobs = False
-        prompt = openai_mod.apply_chat_template(
-            processor, config, messages, num_images=0,
-            **gen_args.to_template_kwargs())
+        images = None
+        if req.pictures:
+            # The user turn holds its pictures in place: the template
+            # renders each image part where it stands, and the processor
+            # takes the pictures in that order.
+            prompt_utils = importlib.import_module(
+                "gmlx._vendor.mlx_vlm.prompt_utils")
+            prompt = prompt_utils.get_chat_template(
+                processor, messages, True, **gen_args.to_template_kwargs())
+            images = [p.image() for p in req.pictures]
+        else:
+            prompt = openai_mod.apply_chat_template(
+                processor, config, messages, num_images=0,
+                **gen_args.to_template_kwargs())
         rg = runtime_mod.runtime.response_generator
         if rg is None:
             raise HTTPException(status_code=503, detail="the chat engine of "
                                 "the upsampler is not running")
         try:
-            _ctx, token_iter = rg.generate(prompt, args=gen_args)
+            media = {} if images is None else {"images": images}
+            _ctx, token_iter = rg.generate(prompt, args=gen_args, **media)
         except gen_mod.PromptTooLongError as e:
             limit = gen_mod.get_configured_context_limit()
             room = f" of {limit} tokens" if limit else ""

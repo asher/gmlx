@@ -1847,6 +1847,32 @@ def test_an_upsampled_encode_also_answers_the_prompt_as_typed(host, monkeypatch)
     assert fields["cond_typed"] in steps.STATE.tensors
 
 
+def test_an_encode_with_images_gives_them_to_the_rewrite(host, monkeypatch):
+    """The rewrite of an encode with images gets them as its pictures, for
+    a family whose upsampler sees them; one without images gets none."""
+    seen = []
+
+    def encode(served, text, images, borrow=None, ref_latents=True, also=None):
+        return {"cond": _features(), "refs": [], "image_slots": []}
+
+    def revise(model, text, requested, has_refs, **kw):
+        seen.append((has_refs, kw))
+        return None
+
+    monkeypatch.setattr(steps, "encode", encode)
+    monkeypatch.setattr(host, "revise", revise, raising=False)
+    img = np.full((8, 16, 3), 9, np.uint8)
+    body = wire.write({"image_0": img}, {"model": "qit", "text": "a cat"})
+    r = _http().post(f"{P}/encode", content=body,
+                     headers={**V, "Content-Type": wire.CONTENT_TYPE})
+    assert r.status_code == 200, r.text
+    ((has_refs, kw),) = seen
+    assert has_refs is True
+    assert [np.asarray(i).shape for i in kw["pictures"]] == [(8, 16, 3)]
+    _client().encode("zit", "a cat")
+    assert seen[-1] == (False, {})
+
+
 def _stub_step_encode(monkeypatch):
     """steps.encode on the Qwen-Image 2.1 family's reference rules with the
     text encoder and the VAE stubbed. Returns the served model, the

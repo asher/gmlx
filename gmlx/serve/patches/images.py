@@ -19,6 +19,7 @@ import functools
 import importlib
 import json
 import logging
+import secrets
 import statistics
 import threading
 import time
@@ -603,15 +604,29 @@ def make_endpoint(route: str):
         timeout_s = gen.get_token_queue_timeout()
 
         def prepare():
+            from gmlx.image.upsample import takes_pictures
+
             from ..image_upsample import revise
 
+            # The seed is drawn before the upsampler runs, which it seeds
+            # when it samples, so the seed reruns the caption with the
+            # image.
+            if req.seed is None:
+                req.seed = secrets.randbelow(1 << 32)
+            seen = {"pictures": req.images, "canvas": req.size} \
+                if req.images else {}
             req.revised_prompt = revise(
                 req.model, req.prompt, req.prompt_upsampling,
-                req.route != "generations", stop=stop)
+                req.route != "generations", stop=stop, seed=req.seed,
+                **seen)
             hold = residency.acquire_image_model(req.model)
             holds.append(hold)
             served = hold._entry.pipeline
             check_family(req, served)
+            if req.prompt_upsampling and req.route != "generations" and \
+                    not takes_pictures(served.pipe.family):
+                # A prompt with reference images runs as typed.
+                warn_ignored_fields(path, {"prompt_upsampling"})
             size = target_size(req, served)
             _hopeless(hold, served, req)
             budget = _budget(hold)

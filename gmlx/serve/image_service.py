@@ -957,9 +957,6 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
         prompt_upsampling=_opt_bool(fields, "prompt_upsampling"),
         int8=int8,
     )
-    if route != "generations" and req.prompt_upsampling:
-        # A prompt with reference images runs as typed.
-        req.ignored.add("prompt_upsampling")
     if req.stream and req.n > 1:
         raise _bad("stream with n above 1 is not supported; the stream "
                    "events carry no image index", "n")
