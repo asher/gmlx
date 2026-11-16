@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import math
 import pkgutil
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -162,41 +163,128 @@ class UpsampleParts:
     needs: str = ""
 
 
-# The image limits: the pixels and the longer side of the largest image a
-# served request asks for, and of the size an edit without one takes.
+# The image limits of a family without its own: the pixels and the
+# longer side of the largest image a served request asks for, and of the
+# size an edit without one takes. The CLI and the API hold such a family
+# to none.
 MAX_PIXELS = 2048 * 2048
 MAX_SIDE = 4096
 
 
-def fit_size(width: int, height: int, unit: int) -> tuple:
+def limited(family) -> bool:
+    """Whether ``family`` sets size limits of its own, which hold on every
+    path in place of the image limits."""
+    return family is not None and any(
+        v is not None for v in (family.max_pixels, family.max_side,
+                                family.min_pixels, family.aspect))
+
+
+def size_limits(family) -> tuple:
+    """(pixels, side) of the largest image of ``family``: its own bounds
+    where it is limited, with None for a bound it does not set, else the
+    image limits."""
+    if not limited(family):
+        return MAX_PIXELS, MAX_SIDE
+    return family.max_pixels, family.max_side
+
+
+def _shape(wh: tuple) -> str:
+    return f"{wh[0]}:{wh[1]}"
+
+
+def smallest_size(family, width: int, height: int) -> tuple:
+    """(width, height) at the shape of ``width`` x ``height`` scaled up to
+    the fewest pixels ``family`` takes, each side rounded up to its size
+    multiple."""
+    unit = int(family.constants.values.get("size_multiple", 16))
+    scale = (family.min_pixels / (width * height)) ** 0.5
+    return (math.ceil(width * scale / unit) * unit,
+            math.ceil(height * scale / unit) * unit)
+
+
+def size_refusal(family, width: int, height: int) -> str | None:
+    """Why ``family`` refuses an image of ``width`` x ``height`` pixels by
+    its own size limits, or None. A family without limits refuses none:
+    serve holds it to the image limits, and the CLI and the API to none."""
+    if not limited(family):
+        return None
+    title, px = family.title, width * height
+    if family.max_pixels is not None and px > family.max_pixels:
+        return (f"{width}x{height} is {px:,} pixels, over the "
+                f"{family.max_pixels:,} that {title} takes")
+    if family.max_side is not None and max(width, height) > family.max_side:
+        return (f"{width}x{height} has a side over the {family.max_side} "
+                f"pixels that {title} takes")
+    if family.aspect is not None:
+        (lw, lh), (hw, hh) = family.aspect
+        if width * lh < lw * height or width * hh > hw * height:
+            return (f"{width}x{height} is outside the shapes {title} takes, "
+                    f"{_shape(family.aspect[0])} to "
+                    f"{_shape(family.aspect[1])}")
+    if family.min_pixels is not None and px < family.min_pixels:
+        w, h = smallest_size(family, width, height)
+        return (f"{width}x{height} is {px:,} pixels, under the "
+                f"{family.min_pixels:,} that {title} takes; the smallest "
+                f"size of its shape is {w}x{h}")
+    return None
+
+
+def fit_size(width: int, height: int, unit: int, family=None) -> tuple:
     """(width, height) scaled down at its shape to the largest size in the
-    image limits, each side floored to a multiple of ``unit``. A side
-    that floors to nothing is 0."""
-    scale = min(1.0, (MAX_PIXELS / (width * height)) ** 0.5,
-                MAX_SIDE / max(width, height))
-    return (int(width * scale) // unit * unit,
+    limits of ``family`` (the image limits for None or a family without
+    its own), each side floored to a multiple of ``unit``. A side that
+    floors to nothing is 0. A shape the family takes keeps inside its
+    shapes, the longer side floored further where the floors leave it."""
+    pixels, side = size_limits(family)
+    scale = min(1.0, (pixels / (width * height)) ** 0.5 if pixels else 1.0,
+                side / max(width, height) if side else 1.0)
+    w, h = (int(width * scale) // unit * unit,
             int(height * scale) // unit * unit)
+    if limited(family) and family.aspect is not None and min(w, h) > 0:
+        (lw, lh), (hw, hh) = family.aspect
+        if width * lh >= lw * height and width * hh <= hw * height:
+            while h > unit and w * lh < lw * h:
+                h -= unit
+            while w > unit and w * hh > hw * h:
+                w -= unit
+    return w, h
 
 
 def edit_size(family, refs, unit: int) -> tuple | None:
     """(width, height) of an edit of ``family`` with the prepared ``refs``
-    and no size of its own: the size the family gives them, scaled into
-    the image limits on the ``unit`` grid when it is past them. None for
-    a family without that rule. Raises ValueError when a side scales to
-    nothing."""
+    and no size of its own: the size the family gives them, scaled down
+    into its limits on the ``unit`` grid when it is past them. None for a
+    family without that rule. Raises ValueError when a side scales to
+    nothing, or when a limited family refuses the size, as for a first
+    reference outside its shapes."""
     edit = family.edit
     if not refs or edit is None or edit.size is None:
         return None
     w, h = edit.size(refs)
-    if w * h <= MAX_PIXELS and max(w, h) <= MAX_SIDE:
-        return w, h
-    fit = fit_size(w, h, unit)
+    pixels, side = size_limits(family)
+    fit = w, h
+    if (pixels and w * h > pixels) or (side and max(w, h) > side):
+        fit = fit_size(w, h, unit, family)
     if min(fit) <= 0:
         raise ValueError(
             f"the first reference sizes the edit at {w}x{h}, which keeps "
-            f"no side of {unit} pixels in the limit of {MAX_PIXELS} pixels "
-            f"(2048x2048) and a side of {MAX_SIDE}: give the edit a size")
+            f"no side of {unit} pixels in {limits_text(family)}: give the "
+            "edit a size")
+    why = size_refusal(family, *fit)
+    if why:
+        raise ValueError(f"the first reference sizes the edit at {w}x{h}: "
+                         f"{why}; give the edit a size")
     return fit
+
+
+def limits_text(family) -> str:
+    """The largest images of ``family`` in words, as refusals name them."""
+    if not limited(family):
+        return (f"the limit of {MAX_PIXELS} pixels (2048x2048) and a side "
+                f"of {MAX_SIDE}")
+    parts = [f"{family.max_pixels:,} pixels"] if family.max_pixels else []
+    parts += [f"a side of {family.max_side}"] if family.max_side else []
+    return f"the {' and '.join(parts)} that {family.title} takes"
 
 
 @dataclass(frozen=True)
@@ -251,6 +339,14 @@ class Family:
     # models, such as "flux". A file with one loads when its tensors match
     # this family, but the value alone never names the family.
     shared_arch_strings: frozenset = frozenset()
+    # The size limits of the family's images on every path, CLI, API and
+    # serve: the most pixels, the longest side, the fewest pixels, and the
+    # narrowest and widest shapes as ((w, h), (w, h)). All None keeps the
+    # image limits in serve and none in the CLI and the API.
+    max_pixels: int | None = None
+    max_side: int | None = None
+    min_pixels: int | None = None
+    aspect: tuple | None = None
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))

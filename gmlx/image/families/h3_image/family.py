@@ -273,4 +273,11 @@ FAMILY = Family(
     unknown_variant="pruned",
     sampling=SAMPLING,
     ref_encode_seed=42,
+    # The release's sizes: 655,360 to 20,000,000 pixels at 1:3 to 3:1.
+    # 7712 is the longest side on the 32 pixel grid inside all three:
+    # 7712x2592 is 19,989,504 pixels at 2.975:1.
+    max_pixels=20_000_000,
+    max_side=7712,
+    min_pixels=655_360,
+    aspect=((1, 3), (3, 1)),
 )
