@@ -44,9 +44,11 @@ against fp32 gap, as check3_h3.py does.
       --spans 3:20 24:41 --text-len 48]
 
 --self-test writes a tiny model of the class on random weights, with the
-weights by name, and its step at sigma 1.0 and 0.75, so the gmlx side
-checks the whole forward on the CPU. Its fixtures are written compressed,
-to be committed beside their manifests.
+weights by name, and its step at sigma 1.0 and 0.75, each as text to image
+and as an edit, and at sigma 1.0 the edit's prompt without its references
+(the node without its VAE), so the gmlx side checks the whole forward on
+the CPU. Its fixtures are written compressed, to be committed beside their
+manifests.
 """
 
 from __future__ import annotations
@@ -94,6 +96,11 @@ TINY_CASE = {"shape": "96x64", "text": 8, "sigmas": (1.0, 0.75)}
 # vision span in the prompt.
 TINY_EDIT = {"refs": ((64, 64), (96, 32)), "spans": ((1, 5),),
              "ref_seed": 7}
+# The tiny edit's prompt without its references, as
+# MiniMaxH3ImageConditioning gives it without its VAE: the pictures
+# condition the text encoder alone.
+TINY_VISION = {"refs": (), "spans": TINY_EDIT["spans"],
+               "ref_seed": TINY_EDIT["ref_seed"]}
 
 
 def comfy_oracle():
@@ -200,16 +207,19 @@ def ref_noise(torch, refs, seed: int) -> list:
 def edit_payload(torch, refs, text_len: int, spans, seed: int) -> dict:
     """The minimax_payload of an edit step: the references as
     MiniMaxH3ImageConditioning gives them, the run seed and the prompt's
-    token tags, 0 over each vision span."""
+    token tags, 0 over each vision span. Without references it holds no
+    refs, as the node gives it without its VAE."""
     tags = torch.ones(text_len, dtype=torch.long)
     for a, b in spans:
         tags[a:b] = 0
-    blocks = [{"kind": "image", "latent_h": z.shape[2],
-               "latent_w": z.shape[3],
-               "latent": torch.from_numpy(z[:, :, None])} for z in refs]
-    return {"refs": blocks, "cond_video_latents": [b["latent"]
-                                                   for b in blocks],
-            "seed": seed, "text_token_tags": tags}
+    payload = {"seed": seed, "text_token_tags": tags}
+    if refs:
+        blocks = [{"kind": "image", "latent_h": z.shape[2],
+                   "latent_w": z.shape[3],
+                   "latent": torch.from_numpy(z[:, :, None])} for z in refs]
+        payload.update(refs=blocks, cond_video_latents=[b["latent"]
+                                                        for b in blocks])
+    return payload
 
 
 def call(torch, dm, lat, feats, sigma, mode, grid, payload=None):
@@ -451,6 +461,12 @@ def self_test(torch, a) -> int:
         run_case(torch, dm, lat, feats, sigma,
                  f"{name}_edit_s{PDD_SIGMAS.index(sigma)}", inputs, {},
                  [note], compressed=True, edit=edit)
+    vision = {"latents": [], "spans": TINY_VISION["spans"],
+              "seed": TINY_VISION["ref_seed"]}
+    sigma = TINY_CASE["sigmas"][0]
+    run_case(torch, dm, lat, feats, sigma,
+             f"{name}_vision_s{PDD_SIGMAS.index(sigma)}", inputs, {},
+             [note], compressed=True, edit=vision)
     wx = fixtures.FixtureWriter(name + "_weights", check=3, family=FAMILY,
                                 script=SCRIPT)
     wx.inputs.update(inputs)

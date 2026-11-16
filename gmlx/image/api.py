@@ -427,7 +427,7 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
     rows, where the prefix holds them, and the tokens of its reference
     latents."""
     p = pipe.dit.cfg.patch
-    if cond.pending:
+    if _pending(pipe, cond):
         px = pipe.vae_scale * p
         refs = sum((r.height // px) * (r.width // px) for r in cond.refs)
     else:
@@ -1032,8 +1032,19 @@ def _ident(cond: Conditioning) -> tuple:
             tuple(int(s) for s in cond.image_slots))
 
 
+def _pending(pipe: ImagePipeline, cond: Conditioning) -> bool:
+    """Whether ``cond`` waits for the latents of its reference images.
+    The image slots of a DiT whose caption reads them (``caption_slots``)
+    are vision rows of the prompt and no reference's place, so they wait
+    for nothing: ComfyUI's MiniMaxH3ImageConditioning without its VAE
+    conditions on the pictures through them alone."""
+    if getattr(pipe.dit, "caption_slots", False):
+        return bool(cond.refs) and not cond.ref_latents
+    return cond.pending
+
+
 def _need_latents(pipe: ImagePipeline, cond: Conditioning) -> None:
-    if cond.pending:
+    if _pending(pipe, cond):
         raise ValueError(
             "the conditioning has reference images and not their latents "
             "yet: pass it through encode_references first")

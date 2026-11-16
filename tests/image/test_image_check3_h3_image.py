@@ -10,8 +10,9 @@ rows and head segment equal the oracle's.
 The tiny cases run ComfyUI's class at a tiny size on random weights at
 sigma 1.0, which reads head 0 alone, and at 0.75, which adds head 3 to
 it, each as text to image and as an edit with two references of other
-sizes than the target and a vision span in the prompt. Their fixtures are
-committed, so the whole forward is checked on the CPU tier: in fp32
+sizes than the target and a vision span in the prompt, and at sigma 1.0
+the edit's prompt without its references, as MiniMaxH3ImageConditioning
+gives it without its VAE. Their fixtures are committed, so the whole forward is checked on the CPU tier: in fp32
 within FP32_TOL of the oracle, and in bf16 under the product gate, twice
 the oracle's gap per row (h3_image_gates.py). A head one grid point off,
 head k without head 0, RoPE pairs taken adjacent or the GLU halves
@@ -73,7 +74,8 @@ from gmlx.image.ops import kq_routes
 TINY = "selftest_h3_image_tiny"
 TINY_CASES = (f"{TINY}_s0", f"{TINY}_s3")
 TINY_EDITS = (f"{TINY}_edit_s0", f"{TINY}_edit_s3")
-TINY_ALL = TINY_CASES + TINY_EDITS
+TINY_VISION = f"{TINY}_vision_s0"
+TINY_ALL = TINY_CASES + TINY_EDITS + (TINY_VISION,)
 REAL_EDITS = ("check3_h3_image_edit_512x512_s0",
               "check3_h3_image_edit_512x512_s4")
 REAL = ("check3_h3_image_512x512_s0", "check3_h3_image_512x512_s3",
@@ -190,6 +192,38 @@ def test_sample_mixes_the_references_by_the_request_seed(tiny, monkeypatch):
             api.sample(pipe, cond, height=h * 16, width=w * 16, sigmas=grid,
                        noise=np.zeros((1, 24, h, w), np.float32), cfg=1.0,
                        neg_skip=())
+
+
+def test_the_pictures_alone_condition_through_the_caption(tiny,
+                                                         monkeypatch):
+    """A prompt whose pictures have no reference latents, as ComfyUI's
+    node gives it without its VAE, samples: the caption reads its image
+    slots and the step has no reference rows."""
+    from gmlx.image.h3.pictures import span_slots, spans_of
+
+    weights, config, cases = tiny
+    arrays, _ = cases[TINY_VISION]
+    pipe = api.ImagePipeline(dit=hg.tiny_model(weights, config),
+                             family=dataclasses.replace(hi.FAMILY,
+                                                        min_pixels=None),
+                             variant="pruned")
+    slots_seen, refs_seen = [], []
+    real = him.H3ImageDiT.caption
+
+    def cap(self, feats, taps=None, *, slots=()):
+        slots_seen.append(tuple(slots))
+        return real(self, feats, taps, slots=slots)
+    monkeypatch.setattr(him.H3ImageDiT, "caption", cap)
+    monkeypatch.setattr(him.H3ImageDiT, "references",
+                        lambda self, *a, **k: refs_seen.append(a))
+    slots = span_slots(spans_of(arrays["text_tags"]))
+    cond = Conditioning(mx.array(arrays["features"]), image_slots=slots)
+    _, _, h, w = arrays["latents"].shape
+    with mx.stream(mx.cpu):
+        api.sample(pipe, cond, height=h * 16, width=w * 16,
+                   sigmas=list(hi.PDD_SIGMAS[:3]), seed=5, cfg=1.0,
+                   neg_skip=())
+    assert slots and set(slots_seen) == {slots} and not refs_seen
 
 
 @pytest.mark.parametrize("name", TINY_ALL)
