@@ -816,13 +816,12 @@ def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
     """Three runs of 2x3 tiles peak under 2.7 run canvases over one
     tile's peak, at 2.48 with the strip of the row above and the one the
     row builds for the row below, and between yields hold under half a
-    canvas: the
-    tail the next run fades from, and at the last run the tail's finished
-    frames. The decoder evaluates one block at a time, so a tile peaks at
-    0.83 canvases and the decode peaks as a run finishes. A slice that
-    keeps the row above alive reads 3.15, one that keeps the canvas alive
-    copies it at each tile write and reads 3.32, and one that keeps the
-    run before alive holds a canvas between runs."""
+    canvas: the tail the next run fades from, and at the last run the
+    tail's finished frames. The decoder evaluates one block at a time, so
+    a tile peaks at 0.83 canvases and the decode peaks as a run finishes.
+    A slice that keeps the row above alive reads 3.15, one that keeps the
+    canvas alive copies it at each tile write and reads 3.32, and one that
+    keeps the run before alive holds a canvas between runs."""
     vae = vr.load_vae(tiny[0]["vae"], family="h3", dtype=mx.float16)
     mx.eval(vae.parameters())
     z = mx.random.normal((1, 24, 17, 24, 33), key=mx.random.key(0))
