@@ -30,8 +30,9 @@ from gmlx.image.families.h3_image import family as hi
 from gmlx.image.families.h3_image import model as him
 
 NAME = "check4_h3_image"
-# How far off the grid a step route and the pack take a sigma as the
-# grid's (design note section 2), over ComfyUI's simple schedule.
+# A bound on how far ComfyUI's simple schedule at 6 steps lands off the
+# grid, a fact of the fixture. No step takes a nearby sigma as the grid's:
+# each reads the heads it spans by ComfyUI's rule.
 GRID_TOL = 2e-3
 SCHEDULES = ("simple_6", "grid", "simple_3")
 
