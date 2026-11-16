@@ -246,6 +246,39 @@ print((mx.take(mx.contiguous(view), mx.arange(rows), axis=0)[:, 0] != want).sum(
   `tests/video/test_video_h3_vsa.py`. It stubs the call and checks that the graph of the q, k
   and v the call receives holds no gather. It needs no kernel, so it runs on any device.
 
+## CPU reductions lose digits over a long row
+
+- Dependency: mlx 0.32.3, CPU streams. GPU streams are right.
+- Affected: `mx.fast.layer_norm`, `mx.mean`, `mx.var` and `mx.sum` over a long float32 axis on
+  the CPU stream, which is the device of gmlx's CI and of `KQUANT_FORCE_CPU=1`.
+- What goes wrong: a CPU reduction adds the row in float32 one element after another, so its error
+  grows with the row's length, and with its mean where the op takes the variance. Over 524,288
+  values `mx.fast.layer_norm` is 4e-6 relative off float64, and 2.5e-5 when the values sit near
+  16, against 5e-8 and 8e-7 on the GPU. No error is raised.
+- Not affected: float64 reductions on the CPU stream, which are exact to float64 rounding; short
+  rows, such as a token's hidden size.
+
+Smallest repro:
+
+```python
+import mlx.core as mx
+import numpy as np
+
+x = np.random.default_rng(0).standard_normal((1, 1 << 19)).astype(np.float32)
+want = (x - x.astype(np.float64).mean()) / x.astype(np.float64).std()
+for s in (mx.cpu, mx.gpu):
+    y = np.asarray(mx.fast.layer_norm(mx.array(x), None, None, 0.0, stream=s), np.float64)
+    print(s, np.linalg.norm(y - want) / np.linalg.norm(want))  # cpu 2.9e-6, gpu 6e-8
+```
+
+- Where gmlx meets it: a VAE's GroupNorm normalizes each group over the whole image, so on the
+  CPU a group of a large image reads a long row. The MiniMax-H3-Image encoder's fp32 self-test
+  read 0.93 of its gate on the CPU against 0.53 on the GPU.
+- Guard: `layer_norm` in `gmlx/mlx_guards.py`, which `group_norm` in
+  `gmlx/image/vae/group_norm.py` uses. On the CPU it takes the statistics in float64; on a GPU
+  stream it is the stock op.
+- Test: `test_layer_norm_on_the_cpu_takes_its_statistics_in_float64` in `tests/test_mlx_guards.py`.
+
 ## The diffusers single-file loader leaves a BF16 tensor outside a linear layer undecoded
 
 - Dependency: diffusers at e0abab83, the revision the image reference scripts under

@@ -12,6 +12,10 @@ with or without the guard.
 misplace inputs on a GPU stream. The tests here hold the routing on small
 arrays with the limit lowered. The tests of each caller past the real
 limit are beside the caller's other tests.
+
+``layer_norm``: on the CPU stream the stock op adds a long row in float32
+one element after another and loses digits; the guard takes the
+statistics in float64 there and is the stock op on a GPU stream.
 """
 from __future__ import annotations
 
@@ -272,3 +276,43 @@ def test_concatenate_past_the_limit_raises_on_mismatched_rows(monkeypatch):
     monkeypatch.setattr(mlx_guards, "_STOCK_MAX", 0)
     with pytest.raises(ValueError):
         mx.eval(mlx_guards.concatenate([a, b], axis=2))
+
+
+def _normalized(x: np.ndarray, eps: float) -> np.ndarray:
+    x = x.astype(np.float64)
+    mu = x.mean(-1, keepdims=True)
+    return (x - mu) / np.sqrt(((x - mu) ** 2).mean(-1, keepdims=True) + eps)
+
+
+def _rel(got: mx.array, want: np.ndarray) -> float:
+    got = _np(got)
+    return float(np.linalg.norm(got - want) / np.linalg.norm(want))
+
+
+def test_layer_norm_on_the_cpu_takes_its_statistics_in_float64():
+    """A group of 2^19 values off zero, as a VAE's GroupNorm reads over a
+    large image: the stock CPU op drifts past 1e-6 of float64, the guard
+    stays at the output's float32 rounding, in the input dtype."""
+    x = (np.random.default_rng(0).standard_normal((2, 1 << 19))
+         + 16).astype(np.float32)
+    want = _normalized(x, 1e-6)
+    with mx.stream(mx.cpu):
+        stock = mx.fast.layer_norm(mx.array(x), None, None, 1e-6)
+        got = mlx_guards.layer_norm(mx.array(x), 1e-6)
+        half = mlx_guards.layer_norm(mx.array(x).astype(mx.float16), 1e-6)
+    assert got.dtype == mx.float32 and half.dtype == mx.float16
+    print(f"layer norm over 2^19 on the CPU: stock {_rel(stock, want):.2e}, "
+          f"guard {_rel(got, want):.2e}")
+    assert _rel(got, want) < 1e-7
+    assert _rel(stock, want) > 1e-6
+
+
+@pytest.mark.skipif(bool(os.environ.get("KQUANT_FORCE_CPU"))
+                    or not mx.metal.is_available(),
+                    reason="the guard is the stock op on GPU streams")
+def test_layer_norm_on_the_gpu_is_the_stock_op():
+    x = mx.random.normal((3, 4096), key=mx.random.key(0)) + 4
+    with mx.stream(mx.gpu):
+        got = mlx_guards.layer_norm(x, 1e-5)
+        want = mx.fast.layer_norm(x, None, None, 1e-5)
+    assert np.array(got).tobytes() == np.array(want).tobytes()

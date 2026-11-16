@@ -176,7 +176,8 @@ def test_the_tiny_model_in_fp32_passes_its_gates(tiny, request):
     path, _, arrays, m = tiny
     got = shares(path, arrays, m, "fp32")
     assert set(got) == _items(m["inputs"]["cases"])
-    print(worst_line("h3 image check5 tiny fp32", got))
+    print(worst_line(f"h3 image check5 tiny fp32 on the "
+                     f"{mx.default_device().type.name.upper()}", got))
     over = {k: v for k, v in got.items() if not v <= 1}
     assert not over, over
 
@@ -185,7 +186,8 @@ def test_the_tiny_model_in_float16_passes_its_gates(tiny):
     path, _, arrays, m = tiny
     got = shares(path, arrays, m, "f16")
     assert set(got) == _items(m["inputs"]["cases"])
-    print(worst_line("h3 image check5 tiny f16", got))
+    print(worst_line(f"h3 image check5 tiny f16 on the "
+                     f"{mx.default_device().type.name.upper()}", got))
     over = {k: v for k, v in got.items() if not v <= 1}
     assert not over, over
 
