@@ -364,6 +364,57 @@ def test_the_tap_with_images_is_the_forward_of_the_class(handle, refs):
         assert text.features.dtype == mx.float32
 
 
+def test_the_pass_alone_holds_the_towers_rows(handle, refs, monkeypatch):
+    """When the language pass runs, only its graph holds each picture's
+    tower outputs, the joined image rows and the deepstack rows, so the
+    pass frees each once read. Held by the tap to the end, they were eight
+    rows of features beside each vision row of the pass."""
+    import gc
+    import weakref
+
+    real, rows = vision_tap.mx, vision_tap._tower_rows
+    tower, joined, alive = [], [], []
+
+    def ids(refs):
+        return {id(r()) for r in refs if r() is not None}
+
+    def tower_rows(*a):
+        feats, deep, grids = rows(*a)
+        tower.extend(weakref.ref(x) for x in feats + sum(deep, []))
+        return feats, deep, grids
+
+    class Spy:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        @staticmethod
+        def concatenate(arrays, *a, **k):
+            out = real.concatenate(arrays, *a, **k)
+            if {id(x) for x in arrays} & ids(tower):
+                joined.append(weakref.ref(out))
+            return out
+
+        @staticmethod
+        def eval(*arrays):
+            gc.collect()
+            alive.append(len(ids(tower)) + len(ids(joined)))
+            return real.eval(*arrays)
+
+    monkeypatch.setattr(vision_tap, "_tower_rows", tower_rows)
+    monkeypatch.setattr(vision_tap, "mx", Spy())
+    with real.stream(real.cpu):
+        _, feats, _ = edit.encode(handle, "paint it red", refs)
+    # Two pictures, each its features and its deepstack blocks, and the
+    # joins of each kind; the last eval is the pass's.
+    blocks = len(tower) // len(refs) - 1
+    assert blocks >= 1 and len(joined) == 1 + blocks
+    assert alive[-1] == 0, alive
+    monkeypatch.undo()
+    with real.stream(real.cpu):
+        _, want, _ = edit.encode(handle, "paint it red", refs)
+    assert np.array_equal(np.array(feats), np.array(want))
+
+
 def _linears(module) -> dict:
     return {p: id(m) for p, m in module.named_modules()
             if isinstance(m, (nn.Linear, vision_tap.ExactLinear))}
