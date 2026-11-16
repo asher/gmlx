@@ -147,6 +147,14 @@ class UpsampleParts:
     it into the caption, or None when it holds none. ``suggested`` names
     the chat model to set when none is, and ``expected`` warns when none
     is set.
+
+    ``top_p``, ``top_k`` and ``min_p`` sample beside ``temperature``; a
+    turn at a temperature above 0 is seeded by the image's seed. ``read``
+    takes the place of reading a prompt file as the system prompt: it
+    reads the file at a path into the text ``turn`` builds the chat turn
+    from, ``turn(text, prompt, pictures, canvas)``. ``pictures`` is True for a
+    family whose upsampler sees a prompt's reference images, through the
+    chat model's vision tower, so ``turn`` gets each as a ``Picture``.
     """
     prompts: str | None
     sha256: str
@@ -163,6 +171,12 @@ class UpsampleParts:
     parse: Callable | None = None
     slot: str = ""
     needs: str = ""
+    top_p: float = 1.0
+    top_k: int = 0
+    min_p: float = 0.0
+    read: Callable | None = None
+    turn: Callable | None = None
+    pictures: bool = False
 
 
 # The image limits of a family without its own: the pixels and the

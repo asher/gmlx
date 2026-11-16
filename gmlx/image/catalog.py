@@ -56,10 +56,13 @@ class Recipe:
                                       # own
     # The upsampler's system prompt of a family that ships none, which the
     # pull fetches when it can and the entry names as upsample_prompt.
+    # prompt_more holds (file, sha256) of the files it reads beside it,
+    # which the pull fetches with it, into the repository's folder.
     prompt_repo: str = ""
     prompt_revision: str = ""
     prompt_file: str = ""
     prompt_sha256: str = ""
+    prompt_more: tuple = ()
     prompt_license: str = ""
     prompt_license_url: str = ""
     # The smallest memory class whose Mac makes an image with it.
@@ -201,7 +204,26 @@ _H3_IMAGE = dict(
                   "service for others needs safeguards; outputs posted "
                   "publicly must be marked machine-generated"),
     encoder_license="apache-2.0", vae_license=_H3_IMAGE_LICENSE,
-    encoder_bytes=19_762_151_200, vae_bytes=1_168_494_144, least_class=32)
+    encoder_bytes=19_762_151_200, vae_bytes=1_168_494_144, least_class=32,
+    # MiniMax's prompt expander prompts, which gmlx does not ship: the
+    # manifest the entry names and the files it lists, at the sha256 the
+    # manifest gives each.
+    prompt_repo="MiniMaxAI/MiniMax-H3-Image-PE",
+    prompt_revision="35603d4b63949afa12cb098227fffefedf081afa",
+    prompt_file="prompt/manifest.json",
+    prompt_sha256="6b0969322669d9713e33148d36c401f73b18939337ea2384d90dc457430b6a5b",
+    prompt_more=(
+        ("prompt/t2i/system_prompt.txt",
+         "818ab3f652ec36b3b489b55c29f072f87e14af703cd11a4f3bff75f423d0beac"),
+        ("prompt/t2i/task_prompt.txt",
+         "890213ad61e143bbd5b7906a802430296e82ca5c61ba16df717dcef5477bbcf4"),
+        ("prompt/t2i/request_params.json",
+         "dfc608bf0c02dd6ce7463be636aa8b148aef200513fa4c46e653ee2e5affbe3e"),
+        ("prompt/edit/task_prompt.txt",
+         "c5695dbfc07a9e65555cef67d92467c613371cc2039b96f057022246a30a57b2")),
+    prompt_license=_H3_IMAGE_LICENSE,
+    prompt_license_url="https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/"
+                       "blob/main/LICENSE")
 
 # What gmlx pull says about each recipe: the GOOD FOR cell, one sentence
 # on what it makes and one on how quick it is.

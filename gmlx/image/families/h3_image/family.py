@@ -17,6 +17,7 @@ import re
 
 import numpy as np
 
+from gmlx.image.families.h3_image.upsample import UPSAMPLE
 from gmlx.image.fingerprint import HeaderView, ImageModelError, Match, Refusal
 from gmlx.image.h3.anchors import AnchorRule
 from gmlx.image.h3.encoder import spec
@@ -334,4 +335,5 @@ FAMILY = Family(
                    prepare_all=_edit("prepare"), size=_edit("default_size"),
                    token_ids=_edit("token_ids"), encode=_edit("encode"),
                    template_id=_edit("template_id"), render=_edit("render")),
+    upsample=UPSAMPLE,
 )

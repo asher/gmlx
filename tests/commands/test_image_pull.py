@@ -852,14 +852,15 @@ F32_PACK = "flux2-vae-F32.gguf"
 F32_SHA = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
 
 
-def _shared_pull(lib, monkeypatch, name, ram_gb=32, args=()):
+def _shared_pull(lib, monkeypatch, name, ram_gb=32, args=(), sha=None):
     root, cfg = lib
     r = catalog.recipe(name)
     monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
                         lambda: ram_gb << 30)
     monkeypatch.setattr(catalog, "scan", _shared_scan)
     got = _downloads(monkeypatch)
-    monkeypatch.setattr(catalog, "sha256_file", lambda p: r.vae_sha256)
+    monkeypatch.setattr(catalog, "sha256_file",
+                        sha or (lambda p: r.vae_sha256))
     monkeypatch.setattr(catalog, "vae_identity", lambda p: (
         ("flux3_klein", F32_SHA) if os.path.basename(p) == F32_PACK
         else (r.family, r.vae_sha256)))
@@ -1183,7 +1184,9 @@ def test_a_minimax_h3_image_pull_takes_its_class_quant_and_packs_comfys_vae(
          "Qwen3-VL-32B-Instruct-Q4_K_M.gguf", "main"),
         ("unsloth/Qwen3-VL-32B-Instruct-GGUF", "mmproj-BF16.gguf", "main"),
         ("Comfy-Org/MiniMax-H3-Image",
-         "vae/minimax_h3_image_vae_fp16.safetensors", H.vae_revision)]
+         "vae/minimax_h3_image_vae_fp16.safetensors", H.vae_revision),
+        # MiniMax's prompts, whose manifest reads as another digest here.
+        (H.prompt_repo, H.prompt_file, H.prompt_revision)]
     ((_src, kw),) = packed
     assert kw["family"] == "h3_image" and kw["config_json"] == "{}"
     assert m.path == ("unsloth__MiniMax-H3-Image-GGUF/"
@@ -1200,6 +1203,43 @@ def test_a_minimax_h3_image_pull_takes_its_class_quant_and_packs_comfys_vae(
             "(https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/"
             "LICENSE); encoder apache-2.0; VAE "
             "minimax-h3-image-community-license-agreement") in out
+
+
+def test_a_minimax_h3_image_pull_fetches_minimaxs_prompts_for_the_entry(
+        lib, monkeypatch, capsys):
+    """The manifest and the four files it lists land in the PE repo's
+    folder, each at the sha256 the recipe pins, the manifest last, and the
+    entry names the manifest. The plan's license line says the prompt
+    files are under the model's license."""
+    root, cfg = lib
+    pins = {H.prompt_file: H.prompt_sha256, **dict(H.prompt_more)}
+    folder = root / "MiniMaxAI__MiniMax-H3-Image-PE"
+
+    def sha(p):
+        # Each fetched prompt file reads as its pin, the rest as the VAE.
+        hit = [f for f in pins if str(p).endswith(os.sep + f)]
+        return pins[hit[0]] if hit else H.vae_sha256
+
+    landed, real = [], os.replace
+
+    def replace(src, dst, **kw):
+        if str(dst).startswith(str(folder) + os.sep):
+            landed.append(os.path.relpath(dst, folder))
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(os, "replace", replace)
+    got, _packed, m = _shared_pull(lib, monkeypatch, H.name, sha=sha)
+    out = capsys.readouterr().out
+    assert [(r, f) for r, f, _rev in got if r == H.prompt_repo] == [
+        (H.prompt_repo, f) for f in pins]
+    assert sorted(landed[:-1]) == sorted(f for f, _ in H.prompt_more)
+    assert landed[-1] == H.prompt_file
+    for f in pins:
+        assert (folder / f).is_file()
+    assert m.upsample_prompt == ("MiniMaxAI__MiniMax-H3-Image-PE/"
+                                 "prompt/manifest.json")
+    assert ("the upsampler prompt prompt/manifest.json and the files it "
+            "reads of MiniMaxAI/MiniMax-H3-Image-PE") in out
 
 
 @pytest.mark.parametrize("ram_gb", [16, 24])

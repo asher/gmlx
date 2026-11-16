@@ -223,14 +223,21 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                     help="The chat model that rewrites the prompt before it "
                          "is encoded: a GGUF, or a models: id of the config "
                          "(default: the entry's upsampler). A prompt with "
-                         "--ref or --init-image runs as typed.")
+                         "--init-image runs as typed, and one with --ref "
+                         "too, except on MiniMax-H3-Image, whose upsampler "
+                         "sees the references.")
     up.add_argument("--no-upsample", action="store_true",
                     help="Run the prompt as typed, without the upsampler.")
+    p.add_argument("--upsampler-mmproj", default=None, metavar="GGUF",
+                   help="The vision tower of --upsampler, for an upsampler "
+                        "that sees the --ref images (default: the mmproj of "
+                        "the upsampler's models: entry).")
     p.add_argument("--upsample-prompt", default=None, metavar="FILE",
                    help="A text file whose system prompt the upsampler takes "
                         "in place of the family's (default: the entry's "
                         "upsample_prompt). Qwen-Image 2.1 ships none and "
-                        "needs one.")
+                        "needs one; MiniMax-H3-Image ships none and takes "
+                        "MiniMax's prompt/manifest.json.")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
                         "on Qwen-Image 2.1 (default: the init image's, else "
@@ -530,13 +537,21 @@ def _from_config(a) -> None:
         a.upsample_prompt = rm.upsample_prompt
 
 
-def _upsampler_path(a) -> str:
+def _upsampler_path(a, mmproj: bool = False):
     """The GGUF of --upsampler: the file, or the models: entry of that id
-    in the config."""
+    in the config. With ``mmproj``, (the GGUF, its vision tower): the
+    --upsampler-mmproj file, else the entry's mmproj, else None."""
     import gmlx.config as cfgmod
 
+    tower = getattr(a, "upsampler_mmproj", None)
+    if tower is not None:
+        tower = os.path.expanduser(tower)
+        if not os.path.isfile(tower):
+            raise FileNotFoundError(f"--upsampler-mmproj {tower}: no such "
+                                    "file")
     if os.path.isfile(os.path.expanduser(a.upsampler)):
-        return os.path.expanduser(a.upsampler)
+        found = os.path.expanduser(a.upsampler)
+        return (found, tower) if mmproj else found
     path = (os.path.expanduser(a.config) if getattr(a, "config", None)
             else next((str(c) for c in cfgmod.default_config_paths()
                        if os.path.exists(c)), None))
@@ -545,17 +560,27 @@ def _upsampler_path(a) -> str:
         try:
             cfg = cfgmod.load_config(path)
             if a.upsampler in cfg.models:
-                return cfgmod.resolve_path(cfg.models[a.upsampler].path,
-                                           cfg.model_dirs)
+                m = cfg.models[a.upsampler]
+                found = cfgmod.resolve_path(m.path, cfg.model_dirs)
+                if not mmproj:
+                    return found
+                if tower is None and m.mmproj:
+                    tower = cfgmod.resolve_path(m.mmproj, cfg.model_dirs)
+                return found, tower
         except cfgmod.ConfigError as e:
             raise FileNotFoundError(f"--upsampler {a.upsampler}: {e}") from None
     raise FileNotFoundError(f"--upsampler {a.upsampler}: no such file, and "
                             f"no models: id of that name {where}")
 
 
-def _upsample(a, family, prompt: str, refs, log) -> str | None:
+def _upsample(a, family, prompt: str, refs, log, seed: int | None = None
+              ) -> str | None:
     """The caption the upsampler writes for ``prompt``, or None when it
-    runs as typed, as a prompt with an image input does."""
+    runs as typed, as a prompt with an image input does, except a prompt
+    with references on a family whose upsampler sees them. ``seed`` seeds
+    an upsampler that samples."""
+    from gmlx.image.upsample import takes_pictures
+
     if family.upsample is None:
         if a.upsampler is not None:
             log(f"note: the upsampler is unused, since {family.title} "
@@ -563,7 +588,8 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
         return None
     if a.no_upsample or not prompt.strip():
         return None
-    if refs or a.init_image is not None:
+    sees = bool(refs) and a.init_image is None and takes_pictures(family)
+    if (refs or a.init_image is not None) and not sees:
         if a.upsampler is not None:
             flag = "--ref" if refs else "--init-image"
             log(f"note: a prompt with {flag} runs as typed, and the "
@@ -576,31 +602,56 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
                 "models: id, or upsampler on the image_models entry, or pass "
                 "--no-upsample")
         return None
-    from gmlx.image.upsample import UpsampleError, system_prompt
+    from gmlx.image.upsample import Picture, UpsampleError, system_prompt
 
     try:
         system = system_prompt(family, a.upsample_prompt)
     except UpsampleError as e:
         raise _Usage(str(e)) from None
-    a.upsampler = _upsampler_path(a)
+    if not sees:
+        a.upsampler = _upsampler_path(a)
+        return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json,
+                             system=system, seed=seed)
+    a.upsampler, tower = _upsampler_path(a, mmproj=True)
+    if tower is None:
+        raise _Usage(f"--ref: the {family.title} upsampler sees the "
+                     "references through its vision tower: pass "
+                     "--upsampler-mmproj, or set mmproj on the upsampler's "
+                     "models: entry, or pass --no-upsample")
+    pictures = tuple(Picture.of(open_image("--ref", r)) for r in a.ref)
     return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json,
-                         system=system)
+                         system=system, seed=seed, pictures=pictures,
+                         mmproj=tower, canvas=a.size)
+
+
+def _picture_tokens(pictures) -> int:
+    """About the vision tokens of ``pictures``: one a 32 pixel square,
+    a Qwen vision tower's 16 pixel patches merged two by two, up to
+    16384 a picture."""
+    return sum(min(16384, -(-p.size[0] // 32) * -(-p.size[1] // 32))
+               for p in pictures)
 
 
 def run_upsampler(path: str, family, prompt: str, log,
                   quiet: bool = False, system: str | None = None,
-                  tag: str = "image") -> str:
+                  tag: str = "image", *, seed: int | None = None,
+                  pictures=(), mmproj: str | None = None,
+                  canvas: tuple | None = None) -> str:
     """Load the chat model at ``path``, write the caption of ``prompt``,
     and release the model before returning, under ``system``, by default
     the family's shipped system prompt. ``quiet`` keeps the load's lines
-    off stdout; ``tag`` heads the line that reports the rewrite."""
+    off stdout; ``tag`` heads the line that reports the rewrite. ``seed``
+    seeds a turn that samples. ``pictures`` go to a family whose
+    upsampler sees them, through the vision tower ``mmproj``: the model
+    then loads with its tower, and the turn takes the pictures in its
+    order; ``canvas`` is the size the request asks for, if it asks."""
     import gc
 
     import mlx.core as mx
 
     import gmlx.load.loadlog as loadlog
     from gmlx.gen.generation import generate
-    from gmlx.image.upsample import (UpsampleError, reply_lead,
+    from gmlx.image.upsample import (UpsampleError, chat_request, reply_lead,
                                      system_prompt, upsample)
     from gmlx.load.loader import load_model
     from gmlx.serve.capacity import working_set_bytes
@@ -611,23 +662,43 @@ def run_upsampler(path: str, family, prompt: str, log,
 
     if system is None:
         system = system_prompt(family)
-    # About 3 characters a token, which overcounts English.
-    ctx = (len(system) + len(prompt)) // 3 + (
-        family.upsample.max_tokens)
+    pictures = tuple(pictures)
+    if family.upsample.turn is None:
+        chars = len(system) + len(prompt)
+    else:
+        req = chat_request(family, prompt, system, pictures=pictures,
+                           canvas=canvas)
+        chars = sum(len(m["content"]) if isinstance(m["content"], str)
+                    else sum(len(c.get("text", "")) for c in m["content"])
+                    for m in req.messages)
+    # About 3 characters a token, which overcounts English, the pictures'
+    # vision tokens, and the reply.
+    ctx = chars // 3 + _picture_tokens(pictures) + family.upsample.max_tokens
     def stdout():
         return (contextlib.redirect_stdout(sys.stderr) if quiet
                 else contextlib.nullcontext())
 
     with stdout():
         check_or_exit(path, ctx_tokens=ctx)
-    limit, _ = resolve_cache_limit(None, [path], working_set_bytes() or 0.0)
+    # The vision tower joins the cache limit's files, as gmlx run --mmproj
+    # prices it.
+    files = [path] + ([mmproj] if pictures else [])
+    limit, _ = resolve_cache_limit(None, files, working_set_bytes() or 0.0)
     prev = None if limit is None else mx.set_cache_limit(limit)
     name = os.path.basename(path)
     t0 = time.perf_counter()
+    model = tok = None
     try:
         with stdout(), loadlog.load_ui(False, path):
-            model, _config, tok = load_model(path)
-        template = getattr(tok, "chat_template", None)
+            if pictures:
+                from gmlx.load.vlm import load_vlm_model
+
+                model, _config, tok, *_ = load_vlm_model(path, mmproj)
+            else:
+                model, _config, tok = load_model(path)
+        text_tok = getattr(tok, "tokenizer", tok) if pictures else tok
+        template = (getattr(tok, "chat_template", None)
+                    or getattr(text_tok, "chat_template", None))
         if template is None:
             raise _Usage(f"--upsampler {name}: the model has no chat "
                          "template, so it cannot take the upsampler's "
@@ -637,8 +708,14 @@ def run_upsampler(path: str, family, prompt: str, log,
             kwargs = map_thinking_controls(
                 {}, req.thinking, None, template,
                 warn=lambda msg: log(f"[upsample] {msg}"))
+            if req.seed is not None:
+                mx.random.seed(req.seed)
+            if req.pictures:
+                return _chat_pictures(model, tok, req, kwargs)
             reply = generate(model, tok, req.user, system_prompt=req.system,
                              max_tokens=req.max_tokens, temp=req.temperature,
+                             top_p=req.top_p, top_k=req.top_k,
+                             min_p=req.min_p,
                              presence_penalty=req.presence_penalty,
                              template_kwargs=kwargs, verbose=False)
             # A template that opens the thinking block or the message
@@ -651,7 +728,8 @@ def run_upsampler(path: str, family, prompt: str, log,
 
         try:
             caption = upsample(family, prompt, chat, name=f"--upsampler {name}",
-                               system=system)
+                               system=system, seed=seed, pictures=pictures,
+                               canvas=canvas)
         except UpsampleError as e:
             raise _Usage(str(e)) from None
     finally:
@@ -663,6 +741,31 @@ def run_upsampler(path: str, family, prompt: str, log,
     log(f"[{tag}] prompt upsampled by {name} in "
         f"{time.perf_counter() - t0:.1f} s, {len(caption.split())} words")
     return caption
+
+
+def _chat_pictures(model, processor, req, kwargs) -> str:
+    """The reply of the vision chat model to the turn ``req``, whose user
+    turn holds its pictures in place, as gmlx run --mmproj generates: the
+    template renders each image part where it stands, and the processor
+    takes the pictures in that order."""
+    from gmlx._vendor.mlx_vlm import generate as vlm_generate
+    from gmlx._vendor.mlx_vlm.prompt_utils import get_chat_template
+    from gmlx.image.upsample import reply_lead
+
+    from .cli import unfit_request
+
+    rendered = get_chat_template(processor, [dict(m) for m in req.messages],
+                                 True, **kwargs)
+    text_tok = getattr(processor, "tokenizer", processor)
+    why = unfit_request(model, text_tok, rendered, 0, req.max_tokens, None)
+    if why:
+        raise _Usage(f"the upsampler: {why}")
+    result = vlm_generate(
+        model, processor, rendered, image=[p.image() for p in req.pictures],
+        max_tokens=req.max_tokens, temperature=req.temperature,
+        top_p=req.top_p, top_k=req.top_k, min_p=req.min_p,
+        presence_penalty=req.presence_penalty or None, verbose=False)
+    return reply_lead(rendered, tokenizer=text_tok) + (result.text or "")
 
 
 def _check_files(a) -> None:
@@ -895,7 +998,13 @@ def _generate(a) -> int:
     _check_limits(fam, width, height, "--size" if a.size else None)
     mask = read_mask(a.mask, (width, height)) if a.mask else None
     text_only = edit is not None and edit.text_only
-    revised = _upsample(a, fam, prompt, refs, log)
+    # The seed is drawn before the upsampler runs, which it seeds when it
+    # samples, so the seed reruns the caption with the image.
+    seed = a.seed
+    if seed is None:
+        seed = secrets.randbelow(1 << 32)
+        log(f"[image] seed {seed}")
+    revised = _upsample(a, fam, prompt, refs, log, seed=seed)
     text = revised or prompt
     mmproj = a.encoder_mmproj if refs and not text_only else None
     if a.encoder_mmproj is not None and not refs:
@@ -908,10 +1017,6 @@ def _generate(a) -> int:
         log("warning: --negative-prompt is unused, since --guidance 1 turns "
             "guidance off")
 
-    seed = a.seed
-    if seed is None:
-        seed = secrets.randbelow(1 << 32)
-        log(f"[image] seed {seed}")
     seeds = [seed + i for i in range(a.count)]
     fmt = _format(a)
     alpha = _check_background(a, fam, fmt)
