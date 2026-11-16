@@ -12,7 +12,8 @@ The file holds no latent statistics: model space takes the video VAE's.
 The VAE owns its tiles, as ComfyUI's class does: a pass past one tile runs
 on tiles of 256 px that overlap by at least 64, whatever the caller asks.
 Decoded tiles blend with the tiles above and to the left as those were
-blended, ``TILES_PER_FORWARD`` tiles of a row through the decoder at a time.
+blended, ``TILES_PER_FORWARD`` tiles of the batch through the decoder at a
+time.
 Encoded tiles blend as encoded (``vit.tiled_moments``).
 
 ``decode`` maps VAE-space latents (B, h, w, 24) to an image (B, 16h, 16w, 3)
@@ -187,8 +188,9 @@ class H3ImageVAE(nn.Module):
     def decode(self, z: mx.array,
                per_forward: int = TILES_PER_FORWARD) -> mx.array:
         """An image (B, 16h, 16w, 3) in float32 on [-1, 1] of VAE-space
-        latents (B, h, w, C), evaluated, ``per_forward`` tiles of a row
-        through the decoder at a time."""
+        latents (B, h, w, C), evaluated, ``per_forward`` // B tiles of a
+        row, at least one, through the decoder at a time, as ComfyUI
+        divides its tiles a forward by the batch."""
         out = self.finish(self.tiled_decode(z, per_forward))
         mx.eval(out)
         return out
@@ -207,8 +209,9 @@ class H3ImageVAE(nn.Module):
         """The raw tiles of one row of latents (B, h, w, C), in order."""
         sp, b = self.config.spatial, z.shape[0]
         tiles = [z[:, :, x // sp:(x + xl) // sp] for x, xl in zip(xs, xlen)]
-        for k in range(0, len(tiles), max(1, per_forward)):
-            group = tiles[k:k + max(1, per_forward)]
+        step = max(1, per_forward // b)
+        for k in range(0, len(tiles), step):
+            group = tiles[k:k + step]
             out = self._forward(mx.concatenate(group, axis=0))
             for g in range(len(group)):
                 yield out[g * b:(g + 1) * b]

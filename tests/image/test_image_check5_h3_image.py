@@ -274,6 +274,32 @@ def test_the_decoder_pauses_per_block_with_the_same_image(tiny):
     assert np.array_equal(np.array(plain), np.array(paced))
 
 
+def test_a_batch_decodes_as_its_images_four_tiles_a_forward(tiny,
+                                                           monkeypatch):
+    """A row of three tiles runs as one forward of three at batch 1, and at
+    batch 2 as forwards of two tiles and one, four and two images, as
+    ComfyUI divides the tiles a forward by the batch. Each image of the
+    batch is its own decode within float32 rounding: a forward of another
+    batch sums its products in another order."""
+    vae = _load(tiny[0], mx.float32)
+    seen = []
+    real = hv.H3ImageVAE._forward
+
+    def spy(self, z):
+        seen.append(z.shape[0])
+        return real(self, z)
+    monkeypatch.setattr(hv.H3ImageVAE, "_forward", spy)
+    z = mx.random.normal((2, 2, 29, 24), key=mx.random.key(2))
+    with mx.stream(mx.cpu):
+        both = np.array(vae.decode(z))
+        assert seen == [4, 2]
+        for i in range(2):
+            seen.clear()
+            one = np.array(vae.decode(z[i:i + 1]))
+            assert seen == [3]
+            assert fx.rel_l2(both[i:i + 1], one) < 1e-6, i
+
+
 def test_the_mask_token_is_read_and_left_unused(tiny):
     """The file's decoder.mask_token is the one tensor of the file the
     module holds no parameter for, as ComfyUI keeps it unused."""

@@ -574,7 +574,8 @@ MOSS_VAE_DECODE = {"exact": {2: VaeFit(base=1.44 * GiB, k=19.7),
 # of one 256 pixel tile reads 0.99 GiB in float16 and 1.97 in float32: the
 # encoder runs as one graph, whose temporaries stay alive until it
 # completes. A whole decode of one tile reads 0.03 GiB. The tiled passes
-# run one 256 pixel tile at a time, four through the decoder at once:
+# run one 256 pixel tile at a time, four of the batch through the decoder
+# at once:
 # the tile term is the whole slope over one tile, and the image term a
 # line through the 2048 and 4096 pixel cells, raised 10 percent, the base
 # 0.25 GiB over every tiled cell. At 4096 pixels a tiled decode reads 0.32
