@@ -1327,10 +1327,12 @@ def test_the_fit_check_names_the_largest_fitting_size_in_few_plans(
         "prompt": "x", "size": "4096x1024"})
     with pytest.raises(image_service.ImageRequestError,
                        match="largest size of its shape that fits is "
-                             "1456x352") as e:
+                             "1424x368") as e:
         image_service.fit_check(req, served, req.size, 1)
     assert e.value.param == "size"
-    # A bisection over the longer side, not a plan per stride.
+    # 1424x368, its short side rounded up, holds more pixels than 1456x352,
+    # both under 1024 x 512. A bisection over the sizes of the shape, not a
+    # plan per size.
     assert len(calls) <= 12, len(calls)
     calls.clear()
     image_service.fit_check(req, served, (512, 512), 1)
@@ -1377,7 +1379,7 @@ def _h3_fit_refusal(served, size) -> str:
     # No size MiniMax-H3-Image takes fits: the largest that fits, 800x800
     # and 1120x544, is under its least pixels, and the answer names the
     # smallest size of the shape it takes. At 608x1184 that is 576x1152,
-    # and at 512x1376 it is 512x1312, a size no bisection step prices.
+    # and at 512x1376 it is 512x1312, whose short side rounds up.
     ((1024, 1024), 680_000, False, (832, 832)),
     ((2048, 1024), 650_000, False, (1152, 576)),
     ((608, 1184), 660_000, False, (576, 1152)),
@@ -1402,13 +1404,16 @@ def test_the_fit_check_names_only_a_size_the_family_takes(
     assert size_refusal(h3, w, h) is None, msg
 
 
-def test_the_fit_check_names_the_smallest_size_of_the_shape_over_a_sweep(
+def test_the_fit_check_names_the_largest_size_of_the_shape_over_a_sweep(
         monkeypatch):
-    """Over a sweep of shapes, where no size MiniMax-H3-Image takes fits
-    the refusal names the smallest size of the shape it takes, and where
-    that size fits it is the answer. A size of the shape has one side a
-    multiple of 32 and the other that side's share of the shape rounded
-    down or up to 32."""
+    """Over a sweep of shapes and budgets, the refusal names the largest
+    smaller size of the shape MiniMax-H3-Image takes that fits, and where
+    none fits the smallest size of the shape it takes. A size of the shape
+    has one side a multiple of 32 and the other that side's share of the
+    shape rounded down or up to 32. The budgets are the least size's
+    pixels and one under, and the pixels of a third, two thirds and all of
+    the way up the taken sizes under the request, each with one under and
+    one over, and a few round counts."""
     import re
 
     from gmlx.image.registry import get_family, size_refusal
@@ -1418,11 +1423,13 @@ def test_the_fit_check_names_the_smallest_size_of_the_shape_over_a_sweep(
     served = _h3_fit_served(monkeypatch, budget)
     shapes = [(w, h) for w in range(32, 7713, 224)
               for h in range(32, 7713, 224)]
-    shapes += [(512, 1376), (608, 1184), (480, 1440), (7712, 2592)]
+    shapes += [(512, 1376), (608, 1184), (480, 1440), (7712, 2592),
+               (672, 1152), (672, 1632)]
     shapes = [s for s in shapes if size_refusal(h3, *s) is None]
     assert len(shapes) > 300
     named = re.compile(r"(?:that fits is|the smallest it takes is) "
                        r"(\d+)x(\d+)$")
+    larger = 0
     for w, h in shapes:
         sizes = set()
         for a in range(32, 7713, 32):
@@ -1431,17 +1438,32 @@ def test_the_fit_check_names_the_smallest_size_of_the_shape_over_a_sweep(
                 for b in (num // den * 32, -(-num // den) * 32):
                     if 32 <= b <= 7712:
                         sizes.add((b, a) if flip else (a, b))
-        least = min(x * y for x, y in sizes if x * y >= h3.min_pixels
-                    and size_refusal(h3, x, y) is None)
-        for px, fits in ((least - 1, False), (least, True)):
+        taken = {(x, y) for x, y in sizes if x * y >= h3.min_pixels
+                 and size_refusal(h3, x, y) is None}
+        least = min(x * y for x, y in taken)
+        under = sorted(x * y for x, y in taken
+                       if x <= w and y <= h and (x, y) != (w, h))
+        budgets = {least - 1, least, 700_000, 1_000_000, 4_000_000}
+        for i in (len(under) // 3, 2 * len(under) // 3, len(under) - 1):
+            if under:
+                budgets |= {under[i] - 1, under[i], under[i] + 1}
+        for px in sorted(budgets):
             if w * h <= px:
                 continue
             budget["px"] = px
             msg = _h3_fit_refusal(served, (w, h))
             W, H = map(int, named.search(msg).groups())
-            assert ("that fits is" in msg) is fits, (w, h, msg)
-            assert (W, H) in sizes and W * H == least, (w, h, msg)
-            assert size_refusal(h3, W, H) is None, (w, h, msg)
+            assert (W, H) in taken, (w, h, px, msg)
+            top = max((n for n in under if n <= px), default=None)
+            if top is None:
+                assert "the smallest it takes is" in msg, (w, h, px, msg)
+                assert W * H == least, (w, h, px, msg)
+            else:
+                assert "that fits is" in msg, (w, h, px, msg)
+                assert W * H == top and W <= w and H <= h, (w, h, px, msg)
+                larger += top > least
+    # The sweep reaches answers above the least size.
+    assert larger > 1000, larger
 
 
 def test_the_fit_check_passes_without_a_budget(monkeypatch):

@@ -1508,7 +1508,7 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     ``_prepare_refs``."""
     from gmlx.commands.image_preflight import prompt_rows, prompt_terms
     from gmlx.image import memfit
-    from gmlx.image.registry import in_shape, smallest_size, takes
+    from gmlx.image.registry import shape_sizes, smallest_size, takes
 
     pipe = served.pipe
     cfg = _guided(req, served)
@@ -1548,46 +1548,34 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
         return
     unit = _stride(served)
     fam = pipe.family
-    # A family with a least size of its own names its smallest size of the
-    # shape, and the bisection prices from the first of its sizes that the
-    # family takes.
-    least = first = None
-
-    def scaled(k: int) -> tuple:
-        scale = k * unit / max(w, h)
-        return in_shape(fam, w, h, max(unit, int(w * scale) // unit * unit),
-                        max(unit, int(h * scale) // unit * unit), unit)
-
-    if getattr(fam, "min_pixels", None):
-        least = smallest_size(fam, w, h)
-        first = next((k for k in range(1, max(w, h) // unit + 1)
-                      if takes(fam, *scaled(k))), max(least) // unit)
-
-    # A smaller size of the shape never needs more memory, so a bisection
-    # over the longer side finds the largest that fits in a few plans.
+    # The smaller sizes of the shape (shape_sizes) that the family takes,
+    # fewest pixels first and, of as many pixels, the nearest the shape
+    # last. A size with more pixels never needs less memory, so a
+    # bisection over them finds the largest that fits in a few plans. A
+    # family with a least size of its own names its smallest size of the
+    # shape when none fits.
+    sizes = sorted({s for s in shape_sizes(w, h, unit, max(w, h))
+                    if s[0] <= w and s[1] <= h and s != (w, h)
+                    and takes(fam, *s)},
+                   key=lambda s: (s[0] * s[1],
+                                  -abs(s[0] * h - s[1] * w) / s[1], s))
+    least = (smallest_size(fam, w, h) if getattr(fam, "min_pixels", None)
+             else None)
     best = None
     if not refs or caption is not None:
-        lo = 1 if first is None else first
-        hi = max(w, h) // unit - 1
+        lo, hi = 0, len(sizes) - 1
         while lo <= hi:
             k = (lo + hi) // 2
-            if fits(*scaled(k), refs):
-                best, lo = scaled(k), k + 1
+            if fits(*sizes[k], refs):
+                best, lo = sizes[k], k + 1
             else:
                 hi = k - 1
-        # The floors can leave the family's least size of the shape under
-        # its least pixels, and a size it refuses is no answer. The
-        # smallest size it takes need not be one the bisection prices.
-        if best is not None and not takes(fam, *best):
-            best = None
-        if best is None and least is not None and fits(*least, refs):
-            best = least
     # The prompt is the cause when no size of the shape fits at its rows
     # and some size of it fits at the family's default rows. The smallest
     # size needs the least memory, so it stands for every size.
     if caption is not None and best is None:
         base = {k: v for k, v in args.items() if k not in terms}
-        if fits(*(least or scaled(1)), refs, base):
+        if fits(*(least or (sizes[0] if sizes else size)), refs, base):
             what, fix = "the prompt", "shorten the prompt"
             if cause == "negative_prompt":
                 what, fix = "the negative prompt", "shorten it"
