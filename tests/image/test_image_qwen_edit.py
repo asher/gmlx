@@ -534,6 +534,9 @@ class _Vae:
     def to_model_space(self, mean):
         return mean.transpose(0, 3, 1, 2)
 
+    def to_vae_layout(self, latents):
+        return latents.transpose(0, 2, 3, 1)
+
 
 @pytest.fixture
 def pipe(handle, monkeypatch):
@@ -696,6 +699,32 @@ def test_reference_latents_come_from_the_vae_once_per_image(pipe):
     with pytest.raises(ValueError, match="1 hashes for 2 reference"):
         Conditioning(pos.features, "k", ref_latents=done[0].ref_latents,
                      ref_hashes=("a",))
+
+
+def test_reference_latents_sample_with_the_family_seed_or_their_own_noise(
+        pipe):
+    """A family with a reference encode seed samples each image with
+    noise_from_seed draws in the shape of its latents, a reference's own
+    noise takes their place, and each draw keeps its own latents."""
+    from gmlx.image.samplers import noise_from_seed
+
+    ref = api.references(pipe, [_picture(300, 260, seed=1)],
+                         area=320 * 320)[0]
+    mode = np.array(api._reference_latents(pipe, ref, None))
+    pipe.family = replace(pipe.family, ref_encode_seed=42)
+    seeded = np.array(api._reference_latents(pipe, ref, None))
+    # The stub's log variance is 0, so a sample is the mean plus the draw.
+    np.testing.assert_array_equal(seeded,
+                                  mode + noise_from_seed(42, (8, 18, 22)))
+    own = noise_from_seed(7, (8, 18, 22))
+    noisy = Reference(ref.pixels, noise=own)
+    np.testing.assert_array_equal(
+        np.array(api._reference_latents(pipe, noisy, None)), mode + own)
+    assert len(pipe.vae.calls) == 3
+    assert noisy.identity[:3] == ref.identity and noisy.identity != \
+        Reference(ref.pixels, noise=own + 1).identity
+    with pytest.raises(ValueError, match="must be .C, h, w. float32"):
+        Reference(ref.pixels, noise=own.astype(np.float64))
 
 
 def test_two_references_of_one_size_keep_their_own_latents_and_order(pipe):

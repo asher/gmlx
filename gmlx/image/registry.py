@@ -237,6 +237,10 @@ class Family:
     # (steps, tokens=, variant=) -> float32 sigmas with the final zero
     schedule: Callable | None = None
     edit: EditParts | None = None      # None takes no reference images
+    # Reference latents sample with noise_from_seed(seed) draws, fixed per
+    # image, as the reference pipeline samples each encode; None encodes
+    # them in mode.
+    ref_encode_seed: int | None = None
     # None runs the prompt as typed, with no upsampler to rewrite it.
     upsample: UpsampleParts | None = None
     loop: LoopRules | None = None      # None runs the loop in float32

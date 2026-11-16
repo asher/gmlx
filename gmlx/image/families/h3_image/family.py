@@ -272,4 +272,5 @@ FAMILY = Family(
     variants=VARIANTS,
     unknown_variant="pruned",
     sampling=SAMPLING,
+    ref_encode_seed=42,
 )

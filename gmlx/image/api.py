@@ -687,11 +687,12 @@ def _encode_with_images(pipe: ImagePipeline, prompt: str,
 
 def encode_references(pipe: ImagePipeline, conds, *, plan=None):
     """``conds``, one Conditioning or several, with the VAE latents of
-    their reference images. Each image is encoded once, in mode, and its
-    latents stay in the pipeline's cache of reference latents under the
-    image's hash and the VAE's dtype. ``plan`` is the memory plan of the
-    request: an encode runs whole or in tiles as it says. A conditioning
-    without reference images comes back as it is."""
+    their reference images. Each image is encoded once, sampled with its
+    own noise or the family's ``ref_encode_seed`` draws, else in mode, and
+    its latents stay in the pipeline's cache of reference latents under
+    the image's hash, the VAE's dtype and the draws. ``plan`` is the
+    memory plan of the request: an encode runs whole or in tiles as it
+    says. A conditioning without reference images comes back as it is."""
     import dataclasses
 
     one = isinstance(conds, Conditioning)
@@ -706,7 +707,15 @@ def encode_references(pipe: ImagePipeline, conds, *, plan=None):
 
 def _reference_latents(pipe: ImagePipeline, ref: Reference, plan):
     vae = _need_vae(pipe)
-    key = (ref.sha256, str(getattr(vae, "dtype", "")))
+    noise, seed = ref.noise, pipe.family.ref_encode_seed
+    if noise is None and seed is not None:
+        s = vae.config.scale
+        noise = noise_from_seed(seed, (vae.config.latent_channels,
+                                       ref.height // s, ref.width // s))
+        draws = f"seed {seed}"
+    else:
+        draws = ref.noise_sha256
+    key = (ref.sha256, str(getattr(vae, "dtype", "")), draws)
     hit = pipe.reference_latents.get(key)
     if hit is not None:
         return hit
@@ -726,7 +735,9 @@ def _reference_latents(pipe: ImagePipeline, ref: Reference, plan):
     # The channels the VAE encodes: RGB, or RGBA on a VAE that reads alpha.
     px = ref.pixels[..., :vae.config.in_channels]
     x = mx.array(px.astype(np.float32) / 255.0)[None] * 2 - 1
-    z = tiling.encode(vae, x, tiled=tiled, mode="mode", free=room)[0]
+    how = ({"mode": "mode"} if noise is None
+           else {"mode": "sample", "noise": noise[None]})
+    z = tiling.encode(vae, x, tiled=tiled, free=room, **how)[0]
     mx.eval(z)
     pipe.reference_latents.put(key, z, array_bytes([z]))
     return z
