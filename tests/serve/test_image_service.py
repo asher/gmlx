@@ -1235,17 +1235,20 @@ def test_the_fit_check_names_the_largest_fitting_size_in_few_plans(
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("size, fits_px, named", [
+@pytest.mark.parametrize("size, fits_px, fits, named", [
     # No size MiniMax-H3-Image takes fits: the largest that fits, 800x800
-    # and 1120x544, is under its least pixels.
-    ((1024, 1024), 680_000, None),
-    ((2048, 1024), 650_000, None),
-    ((1024, 1024), 800_000, (864, 864)),
+    # and 1120x544, is under its least pixels, and the answer names the
+    # smallest size of the shape it takes. At 608x1184 that is 576x1152,
+    # under smallest_size's 608x1152, whose sides round up.
+    ((1024, 1024), 680_000, False, (832, 832)),
+    ((2048, 1024), 650_000, False, (1152, 576)),
+    ((608, 1184), 660_000, False, (576, 1152)),
+    ((1024, 1024), 800_000, True, (864, 864)),
 ])
 def test_the_fit_check_names_only_a_size_the_family_takes(
-        monkeypatch, size, fits_px, named):
+        monkeypatch, size, fits_px, fits, named):
     from gmlx.image import memfit
-    from gmlx.image.registry import get_family, size_refusal, smallest_size
+    from gmlx.image.registry import get_family, size_refusal
 
     def plan_memory(*, height, width, _hint=True, **k):
         ok = width * height <= fits_px
@@ -1272,13 +1275,12 @@ def test_the_fit_check_names_only_a_size_the_family_takes(
         image_service.fit_check(req, served, req.size, 1)
     assert e.value.param == "size"
     msg = str(e.value)
-    if named is None:
-        w, h = smallest_size(h3, *size)
+    w, h = named
+    if not fits:
         assert msg.endswith(f"no size of its shape that MiniMax-H3-Image "
                             f"takes does; the smallest it takes is "
                             f"{w}x{h}"), msg
     else:
-        w, h = named
         assert msg.endswith(f"the largest size of its shape that fits is "
                             f"{w}x{h}"), msg
     assert size_refusal(h3, w, h) is None, msg

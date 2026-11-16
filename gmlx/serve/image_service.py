@@ -1475,6 +1475,13 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
         return in_shape(fam, w, h, max(unit, int(w * scale) // unit * unit),
                         max(unit, int(h * scale) // unit * unit), unit)
 
+    if least is not None:
+        # The smallest size of the shape the family takes, of those the
+        # bisection prices: smallest_size rounds each side up, which can
+        # pass over a smaller one.
+        least = next((scaled(k) for k in range(1, max(w, h) // unit + 1)
+                      if size_refusal(fam, *scaled(k)) is None), least)
+
     # A smaller size of the shape never needs more memory, so a bisection
     # over the longer side finds the largest that fits in a few plans.
     best = None
