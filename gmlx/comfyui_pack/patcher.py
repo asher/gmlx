@@ -49,8 +49,8 @@ class GmlxBinding:
     model_id: str
     status: dict
     manifest_count: int = 0
-    # The int8 setting of a MiniMax-H3 model's steps, from the model loader:
-    # "entry" follows the server's entry.
+    # The int8 setting of a MiniMax-H3 or MiniMax-H3-Image model's steps,
+    # from the model loader: "entry" follows the server's entry.
     int8: str = "entry"
     events: list = field(default_factory=list)
 

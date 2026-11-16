@@ -534,8 +534,9 @@ class Int8(Base):
     def test_int8_on_an_image_model_is_refused_at_the_load(self):
         with self.assertRaises(C.GmlxRefusal) as e:
             self.loaded("attention", ZID)
-        self.assertEqual(str(e.exception), "gmlx: int8 attention runs on MiniMax-H3, and "
-                         "'z-image-turbo' is an image model; set int8 to entry")
+        self.assertEqual(str(e.exception), "gmlx: int8 attention runs on MiniMax-H3 and "
+                         "MiniMax-H3-Image, and 'z-image-turbo' takes no int8 setting; "
+                         "set int8 to entry")
         self.loaded("off", ZID)
 
 

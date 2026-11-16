@@ -598,8 +598,9 @@ class RemoteForward:
         return anchors, spans
 
     def _int8(self, fields: dict) -> None:
-        """The model loader's int8 setting on each AV step, which the server
-        runs over its entry's; ``entry`` sends nothing. A server from before
+        """The model loader's int8 setting on each step of a model whose
+        status names one, which the server runs over its entry's;
+        ``entry`` sends nothing. A server from before
         the int8 setting runs the entry's, with one warning a model when the
         loader asks for a value other than off."""
         value = self.b.int8
@@ -714,6 +715,8 @@ class RemoteForward:
             client.ensure_tensor(t, h)
         fields = {"model": self.b.model_id, "run": run, "convention": "comfy",
                   "patch_table": table, "rows": rows}
+        if "int8" in self.b.status:
+            self._int8(fields)
         if kv and kwargs.get("ref_latents"):
             # The server keeps the references' K and V of the run's first step.
             fields["ref_cache"] = True
@@ -743,16 +746,16 @@ class RemoteForward:
 
 def load_model(client: StepClient, model_id: str, int8: str = "entry") -> GmlxModelPatcher:
     """The gmlx MODEL of ``model_id`` on ``client``'s server, whose MiniMax-H3
-    steps run at the int8 setting ``int8``, or the entry's. A value whose
+    or MiniMax-H3-Image steps run at the int8 setting ``int8``, or the entry's. A value whose
     linears differ from the entry's is refused here when the status names the
     entry's setting, else at the first step."""
     status = client.status(model_id)
     facts = status.get("comfy") or {}
     if not facts.get("model_class"):
         raise GmlxError(f"gmlx: the server gives no ComfyUI model class for {model_id!r}")
-    if int8 not in ("entry", "off") and not status.get("audio"):
-        raise GmlxRefusal(f"gmlx: int8 {int8} runs on MiniMax-H3, and {model_id!r} is an "
-                          "image model; set int8 to entry")
+    if int8 not in ("entry", "off") and not status.get("audio") and "int8" not in status:
+        raise GmlxRefusal(f"gmlx: int8 {int8} runs on MiniMax-H3 and MiniMax-H3-Image, and "
+                          f"{model_id!r} takes no int8 setting; set int8 to entry")
     why = discovery.int8_refusal(status.get("int8") or "entry", int8)
     if why:
         raise GmlxRefusal(f"gmlx: {why}")
