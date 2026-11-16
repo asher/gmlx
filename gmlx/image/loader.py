@@ -296,6 +296,10 @@ def load_dit(path: str, *, family: str | None = None,
                if isinstance(m, KQuantLinear))
     # A model loaded on one thread may run on another.
     materialize_module_arrays(model)
+    n_owned = len(no_alias)
+    # The model alone holds the leaves, so each K-quant leaf frees as its
+    # int8 copy lands.
+    del weights, no_alias
     collect_after_load()
     if attention != "dense":
         model.attention = attention
@@ -306,6 +310,6 @@ def load_dit(path: str, *, family: str | None = None,
             raise ImageModelError(str(e)) from e
         log(f"[{kind}] {fam.title}: {n} linears converted to int8")
     info = DitInfo(identified=ident, shards=tuple(shards), act_dtype=act,
-                   n_kquant=n_kq, n_owned_casts=len(no_alias),
+                   n_kquant=n_kq, n_owned_casts=n_owned,
                    file_bytes=sum(s.size for s in scans))
     return model, info

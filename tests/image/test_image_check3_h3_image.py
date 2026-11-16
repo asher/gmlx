@@ -395,8 +395,23 @@ def test_check3_int8(gguf_dir, monkeypatch, int8):
         pytest.skip("int8 runs on a GPU with NAX units")
     attention, linears = int8_parts(int8)
     p = _find(gguf_dir, _manifest(REAL[0])["files"]["dit"])
+    counted = []
+    gate = image_loader.gate_load
+    monkeypatch.setattr(image_loader, "gate_load", lambda n, *a, **k: (
+        counted.append(n), gate(n, *a, **k)))
+    gc.collect()
+    mx.clear_cache()
+    before = mx.get_active_memory()
+    mx.reset_peak_memory()
     model, _ = image_loader.load_dit(p, int8=int8, log=lambda *_: None)
+    load_peak = mx.get_peak_memory() - before
     try:
+        # A load that converts its linears peaks within what its gate
+        # counts: each K-quant leaf frees as its int8 copy lands.
+        print(f"h3 image check3 int8 {int8}: load peak "
+              f"{load_peak / 2**30:.2f} GiB of {counted[0] / 2**30:.2f} "
+              "counted")
+        assert linears != "int8" or load_peak <= counted[0]
         assert (model.attention, model.linears) == (attention, linears)
         assert sum(isinstance(m, Int8Linear) for _, m in
                    model.named_modules()) == (200 if linears == "int8" else 0)
