@@ -40,6 +40,7 @@ import os
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 import pytest
 
 import block_gates as bg
@@ -48,7 +49,8 @@ from block_gates import exact_process, kernel_calls, rerun_exact
 from image_fixtures import fixture_view
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
 
-from gmlx.image import ops
+from gmlx.image import api, ops
+from gmlx.image.conditioning import Conditioning
 from gmlx.image.families.h3_image import family as hi
 from gmlx.image.families.h3_image import loader as hl
 from gmlx.image.families.h3_image import model as him
@@ -84,9 +86,42 @@ def test_the_tiny_manifests_follow_the_rule(tiny, name):
 def test_the_tiny_cases_read_head_0_alone_and_head_3_beside_it(tiny):
     _, config, cases = tiny
     model = hg.tiny_model(tiny[0], config)
-    heads = [model.modulation(float(cases[n][0]["sigma"]), 1).head
+    heads = [model.modulation(float(cases[n][0]["sigma"]), 1,
+                              hg.step_target(cases[n][0])).heads
              for n in TINY_CASES]
-    assert heads == [0, 3]
+    assert heads == [(), ((3, 1.0),)]
+
+
+def test_sample_gives_each_step_the_sigma_it_goes_to(tiny, monkeypatch):
+    """A run on ComfyUI's simple schedule at 3 steps, off the grid, hands
+    each step the next sigma of the schedule, so each step reads the
+    heads and weights ComfyUI reads on it (check 4's fixture)."""
+    weights, config, cases = tiny
+    arrays, _ = cases[TINY_CASES[0]]
+    c4, m4 = committed_fixture("check4_h3_image")
+    s = c4["simple_3"]
+    pipe = api.ImagePipeline(dit=hg.tiny_model(weights, config),
+                             family=hi.FAMILY, variant="pruned")
+    real = him.H3ImageDiT.modulation
+    seen = []
+
+    def spy(self, sigma, batch, target=None):
+        mod = real(self, sigma, batch, target)
+        seen.append((np.float32(np.reshape(sigma, -1)[0]),
+                     np.float32(np.reshape(target, -1)[0]), mod.heads))
+        return mod
+    monkeypatch.setattr(him.H3ImageDiT, "modulation", spy)
+    feats = mx.array(arrays["features"])
+    with mx.stream(mx.cpu):
+        api.sample(pipe, Conditioning(feats), height=64, width=64,
+                   sigmas=s, seed=0, cfg=1.0, neg_skip=())
+    want = []
+    for (start, stop), w in zip(c4["heads_simple_3"].tolist(),
+                                m4["results"]["head_weights"]["simple_3"]):
+        first = max(start, 1)
+        want.append(tuple(zip(range(first, stop), w[first - start:])))
+    assert [(a, b) for a, b, _ in seen] == list(zip(s[:-1], s[1:]))
+    assert [h for *_, h in seen] == want
 
 
 @pytest.mark.parametrize("name", TINY_CASES)
@@ -142,8 +177,9 @@ def _rope_pairs_adjacent(mp):
 
 
 def _head_one_off(mp):
-    real = hi.step_head
-    mp.setattr(hi, "step_head", lambda s: min(real(s) + 1, hi.STEPS - 1))
+    real = hi.grid_point
+    mp.setattr(hi, "grid_point",
+               lambda s: min(real(s) + 1, len(hi.PDD_SIGMAS) - 1))
 
 
 def _head_alone(mp):
@@ -152,9 +188,9 @@ def _head_alone(mp):
 
     def head(self, x, mod, plan, taps=None):
         out = real(self, x, mod, plan, taps)
-        if not mod.head:
+        if not mod.heads:
             return out
-        return out - real(self, x, dataclasses.replace(mod, head=0), plan)
+        return out - real(self, x, dataclasses.replace(mod, heads=()), plan)
     mp.setattr(him.H3ImageDiT, "head", head)
 
 

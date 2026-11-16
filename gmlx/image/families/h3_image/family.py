@@ -6,8 +6,9 @@ ships: MiniMax-H3's DiT without the audio stream, whose video head stacks
 one head per step of the distilled schedule (PDD), each 24 x 2 x 2 wide.
 Head 0 is a full head and heads 1 to 5 are offsets from it.
 
-The schedule is fixed: six steps on the sigmas of the release's
-pdd_config.json, at guidance 1.
+The default schedule is the grid itself: six steps on the sigmas of the
+release's pdd_config.json, at guidance 1. A step reads the heads of the
+grid intervals it spans (``step_heads``).
 """
 
 from __future__ import annotations
@@ -134,11 +135,19 @@ def grid_point(sigma: float) -> int:
                key=lambda i: abs(PDD_SIGMAS[i] - sigma))
 
 
-def step_head(sigma) -> int:
-    """The PDD head a step at ``sigma`` reads: the grid point nearest the
-    sigma, at most the last step's. Head 0 is the full head; head k adds
-    its offset to it."""
-    return min(grid_point(model_sigma(sigma)), STEPS - 1)
+def step_heads(sigma, target) -> tuple:
+    """The PDD heads a step from ``sigma`` to ``target`` reads, by
+    ComfyUI's rule: start is the grid point nearest the sigma the DiT
+    reads, at most the last step's, and stop the one nearest the target,
+    at least one past start. Returns start, stop and the float32 weight of
+    each grid interval from start to stop, its share of the span. Head 0
+    is the full head and heads 1 to 5 offsets, so the step reads head 0
+    plus each head past it by its weight."""
+    start = min(grid_point(model_sigma(sigma)), STEPS - 1)
+    stop = max(grid_point(float(np.float32(target))), start + 1)
+    dt = [PDD_SIGMAS[k] - PDD_SIGMAS[k + 1] for k in range(start, stop)]
+    w = np.asarray(dt, np.float32) / np.float32(sum(dt))
+    return start, stop, tuple(float(v) for v in w)
 
 
 def expected() -> dict:

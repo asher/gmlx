@@ -5,10 +5,11 @@ The sequence holds the text rows, then the target image's rows on H3's
 clock after them (``plan``). A step runs at time t = 1 - sigma, each
 segment with its modality row at t; the blocks, the token refiner and the
 curve rows are H3's (``gmlx.image.h3.blocks``). The head runs the whole
-``video_out`` bank in float32 on the target rows, and the step reads head
-0 alone at the first grid point and head 0 plus head k at grid point k
-(``family.step_head``). The model returns the flow velocity, the negated
-head.
+``video_out`` bank in float32 on the target rows, and a step reads head
+0 plus each later head of the grid intervals it spans by its share of
+the span (``family.step_heads``): head 0 alone from the first grid point
+to the next, head 0 plus head k from grid point k to k + 1. The model
+returns the flow velocity, the negated head.
 """
 
 from __future__ import annotations
@@ -63,11 +64,12 @@ class H3ImageConfig:
 
 @dataclass(frozen=True)
 class StepModulation:
-    """What a step derives from sigma: the curve rows (2, basis) at t and
-    at a reference image's time, those times, and the PDD head."""
+    """What a step derives from its sigma and the sigma it goes to: the
+    curve rows (2, basis) at t and at a reference image's time, those
+    times, and each PDD head past head 0 it reads with its weight."""
     t_emb: mx.array
     times: tuple
-    head: int
+    heads: tuple
 
     def arrays(self) -> list:
         return [self.t_emb]
@@ -141,6 +143,9 @@ class FinalLayer(nn.Module):
 
 class H3ImageDiT(H3Core):
     title = fam.TITLE
+    # The heads a step reads follow the sigma it goes to, which sample
+    # passes as the target.
+    reads_target = True
 
     def __init__(self, config: dict):
         super().__init__()
@@ -158,16 +163,23 @@ class H3ImageDiT(H3Core):
         self.blocks = [DiTBlock(b) for _ in range(b.depth)]
         self.final_layer = FinalLayer(cfg)
 
-    def modulation(self, sigma, batch: int) -> StepModulation:
-        """The curve rows of a step at ``sigma``: t = 1 - sigma as the
-        release's DiT reads sigma (``family.model_sigma``), and its PDD
-        head."""
+    def modulation(self, sigma, batch: int, target=None) -> StepModulation:
+        """The curve rows of a step from ``sigma`` to ``target``: t = 1 -
+        sigma as the release's DiT reads sigma (``family.model_sigma``),
+        and the PDD heads the step spans (``family.step_heads``)."""
         if batch != 1:
             raise ValueError(f"{fam.TITLE} runs a batch of 1")
+        if target is None:
+            raise ValueError(f"the {fam.TITLE} heads read the sigma the step "
+                             f"goes to: pass target")
         s = float(np.asarray(sigma, np.float32).reshape(-1)[0])
+        to = float(np.asarray(target, np.float32).reshape(-1)[0])
         t = 1.0 - fam.model_sigma(s)
         times = (t, max(t, fam.REF_TIME))
-        return StepModulation(self.curve(times), times, fam.step_head(s))
+        start, stop, w = fam.step_heads(s, to)
+        first = max(start, 1)
+        heads = tuple(zip(range(first, stop), w[first - start:]))
+        return StepModulation(self.curve(times), times, heads)
 
     def caption(self, feats: mx.array, taps: dict | None = None) -> Caption:
         return Caption(super().caption(feats, taps))
@@ -201,7 +213,7 @@ class H3ImageDiT(H3Core):
     def head(self, x: mx.array, mod: StepModulation, plan: StepPlan,
              taps: dict | None = None) -> mx.array:
         """The step's head rows of the target, float32, at the step's time:
-        the bank's head 0, plus head k at grid point k."""
+        the bank's head 0, plus each head the step spans by its weight."""
         fl = self.final_layer
         y = fl.adaln_proj.linear(mod.t_emb[:1])
         if taps is not None:
@@ -211,30 +223,29 @@ class H3ImageDiT(H3Core):
         n = fl.norm(x[0, s.start:s.stop])
         bank = fl.video_out((ops.modulate(n, scale) + shift).astype(_F32))
         pd = self.cfg.block.patch_dim
-        k = mod.head
         out = bank[:, :pd]
-        if k:
-            out = out + bank[:, k * pd:(k + 1) * pd]
+        for k, w in mod.heads:
+            out = out + w * bank[:, k * pd:(k + 1) * pd]
         if taps is not None:
             taps["final_layer"] = out
         return out
 
     def __call__(self, latents: mx.array, sigma, feats: mx.array | None,
-                 taps: dict | None = None, *,
+                 taps: dict | None = None, *, target=None,
                  mod: StepModulation | None = None,
                  caption: Caption | None = None, refs=None,
                  chunk: int | None = fam.ATTENTION_CHUNK) -> mx.array:
-        """Velocity (1, C, H, W) float32 for latents (1, C, H, W) at
-        ``sigma``, with text features (1, L, text dim). ``mod`` and
-        ``caption``, from ``modulation`` and ``caption``, stand in for the
-        work they hold. ``taps`` collects the output of every module by
-        path."""
+        """Velocity (1, C, H, W) float32 for latents (1, C, H, W) on a
+        step from ``sigma`` to ``target``, with text features (1, L, text
+        dim). ``mod`` and ``caption``, from ``modulation`` and
+        ``caption``, stand in for the work they hold. ``taps`` collects
+        the output of every module by path."""
         if refs is not None:
             raise ValueError(f"{fam.TITLE} takes no reference images yet")
         if latents.shape[0] != 1:
             raise ValueError(f"{fam.TITLE} runs a batch of 1")
         if mod is None:
-            mod = self.modulation(sigma, 1)
+            mod = self.modulation(sigma, 1, target)
         if caption is None:
             if feats is None:
                 raise ValueError("pass text features or their caption")

@@ -9,6 +9,7 @@ import pytest
 from image_fixtures import fixture_view
 from mlx.utils import tree_flatten
 
+from gmlx.image import ops
 from gmlx.image.families.h3_image import family as hi
 from gmlx.image.families.h3_image import model as him
 
@@ -67,23 +68,60 @@ def _plan(text_len, h, w, spans=()):
     return him.H3ImageDiT(cfg).plan(text_len, h, w, spans)
 
 
-@pytest.mark.parametrize("sigma, head", [(1.0, 0), (0.9675236940383911, 1),
-                                          (0.75, 3), (0.23200887441635132, 5),
-                                          (0.0005, 5)])
-def test_a_step_reads_its_grid_points_head(config, sigma, head):
+G = hi.PDD_SIGMAS
+
+
+@pytest.mark.parametrize("sigma, target, heads", [
+    (G[0], G[1], ()), (G[1], G[2], ((1, 1.0),)), (G[3], G[4], ((3, 1.0),)),
+    (G[5], 0.0, ((5, 1.0),)), (0.0005, 0.0, ((5, 1.0),)),
+    (G[0], G[2], ((1, 0.7111971974372864),)),
+    (G[4], 0.0, ((4, 0.5645265579223633), (5, 0.43547341227531433)))])
+def test_a_step_reads_the_heads_it_spans(config, sigma, target, heads):
+    """Head 0 alone, or beside head k, on one grid interval; past head 0
+    each head of a wider step by its share of the span."""
     cfg = {**config, "num_layers": 0, "token_refiner_num_layers": 0}
-    mod = him.H3ImageDiT(cfg).modulation(sigma, 1)
+    mod = him.H3ImageDiT(cfg).modulation(sigma, 1, target)
     t = 1.0 - hi.model_sigma(sigma)
-    assert mod.head == head
+    assert mod.heads == heads
     assert mod.times == (t, max(t, hi.REF_TIME))
     assert mod.t_emb.shape == (2, 8)
+
+
+def test_the_head_on_the_grid_is_head_0_plus_head_k_bit_for_bit(config):
+    """On the six steps of the default schedule the head equals head 0, or
+    head 0 plus head k, as the head read it before steps spanned grid
+    intervals."""
+    cfg = {**config, "num_layers": 0, "token_refiner_num_layers": 0,
+           "hidden_size": 64, "num_attention_heads": 1,
+           "attention_head_dim": 64, "ffn_hidden_size": 128}
+    model = him.H3ImageDiT(cfg)
+    fl = model.final_layer
+    pd = model.cfg.block.patch_dim
+    plan = model.plan(3, 4, 6)
+    x = mx.random.normal((1, plan.layout.rows, model.cfg.dim),
+                         key=mx.random.key(0))
+    for k in range(hi.STEPS):
+        mod = model.modulation(G[k], 1, G[k + 1])
+        y = fl.adaln_proj.linear(mod.t_emb[:1])
+        shift, scale = y.reshape(2, model.cfg.dim)
+        s = plan.target
+        n = fl.norm(x[0, s.start:s.stop])
+        bank = fl.video_out((ops.modulate(n, scale) + shift).astype(
+            mx.float32))
+        want = bank[:, :pd]
+        if k:
+            want = want + bank[:, k * pd:(k + 1) * pd]
+        got = model.head(x, mod, plan)
+        assert np.array(got).tobytes() == np.array(want).tobytes(), k
 
 
 def test_what_the_model_does_not_run_is_refused(config):
     cfg = {**config, "num_layers": 0, "token_refiner_num_layers": 0}
     model = him.H3ImageDiT(cfg)
     with pytest.raises(ValueError, match="batch of 1"):
-        model.modulation(1.0, 2)
+        model.modulation(1.0, 2, G[1])
+    with pytest.raises(ValueError, match="pass target"):
+        model.modulation(1.0, 1)
     lat = mx.zeros((1, 24, 4, 4))
     with pytest.raises(ValueError, match="no reference images"):
         model(lat, 1.0, mx.zeros((1, 2, 5120)), refs=[lat])

@@ -52,6 +52,7 @@
   "steps": 6,
   "pdd_sigmas": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0],
   "scheduler": "simple",
+  "off_grid_steps": 3,
   "comfy": "2aa4d535a76e4b6acf6a94f263bc482430c396dd",
   "comfy_gguf": "373048b8403a7820620065210a691263d4da0a61",
   "model_sampling": "MiniMaxH3ImageModelSampling",
@@ -75,16 +76,21 @@
     [1.0],
     [1.0],
     [1.0]
+   ],
+   "simple_3": [
+    [0.2888028025627136, 0.7111971974372864],
+    [0.3877067565917969, 0.6122932434082031],
+    [0.5645265579223633, 0.43547341227531433]
    ]
   }
  },
  "tolerances": {
   "grid": "bitwise",
   "heads": "exact",
-  "rule": "the sampling row's sigmas and final zero equal ComfyUI's PDD grid bit for bit; each step reads the head ComfyUI's PDD rule picks, one grid interval with weight 1, on the simple schedule and on the grid"
+  "rule": "the sampling row's sigmas and final zero equal ComfyUI's PDD grid bit for bit; each step reads the heads ComfyUI's PDD rule picks, its start and stop grid points and the float32 dt weights over them, on the simple schedule at the step count, on the grid, and on the simple schedule at 3 steps"
  },
  "notes": ["oracle: ComfyUI 2aa4d535a76e4b6acf6a94f263bc482430c396dd, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61; the model config from the GGUF's config key"],
- "created": "2026-11-15T22:31:54Z",
+ "created": "2026-11-15T23:56:41Z",
  "npz": "check4_h3_image.npz",
  "tensors": {
   "grid": {
@@ -97,10 +103,20 @@
    "dtype": "int64",
    "sha256": "fcd96ad0a85098e3e7de021b201afab23c72deca8d90c181d67fd6cc48222c5b"
   },
+  "heads_simple_3": {
+   "shape": [3, 2],
+   "dtype": "int64",
+   "sha256": "062bb22c1a9d417638c86da29ccce85f302cf1c49be1c35b8054d87261e82391"
+  },
   "heads_simple_6": {
    "shape": [6, 2],
    "dtype": "int64",
    "sha256": "fcd96ad0a85098e3e7de021b201afab23c72deca8d90c181d67fd6cc48222c5b"
+  },
+  "simple_3": {
+   "shape": [4],
+   "dtype": "float32",
+   "sha256": "1ce36ce9f101394410d8fc84cfa90a5e3a86c6ec44d5cba6df92a2c4f3991419"
   },
   "simple_6": {
    "shape": [7],
@@ -111,6 +127,11 @@
    "shape": [6],
    "dtype": "float32",
    "sha256": "0c82805eb8220e38462c1804bcf0d26732278e69dfe6eaa4dc088e45c986d777"
+  },
+  "timesteps_simple_3": {
+   "shape": [3],
+   "dtype": "float32",
+   "sha256": "258467e7fffdc250414ca6e82f5ab35eea4d72927086e43600218f81eee30913"
   },
   "timesteps_simple_6": {
    "shape": [6],

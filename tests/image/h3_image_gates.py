@@ -69,18 +69,28 @@ def cosine(got, ref) -> float:
     return float(g @ r / (np.linalg.norm(g) * np.linalg.norm(r)))
 
 
+def step_target(arrays: dict) -> float:
+    """The sigma the fixture's step goes to: the entry of its sampler's
+    schedule after the one nearest the sigma the DiT reads, as ComfyUI's
+    final layer finds it."""
+    s = np.asarray(arrays["sample_sigmas"], np.float32).reshape(-1)
+    i = int(np.abs(s - np.float32(hi.model_sigma(arrays["sigma"]))).argmin())
+    return float(s[min(i + 1, s.size - 1)])
+
+
 def case(arrays: dict):
-    """The fixture's step: latents (1, C, H, W), features (1, L, text dim)
-    and sigma."""
+    """The fixture's step: latents (1, C, H, W), features (1, L, text dim),
+    sigma and the sigma the step goes to."""
     lat = mx.array(arrays["latents"])
     feats = mx.array(arrays["features"])[None]
-    return lat, feats, float(arrays["sigma"])
+    return lat, feats, float(arrays["sigma"]), step_target(arrays)
 
 
 def plan_of(model, arrays: dict):
-    lat, feats, sigma = case(arrays)
+    lat, feats, sigma, target = case(arrays)
     _, _, h, w = lat.shape
-    return model.modulation(sigma, 1), model.plan(feats.shape[1], h, w)
+    return (model.modulation(sigma, 1, target),
+            model.plan(feats.shape[1], h, w))
 
 
 def layout_misses(model, arrays: dict, m: dict) -> list[str]:
@@ -124,10 +134,10 @@ def _eval_blocks(arrays) -> None:
 def free_rows(model, arrays: dict) -> dict:
     """Every tapped row of one step from the fixture's inputs, and the
     velocity. Each block evaluates before the next, as a run does."""
-    lat, feats, sigma = case(arrays)
+    lat, feats, sigma, target = case(arrays)
     taps: dict = {}
     with pacing.paced(_eval_blocks):
-        vel = model(lat, sigma, feats, taps)
+        vel = model(lat, sigma, feats, taps, target=target)
     got = {k: _np(v) for k, v in taps.items()}
     got[VELOCITY] = _np(vel)
     return got

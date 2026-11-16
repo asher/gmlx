@@ -6,11 +6,13 @@ ComfyUI builds the model's sampling from the GGUF's `config` metadata
 (pdd_steps and pdd_sigmas, which ComfyUI-GGUF passes on) as
 MiniMaxH3ImageModelSampling, whose sigma is linear in the index of the
 PDD grid. The fixture holds that grid, the `simple` schedule at its step
-count, which the stock workflow samples, the timestep the DiT reads at
-each step (sigma x 1000 in float32), and the heads each step of the
-schedule and of the grid itself reads: the grid points (start, stop) the
-final layer's PDD rule picks, and their dt weights. The arrays are small,
-so the fixture's .npz is committed beside its manifest.
+count, which the stock workflow samples, the `simple` schedule at
+OFF_GRID_STEPS, whose steps span more than one grid interval, the
+timestep the DiT reads at each step (sigma x 1000 in float32), and the
+heads each step of those schedules and of the grid itself reads: the
+grid points (start, stop) the final layer's PDD rule picks, and the
+float32 dt weights it takes over them. The arrays are small, so the
+fixture's .npz is committed beside its manifest.
 
   python scripts/image_oracle/run.py --python <ComfyUI venv python> \\
       check4_h3_image.py --comfy-dir <ComfyUI checkout> \\
@@ -34,6 +36,8 @@ ORACLE_NEEDS = ("torch", "gguf", "einops", "comfy_kitchen")
 
 NAME = "check4_h3_image"
 FAMILY = "h3_image"
+# A step count whose `simple` steps each span two grid intervals.
+OFF_GRID_STEPS = 3
 
 
 def comfy_oracle():
@@ -48,9 +52,10 @@ def comfy_oracle():
 
 
 def head_picks(torch, steps: int, grid: list, sample_sigmas):
-    """The (start, stop) grid points and dt weights ComfyUI's final layer
-    takes at each sigma of ``sample_sigmas`` but the last: a tiny final
-    layer with the release's head count, whose PDD rule is recorded."""
+    """The (start, stop) grid points and the dt weights, in the head's
+    float32, that ComfyUI's final layer takes at each sigma of
+    ``sample_sigmas`` but the last: a tiny final layer with the release's
+    head count, whose PDD rule is recorded."""
     import comfy.ldm.minimax.model as cm
     import comfy.ops
 
@@ -59,7 +64,8 @@ def head_picks(torch, steps: int, grid: list, sample_sigmas):
 
     def spy(head, h, g, start, stop):
         dt = [g[k] - g[k + 1] for k in range(start, stop)]
-        picks.append((start, stop, [d / sum(dt) for d in dt]))
+        w = torch.tensor(dt, dtype=h.dtype) / sum(dt)
+        picks.append((start, stop, w.tolist()))
         return real(head, h, g, start, stop)
 
     fl = cm.FinalLayer(8, 8, 4, None, 1e-5, apply_silu=False, pdd_steps=steps,
@@ -114,6 +120,7 @@ def main(argv=None) -> int:
                                      ).tolist():
         raise SystemExit("error: ComfyUI's grid is not pdd_config.json's")
     simple = comfy.samplers.simple_scheduler(ms, steps)
+    off_grid = comfy.samplers.simple_scheduler(ms, OFF_GRID_STEPS)
     fx = fixtures.FixtureWriter(
         NAME, check=4, family=FAMILY,
         script=f"scripts/image_oracle/{Path(__file__).name}")
@@ -124,15 +131,20 @@ def main(argv=None) -> int:
     fx.add(f"timesteps_simple_{steps}",
            ms.timestep(simple[:-1]).float().numpy())
     fx.add("timesteps_grid", ms.timestep(grid[:-1]).float().numpy())
+    fx.add(f"simple_{OFF_GRID_STEPS}", off_grid.numpy().astype(np.float32))
+    fx.add(f"timesteps_simple_{OFF_GRID_STEPS}",
+           ms.timestep(off_grid[:-1]).float().numpy())
     picks = {}
-    for name, sched in ((f"simple_{steps}", simple), ("grid", grid)):
+    for name, sched in ((f"simple_{steps}", simple), ("grid", grid),
+                        (f"simple_{OFF_GRID_STEPS}", off_grid)):
         got = head_picks(torch, steps, pdd_sigmas, sched)
         fx.add(f"heads_{name}", np.array([(s, e) for s, e, _ in got],
                                          np.int64))
         picks[name] = [w for _, _, w in got]
     off = float((simple - grid).abs().max())
     fx.inputs.update(steps=steps, pdd_sigmas=unet["pdd_sigmas"],
-                     scheduler="simple", comfy=comfy_head,
+                     scheduler="simple", off_grid_steps=OFF_GRID_STEPS,
+                     comfy=comfy_head,
                      comfy_gguf=gguf_head,
                      model_sampling=type(ms).__name__,
                      config_key=extra["metadata"].get("config"))
@@ -140,9 +152,11 @@ def main(argv=None) -> int:
     fx.tolerances.update(
         grid="bitwise", heads="exact",
         rule="the sampling row's sigmas and final zero equal ComfyUI's PDD "
-             "grid bit for bit; each step reads the head ComfyUI's PDD rule "
-             "picks, one grid interval with weight 1, on the simple "
-             "schedule and on the grid")
+             "grid bit for bit; each step reads the heads ComfyUI's PDD rule "
+             "picks, its start and stop grid points and the float32 dt "
+             "weights over them, on the simple schedule at the step count, "
+             f"on the grid, and on the simple schedule at {OFF_GRID_STEPS} "
+             "steps")
     fx.note(f"oracle: ComfyUI {comfy_head}, ComfyUI-GGUF {gguf_head}; "
             "the model config from the GGUF's config key")
     print(f"wrote {fx.write(a.out, compressed=True)}; simple off the grid by "

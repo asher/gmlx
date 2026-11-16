@@ -910,7 +910,8 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row.
     ``target`` is the sigma the step goes to, likewise, which a flow map
-    DiT takes and every other DiT refuses. ``time`` names how the DiT
+    DiT and a DiT whose ``reads_target`` is set take, and every other DiT
+    refuses. ``time`` names how the DiT
     embeds the time, one of its ``time_rules``: "reference", the rule
     gmlx samples on, which every DiT takes. Outside a ``state_scope`` the
     conditionings of the call are its scope.
@@ -1148,8 +1149,8 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
          time: str = "reference", ref_cache: dict | None = None,
          row: int = 0, skip: tuple = ()) -> mx.array:
     """One row. A DiT that takes reference images gets the tokens of the
-    conditioning's reference latents from its ``references``, and a flow
-    map the ``target`` its modulation reads. A time rule other than the
+    conditioning's reference latents from its ``references``, and a DiT
+    that reads the sigma its step goes to the ``target``. A time rule other than the
     reference's reaches the DiT through its modulation, and a family whose
     step runs in parts runs it whole then. ``ref_cache`` is that of
     ``denoise_step``, and ``row`` the row's place in its call. ``skip``
@@ -1228,9 +1229,9 @@ def _memo(cache: ByteLRU, key, make):
 
 def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None,
                 time: str = "reference"):
-    """The modulation of ``sigma``, and of ``target`` for a flow map, kept
-    under their float32 bits and the patch table, and under the time rule
-    when it is not the reference's."""
+    """The modulation of ``sigma``, and of ``target`` for a DiT that reads
+    the sigma its step goes to, kept under their float32 bits and the
+    patch table, and under the time rule when it is not the reference's."""
     s = np.float32(sigma)
     if time != "reference":
         if target is not None:
@@ -1339,6 +1340,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             raise ValueError("neg_skip needs guidance: cfg is 1.0")
     flow_map = bool(getattr(pipe.dit.cfg, "flow_map", False))
     check_sampling(pipe.family, pipe.variant, flow_map, cfg, sampler)
+    reads_target = flow_map or bool(getattr(pipe.dit, "reads_target", False))
     if cfg != 1.0 and neg is None:
         raise ValueError(f"cfg {cfg} needs a negative conditioning")
     unit = pipe.size_multiple
@@ -1404,7 +1406,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         for i in range(smp.steps):
             if should_stop is not None and should_stop():
                 raise SampleStopped(i, x)
-            to = s[i + 1] if flow_map else None
+            to = s[i + 1] if reads_target else None
             v = denoise_step(pipe, x, s[i], cond, patch_table=patch_table,
                              target=to)
             if cfg != 1.0:
