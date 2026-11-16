@@ -831,7 +831,8 @@ def test_a_flux3_request_plan_prices_the_text_rows_of_its_prompt():
     assert p.terms["step_peak"] == step(image + 640)
 
 
-SHORT = ("z_image", "krea2", "qwen_image21", "flux3_klein", "moss_image")
+SHORT = ("z_image", "krea2", "qwen_image21", "flux3_klein", "moss_image",
+         "h3_image")
 
 
 def _short_cells(family: str) -> list[dict]:
@@ -861,8 +862,10 @@ def _short_cells(family: str) -> list[dict]:
         return out
     path, short = {"krea2": (KREA2_CELLS, 36),
                    "flux3_klein": (FLUX3_CELLS, 80),
-                   "moss_image": (MOSS_CELLS, 80)}[family]
-    return [cell(c["size"], c["size"], c["text_rows"], max(c["steps_gib"]),
+                   "moss_image": (MOSS_CELLS, 80),
+                   "h3_image": (H3_CELLS, 80)}[family]
+    return [cell(c.get("height", c.get("size")), c.get("width", c.get("size")),
+                 c["text_rows"], max(c["steps_gib"]),
                  c.get("refs", 0), c.get("ref_px", 0), c["guided"])
             for c in json.loads(path.read_text())["cells"]
             if c["text_rows"] == short]
@@ -911,7 +914,8 @@ def test_a_short_prompt_plan_covers_every_measured_cell(family):
     row = memfit.PEAKS[family]
     cells = _short_cells(family)
     assert len(cells) == {"z_image": 3, "krea2": 3, "qwen_image21": 79,
-                          "flux3_klein": 13, "moss_image": 11}[family]
+                          "flux3_klein": 13, "moss_image": 11,
+                          "h3_image": 5}[family]
     room = [_short_room(family, c) for c in cells]
 
     def formula(c, caption):
@@ -1040,6 +1044,82 @@ def test_the_moss_encode_term_covers_every_measured_encode():
     # Without the base the shortest prompt is priced under its reading.
     assert 80 * row.encode_row_bytes * memfit.ENCODE_LIVE < max(
         e["gib"] for e in encodes if e["rows"] == 80) * GiB
+
+
+H3_CELLS = QWEN_CELLS.with_name("h3_image_cells.json")
+
+
+def _h3_room(row, c: dict) -> float:
+    """Bytes the row's step leaves above the cell's largest step."""
+    rows = memfit.image_rows(row, c["height"], c["width"], c["text_rows"])
+    return row.step.bytes(rows * row.width * 2) - max(c["steps_gib"]) * GiB
+
+
+def test_the_h3_image_row_covers_every_measured_step():
+    """1024 to 4096 pixels, 5472x3072 and 7712x2592, with 80 text rows and
+    with 4096, through the CLI's step with no pacer. 7712x2592 holds nearly
+    the most image rows the pixel limit allows, and with 80 text rows sits
+    closest to the line."""
+    from gmlx.image.registry import get_family
+
+    row = memfit.PEAKS["h3_image"]
+    assert row.step is memfit.H3_IMAGE_STEP
+    assert row.width == 2 * 14336 and row.caption_rows == row.text_rows == 4096
+    assert memfit.prices_prompt("h3_image")
+    cells = json.loads(H3_CELLS.read_text())["cells"]
+    assert sorted((c["width"], c["height"], c["text_rows"]) for c in cells) \
+        == [(1024, 1024, 80), (1024, 1024, 4096), (2048, 2048, 80),
+            (2048, 2048, 4096), (4096, 4096, 80), (4096, 4096, 4096),
+            (5472, 3072, 80), (7712, 2592, 80), (7712, 2592, 4096)]
+    assert not any(c["guided"] for c in cells)
+    most = get_family("h3_image").max_pixels // row.token_px ** 2
+    assert max(memfit.image_rows(row, c["height"], c["width"], 0)
+               for c in cells) > 0.99 * most
+    room = [_h3_room(row, c) for c in cells]
+    assert min(room) >= ROOM
+    assert min(room) <= 0.3 * GiB and max(room) <= 2 * GiB
+    near = min(cells, key=lambda c: _h3_room(row, c))
+    assert (near["width"], near["height"], near["text_rows"]) == \
+        (7712, 2592, 80)
+
+
+def test_a_thinner_h3_image_row_misses_a_measured_cell():
+    row = memfit.PEAKS["h3_image"]
+    cells = json.loads(H3_CELLS.read_text())["cells"]
+
+    def worst(**change) -> float:
+        thin = dataclasses.replace(row, step=dataclasses.replace(
+            row.step, **change))
+        return min(_h3_room(thin, c) for c in cells)
+
+    assert worst() >= ROOM
+    assert worst(base=2.6 * GiB) < ROOM
+    assert worst(k=2.7) < ROOM
+    # Without the text rows in the formula the most text is priced under
+    # its reading.
+    alone = dataclasses.replace(row, caption_rows=0)
+    assert min(_h3_room(alone, c) for c in cells) < ROOM
+
+
+def test_the_h3_image_encode_term_covers_the_measured_encode():
+    """The encoder alone at the most text rows a step joins."""
+    row = memfit.PEAKS["h3_image"]
+    encodes = json.loads(H3_CELLS.read_text())["encode"]
+    assert [(e["file"], e["rows"]) for e in encodes] == [
+        ("Qwen3-VL-32B-Instruct-Q4_K_M.gguf", 4096)]
+    kw = dict(family="h3_image", height=1024, width=1024,
+              budget=BUDGET_128, overcommit=False)
+    for e in encodes:
+        p = plan_memory(0, ENCODER, 0, caption_tokens=e["rows"], **kw)
+        term = e["rows"] * row.encode_row_bytes * memfit.ENCODE_LIVE
+        assert p.terms["encode_peak"] == int(row.encode_base + term)
+        assert p.terms["encode_peak"] - e["gib"] * GiB >= ROOM
+        # The base of the fit before this encode was read leaves less.
+        assert 0.4 * GiB + term - e["gib"] * GiB < ROOM
+    # The plan of an unknown prompt prices the most rows.
+    p = plan_memory(0, ENCODER, 0, **kw)
+    assert p.terms["encode_peak"] == int(
+        row.encode_base + 4096 * row.encode_row_bytes * memfit.ENCODE_LIVE)
 
 
 FLUX2_CELLS = QWEN_CELLS.with_name("flux2_klein_cells.json")

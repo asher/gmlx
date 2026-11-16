@@ -281,16 +281,19 @@ FLUX2_KLEIN_9B_KV_JOINED = StepFit(base=3.1 * GiB, k=2.9, row_k=0.5)
 # 0.50 above the 2048 pixel cells.
 MOSS_IMAGE_STEP = StepFit(base=1.64 * GiB, k=5.6, row_k=2.0)
 
-# One MiniMax-H3-Image UD-Q4_K_XL step on an M5 Max at 1024, 2048, 4096 and
-# 5472x3072 pixels with 512 text rows, under the 2 GiB cache bound: the
-# MLX peak over the weights, 0.92, 1.44, 3.60 and 3.61 GiB, with the cache
-# read after the step, 1.09, 1.94, 2.03 and 2.03, added, as the footprint
-# over the settled process holds both. A line in the formula bytes through
-# the 2048 and 4096 pixel cells has a slope of 3.4, raised 10 percent to
-# 3.8, and the base is 0.25 GiB above every cell, the 2048 pixel one the
-# closest. These are the step cells of the family's first measurement,
-# with no footprint read; a footprint run refits them.
-H3_IMAGE_STEP = StepFit(base=2.70 * GiB, k=3.8)
+# One MiniMax-H3-Image UD-Q4_K_XL step through ``api.sample`` under the
+# bounded cache with no pacer, as the CLI runs, on an M5 Max in fresh
+# processes: the footprint over the settled process. With 80 text rows it
+# reads 1.06, 1.78 and 4.83 GiB at 1024, 2048 and 4096 pixels, 4.74 at
+# 5472x3072 and 5.48 at 7712x2592; with 4096, 2.77, 3.07 and 5.51 at 1024,
+# 2048 and 4096 pixels and 5.94 at 7712x2592. A text row reads more than an
+# image row at the small sizes. A line in the formula bytes through the two
+# cells of the most rows, 4096 pixels and 7712x2592 with 4096 text rows,
+# has a slope of 2.6, raised 10 percent to 2.9. The base is 0.25 GiB above
+# every cell, 7712x2592 with 80 text rows the closest, and the 1024 pixel
+# cell with 80 is priced 1.81 GiB above its reading. At 7712x2592 a step
+# holds nearly the most image rows the family's pixel limit allows.
+H3_IMAGE_STEP = StepFit(base=2.70 * GiB, k=2.9)
 
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
@@ -898,13 +901,15 @@ PEAKS = {
     # MiniMax-H3-Image joins up to 4096 text rows to the image rows, a token
     # of 32 pixels, in every block. The MLP's fused gate and up product is
     # the widest output: 5376 wide, a 14336 MLP. The encoder is H3 video's
-    # Qwen3-VL-32B, whose measured prompts read 0.13 and 1.61 GiB at 26 and
-    # 5001 tokens (video/memfit.py): a base of 0.4 GiB and its float32 tap
-    # row of 5120 times ENCODE_LIVE clear both by 0.28 GiB or more.
+    # Qwen3-VL-32B: an encode of it alone at 4096 rows reads 1.47 GiB over
+    # the settled process, and video's prompts 0.13 and 1.61 GiB at 26 and
+    # 5001 tokens (video/memfit.py). A base of 0.48 GiB and its float32 tap
+    # row of 5120 times ENCODE_LIVE leave 0.25 GiB above the encode of 4096
+    # rows and more above the others.
     "h3_image": PeakRow(token_px=32, row_multiple=1, caption_rows=4096,
                         width=2 * 14336, step=H3_IMAGE_STEP,
                         encode_row_bytes=5120 * 4,
-                        encode_base=int(0.4 * GiB), text_rows=4096),
+                        encode_base=int(0.48 * GiB), text_rows=4096),
 }
 
 # The keys of each family's DiT config whose product is the width of the
