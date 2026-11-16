@@ -42,7 +42,7 @@ model, and no context figures.
 | `prompt` | What to make. Required on generations and edits. |
 | `model` | An image model id. `default`, no model, and a name that starts with `gpt-image-`, `dall-e-` or `chatgpt-image` take the default image model. |
 | `n` | Images to make, 1 to 10, at seeds `seed`, `seed` plus 1 and so on. |
-| `size` | `WxH`, or `auto` for the entry's default size. Sides are multiples of the model's size step, at most 4096, and an image at most 2048x2048 pixels. A model with size limits of its own takes its limits instead: MiniMax-H3-Image takes 655,360 to 20,000,000 pixels, a side of at most 7712 and shapes from 1:3 to 3:1, and a size under its least pixels gets 400 naming the smallest size of that shape. |
+| `size` | `WxH`, or `auto` for the entry's default size. Sides are multiples of the model's size step, at most 4096, and an image at most 2048x2048 pixels. |
 | `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. |
 | `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. |
 | `seed` | The seed of the first image, random without it. |
@@ -61,6 +61,11 @@ model, and no context figures.
 | `partial_images` | 0 to 3 images of the work in progress before the final one, in a stream. |
 | `image`, `image[]`, `images` | The images of an edit or a variation. |
 | `mask` | An image with an alpha channel. An edit changes the pixels whose alpha is below 128. |
+
+A model with size limits of its own takes them in place of the `size`
+limits: MiniMax-H3-Image takes 655,360 to 20,000,000 pixels, a side of at
+most 7712 and shapes from 1:3 to 3:1. A size under its least pixels gets
+400 naming the smallest size of that shape.
 
 The default image model is the one that
 [`server.defaults.image_model`](config.md#serverdefaultsimage_model) names,
@@ -97,8 +102,8 @@ GIF.
 
 Without `size`, the result takes the size of the first image, cut down to
 the model's size step and the size limits, its model's own where it has
-them. With a `mask`, the edit starts
-from the first image at `strength` 1 and changes only the masked region.
+them. With a `mask`, the edit starts from the first image at `strength` 1
+and changes only the masked region.
 
 FLUX.3 klein scales a single reference down to at most the area of
 2048x2048 pixels, and pads it out to sides that are multiples of 16. Of
