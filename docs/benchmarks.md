@@ -461,13 +461,13 @@ This comparison has its own settings in place of those under
 ## Image generation
 
 gmlx draws a 1024x1024 image faster than ComfyUI and
-stable-diffusion.cpp for Z-Image-Turbo and both Qwen-Image 2.1 models,
-faster than ComfyUI for Krea 2 Turbo, and faster than mflux for
-Z-Image-Turbo, on the M5 Max listed under
-[Methodology](#methodology). Each speedup is the other engine's time
-divided by gmlx's, with the same GGUF file on both sides, except for
-mflux, which runs its own MLX quants against the gmlx file nearest in
-bits.
+stable-diffusion.cpp for Z-Image-Turbo, both Qwen-Image 2.1 models and
+MiniMax-H3-Image, faster than ComfyUI for Krea 2 Turbo, and faster than
+mflux for Z-Image-Turbo, on the M5 Max listed under
+[Methodology](#methodology). MiniMax-H3-Image is also measured at
+4096x4096. Each speedup is the other engine's time divided by gmlx's,
+with the same GGUF file on both sides, except for mflux, which runs its
+own MLX quants against the gmlx file nearest in bits.
 
 - Each engine ran 1024x1024 images with seed 42, cfg 1, euler and the
   model's default steps, one engine at a time in its own process, over
@@ -512,6 +512,62 @@ bits.
 | Engine | Weights | Seconds per step | gmlx | Seconds per image | gmlx | Speedup per step | Speedup per image |
 |---|---|--:|--:|--:|--:|--:|--:|
 | ComfyUI with ComfyUI-GGUF | Krea-2-Turbo-Q4_K_M.gguf | 5.55 | 2.89 | 45.1 | 23.4 | 1.92x | 1.93x |
+
+### MiniMax-H3-Image pruned, 6 steps
+
+MiniMax-H3-Image ran at 1024x1024 and 4096x4096 on newer engine releases
+than the models above, by the same rules, with these differences:
+
+- ComfyUI 0.45.4 ran with ComfyUI-GGUF 373048b and torch 2.14.1 on MPS
+  in bf16, started with `--use-pytorch-cross-attention`, which took
+  less time a step than its default attention at both sizes, 17% less
+  at 4096x4096. It read a copy of the GGUF with one more metadata key,
+  the six-step schedule that ComfyUI reads from the file, with every
+  tensor the same. ComfyUI-GGUF loads no Qwen3-VL-32B encoder GGUF, so
+  ComfyUI took the prompt conditioning from gmlx, and its times cover
+  the DiT, the sampler and the VAE.
+- stable-diffusion.cpp b9d7176b was built with Metal and run with
+  `--diffusion-fa` and `--vae-tiling`, with the
+  qwen3vl_32b_minimax_h3 Q4_K_M encoder its guide names. gmlx ran the
+  Qwen3-VL-32B-Instruct Q4_K_M encoder. The seconds per image of
+  stable-diffusion.cpp leave out its prompt encode, which it runs once
+  for a batch.
+- At 1024x1024 each round timed two images after one or two untimed
+  ones. At 4096x4096 it timed one image after one untimed image,
+  ComfyUI's at 1024x1024.
+- gmlx ran beside ComfyUI in one set of rounds and beside
+  stable-diffusion.cpp and its own `--int8` settings in another, so
+  each row gives the gmlx figures of its own rounds.
+- The second table at each size gives gmlx's `--int8` settings on the
+  same file, each one's speedup taken over `--int8 off`.
+
+At 1024x1024:
+
+| Engine | Weights | Seconds per step | gmlx | Seconds per image | gmlx | Speedup per step | Speedup per image |
+|---|---|--:|--:|--:|--:|--:|--:|
+| ComfyUI with ComfyUI-GGUF | minimax_h3_image_pruned-UD-Q4_K_XL.gguf | 5.06 | 1.15 | 31.1 | 7.3 | 4.40x | 4.26x |
+| stable-diffusion.cpp | minimax_h3_image_pruned-UD-Q4_K_XL.gguf | 2.12 | 1.19 | 14.0 | 7.5 | 1.78x | 1.85x |
+
+| gmlx setting | Seconds per step | Seconds per image | Speedup per step | Speedup per image |
+|---|--:|--:|--:|--:|
+| `--int8 off` | 1.19 | 7.5 | 1.00x | 1.00x |
+| `--int8 attention` | 1.19 | 7.5 | 1.00x | 1.00x |
+| `--int8 linears` | 0.68 | 4.5 | 1.75x | 1.67x |
+| `--int8 all` | 0.68 | 4.6 | 1.74x | 1.66x |
+
+At 4096x4096:
+
+| Engine | Weights | Seconds per step | gmlx | Seconds per image | gmlx | Speedup per step | Speedup per image |
+|---|---|--:|--:|--:|--:|--:|--:|
+| ComfyUI with ComfyUI-GGUF | minimax_h3_image_pruned-UD-Q4_K_XL.gguf | 39.21 | 30.56 | 239.2 | 188.0 | 1.28x | 1.27x |
+| stable-diffusion.cpp | minimax_h3_image_pruned-UD-Q4_K_XL.gguf | 91.05 | 30.60 | 570.7 | 188.0 | 2.98x | 3.04x |
+
+| gmlx setting | Seconds per step | Seconds per image | Speedup per step | Speedup per image |
+|---|--:|--:|--:|--:|
+| `--int8 off` | 30.60 | 188.0 | 1.00x | 1.00x |
+| `--int8 attention` | 28.39 | 175.0 | 1.08x | 1.07x |
+| `--int8 linears` | 24.71 | 152.9 | 1.24x | 1.23x |
+| `--int8 all` | 22.51 | 139.8 | 1.36x | 1.35x |
 
 ## Serving measurements
 
