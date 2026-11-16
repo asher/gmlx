@@ -169,7 +169,11 @@ nothing.
 
 A step, a VAE decode and a VAE encode take the size limits of the OpenAI
 routes: an image over 2048x2048 pixels or with a side over 4096 gets 413,
-as does a VAE pass of more than 16 images. One whose memory plan does not
+as does a VAE pass of more than 16 images. A model with size limits of its
+own takes those instead: MiniMax-H3-Image gets 413 past 20,000,000 pixels
+or a side over 7712, and a denoise step under 655,360 pixels or outside
+1:3 to 3:1 gets 400, while a VAE pass may take any size under its upper
+limits. One whose memory plan does not
 fit beside the models loaded gets 400, and so does the encode of a prompt
 on a video model, priced by its rows. The message of a step names the
 largest term of its plan and, where the plan keeps the keys and values of
