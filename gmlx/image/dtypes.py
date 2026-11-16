@@ -1,6 +1,8 @@
 """The activation dtype of an image model, from the chip generation.
 
-M3 and later chips run the DiT and the VAE in bfloat16. M1 and M2 chips
+M3 and later chips run the DiT and the VAE in bfloat16, or the VAE in the
+first dtype of its row when the row names the dtypes it runs in (the
+MiniMax-H3-Image VAE runs in float16). M1 and M2 chips
 have no native bfloat16, and software bfloat16 there is too slow, so a DiT
 would run in float16. In float16 a Z-Image DiT misses the reference checks
 by a wide margin, so it is refused unless GMLX_IMAGE_ALLOW_FP16=1, and
@@ -86,6 +88,17 @@ def _title(family: str) -> str:
         return family
 
 
+def _row_vae(family: str, dt: mx.Dtype) -> mx.Dtype:
+    """``dt``, or the first dtype of the dtypes the family's VAE row runs
+    in when the row names them and ``dt`` is not one."""
+    from .vae.reader import VAES
+
+    row = VAES.get(family)
+    if row is None or not row.dtypes or dt in row.dtypes:
+        return dt
+    return row.dtypes[0]
+
+
 def _native_bf16(gen: int) -> bool:
     return gen == 0 or gen >= _NATIVE_BF16_GEN
 
@@ -101,7 +114,7 @@ def image_activation(family: str, *, gen: int | None = None,
     ``allow`` default to the GPU generation and GMLX_IMAGE_ALLOW_FP16."""
     gen = _gen(gen)
     if _native_bf16(gen):
-        return Activation(mx.bfloat16, mx.bfloat16, gen)
+        return Activation(mx.bfloat16, _row_vae(family, mx.bfloat16), gen)
     chip = chip_name(gen)
     if family not in FP16_FAMILIES:
         raise ImageDtypeError(
