@@ -103,13 +103,18 @@ class Conditioning:
     each reference in model space, which the VAE adds after the encoder
     ran, and ``ref_hashes`` name their content: the state a DiT derives
     from the conditioning depends on them, and the key does not hold
-    them."""
+    them. A DiT that mixes noise into its reference rows (``seeded_refs``)
+    draws it from ``ref_seed``, the request's seed, which ``sample`` sets,
+    or takes ``ref_noise``, one array per reference in the shape of its
+    rows, as a client sends the draws of its own generator."""
     features: mx.array
     key: str = ""
     ref_latents: tuple = ()
     image_slots: tuple = ()
     refs: tuple = ()
     ref_hashes: tuple = ()
+    ref_noise: tuple = ()
+    ref_seed: int | None = None
 
     def __post_init__(self):
         if self.ref_latents and not self.ref_hashes:
@@ -118,6 +123,10 @@ class Conditioning:
         if len(self.ref_hashes) != len(self.ref_latents):
             raise ValueError(f"{len(self.ref_hashes)} hashes for "
                              f"{len(self.ref_latents)} reference latents")
+        n = len(self.ref_latents) or len(self.refs)
+        if self.ref_noise and len(self.ref_noise) != n:
+            raise ValueError(f"{len(self.ref_noise)} noise arrays for {n} "
+                             "references")
 
     @property
     def pending(self) -> bool:

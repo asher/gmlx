@@ -1,6 +1,6 @@
 """The MiniMax-H3-Image DiT's module tree against the release file's
-tensors, and the step plan's rows. CPU-only; nothing is evaluated at the
-release size."""
+tensors, the step plan's rows, and the rows of reference images.
+CPU-only; nothing is evaluated at the release size."""
 from __future__ import annotations
 
 import mlx.core as mx
@@ -62,10 +62,71 @@ def test_the_plan_tags_text_one_and_the_image_zero():
     assert tags == [1, 0, 1, 0]
 
 
-def _plan(text_len, h, w, spans=()):
+def _plan(text_len, h, w, spans=(), refs=()):
     cfg = {**hi.synth_config(fixture_view(HEADER)), "num_layers": 0,
            "token_refiner_num_layers": 0}
-    return him.H3ImageDiT(cfg).plan(text_len, h, w, spans)
+    return him.H3ImageDiT(cfg).plan(text_len, h, w, spans, refs)
+
+
+def test_each_reference_sits_at_its_own_time_after_the_text():
+    """Reference i of latent (h, w) at time text_len + i on its own
+    frame's grid, after the text group; the target on the clock after the
+    references; the references on the pinned time's image row."""
+    from gmlx.image.h3 import layout as hl
+
+    lay = him.layout(10, 4, 6, ((2, 5),), ((4, 4), (2, 6)))
+    kinds = [(s.kind, s.start, s.stop) for s in lay.segments]
+    assert kinds == [("text", 0, 2), ("vision", 2, 5), ("text", 5, 10),
+                     ("ref", 10, 14), ("ref", 14, 17), ("video", 17, 23)]
+    pos = lay.positions
+    assert (pos[10:14, 0] == 10).all() and (pos[14:17, 0] == 11).all()
+    assert (pos[17:, 0] == 12).all()
+    for (a, b), (h, w) in zip(((10, 14), (14, 17)), ((4, 4), (2, 6))):
+        assert np.array_equal(pos[a:b, 1:], hl.frame_grid(hi.TIMELINE, h,
+                                                          w)[0])
+    assert np.array_equal(pos[17:], him.layout(12, 4, 6).positions[12:])
+    rows = [r for *_, r in _plan(10, 4, 6, ((2, 5),),
+                                 ((4, 4), (2, 6))).segs]
+    assert rows == [1, 0, 1, 3, 3, 0]
+
+
+def test_reference_rows_mix_by_the_family_rule(config):
+    """Each reference's patchified rows, 0.999 of them and 0.001 of noise
+    from a generator every reference restarts at the seed, or of the
+    noise given; no seed and no noise is refused."""
+    cfg = {**config, "num_layers": 0, "token_refiner_num_layers": 0}
+    model = him.H3ImageDiT(cfg)
+    rng = np.random.default_rng(3)
+    z = [mx.array(rng.standard_normal((1, 24, *hw)).astype(np.float32))
+         for hw in ((4, 4), (4, 4), (2, 6))]
+    refs = model.references(z, seed=11)
+    assert refs.sizes == ((4, 4), (4, 4), (2, 6))
+    noise = mx.random.normal((4, 96), mx.float32, key=mx.random.key(11))
+    want = 0.999 * him.patchify(z[0], 2) + (1.0 - 0.999) * noise
+    assert np.array_equal(np.array(refs.rows[0]), np.array(want))
+    # The generator restarts: two references of one shape take one draw.
+    want = 0.999 * him.patchify(z[1], 2) + (1.0 - 0.999) * noise
+    assert np.array_equal(np.array(refs.rows[1]), np.array(want))
+    given = [mx.full((4, 96), 2.0), mx.full((4, 96), 2.0),
+             mx.full((3, 96), -1.0)]
+    out = model.references(z, noise=given)
+    want = 0.999 * him.patchify(z[2], 2) + (1.0 - 0.999) * given[2]
+    assert np.array_equal(np.array(out.rows[2]), np.array(want))
+    with pytest.raises(ValueError, match="take a seed or their noise"):
+        model.references(z)
+    with pytest.raises(ValueError, match="a reference latent is"):
+        model.references([mx.zeros((1, 16, 4, 4))], seed=0)
+
+
+def test_the_caption_reads_its_vision_spans_from_the_image_slots(config):
+    cfg = {**config, "num_layers": 0, "token_refiner_num_layers": 0,
+           "hidden_size": 64, "num_attention_heads": 1,
+           "attention_head_dim": 64, "ffn_hidden_size": 128}
+    model = him.H3ImageDiT(cfg)
+    feats = mx.zeros((1, 12, 5120))
+    assert model.caption(feats).spans == ()
+    cap = model.caption(feats, slots=(3, 4, 5, 9))
+    assert cap.spans == ((2, 7), (8, 11))
 
 
 G = hi.PDD_SIGMAS
@@ -122,9 +183,6 @@ def test_what_the_model_does_not_run_is_refused(config):
         model.modulation(1.0, 2, G[1])
     with pytest.raises(ValueError, match="pass target"):
         model.modulation(1.0, 1)
-    lat = mx.zeros((1, 24, 4, 4))
-    with pytest.raises(ValueError, match="no reference images"):
-        model(lat, 1.0, mx.zeros((1, 2, 5120)), refs=[lat])
     with pytest.raises(ValueError, match="one frame square"):
         him.H3ImageConfig.from_dict({**config, "patch_size": [2, 2, 2]})
 

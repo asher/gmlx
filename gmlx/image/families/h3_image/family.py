@@ -18,6 +18,7 @@ import re
 import numpy as np
 
 from gmlx.image.fingerprint import HeaderView, ImageModelError, Match, Refusal
+from gmlx.image.h3.anchors import AnchorRule
 from gmlx.image.h3.encoder import spec
 from gmlx.image.h3.layout import Timeline
 from gmlx.image.registry import ConstantsRow, Family, SamplingRow, VariantRow
@@ -95,13 +96,18 @@ CONSTANTS = ConstantsRow(
     revision=_REVISION,
 )
 
-# The packed sequence: text, then the target image as one latent frame
-# after it on H3's clock, patchified (1, 2, 2); spatial positions span
-# GRID_SCALE over the square-root area. Text and target run at the step's
-# time, reference images at least at REF_TIME.
+# The packed sequence: text, then each reference image as one latent
+# frame at its own time after the text, then the target image as one
+# latent frame on H3's clock after them, patchified (1, 2, 2); spatial
+# positions span GRID_SCALE over each frame's square-root area. Text and
+# target run at the step's time, reference images at least at REF_TIME.
 TIMELINE = Timeline((1, 4, 4, 4, 4), 5.0 / 3.0, 32.0, _PATCH[1],
                     ("text", "anchors", "audio", "video"))
 REF_TIME = 0.999
+# Reference rows mix as video's keyframe rows do (comfy model.py:567-580):
+# 0.999 of the clean rows and 0.001 of noise from a generator every
+# reference restarts at the request's seed, at a time of at least 0.999.
+REF_RULE = AnchorRule(aug=REF_TIME, seed_offset=0)
 # Modality tags of the adaLN rows, as H3's: image, text. A prompt's vision
 # rows take the image tag.
 TAGS = {"video": 0, "text": 1}

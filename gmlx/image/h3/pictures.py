@@ -113,3 +113,26 @@ def encode_pictures(handle, prompt: str, images, label: str,
     out = feats[None].astype(mx.float32)
     mx.eval(out)
     return out, spans
+
+
+def span_slots(spans) -> tuple:
+    """The image slots of vision spans: each span's rows less its start
+    and end markers, ascending."""
+    return tuple(r for a, b in spans for r in range(a + 1, b - 1))
+
+
+def slot_spans(slots) -> tuple:
+    """The vision spans of image slots: each run of consecutive slots with
+    the marker row before it and after it."""
+    out: list = []
+    for s in (int(v) for v in slots):
+        if out and s == out[-1][1] - 1:
+            out[-1][1] = s + 2
+        elif out and s < out[-1][1] - 1:
+            raise ValueError(f"image slots {list(slots)} are not ascending")
+        else:
+            if s < 1:
+                raise ValueError(f"image slot {s} has no marker row before "
+                                 "it")
+            out.append([s - 1, s + 2])
+    return tuple((a, b) for a, b in out)

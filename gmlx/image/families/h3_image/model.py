@@ -1,10 +1,13 @@
 """MiniMax-H3-Image DiT: H3's single-stream blocks over text and one
 latent frame.
 
-The sequence holds the text rows, then the target image's rows on H3's
-clock after them (``plan``). A step runs at time t = 1 - sigma, each
-segment with its modality row at t; the blocks, the token refiner and the
-curve rows are H3's (``gmlx.image.h3.blocks``). The head runs the whole
+The sequence holds the text rows, then each reference image's rows at its
+own time after the text, then the target image's rows on H3's clock after
+them (``plan``). A step runs at time t = 1 - sigma, each segment with its
+modality row at t, and the reference rows at the family's pinned time;
+the blocks, the token refiner and the curve rows are H3's
+(``gmlx.image.h3.blocks``). A reference's rows are its patchified latents,
+mixed with a little noise by the family's rule (``family.REF_RULE``). The head runs the whole
 ``video_out`` bank in float32 on the target rows, and a step reads head
 0 plus each later head of the grid intervals it spans by its share of
 the span (``family.step_heads``): head 0 alone from the first grid point
@@ -24,6 +27,8 @@ import numpy as np
 from gmlx.image import ops, pacing
 from gmlx.image.h3 import layout as lay
 from gmlx.image.h3 import rope
+from gmlx.image.h3.anchors import augment, pinned
+from gmlx.image.h3.pictures import slot_spans
 from gmlx.image.h3.blocks import (_F32, AdalnProj, DiTBlock, H3BlockConfig,
                                   H3Core, Rope, TokenRefiner)
 from gmlx.image.families.h3_image import family as fam
@@ -77,11 +82,24 @@ class StepModulation:
 
 @dataclass(frozen=True)
 class Caption:
-    """The text rows (1, L, dim) after the refiner."""
+    """The text rows (1, L, dim) after the refiner, and the vision spans
+    of the prompt's pictures, (start, stop) rows."""
     rows: mx.array
+    spans: tuple = ()
 
     def arrays(self) -> list:
         return [self.rows]
+
+
+@dataclass(frozen=True)
+class References:
+    """The reference images of a step: each one's rows (n, patch dim) in
+    float32 as the family's rule mixes them, and its latent (h, w)."""
+    rows: tuple
+    sizes: tuple
+
+    def arrays(self) -> list:
+        return list(self.rows)
 
 
 @dataclass(frozen=True)
@@ -108,28 +126,40 @@ def unpatchify(rows: mx.array, shape: tuple, patch: int) -> mx.array:
 
 
 @functools.lru_cache(maxsize=64)
-def layout(text_len: int, lat_h: int, lat_w: int, spans: tuple = ()):
+def layout(text_len: int, lat_h: int, lat_w: int, spans: tuple = (),
+           refs: tuple = ()):
     """The segments and positions of a step: the text group at (i, 0, 0),
-    a vision segment over each span, then the target on the clock after
-    the text."""
+    a vision segment over each span, then each reference of latent (h, w)
+    in ``refs`` at time text_len + i on its own frame's grid, then the
+    target on the clock after the references (comfy model.py:383-483)."""
     tl = fam.TIMELINE
-    if lat_h % tl.patch or lat_w % tl.patch:
-        raise ValueError(f"latent {lat_h}x{lat_w} is not a multiple of the "
-                         f"patch {tl.patch}")
+    for h, w in ((lat_h, lat_w), *refs):
+        if h % tl.patch or w % tl.patch:
+            raise ValueError(f"latent {h}x{w} is not a multiple of the "
+                             f"patch {tl.patch}")
     segs, pos = [], []
     for kind, a, b in lay.text_segments(text_len, spans):
         g = np.zeros((b - a, 3), np.float64)
         g[:, 0] = np.arange(a, b, dtype=np.float64)
         segs.append(lay.Segment(a, b, kind))
         pos.append(g)
+    at = text_len
+    for i, (h, w) in enumerate(refs):
+        grid, _ = lay.frame_grid(tl, h, w)
+        g = np.empty((grid.shape[0], 3), np.float64)
+        g[:, 0] = float(text_len + i)
+        g[:, 1:] = grid
+        segs.append(lay.Segment(at, at + g.shape[0], "ref"))
+        pos.append(g)
+        at += g.shape[0]
     frame, _ = lay.frame_grid(tl, lat_h, lat_w)
-    p = lay.video_positions(tl, 1, frame, float(text_len))
-    segs.append(lay.Segment(text_len, text_len + p.shape[0], "video"))
+    p = lay.video_positions(tl, 1, frame, float(text_len + len(refs)))
+    segs.append(lay.Segment(at, at + p.shape[0], "video"))
     pos.append(p)
     positions = np.concatenate(pos)
     positions.setflags(write=False)
     return lay.Layout(segments=tuple(segs), positions=positions,
-                      signature=(text_len, lat_h, lat_w, spans))
+                      signature=(text_len, lat_h, lat_w, spans, refs))
 
 
 class FinalLayer(nn.Module):
@@ -146,6 +176,10 @@ class H3ImageDiT(H3Core):
     # The heads a step reads follow the sigma it goes to, which sample
     # passes as the target.
     reads_target = True
+    # The caption takes the image slots of the prompt's pictures, and the
+    # references take the request's seed or their noise.
+    caption_slots = True
+    seeded_refs = True
 
     def __init__(self, config: dict):
         super().__init__()
@@ -175,38 +209,72 @@ class H3ImageDiT(H3Core):
         s = float(np.asarray(sigma, np.float32).reshape(-1)[0])
         to = float(np.asarray(target, np.float32).reshape(-1)[0])
         t = 1.0 - fam.model_sigma(s)
-        times = (t, max(t, fam.REF_TIME))
+        times = (t, pinned(t, fam.REF_RULE))
         start, stop, w = fam.step_heads(s, to)
         first = max(start, 1)
         heads = tuple(zip(range(first, stop), w[first - start:]))
         return StepModulation(self.curve(times), times, heads)
 
-    def caption(self, feats: mx.array, taps: dict | None = None) -> Caption:
-        return Caption(super().caption(feats, taps))
+    def caption(self, feats: mx.array, taps: dict | None = None, *,
+                slots=()) -> Caption:
+        """The text rows of features (1, L, text dim), whose image
+        ``slots`` are the vision tokens of the prompt's pictures."""
+        return Caption(super().caption(feats, taps), slot_spans(slots))
+
+    def references(self, latents, *, seed: int | None = None,
+                   noise=None) -> References:
+        """The rows of reference latents, each (1, C, h, w) in model
+        space, mixed by the family's rule with noise from ``seed`` or
+        ``noise``, one array (n, patch dim) per reference
+        (``anchors.augment``)."""
+        if noise is None and seed is None:
+            raise ValueError(f"{fam.TITLE} references take a seed or their "
+                             "noise")
+        rows, sizes = [], []
+        for z in latents:
+            if z.ndim != 4 or z.shape[0] != 1 \
+                    or z.shape[1] != self.cfg.in_channels:
+                raise ValueError(f"a reference latent is (1, "
+                                 f"{self.cfg.in_channels}, h, w), not "
+                                 f"{tuple(z.shape)}")
+            rows.append(patchify(z.astype(_F32), self.cfg.patch))
+            sizes.append((int(z.shape[2]), int(z.shape[3])))
+        mixed = augment(rows, fam.REF_RULE, 0 if seed is None else seed,
+                        noise)
+        return References(tuple(mixed), tuple(sizes))
 
     def plan(self, text_len: int, lat_h: int, lat_w: int,
-             spans: tuple = ()) -> StepPlan:
+             spans: tuple = (), refs: tuple = ()) -> StepPlan:
         """The step's layout and segment rows: text at tag text, vision
-        rows and the target at tag image, each at the step's time."""
-        lt = layout(text_len, lat_h, lat_w, tuple(spans))
-        tag = {"text": fam.TAGS["text"], "vision": fam.TAGS["video"],
-               "video": fam.TAGS["video"]}
-        segs = tuple((s.start, s.stop, tag[s.kind]) for s in lt.segments
+        rows and the target at tag image at the step's time, and the
+        references of latent (h, w) in ``refs`` at tag image at the
+        pinned time, the modulation's second time."""
+        lt = layout(text_len, lat_h, lat_w, tuple(spans), tuple(refs))
+        row = {"text": fam.TAGS["text"], "vision": fam.TAGS["video"],
+               "video": fam.TAGS["video"], "ref": 3 + fam.TAGS["video"]}
+        segs = tuple((s.start, s.stop, row[s.kind]) for s in lt.segments
                      if s.rows)
         return StepPlan(layout=lt, segs=segs, target=lt.span("video"))
 
     def embed(self, latents: mx.array, text: mx.array, plan: StepPlan,
-              taps: dict | None = None) -> mx.array:
-        """The sequence (1, rows, dim): the text rows, then the target's
-        rows through the float32 patch projection."""
+              taps: dict | None = None,
+              refs: References | None = None) -> mx.array:
+        """The sequence (1, rows, dim): the text rows, then the rows of
+        each reference and the target's through the float32 patch
+        projection, in one product as ComfyUI's forward runs them."""
         act = self.act_dtype
-        rows = self.video_patch_proj(
-            patchify(latents, self.cfg.patch).astype(_F32))
+        rows = patchify(latents, self.cfg.patch).astype(_F32)
+        if refs is not None and refs.rows:
+            rows = mx.concatenate([*refs.rows, rows], axis=0)
+        rows = self.video_patch_proj(rows)
         if taps is not None:
             taps["video_patch_proj"] = rows
-        if text.shape[1] != plan.target.start:
-            raise ValueError(f"{text.shape[1]} text rows for a layout of "
-                             f"{plan.target.start}")
+        text_len = plan.layout.signature[0]
+        if text.shape[1] != text_len \
+                or text_len + rows.shape[0] != plan.layout.rows:
+            raise ValueError(f"{text.shape[1]} text rows and "
+                             f"{rows.shape[0]} image rows for a layout of "
+                             f"{text_len} and {plan.layout.rows - text_len}")
         return mx.concatenate([text.astype(act), rows.astype(act)[None]],
                               axis=1)
 
@@ -237,11 +305,10 @@ class H3ImageDiT(H3Core):
                  chunk: int | None = fam.ATTENTION_CHUNK) -> mx.array:
         """Velocity (1, C, H, W) float32 for latents (1, C, H, W) on a
         step from ``sigma`` to ``target``, with text features (1, L, text
-        dim). ``mod`` and ``caption``, from ``modulation`` and
+        dim) and the rows of reference images ``refs``, from
+        ``references``. ``mod`` and ``caption``, from ``modulation`` and
         ``caption``, stand in for the work they hold. ``taps`` collects
         the output of every module by path."""
-        if refs is not None:
-            raise ValueError(f"{fam.TITLE} takes no reference images yet")
         if latents.shape[0] != 1:
             raise ValueError(f"{fam.TITLE} runs a batch of 1")
         if mod is None:
@@ -251,8 +318,9 @@ class H3ImageDiT(H3Core):
                 raise ValueError("pass text features or their caption")
             caption = self.caption(feats, taps)
         _, c, h, w = latents.shape
-        plan = self.plan(caption.rows.shape[1], h, w)
-        x = self.embed(latents, caption.rows, plan, taps)
+        plan = self.plan(caption.rows.shape[1], h, w, caption.spans,
+                         () if refs is None else refs.sizes)
+        x = self.embed(latents, caption.rows, plan, taps, refs)
         cos, sin = rope.tables(plan.layout.positions, self.rope.inv_freq,
                                self.cfg.block.head_dim)
         if taps is not None:

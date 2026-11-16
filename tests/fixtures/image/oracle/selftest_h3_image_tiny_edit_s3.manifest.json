@@ -1,0 +1,395 @@
+{
+ "schema": 1,
+ "name": "selftest_h3_image_tiny_edit_s3",
+ "check": 3,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check3_h3_image.py",
+ "argv": ["check3_h3_image.py", "--comfy-dir", "ComfyUI-h3-image", "--self-test"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {},
+ "inputs": {
+  "refs": [
+   [64, 64],
+   [96, 32]
+  ],
+  "spans": [
+   [1, 5]
+  ],
+  "ref_seed": 7,
+  "comfy_config": {
+   "hidden_size": 32,
+   "num_layers": 2,
+   "token_refiner_num_layers": 1,
+   "num_attention_heads": 2,
+   "attention_head_dim": 64,
+   "ffn_hidden_size": 48,
+   "latents_dim": 24,
+   "patch_size": [1, 2, 2],
+   "text_dim": 40,
+   "time_embed_dim": 8,
+   "rope_inv_freq_len": 8,
+   "adaln_curve_grid": 1025,
+   "norm_eps": 1e-05,
+   "qk_norm_eps": 1e-05,
+   "final_norm_eps": 1e-05,
+   "pdd_steps": 6,
+   "pdd_sigmas": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0]
+  },
+  "config": {
+   "hidden_size": 32,
+   "num_layers": 2,
+   "token_refiner_num_layers": 1,
+   "num_attention_heads": 2,
+   "attention_head_dim": 64,
+   "ffn_hidden_size": 48,
+   "latents_dim": 24,
+   "patch_size": [1, 2, 2],
+   "text_dim": 40,
+   "adaln_basis": 8,
+   "rope_inv_freq_len": 8,
+   "adaln_grid": 1025,
+   "norm_eps": 1e-05,
+   "qk_norm_eps": 1e-05,
+   "final_norm_eps": 1e-05,
+   "pdd_steps": 6,
+   "pdd_sigmas": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0]
+  },
+  "seed": 0,
+  "shape": [96, 64],
+  "text_rows": 8,
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "attention": "attention_pytorch",
+  "comfy": "2aa4d535a76e4b6acf6a94f263bc482430c396dd",
+  "sigma": 0.75,
+  "sample_sigmas": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0],
+  "segment_kinds": ["text", "ref_img", "ref_img", "video"]
+ },
+ "results": {
+  "velocity_bf16_vs_fp32": {
+   "rel_l2": 0.006153180348450061,
+   "cosine": 0.9999811314827013,
+   "max_abs": 0.04911148548126221
+  },
+  "rows_bf16_vs_fp32": {
+   "video_patch_proj": {
+    "rel_l2": 0.0,
+    "cosine": 1.0,
+    "max_abs": 0.0,
+    "teacher_forced": false
+   },
+   "condition_proj": {
+    "rel_l2": 0.002724940034685787,
+    "cosine": 0.9999962877402311,
+    "max_abs": 0.011199712753295898,
+    "teacher_forced": false
+   },
+   "token_refiner.blocks.0": {
+    "rel_l2": 0.005916787521266335,
+    "cosine": 0.999982642783198,
+    "max_abs": 0.02023029327392578,
+    "teacher_forced": true
+   },
+   "token_refiner.final_norm": {
+    "rel_l2": 0.0030994982603600443,
+    "cosine": 0.9999953046524428,
+    "max_abs": 0.013341188430786133,
+    "teacher_forced": true
+   },
+   "blocks.0": {
+    "rel_l2": 0.004815948988560924,
+    "cosine": 0.9999885613726539,
+    "max_abs": 0.04058337211608887,
+    "teacher_forced": true
+   },
+   "blocks.1": {
+    "rel_l2": 0.00685339000684598,
+    "cosine": 0.9999776043342214,
+    "max_abs": 0.13779926300048828,
+    "teacher_forced": true
+   },
+   "final_layer.adaln_proj.linear": {
+    "rel_l2": 0.0,
+    "cosine": 1.0,
+    "max_abs": 0.0,
+    "teacher_forced": false
+   },
+   "final_layer": {
+    "rel_l2": 0.002764113360389387,
+    "cosine": 0.9999961829019492,
+    "max_abs": 0.021049976348876953,
+    "teacher_forced": true
+   }
+  },
+  "free_bf16_vs_fp32": {
+   "token_refiner.blocks.0": {
+    "rel_l2": 0.005837096020413356,
+    "cosine": 0.9999830987283204,
+    "max_abs": 0.023891568183898926
+   },
+   "token_refiner.final_norm": {
+    "rel_l2": 0.006123573008083081,
+    "cosine": 0.9999812835944286,
+    "max_abs": 0.01825082302093506
+   },
+   "blocks.0": {
+    "rel_l2": 0.0055880347873830515,
+    "cosine": 0.9999845126867973,
+    "max_abs": 0.04798603057861328
+   },
+   "blocks.1": {
+    "rel_l2": 0.00799716144314269,
+    "cosine": 0.999968846315795,
+    "max_abs": 0.11653518676757812
+   },
+   "final_layer": {
+    "rel_l2": 0.00615318034845006,
+    "cosine": 0.9999811314827013,
+    "max_abs": 0.04911148548126221
+   }
+  },
+  "times": {
+   "fp32_s": 0.0,
+   "bf16_s": 0.0,
+   "bf16_teacher_forced_s": 0.0
+  }
+ },
+ "tolerances": {
+  "velocity": {
+   "rel_l2": 0.012306360696900122,
+   "cosine_min": 0.9999245259308052
+  },
+  "video_patch_proj": {
+   "rel_l2": 1e-05,
+   "float32": true
+  },
+  "condition_proj": {
+   "rel_l2": 0.005449880069371574,
+   "teacher_forced": false
+  },
+  "token_refiner.blocks.0": {
+   "rel_l2": 0.01183357504253267,
+   "teacher_forced": true
+  },
+  "free token_refiner.blocks.0": {
+   "rel_l2": 0.011674192040826712
+  },
+  "token_refiner.final_norm": {
+   "rel_l2": 0.006198996520720089,
+   "teacher_forced": true
+  },
+  "free token_refiner.final_norm": {
+   "rel_l2": 0.012247146016166163
+  },
+  "blocks.0": {
+   "rel_l2": 0.009631897977121847,
+   "teacher_forced": true
+  },
+  "free blocks.0": {
+   "rel_l2": 0.011176069574766103
+  },
+  "blocks.1": {
+   "rel_l2": 0.01370678001369196,
+   "teacher_forced": true
+  },
+  "free blocks.1": {
+   "rel_l2": 0.01599432288628538
+  },
+  "final_layer.adaln_proj.linear": {
+   "rel_l2": 1e-05,
+   "float32": true
+  },
+  "final_layer": {
+   "rel_l2": 0.005528226720778774,
+   "teacher_forced": true
+  },
+  "free final_layer": {
+   "rel_l2": 0.01230636069690012
+  },
+  "rule": "tolerance = 2 x the oracle's own bf16 against fp32 relative L2: teacher-forced for each refiner block, the refiner's norm, each block and the head, free running for the other rows and for the velocity, and free running for each teacher-forced row as 'free <row>'; rows in float32 in both modes take a float32 tolerance"
+ },
+ "notes": ["the weights are in selftest_h3_image_tiny_weights by name in torch order"],
+ "created": "2026-11-16T16:21:14Z",
+ "npz": "selftest_h3_image_tiny_edit_s3.npz",
+ "tensors": {
+  "blocks.0": {
+   "shape": [21, 32],
+   "dtype": "float32",
+   "sha256": "4ad7cfbc264b828343c086ab9029f6f3bf48a243dfa8abad3fa12e10db5a5883"
+  },
+  "blocks.1": {
+   "shape": [21, 32],
+   "dtype": "float32",
+   "sha256": "458da239c1879b67a9b52e7bca4abe688e04b553909a10347e8340ddc9ae3966"
+  },
+  "condition_proj": {
+   "shape": [8, 32],
+   "dtype": "float32",
+   "sha256": "3976b693fa713c1ca0b327fb69d77b98d78e683c7bbda8ad660cc0409a0d8cf0"
+  },
+  "features": {
+   "shape": [8, 40],
+   "dtype": "float32",
+   "sha256": "6990670c1a3e5ace9f0a87b4113ee0257f41c0ac2476154fde3062a7dbb11545"
+  },
+  "final_layer": {
+   "shape": [6, 96],
+   "dtype": "float32",
+   "sha256": "e852e09dd7b58ceab42e3c8cd6d2e19888bbf7e41c1875bcf12a308addf443ac"
+  },
+  "final_layer.adaln_proj.linear": {
+   "shape": [2, 64],
+   "dtype": "float32",
+   "sha256": "c4848645ead06e0444ae5d245163c0e5f7ea824249acc52e75a79a8d94d79172"
+  },
+  "head_segment": {
+   "shape": [3],
+   "dtype": "int64",
+   "sha256": "11bc5d27cb43940e863c4632ab39a494e695c7aa21255ab806a4576f7dd0b399"
+  },
+  "head_sigma": {
+   "shape": [],
+   "dtype": "float64",
+   "sha256": "e4319a2d73934f7c5fcec97280687f50b66a4335ae57a4ae90f3920400c8f976"
+  },
+  "in.blocks.0": {
+   "shape": [21, 32],
+   "dtype": "float32",
+   "sha256": "ee05cf1bf081f8c684debc2da1b84b799903c015745013f476684871618587fe"
+  },
+  "in.final_layer": {
+   "shape": [21, 32],
+   "dtype": "float32",
+   "sha256": "458da239c1879b67a9b52e7bca4abe688e04b553909a10347e8340ddc9ae3966"
+  },
+  "latents": {
+   "shape": [1, 24, 4, 6],
+   "dtype": "float32",
+   "sha256": "673a50a34204eb87460a1efae7aa0c9bd399dd10a7be72d55a30cf6221b668ae"
+  },
+  "positions": {
+   "shape": [21, 3],
+   "dtype": "float64",
+   "sha256": "1586df07efb43cfb1cd7e22721436d1066bbcbc3276ca765c1cdd0053dbcd5f8"
+  },
+  "ref_latents_0": {
+   "shape": [1, 24, 4, 4],
+   "dtype": "float32",
+   "sha256": "7cf033bb22e01398502ce883c2c1a7babbb59b9a1390640ad2d2c12d53262eae"
+  },
+  "ref_latents_1": {
+   "shape": [1, 24, 2, 6],
+   "dtype": "float32",
+   "sha256": "cb4c660611dba6f8c5cae1c9dc56e32cddb2a8a54ea4b751366fb5b4a2a3892f"
+  },
+  "ref_noise_0": {
+   "shape": [4, 96],
+   "dtype": "float32",
+   "sha256": "6c5f57d0c1841975962eb951dee1b3b49eca780e5affd8f920a4c538a4f977ec"
+  },
+  "ref_noise_1": {
+   "shape": [3, 96],
+   "dtype": "float32",
+   "sha256": "b2370bb13a1c261204fc63bc685ac51c7133b79e5c72b282acaf5b67fa92d6c4"
+  },
+  "ref_seed": {
+   "shape": [],
+   "dtype": "int64",
+   "sha256": "aae89fc0f03e2959ae4d701a80cc3915918c950b159f6abb6c92c1433b1a8534"
+  },
+  "rope.angles": {
+   "shape": [21, 48],
+   "dtype": "float32",
+   "sha256": "5be0c8f5898997bafa2363cbf14bcfbc6228158ace35104effe335f05d94c9d3"
+  },
+  "sample_sigmas": {
+   "shape": [7],
+   "dtype": "float32",
+   "sha256": "a974c89ae39ca1cfc6d6bb8236dbc6ce3c339b229809cb075c5c4f5a859b09cd"
+  },
+  "segments": {
+   "shape": [6, 3],
+   "dtype": "int64",
+   "sha256": "f4a362cef467516993b1143b93c29eb8b6c966851ac2b291ef0ba9fbabe328eb"
+  },
+  "sigma": {
+   "shape": [],
+   "dtype": "float32",
+   "sha256": "9a8208635e00348ab64aac2b759e76391fd47089e9a749bbcec770d9eb5c6421"
+  },
+  "t_emb": {
+   "shape": [2, 8],
+   "dtype": "float32",
+   "sha256": "6e99a295c5cb4e60709b6a826f9c765b541b9b32b55f63e8b4c81b13a8aee536"
+  },
+  "t_values": {
+   "shape": [2],
+   "dtype": "float64",
+   "sha256": "675cb184b437a3fb8866dfac1094e502f14319d4dc591682b37ee31dd9f4542b"
+  },
+  "text_tags": {
+   "shape": [8],
+   "dtype": "int64",
+   "sha256": "b7b496faf449dd96b08b2c76926f315a4bff5072d75ab60e0066b6896da1762b"
+  },
+  "timestep": {
+   "shape": [1],
+   "dtype": "float32",
+   "sha256": "1d77e51c3092b797b15b02104368537eea7b222148a4d2ba2d2d578491c50ac5"
+  },
+  "token_refiner.blocks.0": {
+   "shape": [8, 32],
+   "dtype": "float32",
+   "sha256": "7395a91683f380870a9ea5875367f8ed0b5f351884d83373e3669337ebbb8fef"
+  },
+  "token_refiner.final_norm": {
+   "shape": [8, 32],
+   "dtype": "float32",
+   "sha256": "95825e7d79f30c595502ace04c96c1683d1769c9b490752f5ffbf1c2c9940502"
+  },
+  "velocity": {
+   "shape": [1, 24, 4, 6],
+   "dtype": "float32",
+   "sha256": "595dffed42b07e03c118ed8959b47e64647ffcb402e41887ebc5a6bf269a8b78"
+  },
+  "velocity_bf16": {
+   "shape": [1, 24, 4, 6],
+   "dtype": "float32",
+   "sha256": "2da3ac0acc6d6affb242a3e60a16d2439234637f4373783af2cf50726f2ba669"
+  },
+  "video_patch_proj": {
+   "shape": [13, 32],
+   "dtype": "float32",
+   "sha256": "74e023d3833a6fa0e24b3f5470727c45c7b677c5e530b2133de311a50a117d36"
+  }
+ }
+}

@@ -9,11 +9,14 @@ rows and head segment equal the oracle's.
 
 The tiny cases run ComfyUI's class at a tiny size on random weights at
 sigma 1.0, which reads head 0 alone, and at 0.75, which adds head 3 to
-it. Their fixtures are committed, so the whole forward is checked on the
-CPU tier: in fp32 within FP32_TOL of the oracle, and in bf16 under the
-product gate, twice the oracle's gap per row (h3_image_gates.py). A head
-one grid point off, head k without head 0, RoPE pairs taken adjacent or
-the GLU halves swapped miss the fp32 gate.
+it, each as text to image and as an edit with two references of other
+sizes than the target and a vision span in the prompt. Their fixtures are
+committed, so the whole forward is checked on the CPU tier: in fp32
+within FP32_TOL of the oracle, and in bf16 under the product gate, twice
+the oracle's gap per row (h3_image_gates.py). A head one grid point off,
+head k without head 0, RoPE pairs taken adjacent or the GLU halves
+swapped miss the fp32 gate, and on an edit so do reference rows at the
+step's time or left unmixed.
 
 On the release file the fixtures hold the step at 512x512 at sigma 1.0
 and 0.75, at 768x512 at 0.5327739119529724 and at 1024x1024 at
@@ -67,6 +70,8 @@ from gmlx.image.ops import kq_routes
 
 TINY = "selftest_h3_image_tiny"
 TINY_CASES = (f"{TINY}_s0", f"{TINY}_s3")
+TINY_EDITS = (f"{TINY}_edit_s0", f"{TINY}_edit_s3")
+TINY_ALL = TINY_CASES + TINY_EDITS
 REAL = ("check3_h3_image_512x512_s0", "check3_h3_image_512x512_s3",
         "check3_h3_image_768x512_s4", "check3_h3_image_1024x1024_s5")
 HEADER = "h3_image_pruned_ud_q4_k_xl.header.json"
@@ -79,14 +84,14 @@ FP32_TOL = 1e-5
 def tiny():
     weights, wm = committed_fixture(TINY + "_weights")
     out = {}
-    for name in TINY_CASES:
+    for name in TINY_ALL:
         arrays, m = committed_fixture(name)
         assert wm["inputs"]["config"] == m["inputs"]["config"]
         out[name] = (arrays, m)
     return weights, wm["inputs"]["config"], out
 
 
-@pytest.mark.parametrize("name", TINY_CASES)
+@pytest.mark.parametrize("name", TINY_ALL)
 def test_the_tiny_manifests_follow_the_rule(tiny, name):
     hg.assert_manifest_rule(tiny[2][name][1])
 
@@ -134,14 +139,62 @@ def test_sample_gives_each_step_the_sigma_it_goes_to(tiny, monkeypatch):
     assert [h for *_, h in seen] == want
 
 
-@pytest.mark.parametrize("name", TINY_CASES)
+def test_sample_mixes_the_references_by_the_request_seed(tiny, monkeypatch):
+    """An edit's reference rows take the noise of the request's seed, or
+    the noise the conditioning holds; noise given without a seed and no
+    reference noise is refused. The caption reads the image slots."""
+    from gmlx.image.h3.pictures import span_slots, spans_of
+
+    weights, config, cases = tiny
+    arrays, _ = cases[TINY_EDITS[0]]
+    pipe = api.ImagePipeline(dit=hg.tiny_model(weights, config),
+                             family=dataclasses.replace(hi.FAMILY,
+                                                        min_pixels=None),
+                             variant="pruned")
+    seen, slots_seen = [], []
+    real_refs, real_cap = him.H3ImageDiT.references, him.H3ImageDiT.caption
+
+    def refs(self, latents, *, seed=None, noise=None):
+        seen.append((seed, None if noise is None else
+                     [np.array(n) for n in noise]))
+        return real_refs(self, latents, seed=seed, noise=noise)
+
+    def cap(self, feats, taps=None, *, slots=()):
+        slots_seen.append(tuple(slots))
+        return real_cap(self, feats, taps, slots=slots)
+    monkeypatch.setattr(him.H3ImageDiT, "references", refs)
+    monkeypatch.setattr(him.H3ImageDiT, "caption", cap)
+    slots = span_slots(spans_of(arrays["text_tags"]))
+    z = tuple(mx.array(arrays[f"ref_latents_{i}"][0]) for i in range(2))
+    cond = Conditioning(mx.array(arrays["features"]), ref_latents=z,
+                        image_slots=slots)
+    _, _, h, w = arrays["latents"].shape
+    grid = list(hi.PDD_SIGMAS[:3])
+    with mx.stream(mx.cpu):
+        api.sample(pipe, cond, height=h * 16, width=w * 16, sigmas=grid,
+                   seed=5, cfg=1.0, neg_skip=())
+        assert [s for s, _ in seen] == [5, 5] and set(slots_seen) == {slots}
+        seen.clear()
+        noise = tuple(mx.array(arrays[f"ref_noise_{i}"]) for i in range(2))
+        api.sample(pipe, dataclasses.replace(cond, ref_noise=noise),
+                   height=h * 16, width=w * 16, sigmas=grid, seed=5,
+                   cfg=1.0, neg_skip=())
+        assert all(s is None and np.array_equal(n[1], arrays["ref_noise_1"])
+                   for s, n in seen)
+        with pytest.raises(ValueError, match="pass a seed"):
+            api.sample(pipe, cond, height=h * 16, width=w * 16, sigmas=grid,
+                       noise=np.zeros((1, 24, h, w), np.float32), cfg=1.0,
+                       neg_skip=())
+
+
+@pytest.mark.parametrize("name", TINY_ALL)
 def test_the_tiny_step_lays_out_as_the_oracle(tiny, name):
     weights, config, cases = tiny
     arrays, m = cases[name]
     assert not hg.layout_misses(hg.tiny_model(weights, config), arrays, m)
 
 
-@pytest.mark.parametrize("name", TINY_CASES)
+@pytest.mark.parametrize("name", TINY_ALL)
 def test_the_tiny_step_in_float32_is_the_oracle_step(tiny, name, request):
     """In float32 products with TF32 off and the stock ops, as the oracle
     multiplies."""
@@ -159,7 +212,7 @@ def test_the_tiny_step_in_float32_is_the_oracle_step(tiny, name, request):
     assert not over, over
 
 
-@pytest.mark.parametrize("name", TINY_CASES)
+@pytest.mark.parametrize("name", TINY_ALL)
 def test_the_tiny_step_in_bfloat16_passes_the_product_gate(tiny, name):
     """On the weights in the dtypes the loader gives them."""
     weights, config, cases = tiny
@@ -204,12 +257,37 @@ def _head_alone(mp):
     mp.setattr(him.H3ImageDiT, "head", head)
 
 
+def _refs_at_step_time(mp):
+    """Reference rows on the step's time row, not the pinned one."""
+    real = him.H3ImageDiT.plan
+
+    def plan(self, *a, **k):
+        p = real(self, *a, **k)
+        segs = tuple((s, e, r - 3 if r >= 3 else r) for s, e, r in p.segs)
+        return dataclasses.replace(p, segs=segs)
+    mp.setattr(him.H3ImageDiT, "plan", plan)
+
+
+def _refs_unmixed(mp):
+    """Reference rows without the rule's noise."""
+    mp.setattr(him, "augment", lambda rows, rule, seed, noise=None: [
+        r.astype(mx.float32) for r in rows])
+
+
 # Wrong models the float32 gate must fail, with the case each shows on:
-# the head rule at a step past the first, the rest on both.
-FAULTS = {"glu halves swapped": (_glu_halves_swapped, TINY_CASES),
-          "rope pairs adjacent": (_rope_pairs_adjacent, TINY_CASES),
-          "head one grid point off": (_head_one_off, TINY_CASES),
-          "head k without head 0": (_head_alone, TINY_CASES[1:])}
+# the head rule at a step past the first, the references' rules on the
+# edits, the rest on all. Each misses its gate a hundredfold at the
+# velocity, and unmixed references fiftyfold at the patch projection's
+# rows, where their 0.001 of noise enters the step (83 times its gate
+# there and 12 times at the velocity when booked).
+FAULTS = {"glu halves swapped": (_glu_halves_swapped, TINY_ALL),
+          "rope pairs adjacent": (_rope_pairs_adjacent, TINY_ALL),
+          "head one grid point off": (_head_one_off, TINY_ALL),
+          "head k without head 0": (_head_alone, TINY_CASES[1:]
+                                    + TINY_EDITS[1:]),
+          "references at the step's time": (_refs_at_step_time, TINY_EDITS),
+          "references unmixed": (_refs_unmixed, TINY_EDITS,
+                                 "video_patch_proj", 50)}
 
 
 @pytest.mark.parametrize("fault", FAULTS)
@@ -218,14 +296,15 @@ def test_the_tiny_float32_gate_fails_a_wrong_model(tiny, request,
     if not exact_process():
         return rerun_exact(request, f"h3 image check3 tiny fault {fault}")
     weights, config, cases = tiny
-    apply, names = FAULTS[fault]
+    apply, names, *at = FAULTS[fault]
+    row, times = at if at else (hg.VELOCITY, 100)
     apply(monkeypatch)
     for name in names:
         arrays, m = cases[name]
         got = hg.measures(hg.tiny_model(weights, config), arrays, m)
-        print(f"h3 image check3 tiny fault {fault} {name}: velocity "
-              f"{got[hg.VELOCITY]:.2e}")
-        assert got[hg.VELOCITY] > 100 * FP32_TOL, (name, got[hg.VELOCITY])
+        print(f"h3 image check3 tiny fault {fault} {name}: {row} "
+              f"{got[row]:.2e}")
+        assert got[row] > times * FP32_TOL, (name, got[row])
 
 
 def _manifest(name: str) -> dict:

@@ -1206,7 +1206,13 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
         if not hasattr(dit, "references"):
             raise ValueError(f"the {pipe.family.title} DiT takes no "
                              f"reference images")
-        refs = dit.references([mx.array(z)[None] for z in cond.ref_latents])
+        draws = {}
+        if getattr(dit, "seeded_refs", False):
+            draws = {"seed": cond.ref_seed, "noise": (
+                [mx.array(n) for n in cond.ref_noise] if cond.ref_noise
+                else None)}
+        refs = dit.references([mx.array(z)[None] for z in cond.ref_latents],
+                              **draws)
         if ref_cache is not None:
             if skip:
                 raise ValueError("a cached reference row skips no blocks")
@@ -1282,11 +1288,18 @@ def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None,
 
 
 def _caption(pipe: ImagePipeline, cond: Conditioning, table):
+    """The DiT's caption of ``cond``, kept under its key and the patch
+    table. A DiT whose caption reads the image slots of the prompt's
+    pictures (``caption_slots``) takes them, and they join the key."""
+    kw, key = {}, (cond.key, table)
+    if getattr(pipe.dit, "caption_slots", False):
+        slots = tuple(int(s) for s in cond.image_slots)
+        kw, key = {"slots": slots}, key + (slots,)
     make = lambda: _under(  # noqa: E731
-        pipe, table, lambda: pipe.dit.caption(cond.features[None]))
+        pipe, table, lambda: pipe.dit.caption(cond.features[None], **kw))
     if not cond.key:
         return make()
-    return _memo(pipe.captions, (cond.key, table), make)
+    return _memo(pipe.captions, key, make)
 
 
 def guide(v_pos: mx.array, v_neg: mx.array, cfg: float,
@@ -1359,7 +1372,9 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     positive velocity before it runs the negative row, and the two give
     the latents of a step that evaluates both together. ``neg_skip`` holds
     the blocks the negative pass of a guided step skips, the variant's
-    sampling row's when None."""
+    sampling row's when None. A DiT that mixes noise into its reference
+    rows draws it from the seed of the noise, given or random, unless the
+    conditioning holds that noise or a seed of its own."""
     patch_table = _table_id(pipe, patch_table)
     if cfg is None:
         cfg = pipe.defaults.cfg
@@ -1417,10 +1432,15 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         raise ValueError(f"init_latents {tuple(init.shape)} do not match "
                          f"{shape}")
     if noise is None:
-        noise = noise_from_seed(secrets.randbelow(1 << 63)
-                                if seed is None else seed, shape)
+        if seed is None:
+            seed = secrets.randbelow(1 << 63)
+        noise = noise_from_seed(seed, shape)
     elif seed is not None:
         raise ValueError("pass seed or noise, not both")
+    if getattr(pipe.dit, "seeded_refs", False):
+        cond = _seed_refs(pipe, cond, seed)
+        if neg is not None:
+            neg = _seed_refs(pipe, neg, seed)
     noise = mx.array(noise).astype(mx.float32)
     if tuple(noise.shape) != shape:
         raise ValueError(f"noise {tuple(noise.shape)} does not match {shape}")
@@ -1462,6 +1482,23 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             if on_step is not None:
                 on_step(i, x)
     return x
+
+
+def _seed_refs(pipe: ImagePipeline, cond: Conditioning, seed):
+    """``cond`` with the request's ``seed`` for the noise its DiT mixes
+    into the reference rows, unless it holds that noise or a seed already.
+    A request whose noise came without a seed gives none, and its
+    references are refused without their noise."""
+    import dataclasses
+
+    if not (cond.refs or cond.ref_latents) or cond.ref_noise \
+            or cond.ref_seed is not None:
+        return cond
+    if seed is None:
+        raise ValueError(f"{pipe.family.title} references mix noise from "
+                         "the request's seed: pass a seed, or the "
+                         "conditioning's ref_noise with the noise")
+    return dataclasses.replace(cond, ref_seed=int(seed))
 
 
 def _need_vae(pipe: ImagePipeline):

@@ -17,7 +17,14 @@ scaled_dot_product_attention.
 One step is one forward as ComfyUI's sampler makes it for a text to image
 prompt: latents (1, 24, 1, H, W), the timestep sigma x 1000 in float32,
 the text features (1, L, 5120) and the sampler's sigmas, here the PDD
-grid, which picks the step's head. Each fixture holds, in float32 under
+grid, which picks the step's head. An edit step (--refs) adds the
+minimax_payload that MiniMaxH3ImageConditioning and model_base give it:
+each reference's latents (seeded normal, one frame) as minimax_refs and
+cond_video_latents, the run seed, and the prompt's token tags with 0 over
+each vision span (--spans). Its fixture also holds each reference's
+latents (1, 24, h, w), the noise ComfyUI's forward mixes into its rows (a
+CPU torch generator restarted at the seed, drawn in the rows' shape), the
+tags and the seed. Each fixture holds, in float32 under
 gmlx's module paths: the text projection, each refiner block and the
 refiner's norm, the patch projection, the curve rows, the input of the
 first block and the output of every block, the head's input and
@@ -33,7 +40,8 @@ against fp32 gap, as check3_h3.py does.
   python scripts/image_oracle/run.py --python <ComfyUI venv python> \\
       --threads 16 check3_h3_image.py --comfy-dir <ComfyUI checkout> \\
       --dit <copy with the config key> --source <release GGUF> \\
-      --cases 512x512:1.0 512x512:0.75
+      --cases 512x512:1.0 512x512:0.75 [--refs 512x512 384x640 \\
+      --spans 3:20 24:41 --text-len 48]
 
 --self-test writes a tiny model of the class on random weights, with the
 weights by name, and its step at sigma 1.0 and 0.75, so the gmlx side
@@ -82,6 +90,10 @@ TINY = {"hidden_size": 32, "num_layers": 2, "token_refiner_num_layers": 1,
         "pdd_sigmas": list(PDD_SIGMAS)}
 _GMLX = {"adaln_curve_grid": "adaln_grid", "time_embed_dim": "adaln_basis"}
 TINY_CASE = {"shape": "96x64", "text": 8, "sigmas": (1.0, 0.75)}
+# The tiny edit: two references of other sizes than the target and a
+# vision span in the prompt.
+TINY_EDIT = {"refs": ((64, 64), (96, 32)), "spans": ((1, 5),),
+             "ref_seed": 7}
 
 
 def comfy_oracle():
@@ -161,7 +173,46 @@ class Capture:
             h.remove()
 
 
-def call(torch, dm, lat, feats, sigma, mode, grid):
+def ref_latents(sizes, seed: int) -> list:
+    """Seeded normal latents (1, 24, h / 16, w / 16) of each reference
+    size (w, h), one frame each."""
+    out = []
+    for i, (w, h) in enumerate(sizes):
+        rng = np.random.default_rng([seed, 1000 + i, w, h])
+        out.append(rng.standard_normal((1, 24, h // 16, w // 16)).astype(
+            np.float32))
+    return out
+
+
+def ref_noise(torch, refs, seed: int) -> list:
+    """The noise ComfyUI's forward mixes into each reference's rows
+    (comfy model.py:567-580): a CPU generator restarted at the seed for
+    each one, drawn in the shape of its patchified rows."""
+    out = []
+    for z in refs:
+        _, c, h, w = z.shape
+        gen = torch.Generator("cpu").manual_seed(seed)
+        out.append(torch.randn((h // 2 * (w // 2), c * 4), generator=gen,
+                               dtype=torch.float32).numpy())
+    return out
+
+
+def edit_payload(torch, refs, text_len: int, spans, seed: int) -> dict:
+    """The minimax_payload of an edit step: the references as
+    MiniMaxH3ImageConditioning gives them, the run seed and the prompt's
+    token tags, 0 over each vision span."""
+    tags = torch.ones(text_len, dtype=torch.long)
+    for a, b in spans:
+        tags[a:b] = 0
+    blocks = [{"kind": "image", "latent_h": z.shape[2],
+               "latent_w": z.shape[3],
+               "latent": torch.from_numpy(z[:, :, None])} for z in refs]
+    return {"refs": blocks, "cond_video_latents": [b["latent"]
+                                                   for b in blocks],
+            "seed": seed, "text_token_tags": tags}
+
+
+def call(torch, dm, lat, feats, sigma, mode, grid, payload=None):
     """One forward; the velocity (1, 24, H, W), the hooks' rows and the
     layout."""
     ctx = torch.from_numpy(feats[None]).to(oracle.torch_dtype(mode))
@@ -169,7 +220,8 @@ def call(torch, dm, lat, feats, sigma, mode, grid):
     cap = Capture(dm)
     try:
         out = dm(torch.from_numpy(lat[:, :, None]), timestep(torch, sigma),
-                 ctx, transformer_options=opts)
+                 ctx, transformer_options=opts,
+                 minimax_payload=None if payload is None else dict(payload))
     finally:
         cap.remove()
     return oracle.to_numpy(out[:, :, 0]), cap, opts["minimax_h3_layout"]
@@ -207,7 +259,11 @@ def layout_rows(torch, dm, cap: Capture, layout, sigma) -> dict:
     times and the curve rows, checked against what the forward used."""
     x, t_emb, segs = cap.inputs["blocks.0"][:3]
     s = float(timestep(torch, sigma).flatten()[0]) / 1000.0
-    times = [1.0 - s]
+    t = 1.0 - s
+    # Reference rows run at max(t, 0.999), the distinct times ascending
+    # (comfy model.py:871-875).
+    refs = any(k == "ref_img" for _, _, k in layout.segments)
+    times = sorted({t, max(t, 0.999)} if refs else {t})
     if t_emb.shape[0] != len(times):
         raise SystemExit(f"error: the forward used {t_emb.shape[0]} times")
     table = dm.adaln_t_table.float()
@@ -233,9 +289,26 @@ def layout_rows(torch, dm, cap: Capture, layout, sigma) -> dict:
 
 
 def run_case(torch, dm, lat, feats, sigma, name, inputs, files, notes, *,
-             compressed: bool = False) -> None:
-    """One step in fp32 and bf16, written as fixture ``name``."""
+             compressed: bool = False, edit: dict | None = None) -> None:
+    """One step in fp32 and bf16, written as fixture ``name``. ``edit``
+    holds the references' latents, their sizes' spans of the prompt and
+    the seed of an edit step."""
+    payload = None
     fx = fixtures.FixtureWriter(name, check=3, family=FAMILY, script=SCRIPT)
+    if edit is not None:
+        refs = edit["latents"]
+        payload = edit_payload(torch, refs, feats.shape[0], edit["spans"],
+                               edit["seed"])
+        for i, (z, n) in enumerate(zip(refs, ref_noise(torch, refs,
+                                                       edit["seed"]))):
+            fx.add(f"ref_latents_{i}", z)
+            fx.add(f"ref_noise_{i}", n)
+        fx.add("text_tags", payload["text_token_tags"].numpy())
+        fx.add("ref_seed", np.int64(edit["seed"]))
+        fx.inputs.update(refs=[[int(z.shape[3]) * 16, int(z.shape[2]) * 16]
+                               for z in refs],
+                         spans=[list(v) for v in edit["spans"]],
+                         ref_seed=edit["seed"])
     fx.inputs.update(inputs)
     for role, path in files.items():
         fx.add_file(role, path)
@@ -254,7 +327,7 @@ def run_case(torch, dm, lat, feats, sigma, name, inputs, files, notes, *,
         t0 = time.perf_counter()
         oracle.emulate_bf16_matmul(mode == "bf16")
         vel[mode], caps[mode], layout = call(torch, dm, lat, feats, sigma,
-                                             mode, grid)
+                                             mode, grid, payload)
         times[f"{mode}_s"] = round(time.perf_counter() - t0, 1)
     oracle.emulate_bf16_matmul(False)
     fx.inputs["segment_kinds"] = [k for _, _, k in layout.segments]
@@ -372,6 +445,12 @@ def self_test(torch, a) -> int:
         run_case(torch, dm, lat, feats, sigma,
                  f"{name}_s{PDD_SIGMAS.index(sigma)}", inputs, {}, [note],
                  compressed=True)
+    edit = {"latents": ref_latents(TINY_EDIT["refs"], a.seed),
+            "spans": TINY_EDIT["spans"], "seed": TINY_EDIT["ref_seed"]}
+    for sigma in TINY_CASE["sigmas"]:
+        run_case(torch, dm, lat, feats, sigma,
+                 f"{name}_edit_s{PDD_SIGMAS.index(sigma)}", inputs, {},
+                 [note], compressed=True, edit=edit)
     wx = fixtures.FixtureWriter(name + "_weights", check=3, family=FAMILY,
                                 script=SCRIPT)
     wx.inputs.update(inputs)
@@ -392,6 +471,15 @@ def main(argv=None) -> int:
     ap.add_argument("--cases", nargs="+", default=["512x512:1.0",
                                                    "512x512:0.75"],
                     help="steps as WxH:SIGMA")
+    ap.add_argument("--refs", nargs="*", default=[],
+                    help="reference sizes WxH: each case runs as an edit "
+                         "on seeded latents of these sizes")
+    ap.add_argument("--spans", nargs="*", default=[],
+                    help="vision spans A:B of the text rows, tag 0 in the "
+                         "edit's token tags")
+    ap.add_argument("--ref-seed", type=int, default=7,
+                    help="the edit's run seed, which draws the noise of "
+                         "its reference rows")
     ap.add_argument("--text-len", type=int, default=8)
     ap.add_argument("--feature-std", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
@@ -423,6 +511,18 @@ def main(argv=None) -> int:
              "oracle_dit is dit with the config key {\"transformer\": "
              "{\"pdd_steps\": 6, \"pdd_sigmas\": [...]}} and every tensor "
              "unchanged"]
+    edit = None
+    if a.refs:
+        sizes = [parse_case(f"{r}:1.0")[:2] for r in a.refs]
+        spans = [tuple(int(v) for v in sp.split(":")) for sp in a.spans]
+        if any(not 0 < x < y <= a.text_len for x, y in spans):
+            raise SystemExit(f"error: spans {a.spans} are not inside "
+                             f"{a.text_len} text rows")
+        edit = {"latents": ref_latents(sizes, a.seed), "spans": spans,
+                "seed": a.ref_seed}
+        notes.append("an edit step: references of seeded normal latents "
+                     "and token tags 0 over the spans, as "
+                     "MiniMaxH3ImageConditioning gives them")
     for w, h, sigma in cases:
         lat = latents(w, h, a.seed)
         k = min(range(len(PDD_SIGMAS)),
@@ -436,8 +536,10 @@ def main(argv=None) -> int:
                   "timestep": "sigma x 1000 in float32 in both modes",
                   "attention": cattn.optimized_attention.__name__,
                   "comfy": a.comfy_head, "comfy_gguf": gguf_head}
-        run_case(torch, dm, lat, feats, sigma, f"{a.name}_{w}x{h}_s{k}",
-                 inputs, files, notes)
+        tag = "_edit" if edit else ""
+        run_case(torch, dm, lat, feats, sigma,
+                 f"{a.name}{tag}_{w}x{h}_s{k}", inputs, files, notes,
+                 edit=edit)
     return 0
 
 

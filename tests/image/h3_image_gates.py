@@ -1,8 +1,10 @@
 """The rows of a MiniMax-H3-Image step against a check 3 fixture of
 scripts/image_oracle/check3_h3_image.py: free running from the fixture's
 inputs, and teacher-forced for each refiner block, the refiner's norm,
-each block and the head from the fixture's float32 input to it. The
-exact gate's floors follow tests/video/h3_gates.py."""
+each block and the head from the fixture's float32 input to it. An edit
+fixture adds each reference's latents and the noise its rows take, and
+the prompt's token tags, whose vision spans the caption reads as image
+slots. The exact gate's floors follow tests/video/h3_gates.py."""
 from __future__ import annotations
 
 import json
@@ -21,9 +23,11 @@ from gmlx.image import pacing
 from gmlx.image.families.h3_image import family as hi
 from gmlx.image.families.h3_image import model as him
 from gmlx.image.h3 import rope
+from gmlx.image.h3.pictures import span_slots, spans_of
 
 VELOCITY = "velocity"
 HEAD = "final_layer"
+ADALN = "final_layer.adaln_proj.linear"
 # Rows outside the blocks that every fixture holds.
 TOP_ROWS = ("condition_proj", "video_patch_proj", "token_refiner.final_norm",
             "final_layer.adaln_proj.linear", HEAD)
@@ -86,11 +90,43 @@ def case(arrays: dict):
     return lat, feats, float(arrays["sigma"]), step_target(arrays)
 
 
+def edit_of(model, arrays: dict) -> tuple:
+    """(refs, slots) of the fixture's step: the rows of its references
+    with the noise the oracle mixed into them, and the image slots of the
+    prompt's vision spans; (None, ()) for a text to image step."""
+    n = sum(1 for k in arrays if k.startswith("ref_latents_"))
+    slots = (span_slots(spans_of(arrays["text_tags"]))
+             if "text_tags" in arrays else ())
+    if not n:
+        return None, slots
+    refs = model.references(
+        [mx.array(arrays[f"ref_latents_{i}"]) for i in range(n)],
+        noise=[mx.array(arrays[f"ref_noise_{i}"]) for i in range(n)])
+    return refs, slots
+
+
 def plan_of(model, arrays: dict):
     lat, feats, sigma, target = case(arrays)
     _, _, h, w = lat.shape
+    refs, slots = edit_of(model, arrays)
+    spans = spans_of(arrays["text_tags"]) if "text_tags" in arrays else ()
     return (model.modulation(sigma, 1, target),
-            model.plan(feats.shape[1], h, w))
+            model.plan(feats.shape[1], h, w, spans,
+                       () if refs is None else refs.sizes))
+
+
+# gmlx's segment kinds as the oracle's layout names them: a vision span is
+# part of its text segment, and a reference is ref_img.
+_ORACLE_KIND = {"vision": "text", "ref": "ref_img"}
+
+
+def oracle_kinds(segments) -> list:
+    out: list = []
+    for s in segments:
+        k = _ORACLE_KIND.get(s.kind, s.kind)
+        if s.rows and not (k == "text" and out and out[-1] == "text"):
+            out.append(k)
+    return out
 
 
 def layout_misses(model, arrays: dict, m: dict) -> list[str]:
@@ -99,7 +135,7 @@ def layout_misses(model, arrays: dict, m: dict) -> list[str]:
     mod, plan = plan_of(model, arrays)
     lay = plan.layout
     out = []
-    kinds = [s.kind for s in lay.segments if s.rows]
+    kinds = oracle_kinds(lay.segments)
     if kinds != m["inputs"]["segment_kinds"]:
         out.append(f"segment kinds {kinds}")
     if not np.array_equal(lay.positions, arrays["positions"]):
@@ -114,9 +150,10 @@ def layout_misses(model, arrays: dict, m: dict) -> list[str]:
         out.append("rope angles")
     if plan.segs != tuple(tuple(r) for r in arrays["segments"].tolist()):
         out.append(f"segments {plan.segs}")
-    if tuple(arrays["t_values"].tolist()) != mod.times[:1]:
+    n = len(arrays["t_values"])
+    if tuple(arrays["t_values"].tolist()) != mod.times[:n]:
         out.append(f"times {mod.times}")
-    t_emb = np.array(mod.t_emb[:1])
+    t_emb = np.array(mod.t_emb[:n])
     if not np.allclose(t_emb, arrays["t_emb"], rtol=1e-6, atol=0):
         out.append("curve rows")
     s = plan.target
@@ -135,9 +172,12 @@ def free_rows(model, arrays: dict) -> dict:
     """Every tapped row of one step from the fixture's inputs, and the
     velocity. Each block evaluates before the next, as a run does."""
     lat, feats, sigma, target = case(arrays)
+    refs, slots = edit_of(model, arrays)
     taps: dict = {}
     with pacing.paced(_eval_blocks):
-        vel = model(lat, sigma, feats, taps, target=target)
+        caption = model.caption(feats, taps, slots=slots)
+        vel = model(lat, sigma, None, taps, target=target, caption=caption,
+                    refs=refs)
     got = {k: _np(v) for k, v in taps.items()}
     got[VELOCITY] = _np(vel)
     return got
@@ -188,11 +228,16 @@ def measures(model, arrays: dict, m: dict) -> dict:
     for k, v in free.items():
         if k not in tols or k not in arrays:
             continue
+        ref = arrays[k]
+        if k == ADALN and ref.shape[0] > 1:
+            # The oracle's head projects every time's row and reads the
+            # step's (its head segment's), which is the one gmlx projects.
+            ref = ref[int(arrays["head_segment"][2])][None]
         if forced_row(k):
-            got[k] = rel(forced[k], arrays[k])
-            got[f"free {k}"] = rel(v, arrays[k])
+            got[k] = rel(forced[k], ref)
+            got[f"free {k}"] = rel(v, ref)
         else:
-            got[k] = rel(v, arrays[k])
+            got[k] = rel(v, ref)
     got[f"cosine {VELOCITY}"] = cosine(free[VELOCITY], arrays[VELOCITY])
     return got
 
@@ -244,8 +289,8 @@ def assert_manifest_rule(m: dict) -> None:
     """Every row tolerance is twice the gap beside it, or the float32
     floor for a row the oracle runs in float32 in both modes, each
     teacher-forced row run free is twice its free gap, the velocity
-    floors follow its gap, and the fixture holds every row of its depth
-    with a gap for each."""
+    floors follow its gap, the fixture holds every row of its depth with
+    a gap for each, and its layout holds a segment for each reference."""
     tols, res = m["tolerances"], m["results"]
     gap = res["velocity_bf16_vs_fp32"]
     assert tols[VELOCITY]["rel_l2"] == 2 * gap["rel_l2"]
@@ -270,7 +315,9 @@ def assert_manifest_rule(m: dict) -> None:
     assert set(res["rows_bf16_vs_fp32"]) == {
         k for k in expected_rows(m)
         if not k.startswith("free ") and k != VELOCITY}
-    assert m["inputs"]["segment_kinds"] == ["text", "video"]
+    refs = m["inputs"].get("refs") or []
+    assert m["inputs"]["segment_kinds"] == ["text", *["ref_img"] * len(refs),
+                                            "video"]
     assert m["inputs"]["sample_sigmas"] == [
         float(np.float32(s)) for s in hi.PDD_SIGMAS]
 
