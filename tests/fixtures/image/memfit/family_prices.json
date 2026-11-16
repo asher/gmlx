@@ -1250,14 +1250,14 @@
    "plans": {
     "16106127360 1024 1.0 0": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 12608916684,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1275,14 +1275,14 @@
     ],
     "16106127360 1024 1.0 1": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 12608916684,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1300,14 +1300,14 @@
     ],
     "16106127360 1024 4.0 0": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 13460360396,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1325,14 +1325,14 @@
     ],
     "16106127360 1024 4.0 1": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 13460360396,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1350,14 +1350,14 @@
     ],
     "16106127360 512 1.0 0": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 12481200128,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1375,14 +1375,14 @@
     ],
     "16106127360 512 1.0 1": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 12481200128,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1400,14 +1400,14 @@
     ],
     "16106127360 512 4.0 0": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 13204927283,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1425,14 +1425,14 @@
     ],
     "16106127360 512 4.0 1": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 13204927283,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1450,14 +1450,14 @@
     ],
     "21474836480 1024 1.0 0": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 12608916684,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1475,14 +1475,14 @@
     ],
     "21474836480 1024 1.0 1": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 12608916684,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1500,14 +1500,14 @@
     ],
     "21474836480 1024 4.0 0": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 13460360396,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1525,14 +1525,14 @@
     ],
     "21474836480 1024 4.0 1": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 13460360396,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1550,14 +1550,14 @@
     ],
     "21474836480 512 1.0 0": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 12481200128,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1575,14 +1575,14 @@
     ],
     "21474836480 512 1.0 1": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 12481200128,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1600,14 +1600,14 @@
     ],
     "21474836480 512 4.0 0": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 13204927283,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1625,14 +1625,14 @@
     ],
     "21474836480 512 4.0 1": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 13204927283,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1650,14 +1650,14 @@
     ],
     "51539607552 1024 1.0 0": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 12608916684,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1675,14 +1675,14 @@
     ],
     "51539607552 1024 1.0 1": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 12608916684,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1700,14 +1700,14 @@
     ],
     "51539607552 1024 4.0 0": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 13460360396,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1725,14 +1725,14 @@
     ],
     "51539607552 1024 4.0 1": [
      {
-      "decode": 9555465788,
+      "decode": 9367161537,
       "denoise": 13460360396,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 697095740,
+      "decode_peak": 508791489,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1750,14 +1750,14 @@
     ],
     "51539607552 512 1.0 0": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 12481200128,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1775,14 +1775,14 @@
     ],
     "51539607552 512 1.0 1": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 12481200128,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1800,14 +1800,14 @@
     ],
     "51539607552 512 4.0 0": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 13204927283,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1825,14 +1825,14 @@
     ],
     "51539607552 512 4.0 1": [
      {
-      "decode": 9543469945,
+      "decode": 9359491799,
       "denoise": 13204927283,
       "encode": 10715943403
      },
      {
       "adapters": 0,
       "caches": 0,
-      "decode_peak": 685099897,
+      "decode_peak": 501121751,
       "dit": 4294967296,
       "encode_peak": 1857573355,
       "encoder": 4294967296,
@@ -1848,21 +1848,21 @@
      false,
      true
     ],
-    "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.90; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.65 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.90; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.65 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.90; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.65 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.90; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.65 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.89; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.64 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.89; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.64 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.89; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.64 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.89; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.64 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
+    "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
    },
    "row": "PeakRow(token_px=32, row_multiple=1, caption_rows=4096, width=28672, step=StepFit(base=2899102924.8, k=2.9, row_k=None, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=20480, text_rows=4096, encode_tower_bytes=0, mmproj_fp32=False, encode_base=515396075, ref_token_px=0, prices_prompt=True)",
    "vae": {
-    "decode 1024 False": 697095740,
-    "decode 1024 True": 697095740,
-    "decode 512 False": 685099897,
-    "decode 512 True": 685099897,
+    "decode 1024 False": 508791489,
+    "decode 1024 True": 508791489,
+    "decode 512 False": 501121751,
+    "decode 512 True": 501121751,
     "encode 1024 False": 1393609513,
     "encode 1024 True": 1393609513,
     "encode 512 False": 1365604984,
@@ -3981,5 +3981,5 @@
    }
   }
  },
- "what": "family_prices(skip=('flux2_klein_9b',)) of tests/image/family_prices.py at gmlx acdf35d7, the commit before the FLUX.2 klein 9B rows: the peak row, the plans at four budgets and the VAE passes of each image family, the recipes with their default quants and sizes, the families each VAE serves and the registry order. Each plan carries the prefix_held term, 0 in every plan here, which the pricing of held conditioning states added. The recipes carry the prompt_* fields of the upsampler prompt pull, which only the Qwen-Image recipes fill. The recipes also carry the use, blurb and speed words that gmlx pull's list and picker print. The h3_image row, its plans and VAE passes, its registry order and its autoencoder's pairing joined after the footprint cells of its step and encode, with every entry before them as it was. The minimax-h3-image recipe and its default quants joined with the catalog's least memory class, which every recipe before it has at 16. The h3_image VAE passes and plans follow the refit of its VAE row on the largest of three to six readings of each cell, with every other entry as it was."
+ "what": "family_prices(skip=('flux2_klein_9b',)) of tests/image/family_prices.py at gmlx acdf35d7, the commit before the FLUX.2 klein 9B rows: the peak row, the plans at four budgets and the VAE passes of each image family, the recipes with their default quants and sizes, the families each VAE serves and the registry order. Each plan carries the prefix_held term, 0 in every plan here, which the pricing of held conditioning states added. The recipes carry the prompt_* fields of the upsampler prompt pull, which only the Qwen-Image recipes fill. The recipes also carry the use, blurb and speed words that gmlx pull's list and picker print. The h3_image row, its plans and VAE passes, its registry order and its autoencoder's pairing joined after the footprint cells of its step and encode, with every entry before them as it was. The minimax-h3-image recipe and its default quants joined with the catalog's least memory class, which every recipe before it has at 16. The h3_image VAE passes and plans follow the refit of its VAE row on the largest of three to six readings of each cell, with every other entry as it was. The h3_image VAE passes and plans follow the refit of its VAE row on the largest of three to six readings of each cell, with every other entry as it was."
 }

@@ -575,7 +575,7 @@ MOSS_VAE_DECODE = {"exact": {2: VaeFit(base=1.44 * GiB, k=19.7),
 # MiniMax-H3-Image VAE footprints under bounded_cache on the published
 # file, over the loaded weights, per pixel at its 1024 decode channels and
 # 128 encode channels, exact only: no conv path reaches this VAE, so the
-# Winograd fits are the exact ones. Each cell ran three to six times, a
+# Winograd fits are the exact ones. Each cell ran three times, a
 # fresh process each on an M5 Max, after a pass of one tile that compiles
 # its kernels, and the fits take the largest reading of each. The whole
 # fits are a line in pixels through the one tile cells at 128 and 256
@@ -586,19 +586,15 @@ MOSS_VAE_DECODE = {"exact": {2: VaeFit(base=1.44 * GiB, k=19.7),
 # passes run one 256 pixel tile at a time, four tiles of one image through
 # the decoder at once: the tile term is the whole slope over one tile, and
 # the image term a line through the 2048 and 4096 pixel cells, raised 10
-# percent, the base 0.25 GiB over every tiled cell. A tiled decode reads
-# one of two levels from run to run, at 4096 pixels in float16 0.40 or
-# 0.60 GiB. The high one holds a second float32 canvas: mlx keeps the
-# inputs of a command buffer alive until its completion handler runs,
-# which can be after the wait on its result returns, so a canvas write
-# can find the canvas still held and copy it in place of writing into it.
-# At 4096 pixels a tiled decode reads up to 0.60 GiB against 0.87 priced
-# in float16, 0.64 against 0.92 in float32, and a tiled encode 1.48
-# against 1.82 and 2.38 against 2.67. A batch decodes one image at a
-# time, and each image after the first adds 48 bytes a pixel, four
-# float32 images: its result held to the end, the copy of it in the
-# batch's result, and its canvas and a copy of it that the buffer cache
-# keeps. Batch 2 cells at 2048 and 4096 pixels added 36 to 44.
+# percent, the base 0.25 GiB over every tiled cell. The tiled decode never
+# reads its canvas, so every canvas write is in place, and its readings
+# vary little from run to run. At 4096 pixels a tiled decode reads up to 0.35
+# GiB against 0.62 priced in float16, 0.36 against 0.62 in float32, and a
+# tiled encode 1.48 against 1.82 and 2.38 against 2.67. A batch decodes
+# one image at a time, and each image after the first adds 48 bytes a
+# pixel: its result held to the end and the copy of it in the batch's
+# result, 24, and buffers the cache keeps. Batch 2 cells at 2048 and 4096
+# pixels added 34 to 46.
 _H3_IMAGE_DECODE = {2: VaeFit(base=0.25 * GiB, k=0.2746),
                     4: VaeFit(base=0.25 * GiB, k=0.1191)}
 _H3_IMAGE_ENCODE = {2: VaeFit(base=0.46 * GiB, k=53.96),
@@ -608,10 +604,10 @@ H3_IMAGE_VAE_DECODE = {"exact": _H3_IMAGE_DECODE,
 H3_IMAGE_VAE_ENCODE = {"exact": _H3_IMAGE_ENCODE,
                        "winograd": _H3_IMAGE_ENCODE}
 H3_IMAGE_VAE_TILED = {
-    "decode": {2: TiledFit(base=0.60 * GiB, k_tiles=0.2746,
-                           k_image=0.007448),
-               4: TiledFit(base=0.65 * GiB, k_tiles=0.1191,
-                           k_image=0.003692)},
+    "decode": {2: TiledFit(base=0.43 * GiB, k_tiles=0.2746,
+                           k_image=0.004762),
+               4: TiledFit(base=0.46 * GiB, k_tiles=0.1191,
+                           k_image=0.002095)},
     "encode": {2: TiledFit(base=0.42 * GiB, k_tiles=53.96, k_image=0.1391),
                4: TiledFit(base=0.62 * GiB, k_tiles=53.89,
                            k_image=0.0457)}}
