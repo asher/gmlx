@@ -145,7 +145,8 @@ def free_rows(model, arrays: dict) -> dict:
 
 def forced_rows(model, arrays: dict) -> dict:
     """Each refiner block, the refiner's norm, each block the fixture
-    holds and the head on the fixture's float32 input to them."""
+    holds and the head on the fixture's float32 input to them, each block
+    at the model's attention."""
     act = model.act_dtype
 
     def fed(name):
@@ -163,7 +164,8 @@ def forced_rows(model, arrays: dict) -> dict:
                            model.cfg.block.head_dim)
     src = "in.blocks.0"
     for i, blk in enumerate(model.blocks):
-        y = blk(fed(src), blk.modulation(mod.t_emb, act), plan.segs, cos, sin)
+        y = blk(fed(src), blk.modulation(mod.t_emb, act), plan.segs, cos, sin,
+                attention=model.attention)
         out[f"blocks.{i}"] = _np(y)
         src = f"blocks.{i}"
     out[HEAD] = _np(model.head(fed("in.final_layer"), mod, plan))

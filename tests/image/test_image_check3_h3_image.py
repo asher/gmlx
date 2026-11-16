@@ -370,13 +370,13 @@ def test_check3_rows(real, name):
 
 # Int8 (design section 5 item 5). Each setting loads through the loader,
 # which sets the attention and converts the family's 200 block linears,
-# and every real case runs the int8 ops in each block of both passes. H3
-# video ships its int8 with no numeric per-step gate; here each case's
-# rows print against the product gate as a record, held to INT8_SANITY
-# times the worst row's ratio to its gate measured at bccd4d84, which a
-# dropped scale or a wrong conversion misses by far. Off is
-# test_check3_rows.
-INT8_WORST = {"attention": 1.013, "linears": 3.31, "all": 3.31}
+# and every real case runs the int8 ops in each block of both passes, the
+# teacher-forced one too. H3 video ships its int8 with no numeric per-step
+# gate; here each case's rows print against the product gate as a record,
+# held to INT8_SANITY times the worst row's ratio to its gate measured in
+# batch 5, which a dropped scale or a wrong conversion misses by far. Off
+# is test_check3_rows.
+INT8_WORST = {"attention": 1.36, "linears": 3.31, "all": 3.32}
 INT8_SANITY = 1.5
 
 
