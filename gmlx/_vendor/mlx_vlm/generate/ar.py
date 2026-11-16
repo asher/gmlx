@@ -1670,7 +1670,12 @@ class GenerationBatch:
         if failed is not None and _is_command_buffer_failure(failed):
             # gmlx: nothing the batch holds is valid; the caller drops it,
             # so the failure goes out before a refusal below can hide it.
-            raise failed
+            # The local goes, so the raised traceback is no cycle that
+            # keeps the batch alive.
+            try:
+                raise failed
+            finally:
+                failed = None
         # gmlx: the kept indices are allocated before the batch changes, so
         # a refusal here leaves every row in it.
         keep_arr = mx.array(keep, mx.int32) if keep else None
@@ -1712,6 +1717,7 @@ class GenerationBatch:
                     # guard drops it whole and rebuilds every row.
                     self._kq_torn = True
                     _mark_broken(e, self.uids)
+                    failed = None
                     raise
                 # gmlx: one layer's kept rows at a time, not every layer's
                 # at the next step.
@@ -1740,7 +1746,10 @@ class GenerationBatch:
             # gmlx: raised from a filtered batch. The next filter or step
             # evaluates the layers left.
             failed._kq_filtered = True
-            raise failed
+            try:
+                raise failed
+            finally:
+                failed = None
 
     def next(self) -> List[Response]:
         """Generate the next batch of tokens."""

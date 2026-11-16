@@ -76,6 +76,15 @@ def _notify_queues(queues, *items):
                 break
 
 
+def _drop_tracebacks(exc):
+    """gmlx: detach the frames of ``exc`` and of the exceptions it chains."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        exc.__traceback__ = None
+        exc = exc.__cause__ or exc.__context__
+
+
 def get_prefill_step_size():
     return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
 
@@ -969,7 +978,11 @@ class _TokenIterator:
             raise StopIteration
         if isinstance(item, Exception):
             self._ended = True
-            raise item
+            # gmlx: the local goes, so the raised traceback is no cycle.
+            try:
+                raise item
+            finally:
+                item = None
         if getattr(item, "finish_reason", None):
             self._ended = True
         return item
@@ -1359,7 +1372,11 @@ class ResponseGenerator:
         # Block until the GPU thread sends back the context
         ctx = rqueue.get()
         if isinstance(ctx, Exception):
-            raise ctx
+            # gmlx: the local goes, so the raised traceback is no cycle.
+            try:
+                raise ctx
+            finally:
+                ctx = None
 
         return ctx, _TokenIterator(
             rqueue, ctx.uid, self._cancel, get_token_queue_timeout()
@@ -2155,6 +2172,9 @@ class ResponseGenerator:
 
             except Exception as e:
                 logger.exception("Error in generation thread")
+                # gmlx: every waiting request gets this exception. Its frames
+                # hold the failed batch, so they go before it is shared.
+                _drop_tracebacks(e)
                 error_queues = {
                     id(info["rqueue"]): info["rqueue"] for info in active.values()
                 }

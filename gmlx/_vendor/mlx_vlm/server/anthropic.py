@@ -886,7 +886,9 @@ async def anthropic_messages_endpoint(http_request: Request):
                             stream=True,
                             error="stream_closed_before_completion",
                         )
-                    gc.collect()
+                    # gmlx: only media leaves enough garbage to collect here.
+                    if images:
+                        gc.collect()
                     mx.clear_cache()
 
             return StreamingResponse(
@@ -1040,8 +1042,10 @@ async def anthropic_messages_endpoint(http_request: Request):
                 tool_calls=bool(parsed_tool_calls),
             )
             runtime.metrics.record_success(envelope)
-            # gmlx: collect first, so clear_cache returns what the collect frees.
-            gc.collect()
+            # gmlx: only media leaves enough garbage to collect here. The
+            # collect runs first, so clear_cache returns what it frees.
+            if images:
+                gc.collect()
             mx.clear_cache()
             return response
 

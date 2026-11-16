@@ -1523,7 +1523,9 @@ async def responses_endpoint(request: Request):
                     metrics.record_result(result)
                     finish_reason = getattr(result, "finish_reason", None) or "stop"
 
-                gc.collect()
+                # gmlx: only media leaves enough garbage to collect here.
+                if images or audio:
+                    gc.collect()
                 mx.clear_cache()
 
                 output_items, content, reasoning, output_finish_reason = (
@@ -2360,7 +2362,9 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                     metrics.record_result(gen_result)
                     finish_reason = getattr(gen_result, "finish_reason", None) or "stop"
 
-                gc.collect()
+                # gmlx: only media leaves enough garbage to collect here.
+                if images or audio or videos:
+                    gc.collect()
                 mx.clear_cache()
 
                 reasoning, content = _split_thinking(
