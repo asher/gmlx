@@ -700,6 +700,34 @@ def test_a_size_outside_the_family_limits_is_refused_before_the_loads(
     assert env.checks == [] and env.pipes == []
 
 
+@pytest.mark.parametrize("command, flag", [("generate", "--size"),
+                                           ("bench", "--sizes")])
+def test_a_default_size_outside_the_family_limits_names_the_size_flag(
+        env, tmp_path, monkeypatch, capsys, command, flag):
+    """A default size the family's limits refuse asks for a size by the
+    flag of the command that gives one."""
+    from gmlx.image import api
+
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    monkeypatch.setattr(api, "sampler_defaults", lambda f, v: (
+        api.SamplerDefaults(steps=6, cfg=1.0, shift=1.0, size=(512, 512))))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:]
+    assert umbrella_main(args) == 2
+    err = capsys.readouterr().err
+    assert ("the image size 512x512 is 262,144 pixels, under the 655,360 "
+            "that MiniMax-H3-Image takes; the smallest size of its shape "
+            f"is 832x832; give one with {flag}") in err, err
+    assert env.checks == [] and env.pipes == []
+
+
 @pytest.mark.parametrize("flags, code, text", [
     ([], 2, "--prompt or --prompt-file is required"),
     (["--prompt", "p", "--size", "40x32"], 2, "multiples of 16"),
