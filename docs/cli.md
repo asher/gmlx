@@ -1403,6 +1403,19 @@ the output of a single reference is cropped back to the scaled image.
 FLUX.3 klein sizes its references by this rule, and `--ref-size` exits 2
 on it.
 
+`--ref` gives MiniMax-H3-Image up to 16 reference images, the first the
+picture to edit, and the prompt names them as Picture 1, Picture 2 and so
+on. Each reference has two copies, as ComfyUI's MiniMax H3 Image
+Conditioning node makes them: the VAE's, its short side scaled into 1024
+to 2048 pixels, and the vision tower's, its short side scaled to 1024,
+each side a multiple of 32, and an alpha channel is dropped. The text
+encoder reads the vision copies through its vision tower, which
+`--encoder-mmproj` loads (`gmlx pull minimax-h3-image` fetches it), and
+the VAE encodes the VAE copies. A reference outside 1:3 to 3:1 exits 2.
+Without `--size` the output has the first reference's VAE copy's size.
+MiniMax-H3-Image sizes its references by this rule, and `--ref-size`
+exits 2 on it.
+
 `--ref` gives FLUX.2 klein up to 10 reference images as well, read as
 FLUX.3 klein reads them, with no `--encoder-mmproj`. A single reference is
 scaled down to at most the area of 2024x2024 pixels, and each of several

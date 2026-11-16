@@ -265,9 +265,10 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "klein, whose encoders read the prompt alone.")
     p.add_argument("--ref-size", type=_positive, default=None, metavar="N",
                    help="Resize each reference to about N x N pixels at its "
-                        "own aspect ratio (default 1024). FLUX.2 klein and "
-                        "FLUX.3 klein size their references by their own "
-                        "rules and take no --ref-size.")
+                        "own aspect ratio (default 1024). FLUX.2 klein, "
+                        "FLUX.3 klein and MiniMax-H3-Image size their "
+                        "references by their own rules and take no "
+                        "--ref-size.")
     p.add_argument("--count", type=_positive, default=1, metavar="N",
                    help="Generate N images (default 1).")
     p.add_argument("--output", default=None, metavar="PATH",

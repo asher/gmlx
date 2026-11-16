@@ -785,6 +785,68 @@ def test_an_h3_image_run_by_path_takes_its_row_size(env, tmp_path,
     assert env.pipes == []
 
 
+def _h3_refs(tmp_path, sizes) -> list:
+    from PIL import Image
+
+    out = []
+    for i, (w, h) in enumerate(sizes):
+        p = tmp_path / f"ref{i}.png"
+        Image.fromarray(np.full((h, w, 3), 40 * i, np.uint8)).save(p)
+        out += ["--ref", str(p)]
+    return out
+
+
+def test_an_h3_image_edit_plans_at_its_first_references_vae_size(
+        env, tmp_path, monkeypatch):
+    """--ref on MiniMax-H3-Image with no size plans image_1's VAE copy's
+    size, and prices each reference at its VAE copy beside the mmproj."""
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+
+    def check(*a, **k):
+        env.checks.append(k)
+        raise RuntimeError("planned")
+
+    monkeypatch.setattr(image_preflight, "check", check)
+    mm = tmp_path / "mmproj.gguf"
+    mm.write_bytes(b"x")
+    args = env.base + ["--prompt", "p", "--encoder-mmproj", str(mm),
+                       "--output", str(tmp_path / "a.png")]
+    assert umbrella_main(args + _h3_refs(tmp_path, [(640, 480),
+                                                    (1000, 2000)])) != 0
+    (k,) = env.checks
+    assert (k["width"], k["height"]) == (1376, 1024)
+    assert k["refs"] == [(1024, 1376), (2048, 1024)]
+    assert k["mmproj"] == str(mm)
+
+
+@pytest.mark.parametrize("flags, sizes, text", [
+    (["--ref-size", "512"], [(640, 480)], "--ref-size: MiniMax-H3-Image "
+     "sizes its references by its own rule"),
+    ([], [(4000, 1000)], "a reference of 4000x1000 pixels is outside the "
+     "shapes MiniMax-H3-Image takes, 1:3 to 3:1"),
+    (None, [(640, 480)], "--ref needs --encoder-mmproj with a DiT path")],
+    ids=["ref-size", "shape", "mmproj"])
+def test_an_h3_image_edit_refuses_before_the_loads(
+        env, tmp_path, monkeypatch, capsys, flags, sizes, text):
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    mm = tmp_path / "mmproj.gguf"
+    mm.write_bytes(b"x")
+    args = env.base + ["--prompt", "p", "--output", str(tmp_path / "a.png")]
+    if flags is not None:
+        args += ["--encoder-mmproj", str(mm), *flags]
+    assert umbrella_main(args + _h3_refs(tmp_path, sizes)) == 2
+    assert text in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
+
+
 @pytest.mark.parametrize("flags, text", [
     (["--steps", "4"], "MiniMax-H3-Image pruned runs 6 steps, the schedule "
      "it was distilled to, not 4"),
