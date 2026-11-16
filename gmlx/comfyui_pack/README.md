@@ -185,9 +185,12 @@ The MiniMax-H3-Image check runs at 1024x1024 with the stock model on ComfyUI's c
 
 The gmlx MODEL equals the in-process run bit for bit at every step, so no step reads more than two thirds of its gate. Against 1.5 times the stock bf16 distance alone, the first step misses: at sigma 1 the gmlx distance is 0.053 and the stock bf16 distance 0.016, a ratio of 3.27. The in-process distance there is 0.053 as well, so the miss is the distance of the gmlx model itself, not of the pack. From the second step on, the in-process distance is 0.96 to 1.19 times the stock bf16 one. Three faults planted in the server's step fail the check: the timestep 3% low reaches 10.6 times the gate, the sign of the velocity dropped 70.5, and every step reading the end of the schedule as the sigma it goes to 1.51.
 
+The edit row takes the graph of the edit workflow with two pictures and its prompt, under the same gate. Its stock bf16 run is ComfyUI 0.45.4 on MPS with an fp32 VAE, where the other rows run on ComfyUI's cpu device: the bf16 run of the edit's oracle, ComfyUI on the cpu, reads 0.88 to 1.09 times its cpu distance from fp32 at each step with its model on MPS. The gmlx MODEL equals the in-process run bit for bit at every step, and the worst step reads 0.667 of its gate. Five faults planted in the server's step fail the edit: the timestep 3% low reaches 23.5 times the gate, the sign of the velocity dropped 113, every step reading the end of the schedule 3.54, the reference rows dropped 25.9, and the vision rows read as text 7.01.
+
 | Model | Graph | gmlx from stock fp32, worst step | gmlx in process, same step | stock bf16, same step | Worst ratio to in process | Worst ratio to stock bf16 | Result |
 |---|---|---|---|---|---|---|---|
 | MiniMax-H3-Image | 1024x1024, 6 steps of `euler` on `simple`, cfg 1 | 0.053 | 0.053 | 0.016 | 1.00 | 3.27 | pass |
+| MiniMax-H3-Image | edit of two pictures, 1024x1024, 6 steps of `euler` on `simple`, cfg 1 | 0.014 | 0.014 | 0.013 | 1.00 | 1.07 | pass |
 
 The FastH3 check runs the `fasth3-t2v` graph at 512x512 for 22 frames and holds the gmlx MODEL against gmlx sampling FastH3 in process, without ComfyUI, from the same noise on the same file. Stock ComfyUI runs FastH3's sparse attention only on CUDA, so on the Mac its FastH3 runs dense attention, which is another model. The two gmlx runs share the weights, the kernels and the 8 trained noise levels, so they differ by float32 rounding alone: the timestep's round trip, the carry of the sound and ComfyUI's arithmetic of the denoised output. The check measures how far a rounding step moves FastH3 at this shape. It samples in process with each latent and each noise level moved one float32 step up or down at random, on four seeds, and takes the largest distance at each step as the floor, once at the in-process latents and once along a run. At every step, for the video and the sound apart, the velocity of the gmlx MODEL at the in-process latents must be within twice the first floor of the in-process velocity, and its latent after each step, sampling on its own, within twice the second floor of the in-process latent, or within 5e-5 for either. The check also runs the server's own step in process at the latents the gmlx MODEL is fed, as the MODEL sends them, and the velocity of the MODEL must equal it to 1e-5 at every step. The two run the same code on the same inputs, so they agree bit for bit, and anything the pack or ComfyUI adds shows at every step with no floor beneath it.
 
@@ -223,10 +226,11 @@ The final image check is reported beside it: the gmlx image must be at least as 
 | MiniMax-H3, 512x512, 22 frames, 8 steps, `h3` with its LoRA | 27.01 dB | 25.33 dB | pass |
 | MiniMax-H3, 512x512, 22 frames, 8 steps, `h3-base` | 29.43 dB | 28.68 dB | pass |
 | MiniMax-H3-Image, 1024x1024, 6 steps | 17.03 dB | 22.19 dB | pass |
+| MiniMax-H3-Image, 1024x1024, 6 steps, edit of two pictures | 40.88 dB | 41.02 dB | pass |
 
 The MiniMax-H3 rows read the frames of each clip as the gmlx video VAE decodes them. The sound, decoded by the gmlx audio VAE, is 0.214 in relative L2 from the stock fp32 sound with the LoRA, as the stock bf16 sound is, and 0.200 against 0.153 for the stock bf16 sound without it.
 
-The MiniMax-H3-Image image, decoded by the gmlx VAE, reads 5.16 dB below the stock bf16 image, inside the bound. The gmlx MODEL equals gmlx in process at every step, so the gap is that of the gmlx model's own bf16 run.
+The MiniMax-H3-Image image, decoded by the gmlx VAE, reads 5.16 dB below the stock bf16 image, inside the bound, and the edit 0.14 dB below the stock bf16 image on MPS. The gmlx MODEL equals gmlx in process at every step, so the gap is that of the gmlx model's own bf16 run.
 
 A fault planted in the Z-Image step convention shows why the step check is the gate. With the velocity sign dropped, the worst step ratio is 188 and the final image reads 8.35 dB. With the timestep read 3% low, the worst step ratio is 7.1, while the final image reads 13.49 dB against a bound of 14.30 dB and fails by only 0.8 dB, so a smaller timestep fault would pass the final image check.
 
