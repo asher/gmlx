@@ -784,6 +784,10 @@ class PeakRow:
     # from the step formula with them joined in each block.
     ref_build: StepFit | None = field(default=None, repr=False)
     ref_read: StepFit | None = field(default=None, repr=False)
+    # Bytes a step row holds beside a dense step on the file's linears:
+    # with int8 attention, and with int8 linears.
+    int8_attention: int = 0
+    int8_linears: int = 0
 
     def step_peak(self, step: int, prefill: int, rows: int = 1,
                   read: int = 0) -> int:
@@ -917,11 +921,16 @@ PEAKS = {
     # the settled process, and video's prompts 0.13 and 1.61 GiB at 26 and
     # 5001 tokens (video/memfit.py). A base of 0.48 GiB and its float32 tap
     # row of 5120 times ENCODE_LIVE leave 0.25 GiB above the encode of 4096
-    # rows and more above the others.
+    # rows and more above the others. Its int8 terms are H3 video's
+    # (video/memfit.py), on the same blocks: the int8 q and k of 56 heads of
+    # 128 with a float32 scale a head, and the int8 copy of fc2's input
+    # with a float32 scale per 1024 columns, a row each.
     "h3_image": PeakRow(token_px=32, row_multiple=1, caption_rows=4096,
                         width=2 * 14336, step=H3_IMAGE_STEP,
                         encode_row_bytes=5120 * 4,
-                        encode_base=int(0.48 * GiB), text_rows=4096),
+                        encode_base=int(0.48 * GiB), text_rows=4096,
+                        int8_attention=2 * 56 * 128 + 2 * 56 * 4,
+                        int8_linears=14336 + 14 * 4),
 }
 
 # The keys of each family's DiT config whose product is the width of the
@@ -1049,6 +1058,19 @@ def file_bytes(src, *, skip=()) -> int:
         return int(src)
     return sum(t.nbytes or tensor_bytes(t.shape, t.codec)
                for n, t in src.tensors.items() if n not in skip)
+
+
+def int8_held(view, family, int8: str) -> int:
+    """Bytes a DiT of ``family`` holds over its file at the int8 setting
+    ``int8``, from its header ``view``: with int8 linears the int8 weights
+    and scales of the linears they convert, less those linears' file
+    bytes (``int8.int8_delta``), else 0."""
+    from . import int8 as neutral
+
+    if neutral.int8_parts(int8)[1] != "int8":
+        return 0
+    return neutral.int8_delta(view, family.strip_prefixes,
+                              family.int8_linears)
 
 
 FLOAT_CODECS = {"F16": 2, "BF16": 2, "F32": 4}
@@ -1241,6 +1263,7 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 init_image: bool = False,
                 ref_sizes=(), step_refs=None, vae_price=None,
                 load_peak: int = 0, load_parts=None,
+                attention: str = "dense", linears: str = "file",
                 budget: float | None = None, overcommit: bool | None = None,
                 _hint: bool = True) -> MemoryPlan:
     """The memory plan for one image request.
@@ -1298,6 +1321,12 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     fits, so a run whose first step fits fits its later steps.
     ``joined`` prices the step of a family in parts run whole, the
     reference tokens joined to its rows, by its ``joined_row``.
+
+    ``attention`` and ``linears`` are the DiT's int8 properties
+    (``int8.int8_parts``). A step with int8 attention, or with int8
+    linears, holds the row's int8 term for each of its rows beside a
+    dense one. ``dit`` counts the DiT as it loads: with int8 linears its
+    int8 weights over the file are the caller's to add (``int8_held``).
 
     ``load_peak`` is what the load of the parts holds over what stays
     resident, as ``load_transient`` gives it from their headers. With it
@@ -1376,16 +1405,20 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
             cache_bytes = max(0, int(cache_bytes) - own)
             terms["caches"] = cache_bytes
 
+    int8_row = ((row.int8_attention if attention == "int8" else 0)
+                + (row.int8_linears if linears == "int8" else 0))
+
     def step_peak(b: int) -> int:
+        more = b * rows * int8_row
         if not ref_cache:
-            return row.step_peak(step_one, prefill, b, read)
+            return row.step_peak(step_one, prefill, b, read) + more
         # The later steps read the K and V the first one keeps, so the
         # first step fits only where they fit too.
         peak = row.ref_read.bytes(step_one, b, read)
         if ref_cache == "build":
             peak = max(peak, row.ref_build.bytes(
                 (rows + max(mine)) * row.width * act, b))
-        return peak
+        return peak + more
 
     def price(op: str, tiled: bool, h: int = height, w: int = width) -> int:
         kw = dict(family=family, itemsize=vsize, tile=tile)

@@ -33,8 +33,11 @@ and twice gmlx's own fp32 floor that the manifest records
 measured now). The site gate reads each op of every block and each
 linear leaf of the shipped model against the stock op in float32 on the
 same input (h3_sites.py), at 512x512 and at 1024x1024 on the GLU kernel
-route. The rows on the release file need it under KQUANT_TEST_GGUF_DIR
-and the fixtures under GMLX_IMAGE_FIXTURES.
+route. Each int8 setting loads the release file through the loader and
+runs every real case on the int8 ops of each block, its rows printed
+against the product gate and held to a sanity bound (INT8_SANITY). The
+rows on the release file need it under KQUANT_TEST_GGUF_DIR and the
+fixtures under GMLX_IMAGE_FIXTURES.
 """
 from __future__ import annotations
 
@@ -363,6 +366,68 @@ def test_check3_rows(real, name):
     print(hg.worst_line(f"h3 image check3 {name}", got, m))
     out = hg.missed(got, m["tolerances"])
     assert not out, out
+
+
+# Int8 (design section 5 item 5). Each setting loads through the loader,
+# which sets the attention and converts the family's 200 block linears,
+# and every real case runs the int8 ops in each block of both passes. H3
+# video ships its int8 with no numeric per-step gate; here each case's
+# rows print against the product gate as a record, held to INT8_SANITY
+# times the worst row's ratio to its gate measured at bccd4d84, which a
+# dropped scale or a wrong conversion misses by far. Off is
+# test_check3_rows.
+INT8_WORST = {"attention": 1.013, "linears": 3.31, "all": 3.31}
+INT8_SANITY = 1.5
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("int8", tuple(INT8_WORST))
+def test_check3_int8(gguf_dir, monkeypatch, int8):
+    import gc
+    from collections import Counter
+
+    import mlx_kquant as kq
+
+    from gmlx.image.int8 import int8_parts
+    from gmlx.image.ops.int8_linear import Int8Linear
+
+    if not kq.nax_available():
+        pytest.skip("int8 runs on a GPU with NAX units")
+    attention, linears = int8_parts(int8)
+    p = _find(gguf_dir, _manifest(REAL[0])["files"]["dit"])
+    model, _ = image_loader.load_dit(p, int8=int8, log=lambda *_: None)
+    try:
+        assert (model.attention, model.linears) == (attention, linears)
+        assert sum(isinstance(m, Int8Linear) for _, m in
+                   model.named_modules()) == (200 if linears == "int8" else 0)
+        calls: Counter = Counter()
+        for op in ("sdpa_qk8_inputs", "int8_matmul"):
+            monkeypatch.setattr(kq, op, lambda *a, _op=getattr(kq, op),
+                                _n=op, **k: (calls.update([_n]),
+                                             _op(*a, **k))[1])
+        passes = 2 * len(model.blocks)
+        for name in REAL:
+            arrays, m = fixture(_manifest(name)["name"])
+            calls.clear()
+            got = hg.measures(model, arrays, m)
+            assert calls["sdpa_qk8_inputs"] == (
+                passes if attention == "int8" else 0)
+            if linears == "int8":
+                assert calls["int8_matmul"] >= 4 * passes
+            else:
+                assert calls["int8_matmul"] == 0
+            tols = m["tolerances"]
+            worst = max(v / hg.gate(tols[k]) for k, v in got.items()
+                        if not k.startswith("cosine "))
+            print(hg.worst_line(f"h3 image check3 int8 {int8} {name}", got,
+                                m) + f", {len(hg.missed(got, tols))} rows "
+                  f"over the product gate")
+            assert worst <= INT8_SANITY * INT8_WORST[int8], (name, worst)
+            del arrays
+    finally:
+        del model
+        gc.collect()
+        mx.clear_cache()
 
 
 # The site gate (h3_sites.py): each op of every block and each linear

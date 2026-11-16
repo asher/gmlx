@@ -254,6 +254,15 @@ def build(config: dict):
     return H3ImageDiT(config)
 
 
+# H3 video's int8 linears less the VSA gate, which this DiT lacks: the
+# four linears of each block, fc2 with one activation scale per 1024 of
+# its input columns.
+INT8_LINEARS = {"blocks.*.attn.qkv_proj": None,
+                "blocks.*.attn.out_proj": None,
+                "blocks.*.mlp.fc1": None,
+                "blocks.*.mlp.fc2": 1024}
+
+
 FAMILY = Family(
     name="h3_image",
     title=TITLE,
@@ -283,4 +292,6 @@ FAMILY = Family(
     max_side=7712,
     min_pixels=655_360,
     aspect=((1, 3), (3, 1)),
+    int8_linears=INT8_LINEARS,
+    int8_attention=True,
 )

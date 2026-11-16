@@ -358,6 +358,13 @@ class Family:
     max_side: int | None = None
     min_pixels: int | None = None
     aspect: tuple | None = None
+    # Path patterns (fnmatch) of the DiT linears that int8 linears convert,
+    # each to the columns of one activation scale: None for the whole row.
+    # Empty runs the file's linears alone.
+    int8_linears: dict = field(default_factory=dict)
+    # The DiT runs int8 attention in place of dense attention, its
+    # ``attention`` setting.
+    int8_attention: bool = False
 
     def variant_names(self) -> tuple[str, ...]:
         return tuple(sorted({v.name for v in self.variants.values()}))
@@ -380,6 +387,27 @@ class Family:
         if row is None and self.unknown_variant is not None:
             row = self.sampling.get(self.unknown_variant)
         return row
+
+
+def int8_refusal(family: Family, variant: str, int8: str) -> str | None:
+    """Why this install or Mac does not run ``variant`` of ``family`` at
+    the int8 setting ``int8`` (``int8.INT8``), or None: a family without
+    the attention half runs dense attention alone, then
+    ``int8.int8_refusal``. Raises ValueError for a value off INT8."""
+    from . import int8 as neutral
+
+    attention, _ = neutral.int8_parts(int8)
+    if attention == "int8" and not family.int8_attention:
+        return f"gmlx runs {family.title} with dense attention only"
+    return neutral.int8_refusal(family.title, variant, int8,
+                                family.int8_linears)
+
+
+def int8_fallback(family: Family) -> str:
+    """The int8 settings of ``family`` that keep the file's linears."""
+    from . import int8 as neutral
+
+    return neutral.int8_fallback(not family.int8_attention)
 
 
 @dataclass(frozen=True)
