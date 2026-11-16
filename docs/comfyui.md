@@ -46,8 +46,9 @@ uv pip install -r requirements.txt
 
 ComfyUI's requirements include PyTorch, so the environment takes about
 1.7 GB. The gmlx nodes need ComfyUI 0.37 or newer and no Python packages
-beyond ComfyUI's own. FLUX.3 klein needs ComfyUI 0.41 or newer, and on an
-older ComfyUI its model loader stops with a message to update ComfyUI.
+beyond ComfyUI's own. FLUX.3 klein needs ComfyUI 0.41 or newer and
+MiniMax-H3-Image needs ComfyUI 0.45 or newer, and on an older ComfyUI their
+model loader stops with a message to update ComfyUI.
 
 ## Put the gmlx nodes into ComfyUI
 
@@ -109,7 +110,7 @@ gmlx launch comfyui
 is running, then starts ComfyUI. Among its lines it prints:
 
 ```text
-[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.43.0)
+[launch] installed the gmlx nodes in ~/ComfyUI/custom_nodes/comfyui-gmlx (a ComfyUI folder, ComfyUI 0.45.4)
 [launch] ComfyUI runs at http://localhost:8188, which you open in a browser, from /Users/you/ComfyUI.
 ```
 
@@ -346,7 +347,7 @@ FastH3 samples at the shifts in force, 12 and 3 without
 
 ## The example workflows
 
-ComfyUI's template browser lists fourteen workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists sixteen workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
@@ -366,6 +367,8 @@ with the commands that install the gmlx nodes and pull its model.
 | `minimax-h3-t2v` | A MiniMax-H3 clip with sound from a text prompt, 5 seconds at 1344x768 in 8 steps, through `gmlx MiniMax-H3 Image to Video` and the gmlx video and audio VAEs | `gmlx video pull h3`, and a Mac with 32 GB or more |
 | `minimax-h3-i2v` | The same clip started at an image, which `Load Image` gives to `first_frame` | `gmlx video pull h3`, a Mac with 32 GB or more, and `first-frame.png` in ComfyUI's `input` folder |
 | `fasth3-t2v` | A FastH3 clip with sound from a text prompt, 5 seconds at 1344x768 on its 8 trained noise levels, through `gmlx Sigmas` | `gmlx video pull fasth3`, and a Mac with an M5 chip or newer and 36 GB or more |
+| `minimax-h3-image-t2i` | MiniMax-H3-Image text to image at 2048x2048 in 6 steps, through `MiniMax H3 Image Conditioning` | `gmlx pull minimax-h3-image`, ComfyUI 0.45 or newer, and a Mac with 32 GB or more |
+| `minimax-h3-image-t2i-4096` | The same at 4096x4096 | `gmlx pull minimax-h3-image`, ComfyUI 0.45 or newer, and the memory the server prices it at |
 
 ## LoRAs
 

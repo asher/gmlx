@@ -76,6 +76,12 @@ COMFY = {
            "edit": False, "context": ("condition_proj.weight", 1),
            "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
                      "latents_per_second": 40}},
+    # MiniMax-H3-Image steps on one latent frame, takes the timestep as sigma
+    # times 1000 and reads the sigma its step goes to from the schedule.
+    "h3_image": {"model_class": "MiniMaxH3Image", "image_model": "minimax_h3_image",
+                 "latent": {"channels": 24, "stride": 16, "patch": 2, "frames": 1},
+                 "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
+                 "context": ("condition_proj.weight", 1), "time_scale": 0.001},
 }
 # The families whose DiT leaves out the blocks a step names.
 SKIPS = {"moss_image"}
@@ -84,6 +90,9 @@ TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0
 # flow shift 10, in float64, each rounded once to float32, then 0.
 FASTH3_SIGMAS = [float(np.float32(10.0 * b / (1.0 + 9.0 * b)))
                  for b in (t / 1000.0 for t in (999, 874, 749, 624, 500, 375, 250, 125))] + [0.0]
+# MiniMax-H3-Image's PDD grid, its six steps.
+H3_IMAGE_SIGMAS = [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724,
+                   0.23200887441635132, 0.0]
 # The schedule rules of the server's status, for the families whose
 # schedule follows the image size.
 QWEN21_RULE = {"rule": "qwen_image21", "base_len": 256, "max_len": 8192, "base_shift": 0.5,
@@ -120,6 +129,9 @@ MODELS = {
                            "sigmas": None, "schedule": None}),
     "fasth3": ("h3", "fasth3", {"steps": 8, "cfg": 1.0, "shift": 10.0, "audio_shift": 3.0,
                                 "sigmas": FASTH3_SIGMAS, "schedule": None}),
+    "minimax-h3-image": ("h3_image", "pruned",
+                         {"steps": 6, "cfg": 1.0, "shift": 1.0, "sigmas": H3_IMAGE_SIGMAS,
+                          "schedule": None}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}
@@ -229,6 +241,11 @@ class State:
     def flow_map(self, mid) -> bool:
         """Whether the model is a flow map DiT, which reads the client's schedule."""
         return any(t["name"].startswith("ref_time_in.") for t in self.manifest(mid)["tensors"])
+
+    def reads_target(self, mid) -> bool:
+        """Whether the model's DiT reads the sigma its step goes to from the
+        client's schedule, a flow map or MiniMax-H3-Image's PDD heads."""
+        return self.flow_map(mid) or MODELS[mid][0] == "h3_image"
 
     def context_dim(self, fam):
         name, axis, *times = COMFY[fam]["context"]
@@ -617,12 +634,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, f"{req['model']!r} skips no blocks")
         sched = tensors.get("sample_sigmas")
         targets = None
-        if st.flow_map(req["model"]):
+        if st.reads_target(req["model"]):
             if sched is None or len(sched[1]) != 1 or sched[1][0] < 2:
-                return self._err(400, "a flow map step holds sample_sigmas, the schedule the "
+                return self._err(400, "a step on this DiT holds sample_sigmas, the schedule the "
                                       "client samples on")
+            # The schedule is in sigmas, and a timestep is a sigma over the family's scale.
+            scale = COMFY[MODELS[req["model"]][0]].get("time_scale", 1.0)
             s = sched[3].astype(np.float32)
-            targets = [float(s[min(int(np.abs(s - np.float32(v)).argmin()) + 1, len(s) - 1)])
+            targets = [float(s[min(int(np.abs(s - np.float32(scale * float(v))).argmin()) + 1,
+                                   len(s) - 1)])
                        for v in ts[3].astype(np.float32).reshape(-1)]
         gen = run.gen if run else 0
         st.event(kind="step_begin", run=rid)
@@ -651,7 +671,8 @@ class Handler(BaseHTTPRequestHandler):
                  ref_cache=req.get("ref_cache", False), skip=skip,
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
                  fields=sorted(req), tensors=sorted(tensors), targets=targets,
-                 sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)])
+                 sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)],
+                 int8=req.get("int8"))
         self._send(200, write_body({"out": out.astype(np.float32)}), ctype=CONTENT_TYPE, headers={
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
             "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",

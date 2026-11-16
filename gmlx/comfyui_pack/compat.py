@@ -80,6 +80,14 @@ H3_NAMES = (
     ("comfy_extras.nodes_minimax_h3", "MiniMaxH3SigmaShift.execute"),
 )
 
+# The MiniMax-H3-Image internals the pack reads, probed apart at its load.
+H3_IMAGE_NAMES = (
+    ("comfy.supported_models", "MiniMaxH3Image"),
+    ("comfy.model_base", "MiniMaxH3Image.extra_conds"),
+    ("comfy.ldm.minimax.model", "MiniMaxH3Model.preprocess_text_embeds"),
+    ("comfy.ldm.minimax.model", "MiniMaxH3ImageModel.forward"),
+)
+
 # What GmlxH3ImageToVideo runs of ComfyUI's MiniMax-H3 nodes, probed when
 # it runs.
 H3_NODE_NAMES = (

@@ -42,7 +42,8 @@ LORA = "z-image-turbo-style.safetensors"
 
 
 def comfy_version(comfy_dir: str) -> tuple:
-    """The release of a ComfyUI checkout. FLUX.3 came in 0.41.0."""
+    """The release of a ComfyUI checkout. FLUX.3 came in 0.41.0 and
+    MiniMax-H3-Image in 0.45.0."""
     try:
         with open(os.path.join(comfy_dir, "comfyui_version.py")) as f:
             m = re.search(r'__version__\s*=\s*"([0-9.]+)"', f.read())
@@ -759,6 +760,43 @@ class Cases:
         self.check("video saved",
                    any(f.startswith("fasth3_") and f.endswith(".mp4") for f in saved), saved)
 
+    async def h3_image_t2i(self):
+        """The MiniMax-H3-Image example workflow: the prompt through the stock
+        MiniMaxH3ImageConditioning on the gmlx CLIP, 6 image steps of one
+        latent frame with the timestep as sigma times 1000 and the sampler's
+        schedule, each going to the next sigma of it, and the frame decoded
+        by the gmlx VAE into a saved image."""
+        wf = workflow("minimax-h3-image-t2i.json")
+        wf["4"]["inputs"].update(width=64, height=96)
+        wf["8"]["inputs"]["filename_prefix"] = "h3-image"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("the prompt encoded once", [e["text"] for e in enc] == [wf["4"]["inputs"]["prompt"]],
+                   [e["text"][:20] for e in enc])
+        steps = kinds(log, "step")
+        self.check("6 steps of one row at cfg 1", len(steps) == 6 and {e["rows"] for e in steps} == {1},
+                   [e["rows"] for e in steps])
+        self.check("one latent frame, its axis taken off", {tuple(e["x_shape"]) for e in steps}
+                   == {(1, 24, 6, 4)}, [e["x_shape"] for e in steps][:1])
+        sched = steps[0]["sample_sigmas"] if steps else []
+        self.check("each step goes to the next sigma of the schedule",
+                   [e["targets"] for e in steps] == [[s] for s in sched[1:]],
+                   [e["targets"] for e in steps])
+        got = [e["timestep"][0] for e in steps]
+        self.check("timesteps are the sigmas times 1000",
+                   np.allclose(got, [s * 1000 for s in sched[:-1]], atol=1e-3), got)
+        self.check("each step at the loader's default, the entry's int8 setting",
+                   [e["int8"] for e in steps] == [None] * 6, [e["int8"] for e in steps])
+        dec = kinds(log, "vae_decode")
+        self.check("decoded once, without the frame axis", [e["shape"] for e in dec] == [[1, 24, 6, 4]],
+                   [e["shape"] for e in dec])
+        d = os.path.join(self.work, "output")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("image saved", any(f.startswith("h3-image_") and f.endswith(".png") for f in saved),
+                   saved)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -859,6 +897,10 @@ async def amain(a) -> dict:
                              lambda: c.flux3_edit(True))
             else:
                 out["skipped"] = ["flux-3-klein t2i", "flux-3-klein edit with two references"]
+            if comfy_version(a.comfy) >= (0, 45, 0):
+                await c.case("minimax-h3-image t2i with the gmlx VAE", c.h3_image_t2i)
+            else:
+                out.setdefault("skipped", []).append("minimax-h3-image t2i")
             out["cases"] = c.results
     except Exception:  # noqa: BLE001
         out["fatal"] = traceback.format_exc()
@@ -889,7 +931,8 @@ def main():
             if not k["ok"]:
                 print(f"     {k['check']}: {str(k['detail'])[:600]}")
     for name in out.get("skipped", []):
-        print(f"skip {name}: this ComfyUI has no FLUX.3")
+        print(f"skip {name}: this ComfyUI has no "
+              f"{'MiniMax-H3-Image' if 'minimax' in name else 'FLUX.3'}")
     if out.get("fatal"):
         print(out["fatal"])
     sys.exit(0 if not out["failed"] and not out.get("fatal") else 1)

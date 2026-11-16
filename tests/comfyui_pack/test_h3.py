@@ -8,7 +8,8 @@ nodes, keyframes and guides from the stock nodes through the gmlx CLIP and
 VAEs to the AV step, and the refusals of what a
 gmlx model does not run: references, FastH3 with keyframes, the noise masks
 and the Fun ControlNet. Every ComfyUI the pack supports has MiniMax-H3,
-which came in v0.30.0.
+which came in v0.30.0. MiniMax-H3-Image, which came in v0.45.0, steps on
+one latent frame with the sampler's schedule.
 
 Needs ``COMFYUI_DIR``. Run with ``python -m unittest`` from this folder."""
 
@@ -31,6 +32,7 @@ import comfy.model_management as mm  # noqa: E402
 import comfy.nested_tensor  # noqa: E402
 import comfy.samplers  # noqa: E402
 import comfy.sd  # noqa: E402
+import comfy.supported_models  # noqa: E402
 import node_helpers  # noqa: E402
 import nodes as comfy_nodes  # noqa: E402
 from comfy_extras import nodes_custom_sampler as CS  # noqa: E402
@@ -43,6 +45,9 @@ HID, FID, ZID = "h3", "fasth3", "z-image-turbo"
 SIZE, FRAMES = 64, 5
 NO_REFS = ("the gmlx nodes run MiniMax-H3 from the text prompt with keyframes and guides, and "
            "take no references")
+IID = "minimax-h3-image"
+HAS_H3_IMAGE = hasattr(comfy.supported_models, "MiniMaxH3Image")
+needs_h3_image = unittest.skipUnless(HAS_H3_IMAGE, "this ComfyUI has no MiniMax-H3-Image")
 
 
 def _out(node_output):
@@ -1270,6 +1275,164 @@ class Refusals(Base):
             H.MiniMaxH3ImageToVideo.execute(clip, video, "a dog", SIZE, SIZE, FRAMES,
                                             first_frame=torch.rand(1, SIZE, SIZE, 3))
         self.assertIn("fasth3 runs text to video only", str(e.exception))
+
+
+def image_latent(size=SIZE):
+    """MiniMax-H3-Image's latent of one frame, as its conditioning node
+    makes it."""
+    return {"samples": torch.zeros(1, 24, 1, size // 16, size // 16)}
+
+
+def image_cond(client, text="a lighthouse on a cliff at dusk"):
+    out, _ = client.encode(IID, text)
+    return [[out["cond"], {}]]
+
+
+@needs_h3_image
+class H3Image(Base):
+    """MiniMax-H3-Image: the weightless model on the PDD heads its manifest's
+    config names, a stock sample of one latent frame through the image step
+    with the sampler's schedule, the VAE's frame axis, and the refusals of
+    what a gmlx model does not run of what its conditioning node gives."""
+
+    def ksample(self, model, pos=None, latent=None, steps=6):
+        pos = pos or image_cond(self.client)
+        with torch.inference_mode():
+            (out,) = comfy_nodes.common_ksampler(model, 1, steps, 1.0, "euler", "simple", pos,
+                                                 pos, latent or image_latent())
+        return out["samples"]
+
+    def test_it_builds_on_meta_on_the_pdd_heads_its_manifest_names(self):
+        import json
+
+        m = P.nodes.GmlxModelLoader().load(IID, self.stub.url, False)[0]
+        uc = m.model.model_config.unet_config
+        want = json.loads(self.client.manifest(IID)["metadata"]["config"])["transformer"]
+        self.assertEqual(type(m.model.model_config).__name__, "MiniMaxH3Image")
+        self.assertEqual((uc["pdd_steps"], uc["pdd_sigmas"]),
+                         (want["pdd_steps"], want["pdd_sigmas"]))
+        self.assertEqual(m.model.diffusion_model.final_layer.pdd_steps, 6)
+        f = m.model.diffusion_model.forward
+        self.assertEqual((f.reads_target, f.flow_map, f.av), (True, False, False))
+        self.assertTrue(all(p.device.type == "meta" for p in m.model.parameters()))
+        self.assertEqual(m.model.get_dtype(), torch.float32)
+        # The refiner runs on the server, in each step.
+        feats = torch.rand(1, 3, 5120)
+        self.assertIs(m.model.diffusion_model.preprocess_text_embeds(feats), feats)
+
+    def test_a_sample_steps_one_frame_on_the_schedule_and_gets_the_frame_back(self):
+        """Each step sends (B, C, h, w), the timestep as sigma times 1000 and
+        ComfyUI's sample_sigmas, so the server's target is the entry after
+        the step's sigma, as ComfyUI's final layer finds it."""
+        m = self.model(IID)
+        out = self.ksample(m)
+        sig = [float(v) for v in comfy.samplers.calculate_sigmas(
+            m.get_model_object("model_sampling"), "simple", 6)]
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), 6)
+        for i, s in enumerate(steps):
+            self.assertEqual(s["sample_sigmas"], sig)
+            self.assertAlmostEqual(s["timestep"][0], sig[i] * 1000, places=2)
+            self.assertEqual(s["targets"], [sig[i + 1]])
+        self.assertEqual({tuple(s["tensors"]) for s in steps}, {("sample_sigmas", "timestep", "x")})
+        self.assertEqual({tuple(s["x_shape"]) for s in steps}, {(1, 24, 4, 4)})
+        self.assertEqual({s["convention"] for s in steps}, {"comfy"})
+        self.assertEqual({tuple(s["row_keys"]) for s in steps}, {("cond", "num_tokens")})
+        self.assertEqual(tuple(out.shape), (1, 24, 1, 4, 4))
+        self.assertTrue(bool(torch.isfinite(out).all()))
+
+    def test_the_conditioning_node_on_the_gmlx_clip_gives_a_frame_that_samples(self):
+        clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]
+        pos, latent = _out(H.MiniMaxH3ImageConditioning.execute(clip, "a lighthouse", SIZE, SIZE))
+        self.assertEqual(tuple(latent["samples"].shape), (1, 24, 1, SIZE // 16, SIZE // 16))
+        self.ksample(self.model(IID), pos=pos, latent=latent, steps=2)
+        self.assertEqual(len(self.stub.events("step")), 2)
+
+    def test_the_vae_gives_and_takes_latents_of_one_frame(self):
+        vae = P.nodes.GmlxVAELoader().load(IID, self.stub.url, False)[0]
+        (lat,) = comfy_nodes.VAEEncode().encode(vae, torch.rand(1, SIZE, SIZE, 3))
+        self.assertEqual(tuple(lat["samples"].shape), (1, 24, 1, SIZE // 16, SIZE // 16))
+        (img,) = comfy_nodes.VAEDecode().decode(vae, lat)
+        self.assertEqual(tuple(img.shape), (1, SIZE, SIZE, 3))
+        self.assertEqual(self.stub.events("vae_decode")[-1]["shape"], [1, 24, 4, 4])
+
+    def test_references_vision_tokens_and_keyframes_are_refused_by_name(self):
+        f = self.model(IID).model.diffusion_model.forward
+        cond = image_cond(self.client)[0][0]
+        x, t = torch.zeros(1, 24, 1, 4, 4), torch.tensor([1000.0])
+        to = {"sample_sigmas": torch.tensor([1.0, 0.5, 0.0])}
+        ref = {"kind": "image", "latent_h": 4, "latent_w": 4, "latent": torch.zeros(1, 24, 1, 4, 4)}
+        cases = {"reference images (minimax_refs": {"refs": [ref]},
+                 "minimax_token_tags hold vision tokens": {
+                     "text_token_tags": torch.tensor([1, 0, 0, 1])},
+                 "keyframes reached the DiT forward": {"keyframes": [{"latent": x}]}}
+        for want, payload in cases.items():
+            with self.subTest(want):
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    f(x, t, context=cond, transformer_options=dict(to), minimax_payload=payload)
+                self.assertIn(want, str(e.exception))
+        with self.assertRaises(C.GmlxError) as e:
+            f(x, t, context=cond, transformer_options={})
+        self.assertIn(f"{IID!r} runs PDD heads, which read the schedule the sampler runs on",
+                      str(e.exception))
+        self.assertEqual(self.stub.events("step"), [])
+        # The payload of a text prompt steps.
+        f(x, t, context=cond, transformer_options=dict(to), minimax_payload={
+            "text_token_tags": torch.ones(4, dtype=torch.long), "refs": [], "keyframes": [],
+            "cond_video_latents": [], "cond_audio_latents": [], "seed": 0, "audio_scale": 1.0})
+        self.assertEqual(len(self.stub.events("step")), 1)
+
+    def test_a_payload_key_comfyui_stops_writing_is_named_at_the_load(self):
+        """The forward refuses references and vision tokens by their payload
+        keys, so a ComfyUI that renames one is named at the load, not run
+        as text to image."""
+        owner = comfy.model_base.MiniMaxH3Image
+        real = owner.__dict__["extra_conds"]
+
+        def renamed(key):
+            def extra_conds(self, **kwargs):
+                out = real(self, **kwargs)
+                held = out["minimax_payload"].cond
+                held[key + "_v2"] = held.pop(key)
+                return out
+            return extra_conds
+
+        for key, (_what, given) in P.model.H3_IMAGE_PAYLOAD.items():
+            with self.subTest(key):
+                owner.extra_conds = renamed(key)
+                try:
+                    with self.assertRaises(C.GmlxError) as e:
+                        self.model(IID)
+                finally:
+                    owner.extra_conds = real
+                self.assertIn(f"gmlx: ComfyUI {P.compat.comfyui_version()}'s MiniMaxH3Image "
+                              f"model does not write minimax_payload[{key!r}] from {given}",
+                              str(e.exception))
+
+    def test_a_missing_h3_image_internal_is_named_with_the_version(self):
+        self.assertIsNone(P.compat.first_missing(P.compat.H3_IMAGE_NAMES))
+        names = P.compat.H3_IMAGE_NAMES
+        try:
+            P.compat.H3_IMAGE_NAMES = names + (("comfy.ldm.minimax.model",
+                                                "MiniMaxH3ImageModel.gone"),)
+            with self.assertRaises(C.GmlxError) as e:
+                self.model(IID)
+        finally:
+            P.compat.H3_IMAGE_NAMES = names
+        for want in ("run MiniMax-H3-Image through",
+                     "comfy.ldm.minimax.model.MiniMaxH3ImageModel.gone",
+                     f"ComfyUI {P.compat.comfyui_version()}", "update ComfyUI"):
+            self.assertIn(want, str(e.exception))
+
+
+@unittest.skipIf(HAS_H3_IMAGE, "this ComfyUI has MiniMax-H3-Image")
+class H3ImageOnAnOlderComfyUI(Base):
+    def test_it_is_refused_by_name(self):
+        with self.assertRaises(C.GmlxError) as e:
+            self.model(IID)
+        for want in (f"ComfyUI {P.compat.comfyui_version()} has no MiniMaxH3Image model",
+                     repr(IID), "update ComfyUI"):
+            self.assertIn(want, str(e.exception))
 
 
 if __name__ == "__main__":
