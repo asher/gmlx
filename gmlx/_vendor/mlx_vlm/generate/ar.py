@@ -68,6 +68,9 @@ from gmlx.serve.tick_guard import mark_broken as _mark_broken
 from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
 from gmlx.serve import speech_rows as _speech_rows
+# gmlx: short-lived rows on the checkpoint tier skip the prompt cache and
+# prefill in groups.
+from gmlx.serve import short_rows as _short_rows
 # gmlx: what the process held before each clear prices the next count of
 # memory wired outside it.
 from gmlx.serve.capacity import note_own_before_clear as _note_own_before_clear
@@ -3153,6 +3156,9 @@ class BatchGenerator:
         uid, ids_list, max_toks, prompt_kwargs, lps, criteria = sequence
         if not ids_list or len(ids_list) < 2:
             return None
+        # gmlx: a short-lived row on the checkpoint tier makes no lookup.
+        if _short_rows.is_short_lived(self, sequence):
+            return None
         coordinator = getattr(self, "apc", None)
         lookup_kwargs = {
             "extra_hash": self._apc_extra_hash(prompt_kwargs or {}),
@@ -3728,7 +3734,9 @@ class BatchGenerator:
             # and at least one of them has a prefix hit, build a mixed
             # warm/cold PromptProcessingBatch with right-padded suffixes so
             # warm and cold rows prefill in a single forward pass.
-            n = min(self.prefill_batch_size, len(self._unprocessed_sequences))
+            # gmlx: on the checkpoint tier, a group of short-lived rows.
+            _short_rows.admit_group(self)
+            n = min(_short_rows.admit_width(self), len(self._unprocessed_sequences))
             sequences = self._unprocessed_sequences[:n]
             if logger.isEnabledFor(logging.DEBUG) and os.environ.get("APC_DEBUG"):
                 logger.warning(
@@ -3784,6 +3792,7 @@ class BatchGenerator:
 
             # APC: also harvest cold-prefill prefixes so future requests hit.
             apc_meta = self._build_apc_meta_for_cold(input_ids, prompt_kwargs_list)
+            _short_rows.mark_short_meta(self, sequences, apc_meta)
             self._kq_admit = (uids, apc_meta)
 
             prompt_batch_cls = _generate_module_override(

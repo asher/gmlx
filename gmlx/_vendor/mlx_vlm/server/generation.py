@@ -1675,6 +1675,8 @@ class ResponseGenerator:
             top_k=max(0, top_k),
             key=key,
             lora=lora,
+            # gmlx: the client capped the reply short (gmlx.serve.short_rows).
+            short_lived=bool(getattr(args, "_kq_short_lived", False)),
         )
 
     def _speech_settings(self, settings, spec, prompt_ids, args):

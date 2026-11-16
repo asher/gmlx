@@ -113,6 +113,37 @@ def install_max_completion_tokens() -> None:
                                 _apply_max_completion_tokens)
 
 
+# Short-lived requests: the client capped the reply at a few tokens
+# (gmlx.serve.short_rows). Runs after the max_completion_tokens transform,
+# so the cap it reads is the final one.
+_SHORT_LIVED_FLAG = "_kq_gguf_short_lived"
+
+
+def _mark_short_lived(args, request, _processor):
+    """Set ``args._kq_short_lived`` when the client set ``max_tokens``,
+    ``max_output_tokens`` or a chat ``max_completion_tokens`` and the final
+    cap is short. A profile or server default cap never counts. Returns
+    ``args`` (mutated)."""
+    from gmlx.serve.short_rows import client_short_lived
+
+    fields = getattr(request, "model_fields_set", None) or set()
+    client = any(f in fields and getattr(request, f, None) is not None
+                 for f in _GEN_ARG_REQUEST_FIELDS["max_tokens"])
+    if not client and "max_completion_tokens" in fields:
+        schemas = importlib.import_module("gmlx._vendor.mlx_vlm.server.schemas")
+        client = isinstance(request, schemas.ChatRequest) and client_max_tokens(
+            getattr(request, "max_completion_tokens", None)) is not None
+    args._kq_short_lived = client_short_lived(
+        client, getattr(args, "max_tokens", None))
+    return args
+
+
+def install_short_lived_mark() -> None:
+    """Mark short-lived requests at the gen-args seam. Install after
+    :func:`install_max_completion_tokens`."""
+    _install_gen_args_transform(_SHORT_LIVED_FLAG, _mark_short_lived)
+
+
 # Thinking-budget fields
 # thinking_budget_message is forced ahead of the end marker when the budget
 # runs out. reasoning_budget_tokens and reasoning_budget_message are

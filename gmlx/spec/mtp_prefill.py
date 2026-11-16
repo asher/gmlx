@@ -18,6 +18,7 @@ import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_int
 from gmlx.serve.capacity import note_own_before_clear
+from gmlx.serve.short_rows import all_short_lived
 from gmlx.spec.ckpt import (
     _install_ckpt_checkpoint_store,
     _install_exact_anchor_pick,
@@ -59,28 +60,38 @@ _MEDIA_PROMPT_KWARGS = ("pixel_values", "pixel_values_videos", "input_features",
                         "image_position_ids", "image_sizes")
 
 
-def _carries_media(batch) -> bool:
-    kwargs = batch._prompt_kwargs or {}
+def media_token_ids(model) -> set[int]:
+    """The ids of the media placeholders in ``model``'s prompts."""
+    config = getattr(model, "config", None)
+    if config is None:
+        return set()
+    from gmlx._vendor.mlx_vlm import apc as _apc
+
+    # The stock reader names image and video placeholders only. Audio ids
+    # and a config's media_token_ids (expanded image blocks) are read here,
+    # so the check does not depend on the serve fold.
+    return _apc.multimodal_token_ids_from_config(config) | {
+        int(getattr(config, a)) for a in ("audio_token_id", "audio_token_index")
+        if getattr(config, a, None) is not None} | {
+        int(t) for t in getattr(config, "media_token_ids", None) or ()}
+
+
+def row_carries_media(kwargs, ids, media_ids) -> bool:
+    """Whether one prompt's kwargs or token ids carry media."""
+    kwargs = kwargs or {}
     if any(kwargs.get(k) is not None for k in _MEDIA_PROMPT_KWARGS):
         return True
     # gemma4 token types: 0 text, 1 image, 2 video, 3 audio.
     types = kwargs.get("mm_token_type_ids")
     if types is not None and bool(mx.any(mx.array(types) != 0).item()):
         return True
-    config = getattr(batch.model, "config", None)
-    if config is None:
-        return False
-    from gmlx._vendor.mlx_vlm import apc as _apc
+    return bool(media_ids) and any(int(t) in media_ids for t in ids)
 
-    # The stock reader names image and video placeholders only. Audio ids
-    # and a config's media_token_ids (expanded image blocks) are read here,
-    # so the check does not depend on the serve fold.
-    media_ids = _apc.multimodal_token_ids_from_config(config) | {
-        int(getattr(config, a)) for a in ("audio_token_id", "audio_token_index")
-        if getattr(config, a, None) is not None} | {
-        int(t) for t in getattr(config, "media_token_ids", None) or ()}
-    return bool(media_ids) and any(
-        int(t) in media_ids for t in batch._input_ids[0].tolist())
+
+def _carries_media(batch) -> bool:
+    return row_carries_media(batch._prompt_kwargs,
+                             batch._input_ids[0].tolist(),
+                             media_token_ids(batch.model))
 
 
 def _l0_salt(batch):
@@ -501,6 +512,7 @@ def install_full_prompt_mtp_prefill() -> None:
         # Stock (non-speculative) batches get the checkpoint tier here:
         # lookup, prefix trim, cursor arming, retirement stash.
         if getattr(self, "draft_kind", None) is None and not _SPEC_APC_DISABLED:
+            ckpt_on = False
             try:
                 # Ckpt-active hybrids under kvarn convert their stock B=1
                 # single-stream caches in place before arming, so the
@@ -514,17 +526,23 @@ def install_full_prompt_mtp_prefill() -> None:
                 if manager is not None:
                     from gmlx.cache.kvarn_serve import ensure_ppb_kvarn
 
-                    ensure_ppb_kvarn(
-                        self, kwargs,
-                        ckpt_active=_ckpt_active(
-                            self.model, mode, int(manager.block_size)))
+                    ckpt_on = _ckpt_active(
+                        self.model, mode, int(manager.block_size))
+                    ensure_ppb_kvarn(self, kwargs, ckpt_active=ckpt_on)
             except Exception:
                 _log.warning(
                     "kvarn ckpt cache conversion failed; continuing stock",
                     exc_info=True,
                 )
             try:
-                _plain_ckpt_init(self)
+                if ckpt_on and all_short_lived(self._apc_meta):
+                    # A short-lived batch makes no lookup and no store.
+                    for meta in self._apc_meta:
+                        meta["checkpoint_len"] = 0
+                        meta["checkpoint_lengths"] = []
+                    self._apc_harvest_enabled = False
+                else:
+                    _plain_ckpt_init(self)
                 _plain_anchor_init(self)
             except Exception:
                 _log.warning(
