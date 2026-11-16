@@ -30,8 +30,11 @@ weight and every float tensor in float32: the teacher-forced rows within
 EXACT_TOL, the free rows and the velocity within the larger of EXACT_TOL
 and twice gmlx's own fp32 floor that the manifest records
 (GMLX_IMAGE_RECORD_FLOORS=<dir> writes manifests with the floors
-measured now). The rows on the release file need it under
-KQUANT_TEST_GGUF_DIR and the fixtures under GMLX_IMAGE_FIXTURES.
+measured now). The site gate reads each op of every block and each
+linear leaf of the shipped model against the stock op in float32 on the
+same input (h3_sites.py), at 512x512 and at 1024x1024 on the GLU kernel
+route. The rows on the release file need it under KQUANT_TEST_GGUF_DIR
+and the fixtures under GMLX_IMAGE_FIXTURES.
 """
 from __future__ import annotations
 
@@ -45,6 +48,8 @@ import pytest
 
 import block_gates as bg
 import h3_image_gates as hg
+import h3_sites as hs
+import qwen_gates as qg
 from block_gates import exact_process, kernel_calls, rerun_exact
 from image_fixtures import fixture_view
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
@@ -356,3 +361,171 @@ def test_check3_rows(real, name):
     print(hg.worst_line(f"h3 image check3 {name}", got, m))
     out = hg.missed(got, m["tolerances"])
     assert not out, out
+
+
+# The site gate (h3_sites.py): each op of every block and each linear
+# leaf on the path a request takes, against the stock op in float32 on
+# the same input, within 2 n u, as every image family's check 3 holds
+# it. 512x512 reads every block on the stock feed-forward, and
+# 1024x1024 at 1032 rows on the GLU kernel route.
+SITE_CASES = (REAL[1], REAL[3])
+
+
+def _sites(model, arrays: dict) -> tuple:
+    """The sites of one free-running production step on the fixture's
+    inputs, the kernel sites, the head rows, the leaves called on a
+    float32 input, the rows and the GLU sites' worst token rows."""
+    sites, routed, heads, skipped, by_row = {}, {}, {}, set(), {}
+    with hs.step_sites(model, sites, routed=routed, heads=heads,
+                       skipped=skipped, by_row=by_row):
+        rows = hg.free_rows(model, arrays)
+    return sites, routed, heads, skipped, rows, by_row
+
+
+def _rows_over(by_row: dict) -> dict:
+    """The token row readings over their gate, keyed apart from the site's
+    own reading."""
+    return {(*k, "row"): v for k, v in qg.over_gate(by_row).items()}
+
+
+def site_line(label: str, sites: dict, routed: dict) -> str:
+    worst = qg.worst_by_op(sites)
+    kinds: dict = {}
+    for op in routed.values():
+        kinds[op] = kinds.get(op, 0) + 1
+    return (f"{label}: {len(sites)} readings, the largest over its gate "
+            "by op: "
+            + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items()))
+            + "; sites on mlx-kquant: "
+            + (", ".join(f"{k} {v}" for k, v in sorted(kinds.items()))
+               or "none"))
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", SITE_CASES)
+def test_check3_site_gate(real, name):
+    """Every op of every block and every linear leaf a step calls on the
+    path a request takes is within its site gate of the stock op in
+    float32 on the same input, the leaves on a float32 input are the ones
+    the family keeps in float32, and that run's velocity passes the
+    product gate."""
+    from gmlx.image.lora import install
+
+    arrays, m = fixture(_manifest(name)["name"])
+    model, _ = real
+    _, plan = hg.plan_of(model, arrays)
+    sites, routed, heads, skipped, rows, by_row = _sites(model, arrays)
+    assert skipped == {p for p in install.linear_leaves(model)
+                       if hg.keeps_fp32(p)}
+    missing = hs.missing_ops(model, sites, plan.layout, routed, skipped,
+                             hi.ATTENTION_CHUNK)
+    assert not missing, missing
+    qk = {k for k in qg.op_sites(sites) if k[2] == "qk"}
+    on = "qk" in kq_routes.active()
+    assert {k for k, v in routed.items() if v == "qk_norm_rope"} == (
+        qk if on else set())
+    assert set(qg.head_sites(sites)) == qk
+    assert set(by_row) == {k for k, v in routed.items()
+                           if v == bg.KERNEL_OPS["glu"]}
+    if plan.layout.rows >= kq_routes._GLU_MIN_ROWS and \
+            "glu" in kq_routes.active():
+        assert by_row, "the GLU route did not run"
+    print(site_line(f"h3 image check3 sites {name}", sites, routed))
+    print(f"h3 image check3 sites {name}, q and k: "
+          + qg.qk_reading(sites, routed, heads, hs.qk_stock_n(model)))
+    if by_row:
+        worst = max(r / g for r, g in by_row.values())
+        print(f"h3 image check3 sites {name}, glu rows: {len(by_row)} "
+              f"sites, the worst token row {worst:.2f} of its gate")
+    over = {**qg.over_gate(sites), **_rows_over(by_row)}
+    assert not over, over
+    v = hg.VELOCITY
+    rel = hg.rel(rows[v], arrays[v])
+    assert rel <= m["tolerances"][v]["rel_l2"], rel
+
+
+def _swiglu_high(mp):
+    real_hidden = blocks._Block.hidden
+    mp.setattr(blocks._Block, "hidden",
+               lambda self, h: real_hidden(self, h) * 1.05)
+
+
+def _glu_tail_high(mp):
+    """The last 16 rows of the MLP's hidden a tenth high, as a GLU kernel
+    with a wrong partial last tile would write them, wherever the kernel
+    takes the rows."""
+    real_hidden = blocks._Block.hidden
+
+    def hidden(self, h):
+        y = real_hidden(self, h)
+        n = y.shape[1]
+        if n < kq_routes._GLU_MIN_ROWS:
+            return y
+        scale = mx.concatenate([mx.ones((n - 16,)), mx.full((16,), 1.1)])
+        return y * scale.astype(y.dtype)[None, :, None]
+    mp.setattr(blocks._Block, "hidden", hidden)
+
+
+def _a_head_off(mp):
+    """Head 1 of the seam's output a twentieth off, on the kernel when the
+    qk route is in force."""
+    real_qk = ops.qk_norm_rope
+
+    def off(q, k, qw, kw, cos, sin, eps):
+        q2, k2 = real_qk(q, k, qw, kw, cos, sin, eps)
+        scale = mx.array([1.05 if h == 1 else 1.0
+                          for h in range(q2.shape[1])]).astype(q2.dtype)
+        return q2 * scale[:, None, None], k2
+    mp.setattr(ops, "qk_norm_rope", off)
+
+
+def _modulate_high(mp):
+    real_mod = ops.modulate
+    mp.setattr(ops, "modulate", lambda x, s: real_mod(x, s) * 1.05)
+
+
+def _gated_residual_high(mp):
+    real_res = ops.gated_residual_once
+    mp.setattr(ops, "gated_residual_once",
+               lambda x, g, y: real_res(x, g * 1.05, y))
+
+
+# name: (the wrong production op, the ops whose sites must miss)
+SITE_FAULTS = {"swiglu a twentieth high": (_swiglu_high, {"swiglu"}),
+               "the GLU kernel's last 16 rows a tenth high": (
+                   _glu_tail_high, {"swiglu"}),
+               "one head of q a twentieth off": (_a_head_off, {"qk"}),
+               "modulation a twentieth high": (_modulate_high,
+                                               {"modulate"}),
+               "gated residual a twentieth high": (
+                   _gated_residual_high, {"gated_residual_once"})}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", list(SITE_FAULTS))
+def test_check3_each_wrong_op_fails_the_site_gate(real, monkeypatch, name):
+    """A site reads an op on the op's own input, so a wrong op is over the
+    gate at its own sites. Two blocks at 1024x1024 are enough: each block
+    reads its own sites, and the kernel routes, the GLU route among them,
+    run there."""
+    arrays, _ = fixture(_manifest(REAL[3])["name"])
+    model, _ = real
+    keep = list(model.blocks)
+    apply, hit = SITE_FAULTS[name]
+    try:
+        model.blocks = keep[:2]
+        with monkeypatch.context() as mp:
+            apply(mp)
+            sites, _, _, _, _, by_row = _sites(model, arrays)
+    finally:
+        model.blocks = keep
+    if apply is _glu_tail_high and not by_row:
+        assert "glu" not in kq_routes.active(), "the GLU route did not run"
+        pytest.skip("the GLU kernel route is not in force")
+    over = {**qg.over_gate(sites), **_rows_over(by_row)}
+    worst = qg.worst_by_op(sites)
+    print(f"h3 image check3 sites, {name}: {len(over)} readings over the "
+          "gate; the largest by op "
+          + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items())))
+    missed = {qg.site_op(k) for k in over if len(k) != 2}
+    assert hit <= missed, (name, sorted(missed))
