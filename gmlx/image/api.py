@@ -483,8 +483,9 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
     family whose plan prices the prompt, the prefix rows of each
     conditioning and whether the two of a guided request are one, the
     prefix states of other conditionings a cache holds and its bound,
-    every state it holds, the reference images the VAE encodes, and the
-    references each step runs.
+    every state it holds, the reference images the VAE encodes, the
+    references each step runs, and on a family whose caption holds the
+    vision rows of the references, those rows.
     ``conds`` is one Conditioning or several, as ``plan_request`` takes
     them, and a conditioning whose references came as latents alone, as
     those of the step routes do, is priced by their shapes.
@@ -505,6 +506,11 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
         prefix_other=0, prefix_bound=0,
         ref_sizes=_ref_sizes(states),
         step_refs=_step_refs(states, pipe.vae_scale))
+    row = memfit.PEAKS.get(pipe.family.name)
+    if states and row is not None and row.vision_edge:
+        # The caption holds the vision rows of the references beside the
+        # text rows.
+        terms["vision"] = max(len(c.image_slots) for c in states)
     parts = pipe.family.step
     if ref_cache is not None and memfit.prices_ref_cache(pipe.family.name):
         # No step sheds a state then, so the bound is all the cache holds.

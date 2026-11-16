@@ -770,6 +770,12 @@ class PeakRow:
     ref_token_px: int = 0           # pixels per reference token on each
                                     # axis when the reference tokens join
                                     # the rows of every step, else 0
+    vision_edge: int = 0            # the short edge in pixels of each
+                                    # reference's copy for the vision
+                                    # tower when its rows join the caption
+                                    # of every step, else 0
+    vision_px: int = 0              # pixels per vision token on each axis
+                                    # of that copy, each side on that grid
     prices_prompt: bool = True      # a plan that knows the prompt prices
                                     # its text rows, else the family's most
     # The row of the family's step run whole, its reference tokens joined to
@@ -915,7 +921,13 @@ PEAKS = {
                           encode_row_bytes=4096 * 4,
                           encode_base=int(0.62 * GiB), text_rows=4096),
     # MiniMax-H3-Image joins up to 4096 text rows to the image rows, a token
-    # of 32 pixels, in every block. The MLP's fused gate and up product is
+    # of 32 pixels, in every block, and an edit the vision rows of each
+    # reference's copy at a short edge of 1024 pixels, a token of 32, and
+    # each reference's own rows at its VAE size, a token of 32. The
+    # encoder's vision tower is H3 video's keyframe tower, unsloth's
+    # mmproj-BF16.gguf at float32, whose pass over one keyframe reads 0.29
+    # GiB plus 1,378,900 bytes a vision token (video/memfit.py): at a
+    # copy's most tokens, 1024 by 3072 pixels at 3:1, 4.24 GiB. The MLP's fused gate and up product is
     # the widest output: 5376 wide, a 14336 MLP. The encoder is H3 video's
     # Qwen3-VL-32B: an encode of it alone at 4096 rows reads 1.47 GiB over
     # the settled process, and video's prompts 0.13 and 1.61 GiB at 26 and
@@ -929,6 +941,9 @@ PEAKS = {
                         width=2 * 14336, step=H3_IMAGE_STEP,
                         encode_row_bytes=5120 * 4,
                         encode_base=int(0.48 * GiB), text_rows=4096,
+                        encode_tower_bytes=int(0.29 * GiB) + 3072 * 1_378_900,
+                        mmproj_fp32=True, ref_token_px=32, vision_edge=1024,
+                        vision_px=32,
                         int8_attention=2 * 56 * 128 + 2 * 56 * 4,
                         int8_linears=14336 + 14 * 4),
 }
@@ -1193,6 +1208,23 @@ def prices_prompt(family: str) -> bool:
     return row is not None and row.prices_prompt
 
 
+def vision_rows(row: PeakRow, sizes) -> int:
+    """The most vision rows the encoder gives references of ``sizes``,
+    (height, width) in pixels at the size the DiT runs them, on a family
+    whose caption holds them: each one's copy for the vision tower at the
+    row's short edge, its long side three grid steps longer than that of
+    the reference scaled so, as a copy scaled from the original image may
+    round, and its two markers. 0 on a family without them."""
+    e, p = row.vision_edge, row.vision_px
+    if not e:
+        return 0
+    out = 0
+    for h, w in sizes:
+        short, long = min(int(h), int(w)), max(int(h), int(w))
+        out += (e // p) * (round(long * e / short / p) + 3) + 2
+    return out
+
+
 def image_rows(row: PeakRow, height: int, width: int,
                caption: int | None) -> int:
     """Rows per item of one step: image tokens padded to the family's
@@ -1261,8 +1293,8 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
                 held_in=None, ref_cache: str = "", joined: bool = False,
                 cache_bytes: int = 0, tile: int = TILE_PX,
                 init_image: bool = False,
-                ref_sizes=(), step_refs=None, vae_price=None,
-                load_peak: int = 0, load_parts=None,
+                ref_sizes=(), step_refs=None, vision: int | None = None,
+                vae_price=None, load_peak: int = 0, load_parts=None,
                 attention: str = "dense", linears: str = "file",
                 budget: float | None = None, overcommit: bool | None = None,
                 _hint: bool = True) -> MemoryPlan:
@@ -1294,7 +1326,11 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     (height, width) of every reference of one conditioning, an image given
     twice counted twice, where ``ref_sizes`` holds each image the VAE
     encodes once. ``prefix_rows`` gives the rows of the request's own
-    conditionings, the positive first, in place of that count.
+    conditionings, the positive first, in place of that count. A family
+    whose caption holds the vision rows of its references counts them
+    beside the caption, from the same sizes by ``vision_rows``, or
+    ``vision`` when it is given: the vision rows of the conditioning with
+    the most, with ``caption_tokens`` its other rows.
     ``prefix_shared`` says the two of a guided request are one, whose
     state is held once. A cache of prefix states that holds
     ``prefix_other`` bytes of other conditionings sheds them to
@@ -1371,12 +1407,16 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
         "prefix_cache": 0,
     }
     rows = image_rows(row, height, width, caption_tokens)
+    sizes = ([(ref_px, ref_px)] * refs if refs else
+             ref_sizes if step_refs is None else step_refs)
     if row.ref_token_px:
         # The reference tokens join the rows of every step.
         p = row.ref_token_px
-        rows += sum((int(h) // p) * (int(w) // p) for h, w in (
-            [(ref_px, ref_px)] * refs if refs else
-            ref_sizes if step_refs is None else step_refs))
+        rows += sum((int(h) // p) * (int(w) // p) for h, w in sizes)
+    if vision is None:
+        vision = vision_rows(row, sizes)
+    # The vision rows join the caption, which the encode runs with them.
+    rows += vision
     text = row.text_rows if text_tokens is None else text_tokens
     counted = slots = 0
     if row.prefix is not None:
@@ -1447,8 +1487,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
     # An encode with reference images runs their image rows beside the
     # text, and the tower.
     encode_peak = (row.encode_base
-                   + (caption + slots) * row.encode_row_bytes * ENCODE_LIVE
-                   + (row.encode_tower_bytes if slots else 0))
+                   + (caption + slots + vision) * row.encode_row_bytes
+                   * ENCODE_LIVE
+                   + (row.encode_tower_bytes if slots or vision else 0))
 
     def build(b: int, release: bool, tiled: bool, levers: tuple,
               staged: bool = False, shed: int | None = None) -> MemoryPlan:

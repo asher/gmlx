@@ -184,7 +184,7 @@ _H3_IMAGE = dict(
     dit_quants=("Q3_K_M", "Q4_K_M", "UD-Q4_K_XL", "Q5_K_M", "Q6_K", "Q8_0"),
     encoder_repo="unsloth/Qwen3-VL-32B-Instruct-GGUF",
     encoder_file="Qwen3-VL-32B-Instruct-{quant}.gguf",
-    encoder_quants=("Q4_K_M",),
+    encoder_quants=("Q4_K_M",), mmproj_file="mmproj-BF16.gguf",
     vae_repo="Comfy-Org/MiniMax-H3-Image",
     vae_revision="0bb149f51e3156ed4b90dd45d5620346bfe1df8f",
     vae_file="vae/minimax_h3_image_vae_fp16.safetensors", vae_config="",
@@ -245,8 +245,9 @@ _WORDS = {
     "flux-3-klein-base": ("images with guidance, edits",
                           "FLUX.3 klein before distillation, with a guidance setting.",
                           "Slow: 50 steps per image."),
-    "minimax-h3-image": ("large detailed images",
-                         "Makes a 2048x2048 image from text, up to 20 MP.",
+    "minimax-h3-image": ("large detailed images, edits",
+                         "Makes images from text up to 20 MP, or edits up "
+                         "to 16 pictures.",
                          "Fast: 6 steps per image, at a large size."),
 }
 

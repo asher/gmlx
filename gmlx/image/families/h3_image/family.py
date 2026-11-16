@@ -21,7 +21,8 @@ from gmlx.image.fingerprint import HeaderView, ImageModelError, Match, Refusal
 from gmlx.image.h3.anchors import AnchorRule
 from gmlx.image.h3.encoder import spec
 from gmlx.image.h3.layout import Timeline
-from gmlx.image.registry import ConstantsRow, Family, SamplingRow, VariantRow
+from gmlx.image.registry import (ConstantsRow, EditParts, Family, SamplingRow,
+                                 VariantRow)
 
 TITLE = "MiniMax-H3-Image"
 
@@ -108,6 +109,25 @@ REF_TIME = 0.999
 # 0.999 of the clean rows and 0.001 of noise from a generator every
 # reference restarts at the request's seed, at a time of at least 0.999.
 REF_RULE = AnchorRule(aug=REF_TIME, seed_offset=0)
+# The reference images of an edit, by ComfyUI's
+# MiniMaxH3ImageConditioning (comfy_extras/nodes_minimax_h3.py): image_1
+# is the picture to edit, the VAE's copy of each has its short edge scaled
+# into 1024 to 2048 pixels and the vision tower's to 1024, each side on
+# the 32 pixel grid, by Lanczos, and the prompt reads each after its
+# label at the image processor's bounds in pixels. A request with
+# references and no size takes image_1's VAE size. gmlx takes up to 16.
+REFERENCES = ConstantsRow(
+    values={
+        "max_refs": 16,
+        "short_edge": 1024,
+        "vae_max_short_edge": 2048,
+        "grid": 32,
+        "label": "Picture {i}: ",
+        "pixels": [3136, 12845056],
+    },
+    repo="github.com/comfyanonymous/ComfyUI",
+    revision="2aa4d535a76e4b6acf6a94f263bc482430c396dd",
+)
 # Modality tags of the adaLN rows, as H3's: image, text. A prompt's vision
 # rows take the image tag.
 TAGS = {"video": 0, "text": 1}
@@ -260,6 +280,16 @@ def build(config: dict):
     return H3ImageDiT(config)
 
 
+def _edit(name: str):
+    def call(*args, **kwargs):
+        from . import edit
+
+        return getattr(edit, name)(*args, **kwargs)
+
+    call.__name__ = name
+    return call
+
+
 # H3 video's int8 linears less the VSA gate, which this DiT lacks: the
 # four linears of each block, fc2 with one activation scale per 1024 of
 # its input columns.
@@ -300,4 +330,8 @@ FAMILY = Family(
     aspect=((1, 3), (3, 1)),
     int8_linears=INT8_LINEARS,
     int8_attention=True,
+    edit=EditParts(max_refs=REFERENCES.values["max_refs"],
+                   prepare_all=_edit("prepare"), size=_edit("default_size"),
+                   token_ids=_edit("token_ids"), encode=_edit("encode"),
+                   template_id=_edit("template_id"), render=_edit("render")),
 )

@@ -611,7 +611,7 @@
     "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 7.22, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.97 GiB, decode_peak 2.60 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 9.14 GiB against a budget of 8.00 GiB (phases encode 9.13, denoise 8.15, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.90 GiB, decode_peak 2.60 GiB, encode_peak 0.88 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
    },
-   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=512, width=36864, step=StepFit(base=2813203578.88, k=3.3, row_k=1.0, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=30720, text_rows=512, encode_tower_bytes=0, mmproj_fp32=False, encode_base=697932185, ref_token_px=16, prices_prompt=False, int8_attention=0, int8_linears=0)",
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=512, width=36864, step=StepFit(base=2813203578.88, k=3.3, row_k=1.0, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=30720, text_rows=512, encode_tower_bytes=0, mmproj_fp32=False, encode_base=697932185, ref_token_px=16, vision_edge=0, vision_px=0, prices_prompt=False, int8_attention=0, int8_linears=0)",
    "vae": {
     "decode 1024 False": 6029060341,
     "decode 1024 True": 4125447946,
@@ -1234,7 +1234,7 @@
     "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 7.49, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.24 GiB, decode_peak 2.60 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 10.60 GiB against a budget of 8.00 GiB (phases encode 10.60, denoise 8.12, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.87 GiB, decode_peak 2.60 GiB, encode_peak 2.35 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
    },
-   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=4096, width=27648, step=StepFit(base=2630667468.8, k=3.0, row_k=1.0, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=28672, text_rows=4096, encode_tower_bytes=0, mmproj_fp32=False, encode_base=644245094, ref_token_px=16, prices_prompt=True, int8_attention=0, int8_linears=0)",
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=4096, width=27648, step=StepFit(base=2630667468.8, k=3.0, row_k=1.0, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=28672, text_rows=4096, encode_tower_bytes=0, mmproj_fp32=False, encode_base=644245094, ref_token_px=16, vision_edge=0, vision_px=0, prices_prompt=True, int8_attention=0, int8_linears=0)",
    "vae": {
     "decode 1024 False": 6029060341,
     "decode 1024 True": 4125447946,
@@ -1276,20 +1276,20 @@
     "16106127360 1024 1.0 1": [
      {
       "decode": 9367161537,
-      "denoise": 12608916684,
-      "encode": 10715943403
+      "denoise": 12965791334,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 508791489,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 3750546636,
+      "step_peak": 4107421286,
       "vae": 268435456
      },
      1,
@@ -1326,20 +1326,20 @@
     "16106127360 1024 4.0 1": [
      {
       "decode": 9367161537,
-      "denoise": 13460360396,
-      "encode": 10715943403
+      "denoise": 14174109696,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 508791489,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 4601990348,
+      "step_peak": 5315739648,
       "vae": 268435456
      },
      2,
@@ -1376,20 +1376,20 @@
     "16106127360 512 1.0 1": [
      {
       "decode": 9359491799,
-      "denoise": 12481200128,
-      "encode": 10715943403
+      "denoise": 12838074777,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 501121751,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 3622830080,
+      "step_peak": 3979704729,
       "vae": 268435456
      },
      1,
@@ -1426,20 +1426,20 @@
     "16106127360 512 4.0 1": [
      {
       "decode": 9359491799,
-      "denoise": 13204927283,
-      "encode": 10715943403
+      "denoise": 13918676582,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 501121751,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 4346557235,
+      "step_peak": 5060306534,
       "vae": 268435456
      },
      2,
@@ -1476,20 +1476,20 @@
     "21474836480 1024 1.0 1": [
      {
       "decode": 9367161537,
-      "denoise": 12608916684,
-      "encode": 10715943403
+      "denoise": 12965791334,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 508791489,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 3750546636,
+      "step_peak": 4107421286,
       "vae": 268435456
      },
      1,
@@ -1526,20 +1526,20 @@
     "21474836480 1024 4.0 1": [
      {
       "decode": 9367161537,
-      "denoise": 13460360396,
-      "encode": 10715943403
+      "denoise": 14174109696,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 508791489,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 4601990348,
+      "step_peak": 5315739648,
       "vae": 268435456
      },
      2,
@@ -1576,20 +1576,20 @@
     "21474836480 512 1.0 1": [
      {
       "decode": 9359491799,
-      "denoise": 12481200128,
-      "encode": 10715943403
+      "denoise": 12838074777,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 501121751,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 3622830080,
+      "step_peak": 3979704729,
       "vae": 268435456
      },
      1,
@@ -1626,20 +1626,20 @@
     "21474836480 512 4.0 1": [
      {
       "decode": 9359491799,
-      "denoise": 13204927283,
-      "encode": 10715943403
+      "denoise": 13918676582,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 501121751,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 4346557235,
+      "step_peak": 5060306534,
       "vae": 268435456
      },
      2,
@@ -1676,20 +1676,20 @@
     "51539607552 1024 1.0 1": [
      {
       "decode": 9367161537,
-      "denoise": 12608916684,
-      "encode": 10715943403
+      "denoise": 12965791334,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 508791489,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 3750546636,
+      "step_peak": 4107421286,
       "vae": 268435456
      },
      1,
@@ -1726,20 +1726,20 @@
     "51539607552 1024 4.0 1": [
      {
       "decode": 9367161537,
-      "denoise": 13460360396,
-      "encode": 10715943403
+      "denoise": 14174109696,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 508791489,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 4601990348,
+      "step_peak": 5315739648,
       "vae": 268435456
      },
      2,
@@ -1776,20 +1776,20 @@
     "51539607552 512 1.0 1": [
      {
       "decode": 9359491799,
-      "denoise": 12481200128,
-      "encode": 10715943403
+      "denoise": 12838074777,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 501121751,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 3622830080,
+      "step_peak": 3979704729,
       "vae": 268435456
      },
      1,
@@ -1826,20 +1826,20 @@
     "51539607552 512 4.0 1": [
      {
       "decode": 9359491799,
-      "denoise": 13204927283,
-      "encode": 10715943403
+      "denoise": 13918676582,
+      "encode": 15630966291
      },
      {
       "adapters": 0,
       "caches": 0,
       "decode_peak": 501121751,
       "dit": 4294967296,
-      "encode_peak": 1857573355,
+      "encode_peak": 6772596243,
       "encoder": 4294967296,
       "mmproj": 0,
       "prefix_cache": 0,
       "prefix_held": 0,
-      "step_peak": 4346557235,
+      "step_peak": 5060306534,
       "vae": 268435456
      },
      2,
@@ -1849,15 +1849,15 @@
      true
     ],
     "8589934592 1024 1.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 1.0 1": "ImageMemoryError: image request does not fit: peak 14.56 GiB against a budget of 8.00 GiB (phases encode 14.56, denoise 8.08, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.83 GiB, decode_peak 0.47 GiB, encode_peak 6.31 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 1024 4.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.74, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.49 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 1024 4.0 1": "ImageMemoryError: image request does not fit: peak 14.56 GiB against a budget of 8.00 GiB (phases encode 14.56, denoise 8.08, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.83 GiB, decode_peak 0.47 GiB, encode_peak 6.31 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 512 1.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
+    "8589934592 512 1.0 1": "ImageMemoryError: image request does not fit: peak 14.56 GiB against a budget of 8.00 GiB (phases encode 14.56, denoise 7.96, decode 4.72; levers release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.71 GiB, decode_peak 0.47 GiB, encode_peak 6.31 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
-    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 9.98 GiB against a budget of 8.00 GiB (phases encode 9.98, denoise 7.62, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.37 GiB, decode_peak 0.47 GiB, encode_peak 1.73 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
+    "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 14.56 GiB against a budget of 8.00 GiB (phases encode 14.56, denoise 7.96, decode 4.72; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 3.71 GiB, decode_peak 0.47 GiB, encode_peak 6.31 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
    },
-   "row": "PeakRow(token_px=32, row_multiple=1, caption_rows=4096, width=28672, step=StepFit(base=2899102924.8, k=2.9, row_k=None, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=20480, text_rows=4096, encode_tower_bytes=0, mmproj_fp32=False, encode_base=515396075, ref_token_px=0, prices_prompt=True, int8_attention=14784, int8_linears=14392)",
+   "row": "PeakRow(token_px=32, row_multiple=1, caption_rows=4096, width=28672, step=StepFit(base=2899102924.8, k=2.9, row_k=None, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=20480, text_rows=4096, encode_tower_bytes=4547365928, mmproj_fp32=True, encode_base=515396075, ref_token_px=32, vision_edge=1024, vision_px=32, prices_prompt=True, int8_attention=14784, int8_linears=14392)",
    "vae": {
     "decode 1024 False": 508791489,
     "decode 1024 True": 508791489,
@@ -2480,7 +2480,7 @@
     "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 6.91, decode 6.84; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.66 GiB, decode_peak 2.59 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 9.20 GiB against a budget of 8.00 GiB (phases encode 9.20, denoise 6.91, decode 6.84; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 2.66 GiB, decode_peak 2.59 GiB, encode_peak 0.95 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
    },
-   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=512, width=45056, step=StepFit(base=2523293286.4, k=2.4, row_k=0.5, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=116736, text_rows=546, encode_tower_bytes=0, mmproj_fp32=False, encode_base=0, ref_token_px=0, prices_prompt=True, int8_attention=0, int8_linears=0)",
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=512, width=45056, step=StepFit(base=2523293286.4, k=2.4, row_k=0.5, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=116736, text_rows=546, encode_tower_bytes=0, mmproj_fp32=False, encode_base=0, ref_token_px=0, vision_edge=0, vision_px=0, prices_prompt=True, int8_attention=0, int8_linears=0)",
    "vae": {
     "decode 1024 False": 4411010047,
     "decode 1024 True": 3429542911,
@@ -3307,7 +3307,7 @@
     "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 8.82 GiB against a budget of 8.00 GiB (phases encode 8.81, denoise 6.50, decode 7.63; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 0.50 GiB, step_peak 1.75 GiB, decode_peak 2.88 GiB, encode_peak 0.56 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 12.06 GiB against a budget of 8.00 GiB (phases encode 11.44, denoise 12.06, decode 11.63; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, prefix_cache 4.50 GiB, step_peak 3.31 GiB, decode_peak 2.88 GiB, encode_peak 3.19 GiB. The largest term is prefix_cache; try fewer or smaller references; the request does not fit without reference images either. GMLX_OVERCOMMIT=1 overrides."
    },
-   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=0, width=36864, step=StepFit(base=1342177280.0, k=4.0, row_k=0.5, read_k=16.0, read_cap=1073741824.0), prefix=PrefixRow(blocks=32, dim=4096, token_px=16, slot_tokens=4, min_ref_px=256), prefill=StepFit(base=1342177280.0, k=6.5, row_k=None, read_k=0.0, read_cap=0.0), encode_row_bytes=73728, text_rows=512, encode_tower_bytes=1610612736, mmproj_fp32=True, encode_base=0, ref_token_px=0, prices_prompt=True, int8_attention=0, int8_linears=0)",
+   "row": "PeakRow(token_px=16, row_multiple=1, caption_rows=0, width=36864, step=StepFit(base=1342177280.0, k=4.0, row_k=0.5, read_k=16.0, read_cap=1073741824.0), prefix=PrefixRow(blocks=32, dim=4096, token_px=16, slot_tokens=4, min_ref_px=256), prefill=StepFit(base=1342177280.0, k=6.5, row_k=None, read_k=0.0, read_cap=0.0), encode_row_bytes=73728, text_rows=512, encode_tower_bytes=1610612736, mmproj_fp32=True, encode_base=0, ref_token_px=0, vision_edge=0, vision_px=0, prices_prompt=True, int8_attention=0, int8_linears=0)",
    "vae": {
     "decode 1024 False": 7303457669,
     "decode 1024 True": 3126029189,
@@ -3325,7 +3325,7 @@
    "flux-3-klein": "Recipe(name='flux-3-klein', title='FLUX.3 klein', family='flux3_klein', variant='distilled', dit_repo='realrebelai/FLUX-3-Image-Klein_GGUFs', dit_file='DISTILLED/flux3_image_klein_sd-{quant}.gguf', dit_quants=('Q4_K_M', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-4B-Instruct-GGUF', encoder_file='Qwen3-VL-4B-Instruct-{quant}.gguf', encoder_quants=('Q8_0',), vae_repo='black-forest-labs/FLUX.2-klein-4B', vae_revision='e7b7dc27f91deacad38e78976d1f2b499d76a294', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04', vae_pack='flux2-vae-BF16.gguf', license='flux-kommunity', license_url='https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280406816, vae_bytes=168114016, aliases=(), license_note='non-commercial use, and commercial use of the images only under $5M annual revenue, affiliates counted, with content filters or a review of each image for unlawful or infringing content before it is shared, and a disclosure that it is made with AI where the law requires one', use='fast images, edits from photos', blurb='Makes an image from text, or edits up to 10 pictures.', speed='Fast: 16 steps per image.', vae_license='apache-2.0', prompt_repo='', prompt_revision='', prompt_file='', prompt_sha256='', prompt_license='', prompt_license_url='', least_class=16)",
    "flux-3-klein-base": "Recipe(name='flux-3-klein-base', title='FLUX.3 klein Base', family='flux3_klein', variant='base', dit_repo='realrebelai/FLUX-3-Image-Klein_GGUFs', dit_file='BASE/flux3_image_klein-{quant}.gguf', dit_quants=('Q4_K_M', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-4B-Instruct-GGUF', encoder_file='Qwen3-VL-4B-Instruct-{quant}.gguf', encoder_quants=('Q8_0',), vae_repo='black-forest-labs/FLUX.2-klein-4B', vae_revision='e7b7dc27f91deacad38e78976d1f2b499d76a294', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04', vae_pack='flux2-vae-BF16.gguf', license='flux-kommunity', license_url='https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280406816, vae_bytes=168114016, aliases=(), license_note='non-commercial use, and commercial use of the images only under $5M annual revenue, affiliates counted, with content filters or a review of each image for unlawful or infringing content before it is shared, and a disclosure that it is made with AI where the law requires one', use='images with guidance, edits', blurb='FLUX.3 klein before distillation, with a guidance setting.', speed='Slow: 50 steps per image.', vae_license='apache-2.0', prompt_repo='', prompt_revision='', prompt_file='', prompt_sha256='', prompt_license='', prompt_license_url='', least_class=16)",
    "krea-2-turbo": "Recipe(name='krea-2-turbo', title='Krea 2 Turbo', family='krea2', variant='turbo', dit_repo='Abiray/Krea-2-Turbo-GGUF', dit_file='Krea-2-Turbo-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'Q5_K_M', 'Q6_K', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-4B-Instruct-GGUF', encoder_file='Qwen3-VL-4B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Comfy-Org/Krea-2', vae_revision='eb1eddd3983a54678545a9b2c178c5853b30f7be', vae_file='vae/qwen_image_vae.safetensors', vae_config='', vae_sha256='a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f', vae_pack='qwen-image-vae-BF16.gguf', license='krea-2-community', license_url='https://cdn.jsdelivr.net/gh/krea-ai/krea-2@db3984fbc6e13b34c0064990fc2d95ac64d00058/assets/hf_samples/LICENSE.pdf', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280406816, vae_bytes=253807712, aliases=(), license_note='free commercial use only under $1M annual revenue, affiliates counted, and a deployer must filter content', use='fast images, edits one picture', blurb='Makes an image from text, or edits one picture.', speed='Fast: 8 steps per image.', vae_license='', prompt_repo='', prompt_revision='', prompt_file='', prompt_sha256='', prompt_license='', prompt_license_url='', least_class=16)",
-   "minimax-h3-image": "Recipe(name='minimax-h3-image', title='MiniMax-H3-Image', family='h3_image', variant='pruned', dit_repo='unsloth/MiniMax-H3-Image-GGUF', dit_file='minimax_h3_image_pruned-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'UD-Q4_K_XL', 'Q5_K_M', 'Q6_K', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-32B-Instruct-GGUF', encoder_file='Qwen3-VL-32B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M',), vae_repo='Comfy-Org/MiniMax-H3-Image', vae_revision='0bb149f51e3156ed4b90dd45d5620346bfe1df8f', vae_file='vae/minimax_h3_image_vae_fp16.safetensors', vae_config='', vae_sha256='d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af', vae_pack='minimax-h3-image-vae-F16.gguf', license='minimax-h3-image-community-license-agreement', license_url='https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=19762151200, vae_bytes=1168494144, aliases=(), license_note=\"no grant in the US, EU, UK or South Korea without MiniMax's separate license; written authorization above $1M yearly revenue, affiliates counted, or to host it for others; a commercial UI must show MiniMax-H3-Image; a service for others needs safeguards; outputs posted publicly must be marked machine-generated\", use='large detailed images', blurb='Makes a 2048x2048 image from text, up to 20 MP.', speed='Fast: 6 steps per image, at a large size.', vae_license='minimax-h3-image-community-license-agreement', prompt_repo='', prompt_revision='', prompt_file='', prompt_sha256='', prompt_license='', prompt_license_url='', least_class=32)",
+   "minimax-h3-image": "Recipe(name='minimax-h3-image', title='MiniMax-H3-Image', family='h3_image', variant='pruned', dit_repo='unsloth/MiniMax-H3-Image-GGUF', dit_file='minimax_h3_image_pruned-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'UD-Q4_K_XL', 'Q5_K_M', 'Q6_K', 'Q8_0'), encoder_repo='unsloth/Qwen3-VL-32B-Instruct-GGUF', encoder_file='Qwen3-VL-32B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M',), vae_repo='Comfy-Org/MiniMax-H3-Image', vae_revision='0bb149f51e3156ed4b90dd45d5620346bfe1df8f', vae_file='vae/minimax_h3_image_vae_fp16.safetensors', vae_config='', vae_sha256='d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af', vae_pack='minimax-h3-image-vae-F16.gguf', license='minimax-h3-image-community-license-agreement', license_url='https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE', encoder_license='apache-2.0', mmproj_file='mmproj-BF16.gguf', encoder_bytes=19762151200, vae_bytes=1168494144, aliases=(), license_note=\"no grant in the US, EU, UK or South Korea without MiniMax's separate license; written authorization above $1M yearly revenue, affiliates counted, or to host it for others; a commercial UI must show MiniMax-H3-Image; a service for others needs safeguards; outputs posted publicly must be marked machine-generated\", use='large detailed images, edits', blurb='Makes a 2048x2048 image from text, up to 20 MP, or edits up to 16 pictures.', speed='Fast: 6 steps per image, at a large size.', vae_license='minimax-h3-image-community-license-agreement', prompt_repo='', prompt_revision='', prompt_file='', prompt_sha256='', prompt_license='', prompt_license_url='', least_class=32)",
    "qwen-image": "Recipe(name='qwen-image', title='Qwen-Image 2.1', family='qwen_image21', variant='base', dit_repo='unsloth/Qwen-Image-2.1-GGUF', dit_file='qwen-image-2.1-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'Q5_K_M', 'Q6_K', 'Q8_0', 'F16'), encoder_repo='unsloth/Qwen3-VL-8B-Instruct-GGUF', encoder_file='Qwen3-VL-8B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Qwen/Qwen-Image-2.1', vae_revision='790c92633540aa0cb11d9abf19eb46d861714758', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417', vae_pack='qwen-image-2.1-vae-F32.gguf', license='qwen-research', license_url='https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE', encoder_license='apache-2.0', mmproj_file='mmproj-BF16.gguf', encoder_bytes=9872089504, vae_bytes=1350985376, aliases=('qwen-image-2.1',), license_note='non-commercial use only', use='images and edits from pictures', blurb='Makes an image from text, or edits up to 10 pictures.', speed='Slow: 40 steps per image.', vae_license='', prompt_repo='Qwen/Qwen-Image-2.1-PE-T2I', prompt_revision='f3ed7985c788ad75b3ab7223e0c4c51e2a43545b', prompt_file='system_prompt.txt', prompt_sha256='a77c9a06c59b120741141d9514b95682bb8761d02bec49ca61def7b2b3d9fb99', prompt_license='the Qwen Research License, non-commercial use only', prompt_license_url='https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I/blob/f3ed7985c788ad75b3ab7223e0c4c51e2a43545b/LICENSE', least_class=16)",
    "qwen-image-turbo": "Recipe(name='qwen-image-turbo', title='Qwen-Image 2.1 Turbo', family='qwen_image21', variant='turbo', dit_repo='AtomicChat/Qwen-Image-2.1-Turbo-GGUF', dit_file='Qwen-Image-2.1-Turbo-{quant}.gguf', dit_quants=('AD-Q3_K', 'AD-Q4_K', 'AD-Q5_K', 'AD-Q6_K', 'Q8_0', 'BF16'), encoder_repo='unsloth/Qwen3-VL-8B-Instruct-GGUF', encoder_file='Qwen3-VL-8B-Instruct-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Qwen/Qwen-Image-2.1', vae_revision='790c92633540aa0cb11d9abf19eb46d861714758', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='a07a1b7c4ee2966a1b3bdc37de9b4f983d56937e46619f709a80b6e490675417', vae_pack='qwen-image-2.1-vae-F32.gguf', license='qwen-research', license_url='https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/main/LICENSE', encoder_license='apache-2.0', mmproj_file='mmproj-BF16.gguf', encoder_bytes=9872089504, vae_bytes=1350985376, aliases=('qwen-image-2.1-turbo',), license_note='non-commercial use only', use='fast images, edits from photos', blurb='Makes an image from text, or edits up to 10 pictures.', speed='Fast: 8 steps per image.', vae_license='', prompt_repo='Qwen/Qwen-Image-2.1-PE-T2I', prompt_revision='f3ed7985c788ad75b3ab7223e0c4c51e2a43545b', prompt_file='system_prompt.txt', prompt_sha256='a77c9a06c59b120741141d9514b95682bb8761d02bec49ca61def7b2b3d9fb99', prompt_license='the Qwen Research License, non-commercial use only', prompt_license_url='https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I/blob/f3ed7985c788ad75b3ab7223e0c4c51e2a43545b/LICENSE', least_class=16)",
    "z-image-turbo": "Recipe(name='z-image-turbo', title='Z-Image-Turbo', family='z_image', variant='turbo', dit_repo='unsloth/Z-Image-Turbo-GGUF', dit_file='z-image-turbo-{quant}.gguf', dit_quants=('Q3_K_M', 'Q4_K_M', 'Q5_K_M', 'Q6_K', 'Q8_0', 'BF16'), encoder_repo='unsloth/Qwen3-4B-GGUF', encoder_file='Qwen3-4B-{quant}.gguf', encoder_quants=('Q4_K_M', 'Q8_0'), vae_repo='Tongyi-MAI/Z-Image-Turbo', vae_revision='f332072aa78be7aecdf3ee76d5c247082da564a6', vae_file='vae/diffusion_pytorch_model.safetensors', vae_config='vae/config.json', vae_sha256='f5b59a26851551b67ae1fe58d32e76486e1e812def4696a4bea97f16604d40a3', vae_pack='z-image-vae-BF16.gguf', license='apache-2.0', license_url='https://huggingface.co/Tongyi-MAI/Z-Image-Turbo', encoder_license='apache-2.0', mmproj_file=None, encoder_bytes=4280405792, vae_bytes=167660192, aliases=(), license_note='', use='fast images, edits one picture', blurb='Makes an image from text, or edits one picture.', speed='Fast: 8 steps per image.', vae_license='', prompt_repo='', prompt_revision='', prompt_file='', prompt_sha256='', prompt_license='', prompt_license_url='', least_class=16)"
@@ -3968,7 +3968,7 @@
     "8589934592 512 4.0 0": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 5.78, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 1.53 GiB, decode_peak 2.60 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides.",
     "8589934592 512 4.0 1": "ImageMemoryError: image request does not fit: peak 8.70 GiB against a budget of 8.00 GiB (phases encode 8.70, denoise 5.78, decode 6.85; levers sequential rows, release the encoder): dit 4.00 GiB, encoder 4.00 GiB, vae 0.25 GiB, step_peak 1.53 GiB, decode_peak 2.60 GiB, encode_peak 0.45 GiB. The largest term is dit; try a smaller DiT quant. GMLX_OVERCOMMIT=1 overrides."
    },
-   "row": "PeakRow(token_px=16, row_multiple=32, caption_rows=512, width=32000, step=StepFit(base=1105954078.72, k=5.5, row_k=None, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=58368, text_rows=512, encode_tower_bytes=0, mmproj_fp32=False, encode_base=0, ref_token_px=0, prices_prompt=False, int8_attention=0, int8_linears=0)",
+   "row": "PeakRow(token_px=16, row_multiple=32, caption_rows=512, width=32000, step=StepFit(base=1105954078.72, k=5.5, row_k=None, read_k=0.0, read_cap=0.0), prefix=None, prefill=None, encode_row_bytes=58368, text_rows=512, encode_tower_bytes=0, mmproj_fp32=False, encode_base=0, ref_token_px=0, vision_edge=0, vision_px=0, prices_prompt=False, int8_attention=0, int8_linears=0)",
    "vae": {
     "decode 1024 False": 6029060341,
     "decode 1024 True": 3701305507,
@@ -3981,5 +3981,5 @@
    }
   }
  },
- "what": "family_prices(skip=('flux2_klein_9b',)) of tests/image/family_prices.py at gmlx acdf35d7, the commit before the FLUX.2 klein 9B rows: the peak row, the plans at four budgets and the VAE passes of each image family, the recipes with their default quants and sizes, the families each VAE serves and the registry order. Each plan carries the prefix_held term, 0 in every plan here, which the pricing of held conditioning states added. The recipes carry the prompt_* fields of the upsampler prompt pull, which only the Qwen-Image recipes fill. The recipes also carry the use, blurb and speed words that gmlx pull's list and picker print. The h3_image row, its plans and VAE passes, its registry order and its autoencoder's pairing joined after the footprint cells of its step and encode, with every entry before them as it was. The minimax-h3-image recipe and its default quants joined with the catalog's least memory class, which every recipe before it has at 16. The h3_image VAE passes and plans follow the refit of its VAE row on the largest of three to six readings of each cell, with every other entry as it was. The h3_image tiled decode passes and plans then follow the refit of its decode on 17532fe9, whose canvas writes are all in place, on the largest of three readings of each decode cell from 1024 pixels, with every other entry as it was. The peak row of each family carries the int8_attention and int8_linears step terms a row of the int8 settings, 14784 and 14392 bytes on h3_image and 0 on every other family, with every plan and VAE pass as it was."
+ "what": "family_prices(skip=('flux2_klein_9b',)) of tests/image/family_prices.py at gmlx acdf35d7, the commit before the FLUX.2 klein 9B rows: the peak row, the plans at four budgets and the VAE passes of each image family, the recipes with their default quants and sizes, the families each VAE serves and the registry order. Each plan carries the prefix_held term, 0 in every plan here, which the pricing of held conditioning states added. The recipes carry the prompt_* fields of the upsampler prompt pull, which only the Qwen-Image recipes fill. The recipes also carry the use, blurb and speed words that gmlx pull's list and picker print. The h3_image row, its plans and VAE passes, its registry order and its autoencoder's pairing joined after the footprint cells of its step and encode, with every entry before them as it was. The minimax-h3-image recipe and its default quants joined with the catalog's least memory class, which every recipe before it has at 16. The h3_image VAE passes and plans follow the refit of its VAE row on the largest of three to six readings of each cell, with every other entry as it was. The h3_image tiled decode passes and plans then follow the refit of its decode on 17532fe9, whose canvas writes are all in place, on the largest of three readings of each decode cell from 1024 pixels, with every other entry as it was. The peak row of each family carries the int8_attention and int8_linears step terms a row of the int8 settings, 14784 and 14392 bytes on h3_image and 0 on every other family, with every plan and VAE pass as it was. The h3_image row gained its edit terms and the minimax-h3-image recipe its mmproj and words; its plans with a reference changed."
 }

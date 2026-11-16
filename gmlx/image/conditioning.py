@@ -31,10 +31,13 @@ class Reference:
     bytes and size. A ``sha256`` given that is not theirs is refused.
     ``noise``, when given, is the float32 standard normal draw (C, h, w)
     in the layout of the image's model-space latents that its encode
-    samples with, in place of the family's."""
+    samples with, in place of the family's. ``vision``, on a family whose
+    encoder reads its own copy of the image, is that copy, (H, W, 3)
+    uint8."""
     pixels: np.ndarray
     sha256: str = ""
     noise: np.ndarray | None = None
+    vision: np.ndarray | None = None
 
     def __post_init__(self):
         px = np.ascontiguousarray(self.pixels)
@@ -56,6 +59,23 @@ class Reference:
                                  f"not {n.dtype} {n.shape}")
             n.setflags(write=False)
             object.__setattr__(self, "noise", n)
+        if self.vision is not None:
+            v = np.ascontiguousarray(self.vision)
+            if v.dtype != np.uint8 or v.ndim != 3 or v.shape[2] != 3:
+                raise ValueError("a reference's vision copy must be (H, W, 3) "
+                                 f"uint8, not {v.dtype} {v.shape}")
+            v.setflags(write=False)
+            object.__setattr__(self, "vision", v)
+
+    @property
+    def vision_sha256(self) -> str:
+        """sha256 of the vision copy, its size and bytes, or ""."""
+        if self.vision is None:
+            return ""
+        h = hashlib.sha256(f"{self.vision.shape[0]}x{self.vision.shape[1]}:"
+                           .encode())
+        h.update(self.vision.tobytes())
+        return h.hexdigest()
 
     @property
     def noise_sha256(self) -> str:
@@ -77,10 +97,14 @@ class Reference:
 
     @property
     def identity(self) -> tuple:
-        """What a conditioning key holds of the image, and of its noise,
-        which the conditioning carries to the encode."""
+        """What a conditioning key holds of the image, of its noise, which
+        the conditioning carries to the encode, and of its vision copy."""
         out = (self.sha256, self.height, self.width)
-        return out + (self.noise_sha256,) if self.noise is not None else out
+        if self.noise is not None:
+            out += (self.noise_sha256,)
+        if self.vision is not None:
+            out += (f"vision {self.vision_sha256}",)
+        return out
 
 
 def latents_hash(latents: mx.array) -> str:
