@@ -128,13 +128,17 @@ def model_sigma(sigma) -> float:
     return float(np.float32(sigma) * np.float32(1000)) / 1000.0
 
 
+def grid_point(sigma: float) -> int:
+    """The PDD grid point nearest ``sigma``, the first of a tie."""
+    return min(range(len(PDD_SIGMAS)),
+               key=lambda i: abs(PDD_SIGMAS[i] - sigma))
+
+
 def step_head(sigma) -> int:
     """The PDD head a step at ``sigma`` reads: the grid point nearest the
-    sigma, the first of a tie, at most the last step's. Head 0 is the full
-    head; head k adds its offset to it."""
-    s = model_sigma(sigma)
-    k = min(range(len(PDD_SIGMAS)), key=lambda i: abs(PDD_SIGMAS[i] - s))
-    return min(k, STEPS - 1)
+    sigma, at most the last step's. Head 0 is the full head; head k adds
+    its offset to it."""
+    return min(grid_point(model_sigma(sigma)), STEPS - 1)
 
 
 def expected() -> dict:
