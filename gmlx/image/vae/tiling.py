@@ -265,6 +265,11 @@ def row_family(vae) -> str:
     return family
 
 
+def owns_tiles(vae) -> bool:
+    """Whether ``vae`` tiles a pass itself, by its row in ``memfit``."""
+    return memfit.vae_row(row_family(vae)).owns_tiles
+
+
 def price_args(vae, op: str, batch: int) -> dict:
     """What ``memfit.vae_peak`` and ``memfit.vae_tiling`` take from
     ``vae`` for ``op``."""
@@ -303,7 +308,8 @@ def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
     ``overlap`` are in output pixels. ``tiled=None`` is the automatic
     choice of ``memfit.vae_tiling`` against ``free`` bytes, which default
     to the free working set. A request with a memory plan passes the two
-    values of ``MemoryPlan.vae_pass``."""
+    values of ``MemoryPlan.vae_pass``. A VAE whose row owns its tiles
+    takes the whole latents on every branch and tiles them itself."""
     rgba = vae.config.out_channels == 4
     if alpha and not rgba:
         raise ValueError("this VAE decodes no alpha channel")
@@ -312,7 +318,7 @@ def decode(vae, latents, *, tiled: bool | None = None, alpha: bool = False,
     b, h, w = z.shape[0], z.shape[1] * s, z.shape[2] * s
     in_tiles = _plan(vae, "decode", b, h, w, tiled, tile, overlap, free)
     with memfit.bounded_cache():
-        if not in_tiles:
+        if not in_tiles or owns_tiles(vae):
             out = vae.decode(z).astype(mx.float32)
         elif vae.lockstep:
             t, lap, _ = crop_layout(vae, "decode", tile, overlap)
@@ -344,7 +350,8 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
     The noise is in the layout of the model-space latents, (B, C, h, w)
     as the result, and it takes the VAE's layout by that alone, with no
     scale or shift, before it is added to the mean in VAE space.
-    ``tiled`` and ``free`` work as in ``decode``."""
+    ``tiled`` and ``free`` work as in ``decode``, and a VAE whose row
+    owns its tiles takes the whole image on every branch."""
     if mode not in ("mode", "sample"):
         raise ValueError(f"encode mode must be 'mode' or 'sample', not {mode!r}")
     if mode == "sample" and noise is None:
@@ -358,7 +365,7 @@ def encode(vae, image, *, tiled: bool | None = None, mode: str = "mode",
                      tiled, tile, overlap, free)
 
     with memfit.bounded_cache():
-        if not in_tiles:
+        if not in_tiles or owns_tiles(vae):
             mean, logvar = vae.encode(x)
         elif vae.lockstep:
             t, lap, _ = crop_layout(vae, "encode", tile, overlap)

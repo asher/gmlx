@@ -576,8 +576,8 @@ class _TinyVae:
 def test_unknown_family_is_refused(z_view):
     with pytest.raises(ValueError, match="known: flux2_klein, "
                                          "flux2_klein_9b, flux2_klein_9b_kv, "
-                                         "flux3_klein, krea2, moss_image, "
-                                         "qwen_image21, z_image"):
+                                         "flux3_klein, h3_image, krea2, "
+                                         "moss_image, qwen_image21, z_image"):
         plan_memory(z_view, 0, 0, family="flux", height=8, width=8,
                     budget=1e12, overcommit=False)
 
@@ -1912,6 +1912,8 @@ TEXT_INPUT = [
     ("flux3_klein", "flux3_klein_q4_k_m.header.json", ("txt_in.weight",)),
     ("moss_image", "moss_image_sft_q4_k_m.header.json",
      ("text_embedder.proj.weight",)),
+    ("h3_image", "h3_image_pruned_ud_q4_k_xl.header.json",
+     ("condition_proj.weight",)),
 ]
 
 

@@ -663,14 +663,15 @@ def test_the_9b_rows_leave_every_other_family_as_it_was():
     sizes, VAE pairings and registry order of every family but the 9B
     and KV, against what they gave before those rows. A change to another
     family's prices rewrites the fixture with family_prices.py. MOSS-Image
-    came after the fixture and is left out."""
+    and MiniMax-H3-Image came after the fixture and are left out."""
     from family_prices import family_prices
 
     from gmlx.image import catalog
 
     before = load_json("memfit/family_prices.json")["prices"]
     assert family_prices(
-        skip=("flux2_klein_9b", "flux2_klein_9b_kv", "moss_image")) == before
+        skip=("flux2_klein_9b", "flux2_klein_9b_kv", "moss_image",
+              "h3_image")) == before
     assert {"flux2_klein", "flux3_klein", "krea2", "qwen_image21",
             "z_image"} <= set(before)
     # The 9B and KV join the pairings of the FLUX.2 autoencoder and no

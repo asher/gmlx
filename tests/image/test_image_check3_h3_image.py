@@ -21,8 +21,8 @@ and 0.75, at 768x512 at 0.5327739119529724 and at 1024x1024 at
 oracle reads a copy of the file with the `config` key ComfyUI needs for
 the PDD heads (the manifest's oracle_dit), every tensor unchanged; gmlx
 reads the release file (dit), found under KQUANT_TEST_GGUF_DIR by the
-manifest's name, size and sha256 and loaded by the family's loader, as
-the family is not discovered yet. The product gate runs the model as it
+manifest's name, size and sha256 and loaded by the family's loader. The
+product gate runs the model as it
 ships and holds each row to twice the oracle's gap; the kernel routes in
 force must run where they apply. The exact gate runs the model in the
 oracle's fp32 arithmetic, every K-quant product dense on its dequantized

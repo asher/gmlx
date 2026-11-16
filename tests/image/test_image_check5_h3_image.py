@@ -14,9 +14,8 @@ The self-test runs ComfyUI's class at a tiny size on seeded weights; its
 fixture is committed with the model's names and shapes, so these tests
 write the same file and run every gate on the CPU tier. Each model of
 WRONG gets one rule wrong and must read at least twice its gate at one
-item. The VAE loads with ``load_vae(..., rows={"h3_image": ROW})``, as the
-family is not discovered yet. The cases on the published file need it
-under KQUANT_TEST_GGUF_DIR and the fixture under GMLX_IMAGE_FIXTURES.
+item. The cases on the published file need it under KQUANT_TEST_GGUF_DIR
+and the fixture under GMLX_IMAGE_FIXTURES.
 """
 from __future__ import annotations
 
@@ -40,7 +39,6 @@ from gmlx.image.vae import reader
 TINY = "selftest_h3_image_vae"
 REAL = "check5_h3_image_vae"
 TWICE_DB = 20 * math.log10(2)
-ROWS = {"h3_image": hv.ROW}
 SPATIAL = hv.H3ImageVAEConfig().spatial
 
 
@@ -56,7 +54,7 @@ seeded = _seeded()
 
 
 def _load(path, dtype):
-    return reader.load_vae(path, family="h3_image", dtype=dtype, rows=ROWS)
+    return reader.load_vae(path, family="h3_image", dtype=dtype)
 
 
 def _image(a) -> np.ndarray:
@@ -285,6 +283,38 @@ def test_the_mask_token_is_read_and_left_unused(tiny):
 
     params = {k for k, _ in tree_flatten(vae.parameters())}
     assert set(header.shapes) - params == {"decoder.mask_token"}
+
+
+@pytest.mark.parametrize("tiled", (None, False, True))
+def test_tiling_gives_the_vae_the_whole_input_on_every_branch(
+        tiny, monkeypatch, tiled):
+    """The VAE owns its tiles, so tiling's decode and encode hand it the
+    whole input past one tile whatever ``tiled`` says, and their result
+    is the VAE's own."""
+    from gmlx.image.vae import tiling
+
+    vae = _load(tiny[0], mx.float32)
+    seen = []
+    for op in ("decode", "encode"):
+        def spy(self, x, *a, _op=op, _f=getattr(hv.H3ImageVAE, op), **k):
+            seen.append((_op, tuple(x.shape)))
+            return _f(self, x, *a, **k)
+        monkeypatch.setattr(hv.H3ImageVAE, op, spy)
+    rng = np.random.default_rng(3)
+    lat = rng.standard_normal((1, 24, 17, 17)).astype(np.float32)
+    img = rng.uniform(-1, 1, (1, 272, 272, 3)).astype(np.float32)
+    noise = rng.standard_normal((1, 24, 17, 17)).astype(np.float32)
+    with mx.stream(mx.cpu):
+        got = tiling.decode(vae, lat, tiled=tiled)
+        want = vae.decode(vae.to_vae_space(mx.array(lat)))
+        assert np.array_equal(np.array(got), np.array(want))
+        got = tiling.encode(vae, img, tiled=tiled, mode="sample", noise=noise)
+        mean, logvar = vae.encode(mx.array(img))
+        want = vae.to_model_space(
+            mean + mx.exp(0.5 * logvar) * vae.to_vae_layout(mx.array(noise)))
+        assert np.array_equal(np.array(got), np.array(want))
+    assert seen == [("decode", (1, 17, 17, 24)), ("decode", (1, 17, 17, 24)),
+                    ("encode", (1, 272, 272, 3)), ("encode", (1, 272, 272, 3))]
 
 
 def _find(root: Path, want: dict) -> str:

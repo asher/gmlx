@@ -281,6 +281,17 @@ FLUX2_KLEIN_9B_KV_JOINED = StepFit(base=3.1 * GiB, k=2.9, row_k=0.5)
 # 0.50 above the 2048 pixel cells.
 MOSS_IMAGE_STEP = StepFit(base=1.64 * GiB, k=5.6, row_k=2.0)
 
+# One MiniMax-H3-Image UD-Q4_K_XL step on an M5 Max at 1024, 2048, 4096 and
+# 5472x3072 pixels with 512 text rows, under the 2 GiB cache bound: the
+# MLX peak over the weights, 0.92, 1.44, 3.60 and 3.61 GiB, with the cache
+# read after the step, 1.09, 1.94, 2.03 and 2.03, added, as the footprint
+# over the settled process holds both. A line in the formula bytes through
+# the 2048 and 4096 pixel cells has a slope of 3.4, raised 10 percent to
+# 3.8, and the base is 0.25 GiB above every cell, the 2048 pixel one the
+# closest. These are the step cells of the family's first measurement,
+# with no footprint read; a footprint run refits them.
+H3_IMAGE_STEP = StepFit(base=2.70 * GiB, k=3.8)
+
 # Measured footprint of one 512-token Qwen3-4B Q4_K_M encode on an M5 Max:
 # 0.35 GiB above the weights, 12.5 times the per-token formula, rounded up.
 ENCODE_LIVE = 16.0
@@ -463,7 +474,11 @@ class VaeMemoryRow:
     ``scale`` is the image pixels per latent pixel of the official VAE,
     or 0 when that is the family's ``vae_scale_factor``. A family whose
     model space packs the VAE's latent pixels counts the packing in that
-    factor, and a tiled pass lays its tiles out at the VAE's own scale."""
+    factor, and a tiled pass lays its tiles out at the VAE's own scale.
+    ``tile`` is the tile in pixels of every tiled pass of the row, over
+    the caller's, or 0 for the caller's. ``owns_tiles`` says that the VAE
+    tiles a pass past one tile itself, whatever its caller asks, so such
+    a pass is priced and chosen in tiles."""
     measured: bool
     channels: dict                  # op -> base channels at full resolution
     whole: dict | None = None       # op -> conv path -> itemsize -> VaeFit
@@ -476,12 +491,14 @@ class VaeMemoryRow:
     scores: float = 0.0
     whole_px: int = 0
     scale: int = 0
+    tile: int = 0
+    owns_tiles: bool = False
 
     @property
     def auto_tiles(self) -> bool:
         """Whether the automatic choice above one tile is tiles on every
         machine, at every size."""
-        return self.tiles_first or not self.measured
+        return self.tiles_first or self.owns_tiles or not self.measured
 
     def tiles_at(self, pixels: int) -> bool:
         """Whether the automatic choice for a pass of ``pixels`` pixels
@@ -547,6 +564,41 @@ MOSS_VAE_DECODE = {"exact": {2: VaeFit(base=1.44 * GiB, k=19.7),
                                 4: VaeFit(base=2.60 * GiB, k=22.5)}}
 
 
+# MiniMax-H3-Image VAE footprints under bounded_cache on the published
+# file, over the loaded weights, per pixel at its 1024 decode channels and
+# 128 encode channels, exact only: no conv path reaches this VAE, so the
+# Winograd fits are the exact ones. One pass a fresh process on an M5 Max,
+# after a pass of one tile that compiles its kernels. The whole fits are
+# a line in pixels through the one tile cells at 128 and 256 pixels, the
+# slope raised 10 percent and the base 0.25 GiB over both. A whole encode
+# of one 256 pixel tile reads 0.99 GiB in float16 and 1.97 in float32: the
+# encoder runs as one graph, whose temporaries stay alive until it
+# completes. A whole decode of one tile reads 0.03 GiB. The tiled passes
+# run one 256 pixel tile at a time, four through the decoder at once:
+# the tile term is the whole slope over one tile, and the image term a
+# line through the 2048 and 4096 pixel cells, raised 10 percent, the base
+# 0.25 GiB over every tiled cell. At 4096 pixels a tiled decode reads 0.32
+# GiB against 0.58 priced in float16, 0.33 against 0.58 in float32, and a
+# tiled encode 1.36 against 1.65 and 2.27 against 2.54. The cells are in
+# the lab's results/image/h3-image/b2/cells.
+_H3_IMAGE_DECODE = {2: VaeFit(base=0.25 * GiB, k=0.2441),
+                    4: VaeFit(base=0.26 * GiB, k=0.1385)}
+_H3_IMAGE_ENCODE = {2: VaeFit(base=0.46 * GiB, k=53.87),
+                    4: VaeFit(base=0.66 * GiB, k=53.91)}
+H3_IMAGE_VAE_DECODE = {"exact": _H3_IMAGE_DECODE,
+                       "winograd": _H3_IMAGE_DECODE}
+H3_IMAGE_VAE_ENCODE = {"exact": _H3_IMAGE_ENCODE,
+                       "winograd": _H3_IMAGE_ENCODE}
+H3_IMAGE_VAE_TILED = {
+    "decode": {2: TiledFit(base=0.43 * GiB, k_tiles=0.2441,
+                           k_image=0.003823),
+               4: TiledFit(base=0.45 * GiB, k_tiles=0.1385,
+                           k_image=0.001529)},
+    "encode": {2: TiledFit(base=0.43 * GiB, k_tiles=53.87, k_image=0.09559),
+               4: TiledFit(base=0.63 * GiB, k_tiles=53.91,
+                           k_image=0.02847)}}
+
+
 VAE_ROWS = {
     # The FLUX.1 autoencoder.
     "z_image": VaeMemoryRow(
@@ -608,6 +660,14 @@ VAE_ROWS = {
         measured=True, channels={"decode": 96, "encode": 128},
         whole={"decode": MOSS_VAE_DECODE, "encode": VAE_ENCODE},
         tiled=VAE_TILED, overlap=128, scale=8),
+    # The MiniMax-H3-Image VAE tiles every pass past one tile of 256 pixels
+    # itself, as ComfyUI's class does, blending tiles that overlap by at
+    # least 64.
+    "h3_image": VaeMemoryRow(
+        measured=True, channels={"decode": 1024, "encode": 128},
+        whole={"decode": H3_IMAGE_VAE_DECODE, "encode": H3_IMAGE_VAE_ENCODE},
+        tiled=H3_IMAGE_VAE_TILED, one_tile=True, overlap=64, tile=256,
+        owns_tiles=True),
 }
 # FLUX.2 klein at both sizes and KV read the file the FLUX.3 klein row
 # was measured on.
@@ -835,6 +895,16 @@ PEAKS = {
                           width=2 * 8192 + 8192, step=MOSS_IMAGE_STEP,
                           encode_row_bytes=4096 * 4,
                           encode_base=int(0.62 * GiB), text_rows=4096),
+    # MiniMax-H3-Image joins up to 4096 text rows to the image rows, a token
+    # of 32 pixels, in every block. The MLP's fused gate and up product is
+    # the widest output: 5376 wide, a 14336 MLP. The encoder is H3 video's
+    # Qwen3-VL-32B, whose measured prompts read 0.13 and 1.61 GiB at 26 and
+    # 5001 tokens (video/memfit.py): a base of 0.4 GiB and its float32 tap
+    # row of 5120 times ENCODE_LIVE clear both by 0.28 GiB or more.
+    "h3_image": PeakRow(token_px=32, row_multiple=1, caption_rows=4096,
+                        width=2 * 14336, step=H3_IMAGE_STEP,
+                        encode_row_bytes=5120 * 4,
+                        encode_base=int(0.4 * GiB), text_rows=4096),
 }
 
 # The keys of each family's DiT config whose product is the width of the
@@ -848,6 +918,7 @@ COND_WIDTH = {
     "flux2_klein_9b_kv": ("joint_attention_dim",),
     "flux3_klein": ("joint_attention_dim",),
     "moss_image": ("text_dim",),
+    "h3_image": ("text_dim",),
 }
 
 
@@ -1307,7 +1378,9 @@ def plan_memory(dit, encoder, vae, mmproj=None, adapters=(), *,
 
     # Above one tile a pass can run in tiles. The choice ``vae_tiling``
     # makes by itself is tiles on a row that takes tiles first, and past
-    # the pixels a row's whole passes were measured to.
+    # the pixels a row's whole passes were measured to. A row with its own
+    # tile prices that tile.
+    tile = vae_row(family).tile or tile
     can_tile = height > tile or width > tile
     auto_tiled = can_tile and vae_row(family).tiles_at(height * width)
     decode = {False: price("decode", False), True: price("decode", True)}
@@ -1571,7 +1644,12 @@ def tile_grid(family: str, op: str, height: int, width: int, *,
     """The tiles of a tiled ``op`` of a ``height`` x ``width`` image, as
     tiling lays them out for the VAE of ``config`` or the official one
     when None: (count, length in pixels) down the rows and across the
-    columns."""
+    columns. A VAE that owns its tiles cuts them at its row's tile and
+    least overlap, whole, with the room left over in the overlaps."""
+    row = vae_row(family)
+    if row.owns_tiles:
+        return tuple((n, length if n == 1 else row.tile) for n, length in (
+            tile_layout(s, row.tile, row.overlap, 1) for s in (height, width)))
     lap = tile_overlap(family, op, tile, overlap, config)
     scale = _latent_px(family, config)
     return (tile_layout(height, tile, lap, scale),
@@ -1656,8 +1734,12 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
     VAE with ``config``, which counts the weights. The plan has no VAE at
     hand and passes neither, which prices the official file: the row's
     own channels and config. An image no larger than a tile is priced
-    whole."""
+    whole. A row with its own tile prices that tile, and a row whose VAE
+    owns its tiles prices a larger image in tiles, whatever ``tiled``
+    says."""
     row = vae_row(family)
+    tile = row.tile or tile
+    tiled = tiled or row.owns_tiles
     if conv is None:
         from gmlx.image.vae.conv import CONV as conv
     conv = _priced_path(conv)
@@ -1735,8 +1817,13 @@ def vae_tiling(op: str, height: int, width: int, *, family: str,
 
     A pass that does not fit as chosen raises ImageMemoryError, unless
     GMLX_OVERCOMMIT=1. ``free`` defaults to ``free_bytes()``, and nothing
-    is refused when the device reports none."""
+    is refused when the device reports none. A row with its own tile
+    reads that tile, and on a row whose VAE owns its tiles a pass past
+    one tile runs in tiles whatever ``tiled`` says."""
     row = vae_row(family)
+    tile = row.tile or tile
+    if row.owns_tiles:
+        tiled = None
     kw = dict(family=family, itemsize=itemsize, channels=channels,
               config=config, batch=batch, tile=tile, overlap=overlap,
               conv=conv)

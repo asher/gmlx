@@ -23,7 +23,6 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from gmlx.image import pacing
-from gmlx.image.vae.group_norm import group_norm
 
 from .tiles import MIN_OVERLAP, TILE, split_tiles
 
@@ -121,6 +120,9 @@ class FrameGroupNorm(nn.Module):
         self.bias = mx.zeros((channels,))
 
     def __call__(self, x: mx.array) -> mx.array:
+        # gmlx.image.vae reads this module through the image VAE's row.
+        from gmlx.image.vae.group_norm import group_norm
+
         b, t = x.shape[:2]
         y = group_norm(x.reshape(b * t, *x.shape[2:]), self.weight,
                        self.bias, GROUPS, GROUP_EPS)

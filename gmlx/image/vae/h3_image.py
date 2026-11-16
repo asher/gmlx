@@ -32,7 +32,7 @@ import mlx.nn as nn
 from gmlx.image.h3 import vit
 from gmlx.image.h3.tiles import MIN_OVERLAP, TILE, split_tiles
 
-from .reader import VaeRow
+from .row import VaeRow
 
 LATENTS_MEAN = (
     0.858090341091156, -0.9606591463088989, 1.0661640167236328,

@@ -1,9 +1,9 @@
 """The MiniMax-H3-Image registry row: the config against the official
 transformer/config.json (check 1), the sampling row against the release's
-pdd_config.json, relatives refused with the reason, and the line to the
-H3 video file. The family is not discovered yet, so the tests call its
-rule directly. CPU-only. Header fixtures hold names, shapes and codecs,
-no weights."""
+pdd_config.json, relatives refused with the reason, the line to the H3
+video file, and the family found by identify. The tests call its rule
+directly. CPU-only. Header fixtures hold names, shapes and codecs, no
+weights."""
 from __future__ import annotations
 
 import hashlib
@@ -75,6 +75,25 @@ def test_the_sampling_row_is_the_release_grid():
 def test_the_label_rule_takes_hyvid_or_none():
     assert hi.FAMILY.arch_strings == frozenset({None})
     assert hi.FAMILY.shared_arch_strings == frozenset({"hyvid"})
+
+
+def test_identify_finds_the_family_on_the_release_header():
+    """The family is discovered: identify names the release header
+    MiniMax-H3-Image under its shared label, the weights it cannot read
+    give no variant hash, and the family's synthesized config is the one
+    its rule gives."""
+    from gmlx.image import fingerprint as ifp
+    from gmlx.image.registry import families, get_family
+
+    assert get_family("h3_image") is hi.FAMILY
+    assert families()[-1] is hi.FAMILY
+    got = ifp.identify(_view())
+    assert got.family is hi.FAMILY and got.identity_hash is None
+    assert got.config == hi.FAMILY.synth_config(_view())
+    with pytest.raises(ifp.ImageModelError, match="contradicts the tensor "
+                       "layout, which is MiniMax-H3-Image"):
+        ifp.identify(fixture_view(HEADER, kv={
+            "general.architecture": "lumina2"}))
 
 
 def test_an_h3_video_file_is_not_taken():
