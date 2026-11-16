@@ -169,6 +169,30 @@ def _add_adapter_flag(p: argparse.ArgumentParser) -> None:
                              "adapters.")
 
 
+def _int8_flag(p: argparse.ArgumentParser) -> None:
+    from gmlx.image.int8 import INT8
+
+    p.add_argument("--int8", choices=INT8, default=None,
+                   help="Run the DiT's attention, its linears or all of "
+                        "them in int8, on an M5 or newer, for a family "
+                        "that takes it (MiniMax-H3-Image). Lossy; linears "
+                        "and all hold more memory (default: the entry's, "
+                        "else off).")
+
+
+def _int8(a, ident) -> str:
+    """The int8 setting, the flag, then the entry's, then off, refused
+    before any weight loads where the family, this install or Mac does
+    not run it."""
+    from gmlx.image.registry import int8_refusal
+
+    int8 = a.int8 or getattr(a, "entry_int8", None) or "off"
+    why = int8_refusal(ident.family, ident.variant, int8)
+    if why:
+        raise RuntimeError(why)
+    return int8
+
+
 def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=prog,
@@ -186,6 +210,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                    help="The DiT's variant, such as turbo, for a file whose "
                         "weights match no known variant (default: from the "
                         "weights, or the entry's variant).")
+    _int8_flag(p)
     src = p.add_mutually_exclusive_group()
     src.add_argument("--prompt", default=None, help="The prompt.")
     src.add_argument("--prompt-file", default=None, metavar="FILE",
@@ -490,6 +515,7 @@ def _from_config(a) -> None:
     a.variant = a.variant or rm.variant
     if rm.defaults.get("size"):
         a.entry_size = _size(rm.defaults["size"])
+    a.entry_int8 = rm.defaults.get("int8")
     if getattr(a, "ref", None) and a.encoder_mmproj is None:
         a.encoder_mmproj = rm.encoder_mmproj
     if rm.adapters:
@@ -840,6 +866,7 @@ def _generate(a) -> int:
     fam = ident.family
     defaults = api.sampler_defaults(fam.name, ident.variant)
     steps, cfg, strength = _settings(a, ident, defaults)
+    int8 = _int8(a, ident)
     stride = _stride(fam)
     refs = _references(a, fam)
     edit = fam.edit
@@ -905,7 +932,7 @@ def _generate(a) -> int:
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
         adapters=_adapter_bytes(a), init_image=init is not None,
         mmproj=mmproj, refs=[(r.height, r.width) for r in refs],
-        variant=a.variant,
+        variant=a.variant, int8=int8,
         prompts=[text] + ([] if cfg == 1.0 else [a.negative_prompt or ""]))
     _check_release(a, before)
     staged = bool(getattr(before, "staged_load", False))
@@ -924,12 +951,13 @@ def _generate(a) -> int:
             "released before the DiT loads")
         pipe, (rows, (cond, neg, encode_s)) = api.load_staged(
             a.model, text_encoder=a.encoder, vae=a.vae, mmproj=mmproj,
-            variant=a.variant, log=log,
+            variant=a.variant, int8=int8, log=log,
             encode=lambda pipe: (_read_adapters(a, pipe, log), encode(pipe)))
         table, adapters = _adapter_table(pipe, rows, log)
     else:
         pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
-                        mmproj=mmproj, variant=a.variant, log=log)
+                        mmproj=mmproj, variant=a.variant, int8=int8,
+                        log=log)
         table, adapters = _load_adapters(a, pipe, log)
         cond, neg, encode_s = encode(pipe)
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
@@ -962,6 +990,8 @@ def _generate(a) -> int:
                 "adapters": adapters}
     if revised is not None:
         settings["revised_prompt"] = revised
+    if int8 != "off":
+        settings["int8"] = int8
     if cfg != 1.0:
         settings["negative_prompt"] = a.negative_prompt or ""
     if alpha:
@@ -1045,6 +1075,7 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
                    help="The DiT's variant, such as turbo, for a file whose "
                         "weights match no known variant (default: from the "
                         "weights, or the entry's variant).")
+    _int8_flag(p)
     p.add_argument("--encoder", default=None, metavar="GGUF",
                    help="The text encoder GGUF.")
     p.add_argument("--vae", default=None, metavar="PATH",
@@ -1328,6 +1359,7 @@ def _bench(a) -> int:
     defaults = api.sampler_defaults(fam.name, ident.variant)
     a.strength = None
     steps, cfg, _ = _settings(a, ident, defaults)
+    int8 = _int8(a, ident)
     stride = _stride(fam)
     if a.ref and fam.edit is not None and not fam.edit.text_only:
         raise _Usage(f"--ref: the {fam.title} encoder reads the references "
@@ -1349,6 +1381,7 @@ def _bench(a) -> int:
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
                           keep_encoder=True, variant=a.variant,
                           refs=[(r.height, r.width) for r in refs],
+                          int8=int8,
                           prompts=[a.prompt] + ([] if cfg == 1.0 else [""]))
     if a.via_steps:
         from gmlx.serve.image_steps_loopback import work
@@ -1356,14 +1389,15 @@ def _bench(a) -> int:
         # The step routes run the pipeline on the image worker, so it
         # loads there.
         pipe = work(lambda: api.load(a.model, text_encoder=a.encoder,
-                                     vae=a.vae, variant=a.variant, log=log))
+                                     vae=a.vae, variant=a.variant,
+                                     int8=int8, log=log))
         table, adapters = None, []
         with _steps_client(a, pipe) as (client, mid):
             records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg,
                                    table, adapters, log, client, mid)
     else:
         pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
-                        variant=a.variant, log=log)
+                        variant=a.variant, int8=int8, log=log)
         table, adapters = _load_adapters(a, pipe, log)
         records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table,
                                adapters, log, refs=refs)
@@ -1441,7 +1475,7 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                "settings": {"width": w, "height": h, "steps": steps,
                             "sampler": a.sampler, "scheduler": None,
                             "guidance": cfg, "batch": 1,
-                            "adapters": adapters,
+                            "adapters": adapters, "int8": _int8_of(pipe),
                             "seed": a.seed, "prompt": a.prompt,
                             **({"refs": [
                                 {"file": os.path.basename(p),
@@ -1468,6 +1502,15 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                 f"{'equal' if transport['equal_to_direct'] else 'differ from'}"
                 " those of a direct run")
     return records
+
+
+def _int8_of(pipe) -> str:
+    """The int8 setting the loaded DiT runs at."""
+    from gmlx.image.int8 import INT8, int8_parts
+
+    parts = (getattr(pipe.dit, "attention", "dense"),
+             getattr(pipe.dit, "linears", "file"))
+    return next(v for v in INT8 if int8_parts(v) == parts)
 
 
 def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:

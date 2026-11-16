@@ -3404,6 +3404,20 @@ def test_image_model_defaults_and_adapters_normalize():
     assert m.ttl_s == 0.0 and m.pin is True
 
 
+def test_image_model_int8_default_parses():
+    """defaults.int8 takes the four settings, YAML's bare off among
+    them."""
+    m = build_config(_image_doc(defaults={"int8": "linears"})).image_models[
+        "zit"]
+    assert m.defaults == {"int8": "linears"}
+    off = build_config(_image_doc(defaults={"int8": False})).image_models[
+        "zit"]
+    assert off.defaults == {"int8": "off"}
+    with pytest.raises(ConfigError, match=r"defaults\.int8: expected one of "
+                       r"off, attention, linears, all, got 'fast'"):
+        build_config(_image_doc(defaults={"int8": "fast"}))
+
+
 @pytest.mark.parametrize("where", ["models", "aliases", "assistants"])
 def test_image_id_collision_is_a_config_error(where):
     doc = _image_doc()
@@ -3463,6 +3477,13 @@ def test_resolve_image_model_and_signature(tmp_path):
     doc["image_models"]["zit"]["defaults"] = {"steps": 4}
     assert cfgmod.resolve_image_model(
         "zit", build_config(doc)).load_signature() == sig
+    # The int8 setting splits the load, off being the setting without it.
+    doc["image_models"]["zit"]["defaults"] = {"int8": "off"}
+    assert cfgmod.resolve_image_model(
+        "zit", build_config(doc)).load_signature() == sig
+    doc["image_models"]["zit"]["defaults"] = {"int8": "linears"}
+    assert cfgmod.resolve_image_model(
+        "zit", build_config(doc)).load_signature() != sig
     doc["image_models"]["zit"]["variant"] = "turbo"
     rv = cfgmod.resolve_image_model("zit", build_config(doc))
     assert rv.variant == "turbo" and rv.load_signature() != sig

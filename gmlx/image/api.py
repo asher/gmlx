@@ -254,9 +254,25 @@ def _header_bytes(path, kind: str) -> int:
     return memfit.file_bytes(_header_view(str(path)), skip=skip)
 
 
+def _int8_bytes(dit, int8: str) -> int:
+    """The bytes the DiT at ``dit`` holds over its file at the int8
+    setting ``int8``, from its header: none but with int8 linears."""
+    from . import memfit
+    from .int8 import int8_parts
+
+    if int8_parts(int8)[1] != "int8":
+        return 0
+    from .loader import identify_dit
+    from .text_encoder import _header_view
+
+    return memfit.int8_held(_header_view(str(dit)),
+                            identify_dit(str(dit)).family, int8)
+
+
 def load(dit, *, text_encoder=None, vae=None, mmproj=None,
          encoder_model=None, encoder_gguf=None, variant=None,
-         memory: str = "auto", log=print) -> ImagePipeline:
+         memory: str = "auto", int8: str = "off",
+         log=print) -> ImagePipeline:
     """Load an image pipeline from a DiT GGUF, a text encoder GGUF or a
     resident chat model given as ``encoder_model=(model, tokenizer)``, and
     a VAE. ``encoder_gguf`` is the GGUF ``encoder_model`` was loaded from:
@@ -264,7 +280,8 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     it, and without it runs on the model's own. ``mmproj`` is the mmproj
     GGUF of the text encoder: with it the encoder loads with its vision
     tower, which a request with reference images needs and a text request
-    does not. With ``memory="auto"`` the
+    does not. ``int8`` is the DiT's int8 setting (``int8.INT8``), which
+    its family and this Mac must run. With ``memory="auto"`` the
     weights of all are gated on their header sizes before anything loads;
     ``memory="off"`` skips that gate, and each load still gates its own
     weights."""
@@ -283,7 +300,7 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     if mmproj is not None and text_encoder is None:
         raise ValueError("an mmproj loads with its text encoder GGUF; pass "
                          "text_encoder")
-    weights = {"dit": _header_bytes(dit, "dit"),
+    weights = {"dit": _header_bytes(dit, "dit") + _int8_bytes(dit, int8),
                "encoder": _header_bytes(text_encoder, "encoder"),
                "vae": _header_bytes(vae, "vae")}
     if mmproj is not None:
@@ -303,7 +320,7 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     if text_encoder is not None or encoder_model is not None:
         spec = encoder_spec(found)
     model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
-                           identified=ident, log=log)
+                           identified=ident, log=log, int8=int8)
     fam = info.identified.family
     seconds["dit"] = time.perf_counter() - t0
     handle = None
@@ -341,7 +358,8 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
 
 
 def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
-                mmproj=None, variant=None, log=print) -> tuple:
+                mmproj=None, variant=None, int8: str = "off",
+                log=print) -> tuple:
     """Load an image pipeline in the staged order, for a request whose
     memory plan says ``staged_load``, and return it with what ``encode``
     returned.
@@ -355,14 +373,15 @@ def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
     and the DiT and the VAE load after that, so the encoder is never
     resident beside them. The conditionings ``encode`` made stay in the
     pipeline's cache. Reference images get their VAE latents after the
-    load, through ``encode_references``. Each load gates its own weights
-    against the working budget."""
+    load, through ``encode_references``. The DiT loads at the int8
+    setting ``int8``. Each load gates its own weights against the working
+    budget."""
     from .dtypes import image_activation
     from .loader import identify_dit, load_dit
     from .text_encoder import encoder_spec, load_encoder
     from .vae import load_vae
 
-    weights = {"dit": _header_bytes(dit, "dit"),
+    weights = {"dit": _header_bytes(dit, "dit") + _int8_bytes(dit, int8),
                "encoder": _header_bytes(text_encoder, "encoder"),
                "vae": _header_bytes(vae, "vae")}
     ident = identify_dit(str(dit), variant=variant)
@@ -387,7 +406,7 @@ def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
         handle.release()
     t0 = time.perf_counter()
     model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
-                           identified=ident, log=log)
+                           identified=ident, log=log, int8=int8)
     pipe.dit, pipe.variant = model, info.identified.variant
     seconds["dit"] = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -572,6 +591,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         vae_dtype=vae_dtype,
         encoder_owned=bool(resident and enc.owned and not keep_encoder),
         cache_bytes=caches, init_image=init_image, vae_price=price,
+        attention=getattr(pipe.dit, "attention", "dense"),
+        linears=getattr(pipe.dit, "linears", "file"),
         budget=budget, overcommit=overcommit, **terms)
     if plan.shed_bytes:
         shed_states(pipe, plan.shed_bytes, _states(conds), live)

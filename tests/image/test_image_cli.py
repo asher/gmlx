@@ -358,6 +358,37 @@ def test_an_entry_defaults_size_is_the_size_without_size(env, tmp_path):
         assert (a.size, b.size) == ((48, 32), (32, 32))
 
 
+def test_int8_on_a_family_without_it_is_refused_before_any_load(
+        env, tmp_path, monkeypatch, capsys):
+    """--int8 names the setting, else the entry's defaults.int8, and a
+    family without the part it names is refused before a weight loads.
+    The flag wins over the entry."""
+    loads = []
+    real = api.load
+    monkeypatch.setattr(api, "load", lambda dit, **kw: loads.append(
+        kw.get("int8")) or real(dit, **kw))
+    out = str(tmp_path / "a.png")
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", out, "--int8",
+                                     "attention"]) == 1
+    assert "gmlx runs Z-Image with dense attention only" in \
+        capsys.readouterr().err
+    assert env.pipes == [] and loads == []
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {tmp_path}\n"
+                   "image_models:\n  zit:\n    path: dit.gguf\n"
+                   "    encoder: enc.gguf\n    vae: vae.gguf\n"
+                   "    defaults: {int8: linears}\n")
+    base = ["image", "generate", "zit", "--config", str(cfg), "--prompt",
+            "p", "--size", "32x32", "--seed", "1", "--output", out]
+    assert umbrella_main(base) == 1
+    assert "gmlx runs Z-Image with its file's linears only" in \
+        capsys.readouterr().err
+    assert loads == []
+    assert umbrella_main(base + ["--int8", "off"]) == 0
+    assert loads == ["off"]
+
+
 def test_the_png_carries_the_settings_unless_told_not_to(env, tmp_path):
     from PIL import Image
 

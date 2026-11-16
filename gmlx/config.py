@@ -154,7 +154,7 @@ _IMAGE_MODEL_KEYS = frozenset({"path", "family", "variant", "encoder",
                                "ttl_s", "upsampler", "upsample",
                                "upsample_prompt"})
 _IMAGE_DEFAULTS_KEYS = frozenset({"size", "steps", "guidance", "sampler",
-                                  "negative_prompt"})
+                                  "negative_prompt", "int8"})
 _IMAGE_ADAPTER_KEYS = frozenset({"path", "strength"})
 _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
                                 "embed_metadata", "tensor_cache_mb",
@@ -1337,14 +1337,14 @@ class ResolvedImageModel:
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
-        adapter list, and the defaults its booked memory is priced at,
-        the size and the guidance. The other request defaults change no
-        loaded weight and no price."""
+        adapter list, the int8 setting, and the defaults its booked
+        memory is priced at, the size and the guidance. The other request
+        defaults change no loaded weight and no price."""
         d = self.defaults or {}
         return (self.path, self.family, self.variant, self.encoder,
                 self.encoder_model, self.encoder_mmproj, self.vae,
                 tuple(self.adapters), self.encoder_release, d.get("size"),
-                d.get("guidance"))
+                d.get("guidance"), d.get("int8") or "off")
 
 
 @dataclass
@@ -2970,6 +2970,17 @@ def _parse_image_defaults(where: str, raw) -> dict:
         out["sampler"] = sampler
     if raw.get("negative_prompt") is not None:
         out["negative_prompt"] = str(raw["negative_prompt"])
+    int8 = raw.get("int8")
+    if int8 is not None:
+        from gmlx.image.int8 import INT8
+
+        # YAML reads a bare off as false.
+        if int8 is False:
+            int8 = "off"
+        if int8 not in INT8:
+            raise ConfigError(f"{where}.int8: expected one of "
+                              f"{', '.join(INT8)}, got {int8!r}")
+        out["int8"] = int8
     return out
 
 
