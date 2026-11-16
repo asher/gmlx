@@ -240,6 +240,27 @@ def test_the_h3_image_row_prices_the_tiles_its_vae_owns():
             "decode", px, px, family="h3_image", itemsize=2)
 
 
+def test_an_h3_image_batch_decode_adds_each_image_after_the_first():
+    """The VAE decodes a batch one image at a time, so a batch decode is
+    one image's price plus 48 bytes a pixel for each image after the
+    first. An encode runs the batch together, all of its terms by the
+    batch."""
+    from gmlx.image.h3 import tiles
+
+    row = memfit.VAE_ROWS["h3_image"]
+    assert row.per_image == {"decode": 48}
+    one = tiles.TILE * tiles.TILE
+    for size, px in itertools.product((2, 4), (1024, 4096)):
+        kw = dict(family="h3_image", itemsize=size)
+        alone = memfit.vae_peak("decode", px, px, **kw)
+        for b in (2, 3):
+            assert memfit.vae_peak("decode", px, px, batch=b, **kw) == \
+                alone + int((b - 1) * 48 * px * px)
+            assert memfit.vae_peak("encode", px, px, batch=b, **kw) == \
+                row.tiled["encode"][size].bytes(b * one, b * px * px,
+                                                row.channels["encode"], size)
+
+
 def test_the_tile_layout_follows_the_scale_of_the_vae():
     for px in range(16, 4112, 16):
         lat = px // 16

@@ -481,7 +481,11 @@ class VaeMemoryRow:
     ``tile`` is the tile in pixels of every tiled pass of the row, over
     the caller's, or 0 for the caller's. ``owns_tiles`` says that the VAE
     tiles a pass past one tile itself, whatever its caller asks, so such
-    a pass is priced and chosen in tiles."""
+    a pass is priced and chosen in tiles.
+    ``per_image`` maps an op whose tiled pass runs a batch one image at a
+    time to the bytes a pixel each image after the first adds: its result,
+    held to the end, and the copy of it in the batch's result. The rest of
+    such a pass is priced at batch 1."""
     measured: bool
     channels: dict                  # op -> base channels at full resolution
     whole: dict | None = None       # op -> conv path -> itemsize -> VaeFit
@@ -496,6 +500,7 @@ class VaeMemoryRow:
     scale: int = 0
     tile: int = 0
     owns_tiles: bool = False
+    per_image: dict = field(default_factory=dict)
 
     @property
     def auto_tiles(self) -> bool:
@@ -570,36 +575,47 @@ MOSS_VAE_DECODE = {"exact": {2: VaeFit(base=1.44 * GiB, k=19.7),
 # MiniMax-H3-Image VAE footprints under bounded_cache on the published
 # file, over the loaded weights, per pixel at its 1024 decode channels and
 # 128 encode channels, exact only: no conv path reaches this VAE, so the
-# Winograd fits are the exact ones. One pass a fresh process on an M5 Max,
-# after a pass of one tile that compiles its kernels. The whole fits are
-# a line in pixels through the one tile cells at 128 and 256 pixels, the
-# slope raised 10 percent and the base 0.25 GiB over both. A whole encode
-# of one 256 pixel tile reads 0.99 GiB in float16 and 1.97 in float32: the
-# encoder runs as one graph, whose temporaries stay alive until it
-# completes. A whole decode of one tile reads 0.03 GiB. The tiled passes
-# run one 256 pixel tile at a time, four of the batch through the decoder
-# at once:
-# the tile term is the whole slope over one tile, and the image term a
-# line through the 2048 and 4096 pixel cells, raised 10 percent, the base
-# 0.25 GiB over every tiled cell. At 4096 pixels a tiled decode reads 0.32
-# GiB against 0.58 priced in float16, 0.33 against 0.58 in float32, and a
-# tiled encode 1.36 against 1.65 and 2.27 against 2.54.
-_H3_IMAGE_DECODE = {2: VaeFit(base=0.25 * GiB, k=0.2441),
-                    4: VaeFit(base=0.26 * GiB, k=0.1385)}
-_H3_IMAGE_ENCODE = {2: VaeFit(base=0.46 * GiB, k=53.87),
-                    4: VaeFit(base=0.66 * GiB, k=53.91)}
+# Winograd fits are the exact ones. Each cell ran three to six times, a
+# fresh process each on an M5 Max, after a pass of one tile that compiles
+# its kernels, and the fits take the largest reading of each. The whole
+# fits are a line in pixels through the one tile cells at 128 and 256
+# pixels, the slope raised 10 percent and the base 0.25 GiB over both. A
+# whole encode of one 256 pixel tile reads 0.99 GiB in float16 and 1.98 in
+# float32: the encoder runs as one graph, whose temporaries stay alive
+# until it completes. A whole decode of one tile reads 0.03 GiB. The tiled
+# passes run one 256 pixel tile at a time, four tiles of one image through
+# the decoder at once: the tile term is the whole slope over one tile, and
+# the image term a line through the 2048 and 4096 pixel cells, raised 10
+# percent, the base 0.25 GiB over every tiled cell. A tiled decode reads
+# one of two levels from run to run, at 4096 pixels in float16 0.40 or
+# 0.60 GiB. The high one holds a second float32 canvas: mlx keeps the
+# inputs of a command buffer alive until its completion handler runs,
+# which can be after the wait on its result returns, so a canvas write
+# can find the canvas still held and copy it in place of writing into it.
+# At 4096 pixels a tiled decode reads up to 0.60 GiB against 0.87 priced
+# in float16, 0.64 against 0.92 in float32, and a tiled encode 1.48
+# against 1.82 and 2.38 against 2.67. A batch decodes one image at a
+# time, and each image after the first adds 48 bytes a pixel, four
+# float32 images: its result held to the end, the copy of it in the
+# batch's result, and its canvas and a copy of it that the buffer cache
+# keeps. Batch 2 cells at 2048 and 4096 pixels added 36 to 44.
+_H3_IMAGE_DECODE = {2: VaeFit(base=0.25 * GiB, k=0.2746),
+                    4: VaeFit(base=0.25 * GiB, k=0.1191)}
+_H3_IMAGE_ENCODE = {2: VaeFit(base=0.46 * GiB, k=53.96),
+                    4: VaeFit(base=0.67 * GiB, k=53.89)}
 H3_IMAGE_VAE_DECODE = {"exact": _H3_IMAGE_DECODE,
                        "winograd": _H3_IMAGE_DECODE}
 H3_IMAGE_VAE_ENCODE = {"exact": _H3_IMAGE_ENCODE,
                        "winograd": _H3_IMAGE_ENCODE}
 H3_IMAGE_VAE_TILED = {
-    "decode": {2: TiledFit(base=0.43 * GiB, k_tiles=0.2441,
-                           k_image=0.003823),
-               4: TiledFit(base=0.45 * GiB, k_tiles=0.1385,
-                           k_image=0.001529)},
-    "encode": {2: TiledFit(base=0.43 * GiB, k_tiles=53.87, k_image=0.09559),
-               4: TiledFit(base=0.63 * GiB, k_tiles=53.91,
-                           k_image=0.02847)}}
+    "decode": {2: TiledFit(base=0.60 * GiB, k_tiles=0.2746,
+                           k_image=0.007448),
+               4: TiledFit(base=0.65 * GiB, k_tiles=0.1191,
+                           k_image=0.003692)},
+    "encode": {2: TiledFit(base=0.42 * GiB, k_tiles=53.96, k_image=0.1391),
+               4: TiledFit(base=0.62 * GiB, k_tiles=53.89,
+                           k_image=0.0457)}}
+H3_IMAGE_PER_IMAGE = {"decode": 48}
 
 
 VAE_ROWS = {
@@ -670,7 +686,7 @@ VAE_ROWS = {
         measured=True, channels={"decode": 1024, "encode": 128},
         whole={"decode": H3_IMAGE_VAE_DECODE, "encode": H3_IMAGE_VAE_ENCODE},
         tiled=H3_IMAGE_VAE_TILED, one_tile=True, overlap=64, tile=256,
-        owns_tiles=True),
+        owns_tiles=True, per_image=H3_IMAGE_PER_IMAGE),
 }
 # FLUX.2 klein at both sizes and KV read the file the FLUX.3 klein row
 # was measured on.
@@ -1772,10 +1788,14 @@ def vae_peak(op: str, height: int, width: int, *, family: str,
                                    overlap=overlap, config=config)
     tiled_fit = row.tiled[op][itemsize]
     tiles = 1 if row.one_tile else ny * nx
-    out = tiled_fit.bytes(batch * tiles * th * tw, batch * height * width,
+    alone = op in row.per_image
+    run = 1 if alone else batch
+    out = tiled_fit.bytes(run * tiles * th * tw, run * height * width,
                           channels, itemsize)
+    if alone:
+        out += int((batch - 1) * row.per_image[op] * height * width)
     if conv != "exact":
-        one = batch * th * tw
+        one = run * th * tw
         out += max(0, fit.bytes(one, channels, itemsize)
                    - fits["exact"][itemsize].bytes(one, channels, itemsize))
     return out + held
