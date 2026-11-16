@@ -1432,6 +1432,7 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
     import numpy as np
 
     from gmlx import __version__
+    from gmlx.image.int8 import int8_of
 
     model = {
         "id": os.path.basename(a.model), "family": fam.name,
@@ -1475,7 +1476,7 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                "settings": {"width": w, "height": h, "steps": steps,
                             "sampler": a.sampler, "scheduler": None,
                             "guidance": cfg, "batch": 1,
-                            "adapters": adapters, "int8": _int8_of(pipe),
+                            "adapters": adapters, "int8": int8_of(pipe.dit),
                             "seed": a.seed, "prompt": a.prompt,
                             **({"refs": [
                                 {"file": os.path.basename(p),
@@ -1502,15 +1503,6 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                 f"{'equal' if transport['equal_to_direct'] else 'differ from'}"
                 " those of a direct run")
     return records
-
-
-def _int8_of(pipe) -> str:
-    """The int8 setting the loaded DiT runs at."""
-    from gmlx.image.int8 import INT8, int8_parts
-
-    parts = (getattr(pipe.dit, "attention", "dense"),
-             getattr(pipe.dit, "linears", "file"))
-    return next(v for v in INT8 if int8_parts(v) == parts)
 
 
 def _pack_vae_parser(prog: str) -> argparse.ArgumentParser:

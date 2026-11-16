@@ -28,6 +28,13 @@ def int8_parts(value: str) -> tuple[str, str]:
     return _PARTS[value]
 
 
+def int8_of(dit) -> str:
+    """The int8 setting a loaded DiT runs at, from its two properties."""
+    parts = (getattr(dit, "attention", "dense"),
+             getattr(dit, "linears", "file"))
+    return next(v for v in INT8 if _PARTS[v] == parts)
+
+
 def int8_served(entry: str) -> tuple[str, str]:
     """The int8 values a request may name on an entry at ``entry``: the
     two whose linears match its loaded DiT's."""

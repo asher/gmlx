@@ -1136,6 +1136,29 @@ def test_bench_via_steps_refuses_adapters(env, capsys):
     assert env.pipes == []
 
 
+@pytest.mark.parametrize("int8", ["attention", "linears", "all"])
+def test_bench_via_steps_runs_and_prices_the_int8_its_dit_loaded_at(int8):
+    """The bench's loopback entry carries the int8 setting its DiT loaded
+    at, so a step, which names no int8, keeps the DiT's attention and its
+    fit prices the int8 rows."""
+    from gmlx.image.int8 import int8_parts
+    from gmlx.serve import image_service
+    from gmlx.serve import image_steps_loopback as loop
+
+    attention, linears = int8_parts(int8)
+    dit = SimpleNamespace(attention=attention, linears=linears,
+                          act_dtype=mx.bfloat16, cfg=SimpleNamespace(patch=2))
+    pipe = api.ImagePipeline(dit=dit, family=get_family("h3_image"),
+                             variant="pruned", weights={"dit": 1})
+    served = loop.OneModelHost("h3", pipe, {"dit": "/d.gguf"}).served
+    # What the step route runs for a step with no int8 field.
+    sent = image_service.request_int8(served, None)
+    image_service.set_int8(served, sent)
+    assert (dit.attention, dit.linears) == (attention, linears)
+    args = image_service._fit_args(pipe, served, 1 << 40, 1.0, int8=sent)
+    assert (args["attention"], args["linears"]) == (attention, linears)
+
+
 def test_bench_refuses_sizes_off_the_stride(env, capsys):
     assert umbrella_main(["image", "bench"] + env.base[2:] + [
         "--sizes", "1024x1000"]) == 2
