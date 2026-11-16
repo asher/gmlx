@@ -108,7 +108,7 @@ class EditParts:
     a tuple with ``crop``, the (left, top, right, bottom) box the output
     is cropped to when the request gives no size, or None. ``size(refs)``
     is then the (width, height) of a request with references and no
-    size of its own, which ``edit_size`` scales into the image limits.
+    size of its own, which ``edit_size`` scales into its family's limits.
     """
     max_refs: int
     area: int = 0

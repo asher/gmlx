@@ -844,7 +844,7 @@ def _generate(a) -> int:
     refs = _references(a, fam)
     edit = fam.edit
     # A family that sizes a request by its references names that size,
-    # scaled into the image limits.
+    # scaled into its family's limits.
     ref_size = None
     if a.size is None and a.init_image is None:
         from gmlx.image.registry import edit_size
