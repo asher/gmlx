@@ -386,13 +386,15 @@ def test_a_batch_decodes_one_image_at_a_time(tiny, monkeypatch):
 def test_the_decode_blends_from_the_tiles_and_never_reads_its_canvas(
         tiny, monkeypatch):
     """Over 3x3 tiles each tile blends with the whole tile to its left,
-    the very array written, and with the strip of the row above, so no
-    blend reads the canvas: a read of the canvas holds its buffer until
-    the read's command buffer completes, and the write after it copies
-    the whole canvas (17532fe9)."""
+    the very array written, and with the strips of the row above as that
+    row's tiles were blended, so no blend reads the canvas: a read of the
+    canvas holds its buffer until the read's command buffer completes,
+    and the write after it copies the whole canvas (17532fe9). The tiled
+    decode indexes no array it returns."""
     vae = _load(tiny[0], mx.float32)
-    calls, raw = [], []
+    calls, raw, reads, canvases = [], [], [], []
     real_blend, real_row = vit.blend, hv.H3ImageVAE._row
+    real_tiled, real_get = hv.H3ImageVAE.tiled_decode, mx.array.__getitem__
 
     def blend(a, b, extent, axis):
         out = real_blend(a, b, extent, axis)
@@ -403,11 +405,26 @@ def test_the_decode_blends_from_the_tiles_and_never_reads_its_canvas(
         for t in real_row(self, *args):
             raw.append(t)
             yield t
+
+    def get(self, key):
+        reads.append(self)
+        return real_get(self, key)
+
+    def tiled(self, *args):
+        mx.array.__getitem__ = get
+        try:
+            canvases.append(real_tiled(self, *args))
+        finally:
+            mx.array.__getitem__ = real_get
+        return canvases[-1]
     monkeypatch.setattr(vit, "blend", blend)
     monkeypatch.setattr(hv.H3ImageVAE, "_row", row)
+    monkeypatch.setattr(hv.H3ImageVAE, "tiled_decode", tiled)
     z = mx.random.normal((1, 29, 29, 24), key=mx.random.key(3))
     with mx.stream(mx.cpu):
         vae.decode(z)
+    assert len(canvases) == 1 and reads
+    assert not any(r is canvases[0] for r in reads)
     ys, ylen, yo = tiles.split_tiles(29 * SPATIAL, tiles.TILE,
                                      tiles.MIN_OVERLAP, SPATIAL)
     xs, xlen, xo = tiles.split_tiles(29 * SPATIAL, tiles.TILE,
@@ -421,7 +438,15 @@ def test_the_decode_blends_from_the_tiles_and_never_reads_its_canvas(
             if i:
                 a, b, extent, axis, tile = next(order)
                 assert (axis, extent) == (1, yo[i - 1])
-                assert a.shape == (1, yo[i - 1], xlen[j], 3)
+                # The row above's blended tiles, each up to the next one's
+                # start, from that row's overlap down.
+                ends = [x1 - x0 for x0, x1 in zip(xs, xs[1:])] + [xlen[-1]]
+                strips = np.concatenate(
+                    [np.array(written[i - 1, k])[:, ylen[i - 1] - yo[i - 1]:,
+                                                 :ends[k]]
+                     for k in range(3)], axis=2)
+                assert np.array_equal(
+                    np.array(a), strips[:, :, xs[j]:xs[j] + xlen[j]]), (i, j)
             if j:
                 a, b, extent, axis, tile = next(order)
                 assert (axis, extent) == (2, xo[j - 1])
