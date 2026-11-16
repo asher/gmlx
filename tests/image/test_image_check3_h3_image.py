@@ -20,24 +20,26 @@ step's time or left unmixed.
 
 On the release file the fixtures hold the step at 512x512 at sigma 1.0
 and 0.75, at 768x512 at 0.5327739119529724 and at 1024x1024 at
-0.23200887441635132, the last past the GLU kernel route's row floor. The
-oracle reads a copy of the file with the `config` key ComfyUI needs for
-the PDD heads (the manifest's oracle_dit), every tensor unchanged; gmlx
-reads the release file (dit), found under KQUANT_TEST_GGUF_DIR by the
-manifest's name, size and sha256 and loaded by the image loader, which
-identifies it by discovery. The product gate runs the model as it ships
-and holds each row to twice the oracle's gap; the kernel routes in
-force must run where they apply. The exact gate runs the model in the
-oracle's fp32 arithmetic, every K-quant product dense on its dequantized
-weight and every float tensor in float32: the teacher-forced rows within
-EXACT_TOL, the free rows and the velocity within the larger of EXACT_TOL
-and twice gmlx's own fp32 floor that the manifest records
-(GMLX_IMAGE_RECORD_FLOORS=<dir> writes manifests with the floors
-measured now). The site gate reads each op of every block and each
-linear leaf of the shipped model against the stock op in float32 on the
-same input (h3_sites.py), at 512x512 and at 1024x1024 on the GLU kernel
-route. Each int8 setting loads the release file through the loader and
-runs every real case on the int8 ops of each block, its rows printed
+0.23200887441635132, the last past the GLU kernel route's row floor, and
+an edit at 512x512 at sigma 1.0 and 0.5327739119529724 with references at
+1024x1024 and 384x640 and two vision spans in 48 text rows, 1568 rows in
+all. The oracle reads a copy of the file with the `config` key ComfyUI
+needs for the PDD heads (the manifest's oracle_dit), every tensor
+unchanged; gmlx reads the release file (dit), found under
+KQUANT_TEST_GGUF_DIR by the manifest's name, size and sha256 and loaded
+by the image loader, which identifies it by discovery. The product gate
+runs the model as it ships and holds each row to twice the oracle's gap;
+the kernel routes in force must run where they apply. The exact gate runs
+the model in the oracle's fp32 arithmetic, every K-quant product dense on
+its dequantized weight and every float tensor in float32: the
+teacher-forced rows within EXACT_TOL, the free rows and the velocity
+within the larger of EXACT_TOL and twice gmlx's own fp32 floor that the
+manifest records (GMLX_IMAGE_RECORD_FLOORS=<dir> writes manifests with
+the floors measured now). The site gate reads each op of every block and
+each linear leaf of the shipped model against the stock op in float32 on
+the same input (h3_sites.py), at 512x512 and at 1024x1024 on the GLU
+kernel route. Each int8 setting loads the release file through the loader
+and runs every real case on the int8 ops of each block, its rows printed
 against the product gate and held to a sanity bound (INT8_SANITY). The
 rows on the release file need it under KQUANT_TEST_GGUF_DIR and the
 fixtures under GMLX_IMAGE_FIXTURES.
@@ -72,8 +74,11 @@ TINY = "selftest_h3_image_tiny"
 TINY_CASES = (f"{TINY}_s0", f"{TINY}_s3")
 TINY_EDITS = (f"{TINY}_edit_s0", f"{TINY}_edit_s3")
 TINY_ALL = TINY_CASES + TINY_EDITS
+REAL_EDITS = ("check3_h3_image_edit_512x512_s0",
+              "check3_h3_image_edit_512x512_s4")
 REAL = ("check3_h3_image_512x512_s0", "check3_h3_image_512x512_s3",
-        "check3_h3_image_768x512_s4", "check3_h3_image_1024x1024_s5")
+        "check3_h3_image_768x512_s4",
+        "check3_h3_image_1024x1024_s5") + REAL_EDITS
 HEADER = "h3_image_pruned_ud_q4_k_xl.header.json"
 # A float32 step against the oracle's float32 step: the gap is summation
 # order alone.
