@@ -24,9 +24,22 @@ off, head k without head 0, and each step's target one grid point late
 each fail the gate at 2048. The bf16 run at 2048 and 4096 must stay
 finite, and its readings print as a share of the 1024 gate of each step.
 
+An edit at 1024x1024 with two pictures runs at the same gate: gmlx's
+copies of each picture must be ComfyUI's byte for byte, its VAE encodes
+each VAE copy on the oracle's draws (ComfyUI's seed 42 torch draws, as
+Reference noise) within half the share of the oracle's latents those
+draws make (other draws land about 1.4 times that share away; the
+encode's own numerics are check 5's), and the latents after each step,
+from those references, the
+oracle's features and the noise of each reference's rows, must stay
+within twice the oracle's own bf16 against fp32 gap after that step. The
+run without its references and the run with its vision rows read as text
+each miss a gate. The run on the family's own seed 42 draws prints as a
+share of the gates.
+
 Skipped unless the manifests of scripts/image_oracle/check6_h3_image.py
 are committed, GMLX_IMAGE_FIXTURES holds their arrays and
-KQUANT_TEST_GGUF_DIR the DiT GGUF the oracle read."""
+KQUANT_TEST_GGUF_DIR the DiT GGUF and the VAE the oracle read."""
 from __future__ import annotations
 
 import dataclasses
@@ -45,6 +58,7 @@ from block_gates import exact_process, rerun_exact
 from image_fixtures import image_dits
 from oracle_fixture import ORACLE, committed, fixture, fx
 
+from gmlx.image.families.h3_image import edit as he
 from gmlx.image.families.h3_image import family as hi
 from gmlx.image.families.h3_image import model as him
 
@@ -55,6 +69,7 @@ EXACT_SIZES = (2048, 4096)
 FAULT_SIZE = 2048
 SIZES = (GATE_SIZE, *EXACT_SIZES)
 EXACT_REL_L2 = 1e-3
+EDIT = f"{NAME}_edit_{GATE_SIZE}"
 
 
 def _name(size: int) -> str:
@@ -73,9 +88,18 @@ def _manifest(size: int) -> dict:
     return committed(_name(size))
 
 
-def _gates() -> dict:
-    """The bf16 gate of the latents after each step, at the gate size."""
-    m = _manifest(GATE_SIZE)
+def _edit_manifest() -> dict:
+    if not (ORACLE / f"{EDIT}.manifest.json").is_file():
+        pytest.skip(f"{EDIT}.manifest.json is not committed: run "
+                    "scripts/image_oracle/check6_h3_image.py --edit and "
+                    "commit the manifest")
+    return committed(EDIT)
+
+
+def _gates(m: dict | None = None) -> dict:
+    """The bf16 gate of the latents after each step, at the gate size, of
+    ``m``, the text to image run by default."""
+    m = _manifest(GATE_SIZE) if m is None else m
     return {k: m["tolerances"][f"step{k}_rel_l2"]
             for k in range(1, m["inputs"]["steps"] + 1)}
 
@@ -86,8 +110,18 @@ def _ulps(got, want) -> int:
     return int(np.max(np.abs(g - w)))
 
 
+def _find(root: Path, want: dict) -> str:
+    for p in sorted(Path(root).rglob(want["name"])):
+        if p.is_file() and os.path.getsize(p) == want["size"]:
+            if fx.file_identity(str(p))["sha256"] != want["sha256"]:
+                pytest.fail(f"{p} is not the file the oracle read")
+            return str(p)
+    pytest.skip(f"{want['name']} is not under KQUANT_TEST_GGUF_DIR")
+
+
 class _Pipe:
-    """The pipeline of the fixtures' file, loaded once."""
+    """The pipeline of the fixtures' file, loaded once, with the VAE of a
+    manifest that names one."""
 
     def __init__(self, root):
         self.root, self.path, self.pipe = root, None, None
@@ -99,8 +133,11 @@ class _Pipe:
     def __call__(self, m: dict):
         from gmlx.image import api
 
-        if self.pipe is not None:
+        vae = m["files"].get("vae")
+        if self.pipe is not None and (vae is None
+                                      or self.pipe.vae is not None):
             return self.pipe
+        self.release()
         want = m["files"]["dit"]
         for p in image_dits(self.root, "h3_image"):
             if Path(p).name == want["name"] and \
@@ -110,7 +147,9 @@ class _Pipe:
             pytest.skip(f"{want['name']} is not under KQUANT_TEST_GGUF_DIR")
         if fx.file_identity(p)["sha256"] != want["sha256"]:
             pytest.fail(f"{p} is not the file the oracle read")
-        self.pipe = api.load(p, log=lambda *_: None)
+        self.pipe = api.load(p, vae=None if vae is None
+                             else _find(self.root, vae),
+                             log=lambda *_: None)
         assert self.pipe.variant == VARIANT
         self.path = p
         return self.pipe
@@ -122,20 +161,21 @@ def pipe(gguf_dir):
 
 
 def _run(pipe, arrays: dict, m: dict, noise=None, features=None,
-         kept: dict | None = None) -> tuple[dict, bool]:
+         kept: dict | None = None, cond=None) -> tuple[dict, bool]:
     """The relative L2 of the latents after each step against the oracle's
     fp32 latents, and whether they stayed finite after every step.
-    ``noise`` and ``features`` replace the fixture's, and ``kept`` takes
-    the latents."""
+    ``noise`` and ``features`` replace the fixture's, ``cond`` the
+    conditioning of its features, and ``kept`` takes the latents."""
     from gmlx.image import api
     from gmlx.image.conditioning import Conditioning
 
     size = m["inputs"]["size"]
     steps = m["inputs"]["steps"]
     want = {k: arrays[f"latents_step{k}"] for k in range(1, steps + 1)}
-    cond = Conditioning(mx.array(arrays["features"] if features is None
-                                 else features),
-                        f"check6 h3 image {size} plain")
+    if cond is None:
+        cond = Conditioning(mx.array(arrays["features"] if features is None
+                                     else features),
+                            f"check6 h3 image {size} plain")
     got: dict = {}
     finite = [True]
 
@@ -439,3 +479,104 @@ def test_check6_exact(pipe, request, monkeypatch, size):
     assert not over, over
     late = {k: v for k, v in forced.items() if v > bg.EXACT_TOL}
     assert not late, late
+
+
+def _edit_refs(arrays: dict, m: dict) -> tuple:
+    """gmlx's references of the edit's pictures."""
+    return he.prepare([arrays[f"picture_{i}"]
+                       for i in range(1, len(m["inputs"]["refs"]) + 1)])
+
+
+def test_the_edit_manifest_follows_the_rule():
+    """The committed edit manifest alone: the release's six steps at
+    guidance 1 at the gate size, picture 1's VAE copy the size of the run,
+    and every gate twice the gap beside it."""
+    m = _edit_manifest()
+    i, r, tol = m["inputs"], m["results"], m["tolerances"]
+    row = hi.FAMILY.sampling[VARIANT]
+    assert i["edit"] and i["size"] == i["gate_size"] == GATE_SIZE
+    assert i["steps"] == r["steps_run"] == row.steps
+    assert i["guidance"] == row.cfg == 1.0
+    assert i["refs"][0] == [GATE_SIZE, GATE_SIZE] and len(i["refs"]) >= 2
+    assert m["files"]["dit"]["name"] == hi.VARIANTS[next(iter(
+        hi.VARIANTS))].files[0]
+    by = r["bf16_vs_fp32_by_step"]
+    for k in range(1, i["steps"] + 1):
+        assert tol[f"step{k}_rel_l2"] == 2 * by[k - 1], k
+    assert "exact_rel_l2" not in tol
+
+
+def test_the_edit_takes_comfyuis_copies_and_its_vision_spans():
+    """gmlx's two copies of each picture are the oracle's, which are
+    MiniMaxH3ImageConditioning's, byte for byte; the edit takes picture
+    1's VAE size; and the oracle's token tags are 0 over a block of one
+    row per 32 x 32 pixels of each vision copy and its two markers."""
+    from gmlx.image.h3.pictures import spans_of
+
+    m = _edit_manifest()
+    arrays, _ = fixture(EDIT)
+    refs = _edit_refs(arrays, m)
+    for i, ref in enumerate(refs, 1):
+        assert np.array_equal(ref.pixels[..., :3], arrays[f"vae_copy_{i}"])
+        assert np.array_equal(ref.vision, arrays[f"vision_copy_{i}"])
+    assert [list(he.default_size(refs))] == m["inputs"]["refs"][:1]
+    spans = spans_of(arrays["text_tags"])
+    assert [list(sp) for sp in spans] == m["inputs"]["spans"]
+    assert [b - a for a, b in spans] == [
+        (r.vision.shape[0] // 32) * (r.vision.shape[1] // 32) + 2
+        for r in refs]
+
+
+def _edit_cond(p, arrays: dict, m: dict, own_draws: bool = False):
+    """The edit's conditioning: the oracle's features and image slots,
+    gmlx's references of the pictures on the oracle's draws (the family's
+    own with ``own_draws``), encoded by gmlx's VAE, and the noise of each
+    reference's rows."""
+    from gmlx.image import api
+    from gmlx.image.conditioning import Conditioning
+    from gmlx.image.h3.pictures import span_slots, spans_of
+
+    refs = _edit_refs(arrays, m)
+    if not own_draws:
+        refs = tuple(dataclasses.replace(r, noise=arrays[
+            f"ref_vae_noise_{i}"]) for i, r in enumerate(refs))
+    noise = tuple(mx.array(arrays[f"ref_noise_{i}"])
+                  for i in range(len(refs)))
+    cond = Conditioning(mx.array(arrays["features"]),
+                        f"check6 h3 image edit {own_draws}",
+                        image_slots=span_slots(spans_of(arrays["text_tags"])),
+                        refs=refs, ref_noise=noise)
+    return api.encode_references(p, cond)
+
+
+@pytest.mark.integration
+def test_check6_edit_at_1024(pipe, monkeypatch):
+    m = _edit_manifest()
+    arrays, _ = fixture(EDIT)
+    gates = _gates(m)
+    p = pipe(m)
+    cond = _edit_cond(p, arrays, m)
+    share = m["results"]["edit"]["draw_share_of_encode"]
+    enc = [fx.rel_l2(np.array(z), arrays[f"ref_latents_{i}"][0])
+           for i, z in enumerate(cond.ref_latents)]
+    print("h3 image check6 edit, each reference's latents: " + ", ".join(
+        f"{v:.2e} ({v / s:.3f} of its draws' share)"
+        for v, s in zip(enc, share)))
+    got, finite = _run(p, arrays, m, cond=cond)
+    print(_line(f"h3 image check6 edit {GATE_SIZE}", got, gates))
+    assert finite and sorted(got) == sorted(gates)
+    over = {k: (v, gates[k]) for k, v in got.items() if v > gates[k]}
+    assert not over, over
+    assert all(v <= s / 2 for v, s in zip(enc, share)), (enc, share)
+    own, _ = _run(p, arrays, m, cond=_edit_cond(p, arrays, m, True))
+    print(_line("h3 image check6 edit on the family's own seed 42 draws",
+                own, gates))
+    faults = {"without its references": dataclasses.replace(
+                  cond, refs=(), ref_latents=(), ref_hashes=(),
+                  ref_noise=()),
+              "vision rows read as text": dataclasses.replace(
+                  cond, image_slots=())}
+    for name, bad in faults.items():
+        miss, _ = _run(p, arrays, m, cond=bad)
+        print(_line(f"h3 image check6 edit {name}", miss, gates))
+        assert any(v > gates[k] for k, v in miss.items()), (name, miss)
