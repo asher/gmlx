@@ -83,6 +83,8 @@ COMFY = {
                  "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
                  "context": ("condition_proj.weight", 1), "time_scale": 0.001},
 }
+# The families whose status names their entry's int8 setting.
+INT8 = {"h3", "h3_image"}
 # The families whose DiT leaves out the blocks a step names.
 SKIPS = {"moss_image"}
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
@@ -359,7 +361,7 @@ class Handler(BaseHTTPRequestHandler):
             if parts[2] == "status":
                 f = COMFY[fam]
                 extra = {"audio": dict(f["audio"])} if "audio" in f else {}
-                if "audio" in f and st.status_int8:
+                if fam in INT8 and st.status_int8:
                     extra["int8"] = st.entry_int8
                 return self._json(200, {
                     "model": parts[1], "family": fam, "variant": variant, "resident": True,
@@ -628,6 +630,8 @@ class Handler(BaseHTTPRequestHandler):
         if missing:
             st.event(kind="step_missing", run=rid, missing=len(set(missing)))
             return self._err(409, "not held", missing=sorted(set(missing)))
+        if self._int8_refused(req):
+            return
         skip = req.get("skip")
         if skip is not None and (MODELS[req["model"]][0] not in SKIPS or not isinstance(skip, list)
                                  or not all(isinstance(i, int) for i in skip)):
@@ -691,6 +695,31 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.005)
         return True
 
+    def _int8_refused(self, req) -> bool:
+        """The server's refusals of a step's int8 setting, before it runs;
+        True when one was sent."""
+        int8 = req.get("int8")
+        lin = {"off": False, "attention": False, "linears": True, "all": True}
+        if int8 is not None and int8 not in lin:
+            self._err(400, f"int8 is off, attention, linears or all, not {int8!r}", param="int8")
+            return True
+        fam, variant, _s = MODELS[req["model"]]
+        if int8 is not None and fam not in INT8:
+            self._err(400, f"{req['model']!r} takes no int8 setting", param="int8")
+            return True
+        entry = self.st.entry_int8
+        if int8 is not None and lin[int8] != lin[entry]:
+            a, b = [v for v in lin if lin[v] == lin[entry]]
+            self._err(400, f"this model's entry loads its DiT at int8 {entry}, so a request "
+                      f"names int8 {a} or {b}, not {int8}; set the entry's defaults.int8 to "
+                      f"run {int8}", param="int8")
+            return True
+        if int8 in ("attention", "all") and variant == "fasth3":
+            self._err(400, "MiniMax-H3 fasth3 runs video sparse attention, and int8 attention "
+                      "applies to dense attention only", param="int8")
+            return True
+        return False
+
     def _av_step(self, tensors, req, t0, rid, run):
         """A stub AV step: one clip, its video (1, C, T, h, w) and audio
         (1, C, 2, T), one row with its cond alone, and the shifts."""
@@ -705,21 +734,9 @@ class Handler(BaseHTTPRequestHandler):
         shifts = req.get("shifts")
         if not isinstance(shifts, dict) or set(shifts) != {"video", "audio"}:
             return self._err(400, "an AV step names its shifts, video and audio")
-        # The server's refusals of an int8 setting, before the step runs.
         int8 = req.get("int8")
-        lin = {"off": False, "attention": False, "linears": True, "all": True}
-        if int8 is not None and int8 not in lin:
-            return self._err(400, f"int8 is off, attention, linears or all, not {int8!r}",
-                             param="int8")
-        entry = st.entry_int8
-        if int8 is not None and lin[int8] != lin[entry]:
-            a, b = [v for v in lin if lin[v] == lin[entry]]
-            return self._err(400, f"this model's entry loads its DiT at int8 {entry}, so a "
-                             f"request names int8 {a} or {b}, not {int8}; set the entry's "
-                             f"defaults.int8 to run {int8}", param="int8")
-        if int8 in ("attention", "all") and MODELS[req["model"]][1] == "fasth3":
-            return self._err(400, "MiniMax-H3 fasth3 runs video sparse attention, and int8 "
-                             "attention applies to dense attention only", param="int8")
+        if self._int8_refused(req):
+            return
         anchors = req.get("anchors") or []
         named = [a[k] for a in anchors for k in ("video", "noise", "audio") if a.get(k)]
         missing = [h for h in [rows[0]["cond"], *named] if h not in st.tensors]

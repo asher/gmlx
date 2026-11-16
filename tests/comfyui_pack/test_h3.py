@@ -544,6 +544,43 @@ class Int8(Base):
                          "set int8 to entry")
         self.loaded("off", ZID)
 
+    def image_steps(self, int8, steps=2):
+        """A stock sample of MiniMax-H3-Image from the loader at ``int8``,
+        and the int8 setting each of its image steps carried."""
+        model = self.loaded(int8, IID)
+        with torch.inference_mode():
+            comfy_nodes.common_ksampler(model, 1, steps, 1.0, "euler", "simple",
+                                        image_cond(self.client), image_cond(self.client),
+                                        image_latent())
+        return [e["int8"] for e in self.stub.events("step")]
+
+    @needs_h3_image
+    def test_minimax_h3_image_loads_at_each_int8_value_and_each_step_carries_it(self):
+        """MiniMax-H3-Image's status names its entry's setting, so the
+        loader takes a value past off, and each image step carries it."""
+        for entry, values in (("off", ("entry", "off", "attention")),
+                              ("linears", ("entry", "linears", "all"))):
+            self.stub.int8(entry)
+            for value in values:
+                with self.subTest(entry=entry, value=value):
+                    self.stub.reset()
+                    self.assertEqual(self.image_steps(value),
+                                     [None if value == "entry" else value] * 2)
+
+    @needs_h3_image
+    def test_a_minimax_h3_image_value_whose_linears_differ_is_refused_at_the_load(self):
+        for entry, value, a, b in (("off", "linears", "off", "attention"),
+                                   ("linears", "attention", "linears", "all")):
+            self.stub.int8(entry)
+            with self.subTest(entry=entry, value=value):
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    self.loaded(value, IID)
+                self.assertEqual(str(e.exception), (
+                    f"gmlx: this model's entry loads its DiT at int8 {entry}, so a request "
+                    f"names int8 {a} or {b}, not {value}; set the entry's defaults.int8 to "
+                    f"run {value}"))
+        self.assertEqual(self.stub.events("step"), [])
+
 
 class Interrupt(Base):
     """Cancel in ComfyUI during an AV step: the flag reaches the server
