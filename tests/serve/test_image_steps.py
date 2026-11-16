@@ -862,11 +862,125 @@ def test_an_h3_image_step_without_its_schedule_is_refused(host, hpipe):
     assert host.held == 0
 
 
+def test_an_h3_image_step_mixes_the_noise_its_row_names_into_each_reference(
+        host, hpipe):
+    """A row's reference latents run with the noise it names for each,
+    in the shape of the reference's rows, as ComfyUI's forward draws it,
+    and its image slots are the vision rows of its cond: the core step
+    of that conditioning bit for bit. Other noise gives another step, and
+    a row without the noise, with noise of another shape or with a slot
+    whose end marker is past the cond is refused."""
+    from oracle_fixture import committed_fixture
+
+    s = committed_fixture("check4_h3_image")[0]["grid"]
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    rng = np.random.default_rng(21)
+    feats = rng.standard_normal((1, 8, 40)).astype(np.float32)
+    a = rng.standard_normal((1, 24, 4, 4)).astype(np.float32)
+    b = rng.standard_normal((1, 24, 2, 6)).astype(np.float32)
+    na = rng.standard_normal((4, 96)).astype(np.float32)
+    nb = rng.standard_normal((3, 96)).astype(np.float32)
+    x = noise_from_seed(7, H3I_SHAPE)
+    t = np.float32(s[1]) * np.float32(1000)
+    slots = [2, 3, 4]
+
+    def row(noise, slots=slots):
+        return [{"cond": c.put(feats), "ref_latents": [c.put(a), c.put(b)],
+                 "ref_noise": [c.put(n) for n in noise],
+                 "image_slots": slots}]
+
+    def want(noise):
+        cond = api.Conditioning(
+            mx.array(feats[0]), "", ref_latents=(mx.array(a[0]),
+                                                 mx.array(b[0])),
+            image_slots=tuple(slots),
+            ref_noise=tuple(mx.array(n) for n in noise))
+        return _f3_velocity(hpipe, x, s[1], cond, s[2])
+
+    out = c.step("h3i", None, x, [t], row([na, nb]), sample_sigmas=s)
+    assert np.array_equal(out, want([na, nb]))
+    other = c.step("h3i", None, x, [t], row([na, nb * 2]), sample_sigmas=s)
+    assert np.array_equal(other, want([na, nb * 2]))
+    assert not np.array_equal(other, out)
+    # The noise names the references beside their latents.
+    r = row([na, nb])[0]
+    cond = _on_worker(lambda: steps.conditioning(r, steps.STATE.tensors,
+                                                 "h3_image"))
+    assert cond.ref_hashes == tuple(
+        f"{z}+{n}" for z, n in zip(r["ref_latents"], r["ref_noise"]))
+    bare = row([na, nb])
+    del bare[0]["ref_noise"]
+    for rows, match in (
+            (bare, "names the noise of each of its reference latents in "
+                   "ref_noise"),
+            (row([na, na]), r"ref_noise 1 is \(4, 96\), and the rows of "
+                            r"reference latents \(24, 2, 6\) take \(3, 96\)"),
+            (row([na]), "a row's ref_noise names 1 tensor and its "
+                        "ref_latents 2"),
+            (row([na, nb], [6, 7]), "image slot 7 and its end marker are "
+                                    "past the cond's 8 rows")):
+        with pytest.raises(StepsClientError, match=match) as e:
+            c.step("h3i", None, x, [t], rows, sample_sigmas=s)
+        assert e.value.status == 400
+    assert host.held == 0
+
+
+def test_a_step_of_a_family_without_noisy_references_takes_no_ref_noise():
+    with pytest.raises(steps.StepError, match="a flux3_klein row takes no "
+                       "ref_noise: its DiT mixes no noise into its "
+                       "references"):
+        steps._ref_noise("flux3_klein", [object()], [object()])
+    assert steps._ref_noise("flux3_klein", [], [object()]) == ()
+
+
+def test_an_h3_image_vae_encode_samples_with_the_noise_it_is_sent(
+        host, hpipe, monkeypatch):
+    """ComfyUI's MiniMax-H3-Image VAE samples an encode with the noise of
+    its seed: noise in the shape of the latents reaches the core encode
+    as a sample's, an encode without it takes the mean, and noise of
+    another shape is refused."""
+    pipe = dataclasses.replace(hpipe, vae=SimpleNamespace(
+        config=SimpleNamespace(in_channels=3, scale=16, latent_channels=24)))
+    _serve(host, "h3v", pipe)
+    seen = []
+    lat = np.random.default_rng(3).standard_normal(
+        (1, 24, 2, 3)).astype(np.float32)
+
+    def encode(p, img, **kw):
+        seen.append({k: np.array(v) if k == "noise" else v
+                     for k, v in kw.items()})
+        return mx.array(lat)
+    monkeypatch.setattr(api, "vae_encode", encode)
+    c = _client()
+    img = np.zeros((2, 32, 48, 3), np.float32)
+    noise = np.random.default_rng(4).standard_normal(
+        (2, 24, 2, 3)).astype(np.float32)
+    got, _, _ = c.container("vae/encode", {"image": img, "noise": noise},
+                            {"model": "h3v"})
+    assert got["latents"].shape == (2, 24, 2, 3)
+    assert [k["mode"] for k in seen] == ["sample", "sample"]
+    assert np.array_equal(np.concatenate([k["noise"] for k in seen]), noise)
+    seen.clear()
+    c.container("vae/encode", {"image": img[:1]}, {"model": "h3v"})
+    assert seen == [{}]
+    with pytest.raises(StepsClientError, match=r"takes noise \(2, 24, 2, 3\), "
+                       r"the shape of the latents of its image, not "
+                       r"\(2, 24, 3, 2\)") as e:
+        c.container("vae/encode", {"image": img,
+                                   "noise": noise.reshape(2, 24, 3, 2)},
+                    {"model": "h3v"})
+    assert e.value.status == 400
+    assert host.held == 0
+
+
 def test_the_h3_image_status_names_comfyuis_model_and_the_entrys_int8(
         host, hpipe, monkeypatch):
     """The pack builds ComfyUI's MiniMaxH3Image on latents of one frame
     and samples on the release's grid; the status names the int8 setting
-    the entry loads at, whose int8 linears the DiT's bytes count."""
+    the entry loads at, whose int8 linears the DiT's bytes count, and the
+    seed of the noise ComfyUI's VAE samples an encode with, the family's
+    for its references. The DiT takes reference latents."""
     from gmlx.image.families.h3_image import family as hi
 
     monkeypatch.setattr(steps, "family_of", lambda spec: (hi.FAMILY,
@@ -888,8 +1002,9 @@ def test_the_h3_image_status_names_comfyuis_model_and_the_entrys_int8(
                            "image_model": "minimax_h3_image"}
     assert st["latent"] == {"channels": 24, "stride": 16, "patch": 2,
                             "frames": 1}
-    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
-    assert not st["edit_capable"]
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model",
+                         "encode_seed": hi.FAMILY.ref_encode_seed}
+    assert hi.FAMILY.ref_encode_seed == 42 and st["edit_capable"]
     assert st["sampling"] == {"steps": 6, "cfg": 1.0, "shift": 1.0,
                               "sigmas": [float(v) for v in hi.PDD_SIGMAS],
                               "schedule": None, "neg_skip": []}
@@ -1790,6 +1905,32 @@ def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
         with pytest.raises(steps.StepError) as e:
             _on_worker(lambda im=im: steps.encode(served, "a", [im]))
         assert e.value.status == 400
+
+
+def test_an_h3_image_step_encode_takes_the_vision_copies_comfyui_gives(
+        monkeypatch):
+    """ComfyUI's MiniMaxH3ImageConditioning gives its encoder the vision
+    copy of each image, whose size MiniMax-H3-Image's rules keep for both
+    copies, and its forward reads the vision rows by their tags: the
+    encode answers their spans with their markers beside the slots. Past
+    16 images the encode is refused."""
+    served, seen, _ = _stub_step_encode(monkeypatch)
+    served.pipe.family = get_family("h3_image")
+    a = np.full((1024, 1376, 3), 7, np.uint8)
+    b = np.full((2048, 1024, 3), 9, np.uint8)
+    got = _on_worker(lambda: steps.encode(served, "a", [a, b],
+                                          ref_latents=False))
+    refs = seen[0]
+    assert [r.pixels.shape[:2] for r in refs] == [(1024, 1376), (2048, 1024)]
+    assert [r.vision.shape[:2] for r in refs] == [(1024, 1376), (2048, 1024)]
+    assert np.all(refs[0].pixels[..., :3] == 7) and np.all(refs[1].vision == 9)
+    n = got["image_slots"]
+    assert n == list(range(2, 2 + 32 * 43 + 64 * 32))
+    assert got["spans"] == [[1, 3 + 32 * 43 + 64 * 32]]
+    with pytest.raises(steps.StepError, match="at most 16 reference images, "
+                       "and the request has 17") as e:
+        _on_worker(lambda: steps.encode(served, "a", [a[:64, :64]] * 20))
+    assert e.value.status == 400
 
 
 @pytest.mark.parametrize("fam, title", [("flux2_klein", "FLUX.2 klein"),

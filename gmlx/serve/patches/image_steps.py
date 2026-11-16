@@ -1655,13 +1655,14 @@ async def vae_encode(request: Request):
                         "[0, 1]")
     if img.shape[0] > MAX_ROWS:
         raise StepError(413, f"a VAE pass takes at most {MAX_ROWS} images")
+    noise = tensors.get("noise")
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
         _image_only(served, "vae/encode")
         _check_size(hold, int(img.shape[2]), int(img.shape[1]),
                     what="a VAE encode", init=True, phase="init")
-        lat = await _on_worker(do_encode, served, img, on=served)
+        lat = await _on_worker(do_encode, served, img, noise, on=served)
     finally:
         hold.release()
     return _container({"latents": lat})

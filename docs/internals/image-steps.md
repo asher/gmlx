@@ -96,6 +96,22 @@ with sides a multiple of 32, and an image outside that area gets 400. An
 encode with `refs: false` leaves out the VAE latents of its reference
 images, for a client that encodes them with a VAE of its own.
 
+MiniMax-H3-Image takes up to 16 reference images. Its encode takes each
+image at the size of its vision copy, as ComfyUI's
+`MiniMaxH3ImageConditioning` gives its encoder, and answers `spans`, the
+[start, stop) rows of each picture's vision block with its markers,
+beside `image_slots`, the block's rows without them. A step row on it
+names those rows in `image_slots`, and names in `ref_noise` one tensor
+for each of its reference latents: the noise its DiT mixes into that
+reference's rows, (h / 2 x w / 2, 96) float32 for latents (24, h, w),
+which ComfyUI's forward draws from a CPU generator restarted at the
+run's seed for each reference. A row with reference latents and no
+`ref_noise`, noise of another shape, or an image slot whose end marker
+is past the cond gets 400. Its status names under `vae.encode_seed` the
+seed ComfyUI's VAE samples an encode with, 42, and a `vae/encode` with
+`noise` in the shape of the latents samples with that noise instead of
+taking the mean. A server whose features list `ref_noise` takes both.
+
 An encode that upsamples the prompt returns the caption as
 `revised_prompt` and its conditioning as `cond`, and the prompt as typed
 as `cond_typed`. A client that adds reference images after the encode,
