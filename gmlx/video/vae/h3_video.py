@@ -174,15 +174,16 @@ class H3VideoVAE(nn.Module):
         """Raw pixels of one run of latents (B, T, H, W, C), the decoded
         ``frames`` of it alone. Each tile blends with the rows above as
         they were blended and with the tile to its left as it was
-        blended."""
+        blended, both taken from the blended tiles: a read of the canvas
+        holds its buffer until the read's command buffer completes, and a
+        write before then copies the canvas."""
         sp = self.cfg.spatial
         h, w = z.shape[2] * sp, z.shape[3] * sp
         ys, ylen, yo = split_tiles(h, TILE, MIN_OVERLAP, sp)
         xs, xlen, xo = split_tiles(w, TILE, MIN_OVERLAP, sp)
-        canvas = None
+        canvas = above = None
         for i, (y, yl) in enumerate(zip(ys, ylen)):
-            above = None if canvas is None else owned(
-                canvas[:, :, y:y + yo[i - 1]])
+            left, strip = None, []
             for j, (x, xl) in enumerate(zip(xs, xlen)):
                 tile = self._tile(z[:, :, y // sp:(y + yl) // sp,
                                     x // sp:(x + xl) // sp])[:, frames]
@@ -191,13 +192,18 @@ class H3VideoVAE(nn.Module):
                 if above is not None:
                     tile = blend(above[:, :, :, x:x + xl], tile, yo[i - 1],
                                  axis=2)
-                if j > 0:
-                    tile = blend(owned(canvas[:, :, y:y + yl,
-                                              x:x + xo[j - 1]]),
-                                 tile, xo[j - 1], axis=3)
+                if left is not None:
+                    tile = blend(left, tile, xo[j - 1], axis=3)
                 canvas[:, :, y:y + yl, x:x + xl] = tile
-                del tile
                 mx.eval(canvas)
+                if i + 1 < len(ys):
+                    end = xs[j + 1] - x if j + 1 < len(xs) else xl
+                    strip.append(owned(tile[:, :, yl - yo[i]:, :end]))
+                left = (owned(tile[:, :, :, xl - xo[j]:])
+                        if j + 1 < len(xs) else None)
+                del tile
+            above = mx.concatenate(strip, axis=3) if strip else None
+            del strip
         return canvas
 
     def _finish(self, raw: mx.array) -> mx.array:

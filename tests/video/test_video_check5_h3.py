@@ -814,7 +814,9 @@ def test_taeh3_holds_one_run_at_a_time(tiny, settled_evals):
 def test_the_video_decoder_holds_one_run_canvas_at_a_time(tiny,
                                                            settled_evals):
     """Three runs of 2x3 tiles peak under 2.7 run canvases over one
-    tile's peak, at 2.32, and between yields hold under half a canvas: the
+    tile's peak, at 2.48 with the strip of the row above and the one the
+    row builds for the row below, and between yields hold under half a
+    canvas: the
     tail the next run fades from, and at the last run the tail's finished
     frames. The decoder evaluates one block at a time, so a tile peaks at
     0.83 canvases and the decode peaks as a run finishes. A slice that
