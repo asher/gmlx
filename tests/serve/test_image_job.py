@@ -89,7 +89,8 @@ def test_the_job_makes_room_for_the_texts_it_encodes(monkeypatch, fields,
     class Room(Exception):
         pass
 
-    def make_room(served, cfg, size, refs, init, budget, prompts=()):
+    def make_room(served, cfg, size, refs, init, budget, prompts=(),
+                  int8=None):
         seen.append(list(prompts))
         raise Room
 
@@ -109,6 +110,38 @@ def test_each_image_of_a_request_takes_the_next_seed(stubs):
                       stop=threading.Event())
     assert stubs.seeds == [5, 6] and out.seeds == [5, 6]
     assert len(out.images) == 2 and out.images[0] != out.images[1]
+
+
+def test_each_request_runs_its_own_int8_attention(stubs, monkeypatch):
+    """A request that names int8 attention runs its steps with it and
+    records it in the PNG, and the next request, naming none, runs the
+    entry's dense attention again."""
+    import io
+
+    import mlx_kquant as kq
+    from PIL import Image
+
+    for name in ("sdpa_qk8_inputs", "sdpa_qk8"):
+        monkeypatch.setattr(kq, name, getattr(kq, name, lambda *a, **k: None),
+                            raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: True)
+    served = _served()
+    served.pipe.family, served.pipe.variant = get_family("h3_image"), "pruned"
+    served.pipe.dit.attention = "dense"
+    served.plan.int8 = "off"
+    seen, real = [], api.sample
+    monkeypatch.setattr(api, "sample", lambda pipe, cond, **kw: (
+        seen.append(pipe.dit.attention), real(pipe, cond, **kw))[1])
+    metas = []
+    for fields in ({"int8": "attention"}, {}):
+        req = svc.parse_request("generations", {"prompt": "x", **fields})
+        svc.check_family(req, served)
+        out = svc.run_job(served, req, size=(64, 64), budget=None,
+                          stop=threading.Event(), embed_metadata=True)
+        with Image.open(io.BytesIO(out.images[0])) as im:
+            metas.append(json.loads(im.text["gmlx"]))
+    assert seen == ["int8", "dense"]
+    assert metas[0]["int8"] == "attention" and "int8" not in metas[1]
 
 
 def _flux3_served():

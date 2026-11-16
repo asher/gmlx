@@ -387,13 +387,15 @@ def _image_only(served, what: str) -> None:
 
 
 def _check_size(hold, width: int, height: int, *, what: str,
-                cfg: float = 1.0, init: bool = False, phase: str):
+                cfg: float = 1.0, init: bool = False, phase: str,
+                int8: str | None = None):
     """Refuse a step or a VAE pass over the size limits of the entry's
     family (the image routes' where it sets none) with 413, a step at a
     size the family refuses otherwise with 400, and one whose memory plan
     does not fit beside the models loaded with 400. ``phase`` is the phase
     of the plan the call runs, which alone counts the held conditioning
-    states. Returns the budget it planned against."""
+    states. ``int8`` is a step's int8 setting, else the entry's. Returns
+    the budget it planned against."""
     from gmlx.image.registry import limits_text, size_limits, size_refusal
 
     from ..image_service import size_fits
@@ -411,7 +413,7 @@ def _check_size(hold, width: int, height: int, *, what: str,
     budget_fn = getattr(SETTINGS.host, "budget", None)
     budget = budget_fn(hold) if budget_fn is not None else None
     if not size_fits(_served(hold), width, height, budget, cfg=cfg,
-                     init=init, held_in=(phase,)):
+                     init=init, held_in=(phase,), int8=int8):
         raise StepError(400, f"{what} of {width}x{height} pixels does not "
                         "fit in memory beside the models now loaded")
     return budget
@@ -952,6 +954,12 @@ async def step(request: Request):
         raise StepError(413, f"a step takes at most {MAX_ROWS} rows")
     if tuple(t_w.shape) not in ((len(rows),), (1,), ()):
         raise StepError(400, "timestep holds one value or one per row")
+    from ..image_service import parse_int8, request_int8
+
+    try:
+        sent = parse_int8(fields.get("int8"))
+    except ValueError as e:
+        raise StepError(400, str(e), param="int8") from None
     missing = [h for r in rows for h in row_hashes(r)
                if h not in STATE.tensors]
     model = fields.get("model") or (run.model if run else None)
@@ -960,10 +968,14 @@ async def step(request: Request):
     try:
         served = _served(hold)
         _image_only(served, "a step on x")
+        try:
+            int8 = request_int8(served, sent)
+        except ValueError as e:
+            raise StepError(400, str(e), param="int8") from None
         w_px, h_px = _px(served, "latent", *x_w.shape[2:])
         guided = 2.0 if len(rows) > 1 else 1.0
         budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided,
-                             phase="denoise")
+                             phase="denoise", int8=int8)
         _check_refs(served, rows)
         fam = served.pipe.family.name
         conv = CONVENTIONS.get(fields.get("convention", "comfy"), {}).get(fam)
@@ -1044,11 +1056,12 @@ async def step(request: Request):
 
             from gmlx.image import api, memfit
 
-            from ..image_service import ensure_dit, size_fits
+            from ..image_service import ensure_dit, set_int8, size_fits
             from ..image_steps import FACTORS, _host, conditioning
 
             # A staged entry's encode let the DiT and the VAE go.
             ensure_dit(served)
+            set_int8(served, int8)
             tid = fields.get("patch_table")
             if pool is not None and table is not None \
                     and not _held(served.pipe, table):
@@ -1079,7 +1092,7 @@ async def step(request: Request):
                           joined=parts and conv.time != "reference",
                           ref_cache=run.ref_cache if ref_cache else None,
                           building=sum(building.values()),
-                          held_in=("denoise",), hint=True)
+                          held_in=("denoise",), hint=True, int8=int8)
             except memfit.ImageMemoryError as e:
                 raise StepError(400, f"a step of {w_px}x{h_px} pixels with "
                                 "the references of its rows does not fit in "

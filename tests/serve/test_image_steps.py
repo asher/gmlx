@@ -364,6 +364,28 @@ def test_a_step_names_every_hash_the_server_lacks_in_a_409(host):
     assert host.held == 0
 
 
+def test_a_step_runs_only_an_int8_setting_its_model_takes(host):
+    """A step names int8 off on any model; a setting off the four, or one
+    whose part its family does not run, is refused before the step."""
+    c = _client()
+    feats = _features()
+    x, t = np.zeros(SHAPE, np.float32), np.array([0.5], np.float32)
+    out, _, _ = c.container("step", {"x": x, "timestep": t},
+                         {"model": "zit", "rows": _rows(c, feats),
+                          "int8": "off"})
+    assert out["out"].shape == SHAPE
+    for int8, why in (("fast", "int8 is off, attention, linears or all, "
+                       "not 'fast'"),
+                      ("attention", "gmlx runs Z-Image with dense attention "
+                       "only")):
+        with pytest.raises(StepsClientError) as e:
+            c.container("step", {"x": x, "timestep": t},
+                        {"model": "zit", "rows": _rows(c, feats),
+                         "int8": int8})
+        assert why in str(e.value)
+    assert host.held == 0
+
+
 def test_the_contract_loop_gives_the_latents_of_sample(host, pipe):
     c = _client()
     feats = _features()
@@ -1804,7 +1826,8 @@ def test_a_vae_encode_is_planned_with_its_image_and_a_decode_without(
     seen = []
     monkeypatch.setattr(image_service, "size_fits",
                         lambda served, w, h, budget, cfg=1.0, init=False,
-                        held_in=None: seen.append((init, held_in)) or False)
+                        held_in=None, int8=None:
+                        seen.append((init, held_in)) or False)
     for path, tensors in (
             ("vae/encode", {"image": np.zeros((1, 32, 48, 3), np.float32)}),
             ("vae/decode", {"latents": np.zeros((1, 4, 4, 6), np.float32)})):
@@ -2086,7 +2109,7 @@ def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
 
     def size_fits(served, w, h, budget, *, cfg=1.0, init=False, conds=None,
                   patch_table=None, joined=False, ref_cache=None, building=0,
-                  held_in=None, hint=False):
+                  held_in=None, hint=False, int8=None):
         seen.append(dict(cfg=cfg, conds=conds, patch_table=patch_table))
         if conds is not None:
             raise memfit.ImageMemoryError("refused", None, "a hint")

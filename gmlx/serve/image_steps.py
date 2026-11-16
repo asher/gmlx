@@ -887,9 +887,15 @@ def status(spec, resident: bool, plan=None) -> dict:
         return video_status(spec, resident, plan)
     fam, variant = family_of(spec)
     facts = COMFY[fam.name]
-    from gmlx.image.api import _header_bytes
+    from gmlx.image.api import _header_bytes, _int8_bytes
 
-    mem = {"dit_bytes": _header_bytes(spec.path, "dit"),
+    from .image_service import entry_int8
+
+    # The entry's int8 setting, on a family that takes one.
+    int8 = (entry_int8(spec) if fam.int8_linears or fam.int8_attention
+            else None)
+    mem = {"dit_bytes": (_header_bytes(spec.path, "dit")
+                         + (_int8_bytes(spec.path, int8) if int8 else 0)),
            "encoder_bytes": (_header_bytes(spec.encoder, "encoder")
                              if spec.encoder else 0),
            "vae_bytes": _header_bytes(spec.vae, "vae")}
@@ -899,7 +905,7 @@ def status(spec, resident: bool, plan=None) -> dict:
         mem["resident_bytes"] = plan.footprint if resident else 0
     act = image_activation(fam.name)
     return {"model": spec.id, "family": fam.name, "variant": variant,
-            "resident": resident,
+            "resident": resident, **({"int8": int8} if int8 else {}),
             "comfy": {"model_class": facts["model_class"],
                       "image_model": facts["image_model"]},
             "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),

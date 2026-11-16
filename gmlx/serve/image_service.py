@@ -64,6 +64,53 @@ class EntryPlan:
     mmproj_bytes: int = 0
     load_parts: tuple | None = None   # see memfit.plan_memory, no tower
     tower_parts: tuple | None = None  # the same with the vision tower
+    int8: str = "off"               # the entry's defaults.int8
+
+
+def entry_int8(spec) -> str:
+    """An entry's int8 setting: its ``defaults.int8``, else off."""
+    return (spec.defaults or {}).get("int8") or "off"
+
+
+def parse_int8(value) -> str | None:
+    """A request's ``int8`` field: None when it is not sent, else one of
+    ``int8.INT8``. Raises ValueError for any other value."""
+    from gmlx.image.int8 import int8_parts
+
+    if value is not None:
+        int8_parts(value)
+    return value
+
+
+def request_int8(served, sent: str | None) -> str:
+    """The int8 setting a request or a step on ``served`` runs: ``sent``,
+    else the entry's. Raises ValueError for a value whose linears differ
+    from the entry's, or that the family, this install or Mac does not
+    run."""
+    from gmlx.image.int8 import int8_request_refusal
+    from gmlx.image.registry import int8_refusal
+
+    entry = getattr(getattr(served, "plan", None), "int8", "off")
+    if sent is None:
+        return entry
+    pipe = served.pipe
+    why = (int8_request_refusal(entry, sent)
+           or int8_refusal(pipe.family, pipe.variant, sent))
+    if why:
+        raise ValueError(why)
+    return sent
+
+
+def set_int8(served, int8: str | None) -> None:
+    """Set the loaded DiT's attention for one request or step from
+    ``int8``, else the entry's setting, on a family with int8 attention.
+    Each request and step sets it, so none runs at the attention the last
+    one left."""
+    from gmlx.image.int8 import int8_parts
+
+    if getattr(served.pipe.family, "int8_attention", False):
+        served.pipe.dit.attention = int8_parts(
+            int8 or getattr(served.plan, "int8", "off"))[0]
 
 
 @dataclass(frozen=True)
@@ -280,13 +327,16 @@ def fit_floored(price, budget):
 def _load_figures(spec, act) -> dict:
     """What the loads of an entry's parts hold over what stays resident,
     from their headers, as the image command counts them: the 16-bit
-    cast of the DiT, and each part loaded with the others or alone."""
-    from gmlx.commands.image_preflight import dit_transient, load_transient
+    cast of the DiT or its int8 conversion at the entry's int8 setting,
+    and each part loaded with the others or alone."""
+    from gmlx.commands.image_preflight import (dit_transient, int8_transient,
+                                               load_transient)
 
     enc, vae, tower = spec.encoder, spec.vae, None
     if enc is not None:
         tower = spec.encoder_mmproj
-    cast = dit_transient(str(spec.path), act.dit)
+    cast = max(dit_transient(str(spec.path), act.dit),
+               int8_transient(str(spec.path), entry_int8(spec)))
     later = max(load_transient(None, vae, None), cast)
     return {"peak": max(load_transient(enc, vae, tower), cast),
             "text_peak": max(load_transient(enc, vae, None), cast),
@@ -300,8 +350,8 @@ def entry_plan(spec) -> EntryPlan:
     model, a family the config does not name, and an entry that cannot
     hold one image of its default size in the working budget."""
     from gmlx.image import memfit
-    from gmlx.image.api import (_header_bytes, check_sampling, check_steps,
-                                sampler_defaults)
+    from gmlx.image.api import (_header_bytes, _int8_bytes, check_sampling,
+                                check_steps, sampler_defaults)
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
     from gmlx.video.memfit import gib
@@ -322,6 +372,15 @@ def entry_plan(spec) -> EntryPlan:
     why = fam.variant_needed(ident.variant)
     if why:
         raise ImageModelError(f"image model {spec.id!r}: {why}")
+    from gmlx.image.int8 import int8_parts
+    from gmlx.image.registry import int8_fallback, int8_refusal
+
+    int8 = entry_int8(spec)
+    why = int8_refusal(fam, ident.variant, int8)
+    if why:
+        raise ImageModelError(f"image model {spec.id!r}: defaults.int8: "
+                              f"{why}")
+    attention, linears = int8_parts(int8)
     check_parts(spec, fam)
     steps = (spec.defaults or {}).get("steps")
     if steps is not None:
@@ -353,7 +412,7 @@ def entry_plan(spec) -> EntryPlan:
     tensor_cache, _cap = cache_bytes()
     own = [2 * os.path.getsize(p) for p, _ in spec.adapters]
     caches = 2 * tensor_cache + _CACHE_BYTES["steps"]
-    dit = _header_bytes(spec.path, "dit")
+    dit = _header_bytes(spec.path, "dit") + _int8_bytes(spec.path, int8)
     vae = _header_bytes(spec.vae, "vae")
     enc = mmproj = 0
     if spec.encoder is not None:
@@ -367,7 +426,7 @@ def entry_plan(spec) -> EntryPlan:
              if _CACHE_BYTES["steps"] else 0)
 
     def common(share: float, cond: int) -> dict:
-        return dict(adapters=own,
+        return dict(adapters=own, attention=attention, linears=linears,
                     family=fam.name, height=height, width=width, cfg=cfg,
                     dtype=act.dit, vae_dtype=act.vae, overcommit=True,
                     cache_bytes=int(caches * share)
@@ -423,6 +482,8 @@ def entry_plan(spec) -> EntryPlan:
         assert budget is not None
         need = price(mode, 0.0)
         hint = "use a smaller quant of the DiT or of the text encoder"
+        if linears == "int8":
+            hint += f", or defaults.int8 {int8_fallback(fam)}"
         if spec.encoder_release == "never" and enc and fitted(
                 mode_of("auto")) is not None:
             hint = "set encoder_release: auto"
@@ -439,7 +500,7 @@ def entry_plan(spec) -> EntryPlan:
                      tensor_floor=floor,
                      encoder_bytes=int(enc), mmproj_bytes=int(mmproj),
                      load_parts=load["parts"],
-                     tower_parts=load["tower_parts"])
+                     tower_parts=load["tower_parts"], int8=int8)
 
 
 def check_parts(spec, fam) -> None:
@@ -485,7 +546,8 @@ def _load(spec) -> ServedImage:
     owned = spec.encoder if not plan.staged else None
     pipe = api.load(spec.path, text_encoder=owned, vae=spec.vae,
                     mmproj=spec.encoder_mmproj if owned else None,
-                    memory="off", variant=spec.variant, log=_log_line)
+                    memory="off", variant=spec.variant, int8=plan.int8,
+                    log=_log_line)
     served = ServedImage(pipe=pipe, spec=spec, plan=plan,
                          facts=dit_facts(pipe))
     try:
@@ -647,6 +709,8 @@ class ImageRequest:
     # typed.
     prompt_upsampling: bool | None = None
     revised_prompt: str | None = None
+    # The request's int8 setting, None for the entry's.
+    int8: str | None = None
 
 
 def default_model_field(model) -> str:
@@ -858,6 +922,10 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
     field = body_surrogate(fields)
     if field is not None:
         raise _bad(surrogate_message(field), field)
+    try:
+        int8 = parse_int8(fields.get("int8"))
+    except ValueError as e:
+        raise _bad(str(e), "int8") from None
     q = fields.get("quality")
     q = _QUALITY_ALIASES.get(str(q).strip().lower(), q) if q else q
     model = default_model_field(fields.get("model"))
@@ -885,6 +953,7 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
         partial_images=_int(fields, "partial_images", 0, MAX_PARTIALS) or 0,
         adapters=_adapters(fields.get("adapters")),
         prompt_upsampling=_opt_bool(fields, "prompt_upsampling"),
+        int8=int8,
     )
     if route != "generations" and req.prompt_upsampling:
         # A prompt with reference images runs as typed.
@@ -1259,6 +1328,10 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     if n is not None and req.steps is not None and req.steps != n:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
+    try:
+        request_int8(served, req.int8)
+    except ValueError as e:
+        raise _bad(f"int8: {e}", "int8") from None
     flow_map = served.facts.flow_map
     if flow_map or pipe.variant in fam.unguided:
         try:
@@ -1337,12 +1410,16 @@ def _prepare_refs(req: ImageRequest, served: ServedImage) -> tuple:
 
 
 def _fit_args(pipe, served: ServedImage, budget, cfg: float,
-              tower: bool = False) -> dict:
+              tower: bool = False, int8: str | None = None) -> dict:
     """The plan_memory arguments of a request on ``served``. A staged
     entry's request loads its encoder alone, with the vision tower when
     ``tower`` says it has reference images. The conditioning states the
     pipeline holds are other conditionings' until the request names its
-    own."""
+    own. ``int8`` is the request's int8 setting, else the entry's."""
+    from gmlx.image.int8 import int8_parts
+
+    attention, linears = int8_parts(
+        int8 or getattr(served.plan, "int8", "off"))
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = served.facts.act_dtype
@@ -1367,11 +1444,13 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
         vae_dtype=served.facts.vae_dtype,
         encoder_owned=bool(resident and enc.owned
                            and not served.plan.keep_encoder),
+        attention=attention, linears=linears,
         cache_bytes=caches, budget=budget, overcommit=False) | staged | states
 
 
 def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
-               init: bool, budget, prompts=()) -> None:
+               init: bool, budget, prompts=(), int8: str | None = None
+               ) -> None:
     """Shed the conditioning states a request does not fit beside before
     its encode, as few as its plan names: those of finished work first,
     then those of the step routes' runs, and those of its own
@@ -1391,7 +1470,8 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
         # a borrowed one's last handle keep.
         own = {api._cond_key(pipe, p, refs, enc) for p in prompts}
     sizes = [(r.height, r.width) for r in refs]
-    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes))
+    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes),
+                     int8=int8)
     args.update(prompt_terms(pipe.family, prompts, sizes))
     args["prefix_other"] -= sum(pipe.captions.nbytes(k) for k in
                                 pipe.captions.keys(lambda k: k[0] in own))
@@ -1435,7 +1515,8 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
         # At the size the job runs them, which may be far from the raw
         # image's.
         refs = [(r.height, r.width) for r in _prepare_refs(req, served)]
-    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, refs))
+    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, refs),
+                     int8=req.int8)
     plan_memory = memfit.plan_memory
     init = bool(req.images) and (pipe.family.edit is None
                                  or req.mask is not None)
@@ -1541,7 +1622,8 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 def size_fits(served: ServedImage, width: int, height: int, budget, *,
               cfg: float = 1.0, init: bool = False, conds=None,
               patch_table=None, joined: bool = False, ref_cache=None,
-              building: int = 0, held_in=None, hint: bool = False) -> bool:
+              building: int = 0, held_in=None, hint: bool = False,
+              int8: str | None = None) -> bool:
     """Whether the memory plan of an image of ``width`` x ``height`` on
     ``served`` fits ``budget``, as the image routes plan a request. The
     step routes ask it before a step, a VAE decode and a VAE encode, and
@@ -1553,12 +1635,13 @@ def size_fits(served: ServedImage, width: int, height: int, budget, *,
     the step keeps, on a family whose row does not count them itself. A
     plan that does not fit with the held states sheds the bytes it names,
     the states of the step's own conditionings last. With ``hint`` a plan
-    that does not fit raises its ImageMemoryError, which names what fits."""
+    that does not fit raises its ImageMemoryError, which names what fits.
+    ``int8`` is the step's int8 setting, else the entry's."""
     from gmlx.image import api, memfit
 
     if budget is None:
         return True
-    args = _fit_args(served.pipe, served, budget, cfg)
+    args = _fit_args(served.pipe, served, budget, cfg, int8=int8)
     if conds:
         args.update(api.plan_terms(served.pipe, conds, height=int(height),
                                    width=int(width), patch_table=patch_table,
@@ -1642,7 +1725,8 @@ def ensure_dit(served: ServedImage) -> None:
 
         act = image_activation(pipe.family.name)
         pipe.dit, _ = load_dit(str(served.spec.path), act_dtype=act.dit,
-                               variant=served.spec.variant, log=_log_line)
+                               variant=served.spec.variant, log=_log_line,
+                               int8=getattr(served.plan, "int8", "off"))
         install.rewrap(pipe)
     ensure_vae(served)
 
@@ -2185,11 +2269,13 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
         served, req.adapters, model_dirs,
         turn=book.pairs if book.pool is not None else None)
     _make_room(served, cfg, size, refs, init is not None, budget,
-               [text] + ([] if neg_text is None else [neg_text]))
+               [text] + ([] if neg_text is None else [neg_text]),
+               int8=req.int8)
     t0 = time.perf_counter()
     cond, neg = _encode(served, text, neg_text, refs, borrow)
     # A staged entry's encode let the DiT and the VAE go.
     ensure_dit(served)
+    set_int8(served, req.int8)
     # The factors the forward builds, after the encode's drop.
     book.table(table)
     plan = api.plan_request(
@@ -2239,6 +2325,9 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
                 "adapters": adapters}
         if req.revised_prompt:
             meta["revised_prompt"] = req.revised_prompt
+        int8 = req.int8 or getattr(served.plan, "int8", "off")
+        if int8 != "off":
+            meta["int8"] = int8
 
     def finish(x) -> np.ndarray:
         from gmlx.commands.image import to_uint8

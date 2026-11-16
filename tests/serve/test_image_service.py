@@ -392,6 +392,108 @@ def test_a_limited_family_holds_the_default_size_to_its_limits(
         image_service.entry_plan(_spec(id="h3", defaults={"size": "512x512"}))
 
 
+def _int8_kernels(monkeypatch) -> None:
+    """An mlx-kquant with the int8 ops on a GPU with NAX units, so a test
+    does not depend on the machine's kq."""
+    import mlx_kquant as kq
+
+    for name in ("sdpa_qk8_inputs", "sdpa_qk8", "int8_quantize_rows",
+                 "int8_matmul"):
+        monkeypatch.setattr(kq, name, getattr(kq, name, lambda *a, **k: None),
+                            raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: True)
+
+
+def test_an_entry_prices_and_loads_at_its_int8_setting(plan_stubs,
+                                                       monkeypatch):
+    """An H3-Image entry's defaults.int8 prices the int8 DiT and each
+    step's int8 rows, and the plan carries the setting the load takes. A
+    family without int8 refuses it by the key."""
+    from gmlx.image import api, loader, memfit
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    _int8_kernels(monkeypatch)
+    monkeypatch.setattr(api, "_int8_bytes", lambda path, int8: (
+        7 if int8 in ("linears", "all") else 0))
+    seen, real = [], memfit.plan_memory
+    monkeypatch.setattr(memfit, "plan_memory", lambda dit, *a, **kw: (
+        seen.append((dit, kw["attention"], kw["linears"])),
+        real(dit, *a, **kw))[1])
+    with pytest.raises(ImageModelError) as e:
+        image_service.entry_plan(_spec(defaults={"int8": "attention"}))
+    assert str(e.value) == ("image model 'zit': defaults.int8: gmlx runs "
+                            "Z-Image with dense attention only")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        get_family("h3_image"), "pruned"))
+    for int8, want in (("all", (8, "int8", "int8")),
+                       ("attention", (1, "int8", "file")),
+                       (None, (1, "dense", "file"))):
+        seen.clear()
+        defaults = {} if int8 is None else {"int8": int8}
+        plan = image_service.entry_plan(_spec(id="h3", defaults=defaults))
+        assert plan.int8 == (int8 or "off")
+        assert set(seen) == {want}, int8
+
+
+def test_a_request_changes_the_attention_alone(monkeypatch):
+    """A request or a step may name the int8 settings whose linears match
+    the entry's loaded DiT, on a family that runs them, and each sets the
+    DiT's attention for itself: one that names none runs the entry's."""
+    from gmlx.image.registry import get_family
+
+    _int8_kernels(monkeypatch)
+    h3, z = get_family("h3_image"), get_family("z_image")
+    dit = SimpleNamespace(attention="dense")
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(family=h3, variant="pruned", dit=dit),
+        plan=SimpleNamespace(int8="off"))
+    pick = image_service.request_int8
+    assert pick(served, None) == "off"
+    assert pick(served, "attention") == "attention"
+    with pytest.raises(ValueError) as e:
+        pick(served, "linears")
+    assert str(e.value) == (
+        "this model's entry loads its DiT at int8 off, so a request names "
+        "int8 off or attention, not linears; set the entry's defaults.int8 "
+        "to run linears")
+    served.plan.int8 = "linears"
+    assert pick(served, None) == "linears" and pick(served, "all") == "all"
+    with pytest.raises(ValueError, match="not off;"):
+        pick(served, "off")
+    zdit = SimpleNamespace()
+    zserved = SimpleNamespace(
+        pipe=SimpleNamespace(family=z, variant="turbo", dit=zdit),
+        plan=SimpleNamespace(int8="off"))
+    with pytest.raises(ValueError) as e:
+        pick(zserved, "attention")
+    assert str(e.value) == "gmlx runs Z-Image with dense attention only"
+    for plan_int8, sent, want in (("off", "attention", "int8"),
+                                  ("off", None, "dense"),
+                                  ("all", None, "int8"),
+                                  ("all", "linears", "dense")):
+        served.plan.int8 = plan_int8
+        image_service.set_int8(served, sent)
+        assert dit.attention == want, (plan_int8, sent)
+    image_service.set_int8(zserved, None)
+    assert vars(zdit) == {}
+
+
+def test_a_request_int8_is_one_of_the_four_settings():
+    req = image_service.parse_request("generations", {"prompt": "x",
+                                                      "int8": "attention"})
+    assert req.int8 == "attention"
+    assert image_service.parse_request("generations",
+                                       {"prompt": "x"}).int8 is None
+    for bad in ("fast", ["off"], 8):
+        with pytest.raises(image_service.ImageRequestError) as e:
+            image_service.parse_request("generations", {"prompt": "x",
+                                                        "int8": bad})
+        assert (e.value.status, e.value.param) == (400, "int8")
+        assert str(e.value) == (f"int8 is off, attention, linears or all, "
+                                f"not {bad!r}")
+
+
 def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
     from gmlx.image import loader
     from gmlx.image.fingerprint import ImageModelError
