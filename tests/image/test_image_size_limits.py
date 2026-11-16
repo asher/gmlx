@@ -49,7 +49,7 @@ def test_h3_image_takes_the_sizes_in_its_limits(size):
                  "MiniMax-H3-Image takes; the smallest size of its shape "
                  "is 832x832"),
     ((800, 800), "the smallest size of its shape is 832x832"),
-    ((1056, 352), "the smallest size of its shape is 1408x480"),
+    ((1056, 352), "the smallest size of its shape is 1376x480"),
 ])
 def test_h3_image_refuses_a_size_past_its_limits_by_name(size, why):
     assert why in size_refusal(H3, *size)

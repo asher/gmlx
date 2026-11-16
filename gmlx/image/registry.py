@@ -194,14 +194,46 @@ def _shape(wh: tuple) -> str:
     return f"{wh[0]}:{wh[1]}"
 
 
+def shape_sizes(width: int, height: int, unit: int, side: int):
+    """The sizes of the shape of ``width`` x ``height`` on ``unit`` up to
+    ``side``: one side a multiple of ``unit``, the other that side's share
+    of the shape rounded down or up to ``unit``. These are the sizes of the
+    shape scaled by one factor with both sides rounded down, or both up."""
+    for a in range(unit, side + 1, unit):
+        for num, den, first in ((height * a, width, True),
+                                (width * a, height, False)):
+            for b in {num // (den * unit) * unit,
+                      -(-num // (den * unit)) * unit}:
+                if unit <= b <= side:
+                    yield (a, b) if first else (b, a)
+
+
 def smallest_size(family, width: int, height: int) -> tuple:
-    """(width, height) at the shape of ``width`` x ``height`` scaled up to
-    the fewest pixels ``family`` takes, each side rounded up to its size
-    multiple."""
+    """(width, height), the size of the shape of ``width`` x ``height``
+    (``shape_sizes``) with the fewest pixels that ``family`` takes, and of
+    sizes with as many pixels the nearest the shape. With none it takes,
+    the shape scaled up to its least pixels, each side rounded up to its
+    size multiple."""
     unit = int(family.constants.values.get("size_multiple", 16))
+    taken = [s for s in shape_sizes(width, height, unit,
+                                    size_limits(family)[1] or MAX_SIDE)
+             if takes(family, *s)]
+    if taken:
+        return min(taken, key=lambda s: (
+            s[0] * s[1], abs(s[0] * height - s[1] * width) / s[1], s))
     scale = (family.min_pixels / (width * height)) ** 0.5
     return (math.ceil(width * scale / unit) * unit,
             math.ceil(height * scale / unit) * unit)
+
+
+def takes(family, width: int, height: int) -> bool:
+    """Whether ``family`` takes an image of ``width`` x ``height`` pixels
+    by its own size limits: ``size_refusal`` without the reason, whose
+    least pixels refusal names ``smallest_size``."""
+    least = getattr(family, "min_pixels", None)
+    if limited(family) and least is not None and width * height < least:
+        return False
+    return size_refusal(family, width, height) is None
 
 
 def size_refusal(family, width: int, height: int) -> str | None:

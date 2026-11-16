@@ -1337,46 +1337,60 @@ def test_the_fit_check_names_the_largest_fitting_size_in_few_plans(
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("size, fits_px, fits, named", [
-    # No size MiniMax-H3-Image takes fits: the largest that fits, 800x800
-    # and 1120x544, is under its least pixels, and the answer names the
-    # smallest size of the shape it takes. At 608x1184 that is 576x1152,
-    # under smallest_size's 608x1152, whose sides round up.
-    ((1024, 1024), 680_000, False, (832, 832)),
-    ((2048, 1024), 650_000, False, (1152, 576)),
-    ((608, 1184), 660_000, False, (576, 1152)),
-    ((1024, 1024), 800_000, True, (864, 864)),
-])
-def test_the_fit_check_names_only_a_size_the_family_takes(
-        monkeypatch, size, fits_px, fits, named):
+def _h3_fit_served(monkeypatch, budget: dict):
+    """A served MiniMax-H3-Image entry whose plan fits sizes of at most
+    ``budget["px"]`` pixels."""
     from gmlx.image import memfit
-    from gmlx.image.registry import get_family, size_refusal
+    from gmlx.image.registry import get_family
 
     def plan_memory(*, height, width, _hint=True, **k):
-        ok = width * height <= fits_px
+        ok = width * height <= budget["px"]
         if not ok and _hint:
             raise memfit.ImageMemoryError("no room")
         return SimpleNamespace(fits=ok)
 
     monkeypatch.setattr(memfit, "plan_memory", plan_memory)
     nb = SimpleNamespace(bytes=0)
-    h3 = get_family("h3_image")
     pipe = SimpleNamespace(
         encoder=None, dit=SimpleNamespace(act_dtype="bfloat16"),
-        weights={"dit": 1, "vae": 1}, adapters=nb, tables=nb, family=h3,
-        vae=None, conditionings=nb, modulations=nb, size_multiple=32,
-        variant="pruned")
-    served = SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
+        weights={"dit": 1, "vae": 1}, adapters=nb, tables=nb,
+        family=get_family("h3_image"), vae=None, conditionings=nb,
+        modulations=nb, size_multiple=32, variant="pruned")
+    return SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
         keep_encoder=True, cfg=1.0), spec=SimpleNamespace(
             id="h3", defaults={}, upsampler=None, upsample=True,
             upsample_prompt=None, encoder_model=None),
         facts=_facts(act_dtype="bfloat16", size_multiple=32))
-    req = image_service.parse_request("generations", {
-        "prompt": "x", "size": f"{size[0]}x{size[1]}"})
+
+
+def _h3_fit_refusal(served, size) -> str:
+    # The fit check reads the size it is given, which the family's limits
+    # bound, not the image limits a request's own size is parsed under.
+    req = image_service.parse_request("generations", {"prompt": "x"})
     with pytest.raises(image_service.ImageRequestError) as e:
-        image_service.fit_check(req, served, req.size, 1)
+        image_service.fit_check(req, served, size, 1)
     assert e.value.param == "size"
-    msg = str(e.value)
+    return str(e.value)
+
+
+@pytest.mark.parametrize("size, fits_px, fits, named", [
+    # No size MiniMax-H3-Image takes fits: the largest that fits, 800x800
+    # and 1120x544, is under its least pixels, and the answer names the
+    # smallest size of the shape it takes. At 608x1184 that is 576x1152,
+    # and at 512x1376 it is 512x1312, a size no bisection step prices.
+    ((1024, 1024), 680_000, False, (832, 832)),
+    ((2048, 1024), 650_000, False, (1152, 576)),
+    ((608, 1184), 660_000, False, (576, 1152)),
+    ((512, 1376), 670_000, False, (512, 1312)),
+    ((512, 1376), 680_000, True, (512, 1312)),
+    ((1024, 1024), 800_000, True, (864, 864)),
+])
+def test_the_fit_check_names_only_a_size_the_family_takes(
+        monkeypatch, size, fits_px, fits, named):
+    from gmlx.image.registry import get_family, size_refusal
+
+    h3 = get_family("h3_image")
+    msg = _h3_fit_refusal(_h3_fit_served(monkeypatch, {"px": fits_px}), size)
     w, h = named
     if not fits:
         assert msg.endswith(f"no size of its shape that MiniMax-H3-Image "
@@ -1386,6 +1400,48 @@ def test_the_fit_check_names_only_a_size_the_family_takes(
         assert msg.endswith(f"the largest size of its shape that fits is "
                             f"{w}x{h}"), msg
     assert size_refusal(h3, w, h) is None, msg
+
+
+def test_the_fit_check_names_the_smallest_size_of_the_shape_over_a_sweep(
+        monkeypatch):
+    """Over a sweep of shapes, where no size MiniMax-H3-Image takes fits
+    the refusal names the smallest size of the shape it takes, and where
+    that size fits it is the answer. A size of the shape has one side a
+    multiple of 32 and the other that side's share of the shape rounded
+    down or up to 32."""
+    import re
+
+    from gmlx.image.registry import get_family, size_refusal
+
+    h3 = get_family("h3_image")
+    budget = {"px": 0}
+    served = _h3_fit_served(monkeypatch, budget)
+    shapes = [(w, h) for w in range(32, 7713, 224)
+              for h in range(32, 7713, 224)]
+    shapes += [(512, 1376), (608, 1184), (480, 1440), (7712, 2592)]
+    shapes = [s for s in shapes if size_refusal(h3, *s) is None]
+    assert len(shapes) > 300
+    named = re.compile(r"(?:that fits is|the smallest it takes is) "
+                       r"(\d+)x(\d+)$")
+    for w, h in shapes:
+        sizes = set()
+        for a in range(32, 7713, 32):
+            for num, den, flip in ((h * a, w * 32, False),
+                                   (w * a, h * 32, True)):
+                for b in (num // den * 32, -(-num // den) * 32):
+                    if 32 <= b <= 7712:
+                        sizes.add((b, a) if flip else (a, b))
+        least = min(x * y for x, y in sizes if x * y >= h3.min_pixels
+                    and size_refusal(h3, x, y) is None)
+        for px, fits in ((least - 1, False), (least, True)):
+            if w * h <= px:
+                continue
+            budget["px"] = px
+            msg = _h3_fit_refusal(served, (w, h))
+            W, H = map(int, named.search(msg).groups())
+            assert ("that fits is" in msg) is fits, (w, h, msg)
+            assert (W, H) in sizes and W * H == least, (w, h, msg)
+            assert size_refusal(h3, W, H) is None, (w, h, msg)
 
 
 def test_the_fit_check_passes_without_a_budget(monkeypatch):

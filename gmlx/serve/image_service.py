@@ -1506,7 +1506,7 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     ``_prepare_refs``."""
     from gmlx.commands.image_preflight import prompt_rows, prompt_terms
     from gmlx.image import memfit
-    from gmlx.image.registry import in_shape, size_refusal, smallest_size
+    from gmlx.image.registry import in_shape, smallest_size, takes
 
     pipe = served.pipe
     cfg = _guided(req, served)
@@ -1546,28 +1546,26 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
         return
     unit = _stride(served)
     fam = pipe.family
-    # A family with a least size of its own names sizes from its smallest
-    # of the shape up.
-    least = (smallest_size(fam, w, h)
-             if getattr(fam, "min_pixels", None) else None)
+    # A family with a least size of its own names its smallest size of the
+    # shape, and the bisection prices from the first of its sizes that the
+    # family takes.
+    least = first = None
 
     def scaled(k: int) -> tuple:
         scale = k * unit / max(w, h)
         return in_shape(fam, w, h, max(unit, int(w * scale) // unit * unit),
                         max(unit, int(h * scale) // unit * unit), unit)
 
-    if least is not None:
-        # The smallest size of the shape the family takes, of those the
-        # bisection prices: smallest_size rounds each side up, which can
-        # pass over a smaller one.
-        least = next((scaled(k) for k in range(1, max(w, h) // unit + 1)
-                      if size_refusal(fam, *scaled(k)) is None), least)
+    if getattr(fam, "min_pixels", None):
+        least = smallest_size(fam, w, h)
+        first = next((k for k in range(1, max(w, h) // unit + 1)
+                      if takes(fam, *scaled(k))), max(least) // unit)
 
     # A smaller size of the shape never needs more memory, so a bisection
     # over the longer side finds the largest that fits in a few plans.
     best = None
     if not refs or caption is not None:
-        lo = 1 if least is None else max(least) // unit
+        lo = 1 if first is None else first
         hi = max(w, h) // unit - 1
         while lo <= hi:
             k = (lo + hi) // 2
@@ -1575,10 +1573,13 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
                 best, lo = scaled(k), k + 1
             else:
                 hi = k - 1
-    # The floors can leave the family's least size of the shape under its
-    # least pixels, and a size it refuses is no answer.
-    if best is not None and size_refusal(fam, *best) is not None:
-        best = None
+        # The floors can leave the family's least size of the shape under
+        # its least pixels, and a size it refuses is no answer. The
+        # smallest size it takes need not be one the bisection prices.
+        if best is not None and not takes(fam, *best):
+            best = None
+        if best is None and least is not None and fits(*least, refs):
+            best = least
     # The prompt is the cause when no size of the shape fits at its rows
     # and some size of it fits at the family's default rows. The smallest
     # size needs the least memory, so it stands for every size.
