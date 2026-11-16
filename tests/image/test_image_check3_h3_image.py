@@ -21,9 +21,9 @@ and 0.75, at 768x512 at 0.5327739119529724 and at 1024x1024 at
 oracle reads a copy of the file with the `config` key ComfyUI needs for
 the PDD heads (the manifest's oracle_dit), every tensor unchanged; gmlx
 reads the release file (dit), found under KQUANT_TEST_GGUF_DIR by the
-manifest's name, size and sha256 and loaded by the family's loader. The
-product gate runs the model as it
-ships and holds each row to twice the oracle's gap; the kernel routes in
+manifest's name, size and sha256 and loaded by the image loader, which
+identifies it by discovery. The product gate runs the model as it ships
+and holds each row to twice the oracle's gap; the kernel routes in
 force must run where they apply. The exact gate runs the model in the
 oracle's fp32 arithmetic, every K-quant product dense on its dequantized
 weight and every float tensor in float32: the teacher-forced rows within
@@ -55,9 +55,9 @@ from image_fixtures import fixture_view
 from oracle_fixture import ORACLE, committed, committed_fixture, fixture, fx
 
 from gmlx.image import api, ops
+from gmlx.image import loader as image_loader
 from gmlx.image.conditioning import Conditioning
 from gmlx.image.families.h3_image import family as hi
-from gmlx.image.families.h3_image import loader as hl
 from gmlx.image.families.h3_image import model as him
 from gmlx.image.h3 import blocks
 from gmlx.image.ops import kq_routes
@@ -259,7 +259,7 @@ def _find(root: Path, want: dict) -> str:
 @pytest.fixture(scope="module")
 def real(gguf_dir):
     p = _find(gguf_dir, _manifest(REAL[0])["files"]["dit"])
-    model, info = hl.load(p, log=lambda *_: None)
+    model, info = image_loader.load_dit(p, log=lambda *_: None)
     return model, info
 
 
