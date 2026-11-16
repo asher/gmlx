@@ -658,12 +658,31 @@ _LORA_ATOL = {mx.float32: 2e-2, mx.bfloat16: 6.25e-2}
 
 
 @pytest.fixture
-def _rows_channel():
+def _rows_channel(monkeypatch):
+    """The row channel for one test. The channel wraps methods of the
+    engine classes and sets a process flag, and both go back after the
+    test. A serve module puts back BatchGenerator._next when it ends, so a
+    channel left installed loses its step binding there while its flag
+    stops the next install."""
     from gmlx import lora_rows
+    from gmlx._vendor.mlx_vlm.generate import ar
 
+    saved = [(cls, dict(vars(cls))) for cls in
+             (ar.BatchGenerator, ar.GenerationBatch, ar.PromptProcessingBatch)]
+    installed = lora_rows._channel_installed
     lora_rows.install_row_channel()
     yield lora_rows
     lora_rows.configure("static", 1)
+    # The test's own patches go first, so that none of them puts back a
+    # method that the channel wrapped.
+    monkeypatch.undo()
+    for cls, attrs in saved:
+        for name in [n for n in vars(cls) if n not in attrs]:
+            delattr(cls, name)
+        for name, value in attrs.items():
+            if vars(cls).get(name) is not value:
+                setattr(cls, name, value)
+    lora_rows._channel_installed = installed
 
 
 def _row(scale, salt):

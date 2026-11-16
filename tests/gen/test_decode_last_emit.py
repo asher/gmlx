@@ -94,8 +94,13 @@ class Rig:
             stopping_criteria=StoppingCriteria([], None)))
 
     def make(self):
+        # Rows of one insert prefill together. An earlier test can leave
+        # the serve __init__ wrapper installed, and with the default
+        # widths it sets the prefill width to 1.
         gen = ar.BatchGenerator(self.lm, self.proc, logprobs_cap=3,
-                                prefill_step_size=None)
+                                prefill_step_size=None,
+                                prefill_batch_size=8,
+                                completion_batch_size=32)
         gen._kq_embed_text = lambda ids, rs: self._embed_text(
             self.model, ids, rs)
         return gen
