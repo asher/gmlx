@@ -123,11 +123,10 @@ def test_sample_gives_each_step_the_sigma_it_goes_to(tiny, monkeypatch):
     with mx.stream(mx.cpu):
         api.sample(pipe, Conditioning(feats), height=64, width=64,
                    sigmas=s, seed=0, cfg=1.0, neg_skip=())
-    want = []
-    for (start, stop), w in zip(c4["heads_simple_3"].tolist(),
-                                m4["results"]["head_weights"]["simple_3"]):
-        first = max(start, 1)
-        want.append(tuple(zip(range(first, stop), w[first - start:])))
+    # The fixture's weights are those of the heads past head 0.
+    want = [tuple(zip(range(max(start, 1), stop), w)) for (start, stop), w
+            in zip(c4["heads_simple_3"].tolist(),
+                   m4["results"]["head_weights"]["simple_3"])]
     assert [(a, b) for a, b, _ in seen] == list(zip(s[:-1], s[1:]))
     assert [h for *_, h in seen] == want
 
