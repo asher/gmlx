@@ -193,7 +193,7 @@ _H3_IMAGE = dict(
     license=_H3_IMAGE_LICENSE,
     license_url="https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/"
                 "LICENSE",
-    # LICENSE sections IV and V.
+    # LICENSE section I definition 5, IV.1, IV.2, V.5 and Exhibit A item 12.
     license_note=("no grant in the US, EU, UK or South Korea without "
                   "MiniMax's separate license; written authorization above "
                   "$1M yearly revenue, affiliates counted, or to host it for "
