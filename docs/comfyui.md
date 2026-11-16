@@ -347,7 +347,7 @@ FastH3 samples at the shifts in force, 12 and 3 without
 
 ## The example workflows
 
-ComfyUI's template browser lists sixteen workflows under `comfyui-gmlx`. Their
+ComfyUI's template browser lists seventeen workflows under `comfyui-gmlx`. Their
 files are in `custom_nodes/comfyui-gmlx/example_workflows`. Each has a note
 with the commands that install the gmlx nodes and pull its model.
 
