@@ -102,8 +102,10 @@ GIF.
 
 Without `size`, the result takes the size of the first image, cut down to
 the model's size step and the size limits, its model's own where it has
-them. With a `mask`, the edit starts from the first image at `strength` 1
-and changes only the masked region.
+them. A first image that a model's own limits refuse, such as one under
+the least pixels of MiniMax-H3-Image or outside its 1:3 to 3:1 shapes,
+gets 400 asking for a size. With a `mask`, the edit starts from the first
+image at `strength` 1 and changes only the masked region.
 
 FLUX.3 klein scales a single reference down to at most the area of
 2048x2048 pixels, and pads it out to sides that are multiples of 16. Of
