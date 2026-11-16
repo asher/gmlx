@@ -669,9 +669,15 @@ class StepClient:
                                       what="the VAE decode")
         return out["image"]
 
-    def vae_encode(self, model: str, image: torch.Tensor) -> torch.Tensor:
-        out, _, _ = self.call_tensors("/vae/encode", {"image": image.float()},
-                                      {"model": model}, what="the VAE encode")
+    def vae_encode(self, model: str, image: torch.Tensor,
+                   noise: torch.Tensor | None = None) -> torch.Tensor:
+        """Latents of ``image``: the mean, or a sample with ``noise`` in the
+        shape of the latents."""
+        tensors = {"image": image.float()}
+        if noise is not None:
+            tensors["noise"] = noise.float()
+        out, _, _ = self.call_tensors("/vae/encode", tensors, {"model": model},
+                                      what="the VAE encode")
         return out["latents"]
 
     def run_begin(self, model: str) -> str:

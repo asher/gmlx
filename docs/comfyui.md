@@ -369,6 +369,7 @@ with the commands that install the gmlx nodes and pull its model.
 | `fasth3-t2v` | A FastH3 clip with sound from a text prompt, 5 seconds at 1344x768 on its 8 trained noise levels, through `gmlx Sigmas` | `gmlx video pull fasth3`, and a Mac with an M5 chip or newer and 36 GB or more |
 | `minimax-h3-image-t2i` | MiniMax-H3-Image text to image at 2048x2048 in 6 steps, through `MiniMax H3 Image Conditioning` | `gmlx pull minimax-h3-image`, ComfyUI 0.45 or newer, and a Mac with 32 GB or more |
 | `minimax-h3-image-t2i-4096` | The same at 4096x4096 | `gmlx pull minimax-h3-image`, ComfyUI 0.45 or newer, and the memory the server prices it at |
+| `minimax-h3-image-edit-two-references` | A MiniMax-H3-Image edit of one picture with a second as a reference, in 6 steps, through `MiniMax H3 Image Conditioning` with the gmlx VAE | `gmlx pull minimax-h3-image`, ComfyUI 0.45 or newer, a Mac with 32 GB or more, and `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder |
 
 ## LoRAs
 

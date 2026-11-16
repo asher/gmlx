@@ -16,7 +16,7 @@ Supported model families:
 - FLUX.2 klein 9B KV, text to image and editing with up to 10 reference images, where the stock `Flux KV Cache` node makes the steps after the first reuse the keys and values of the references. Its license allows non-commercial use only.
 - FLUX.3 klein and FLUX.3 klein Base, text to image and editing with up to 10 reference images, on ComfyUI 0.41 or newer.
 - MiniMax-H3, the recipes `h3`, `h3-fast`, `h3-base` and `fasth3`: video with sound from a text prompt, through ComfyUI's own MiniMax-H3 nodes, with video and audio VAE loaders that decode on the server. It needs a Mac with 32 GB or more, and `fasth3` an M5 chip or newer.
-- MiniMax-H3-Image, text to image through ComfyUI's own `MiniMaxH3ImageConditioning` node, on ComfyUI 0.45 or newer. It needs a Mac with 32 GB or more.
+- MiniMax-H3-Image, text to image and editing with up to 16 pictures through ComfyUI's own `MiniMaxH3ImageConditioning` node, on ComfyUI 0.45 or newer. It needs a Mac with 32 GB or more.
 
 ## Install
 
@@ -62,6 +62,7 @@ The `example_workflows` folder has sixteen graphs, which ComfyUI's template brow
 - `fasth3-t2v.json`: a FastH3 clip with sound from a text prompt, 5 seconds at 1344x768, the same graph on the 8 noise levels FastH3 was trained at, which `gmlx Sigmas` gives in place of `BasicScheduler`, with `MiniMaxH3SigmaShift` at the `fasth3` recipe's shifts, 10 and 3. It needs a Mac with an M5 chip or newer and 36 GB or more.
 - `minimax-h3-image-t2i.json`: MiniMax-H3-Image text to image at 2048x2048, the size the model is tuned for, in 6 steps at cfg 1 with `euler` on the `simple` schedule. The stock `MiniMaxH3ImageConditioning` encodes the prompt with the gmlx CLIP and gives the latent of one frame. It needs ComfyUI 0.45 or newer and a Mac with 32 GB or more.
 - `minimax-h3-image-t2i-4096.json`: the same graph at 4096x4096. On a Mac without the memory for it, the server refuses the size and names the largest it fits. It needs ComfyUI 0.45 or newer.
+- `minimax-h3-image-edit-two-references.json`: a MiniMax-H3-Image edit of Picture 1 with Picture 2 as a second reference, in 6 steps at cfg 1. The stock `MiniMaxH3ImageConditioning` shows the gmlx CLIP each picture's copy for the vision tower after its label, encodes each picture's copy for the VAE with the gmlx VAE, and gives the latent of Picture 1's VAE copy. Each picture must be between 1:3 and 3:1 in shape. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images. It needs ComfyUI 0.45 or newer and a Mac with 32 GB or more.
 
 ### Server address
 
@@ -113,7 +114,7 @@ Anything that would run inside the DiT forward in ComfyUI is refused with an err
 - a quantized Qwen-Image 2.1 prefix cache (`QwenImage21Cache` with a dtype other than default);
 - a MOSS-Image conditioning that masks some of its text rows, such as one from a text encoder other than `gmlx CLIP Loader`;
 - on MiniMax-H3: the references of `MiniMaxH3ReferenceToVideo`, the Fun ControlNet, a noise mask on the latent, and on FastH3 a first or last frame of `MiniMaxH3ImageToVideo` or `GmlxH3ImageToVideo`, or a guide from `MiniMaxH3AddGuide`;
-- on MiniMax-H3-Image, which the gmlx nodes run as text to image: reference images, which `MiniMaxH3ImageConditioning` makes from its images when its `vae` input is connected, a prompt encoded with images, and keyframes.
+- on MiniMax-H3-Image: pictures under a label other than the one `MiniMaxH3ImageConditioning` gives them, a reference noise mix other than ComfyUI's, and keyframes.
 
 The stock `Flux KV Cache` node on FLUX.2 klein 9B KV is not refused: the server keeps the keys and values of the references of each row of the batch from the first step of a run, the later steps of the run reuse those of each row, and the end of the run drops them.
 The stock `SkipLayerGuidanceDiTSimple` node on MOSS-Image is not refused when it names `single_layers` alone, with `start_percent` 0 and `end_percent` 1: the server leaves those blocks out of the negative pass of each step. It is refused with `double_layers`, another window, a linked widget or a block MOSS-Image lacks, and on any other model.

@@ -76,7 +76,8 @@ BENIGN = {"prefetch_dynamic_vbars", "wrappers", "callbacks", "hooks", "transform
           "block_index", "model_dtype", "sampler_calc_cond_batch_function", "total_blocks",
           "block_type", "activations_shape_list", "patches_point", "optimized_attention_override"}
 # DiT inputs the step contract carries. Any other input with a value is refused.
-INPUTS = {"num_tokens", "attention_mask", "ref_latents", "image_slots", "ref_latents_method"}
+INPUTS = {"num_tokens", "attention_mask", "ref_latents", "image_slots", "ref_latents_method",
+          "ref_noise"}
 # Stock nodes whose effect shows only inside the forward, named by the walk-back.
 IN_FORWARD_CLASSES = {"PerturbedAttentionGuidance", "SkipLayerGuidanceDiT", "SkipLayerGuidanceSD3",
                       "SkipLayerGuidanceDiTSimple", "ControlNetApply", "ControlNetApplyAdvanced",
@@ -93,10 +94,10 @@ H3_IMAGE_CLASS = "MiniMaxH3Image"
 H3_CLASSES = {H3_CLASS: ("MiniMax-H3", "H3_NAMES"),
               H3_IMAGE_CLASS: ("MiniMax-H3-Image", "H3_IMAGE_NAMES")}
 # The minimax_payload keys of MiniMaxH3Image.extra_conds the forward
-# refuses by: what each carries and the extra_conds input it is written
-# from.
-H3_IMAGE_PAYLOAD = {"refs": ("the reference images", "minimax_refs"),
-                    "text_token_tags": ("the vision tokens of the prompt", "minimax_token_tags")}
+# reads: what each carries and the extra_conds input it is written from.
+H3_IMAGE_PAYLOAD = {"cond_video_latents": ("the latents of the reference images", "minimax_refs"),
+                    "text_token_tags": ("the vision tokens of the prompt", "minimax_token_tags"),
+                    "seed": ("the seed of the references' noise", "seed")}
 # The node whose skips of single blocks on the negative pass a step takes
 # as its skip set, on the families whose DiT skips blocks.
 SLG_NODE = "SkipLayerGuidanceDiTSimple"
@@ -432,6 +433,7 @@ class RemoteForward:
         uuids = list(to.get("uuids") or [None] * len(coru))
         per = B // len(coru) if B % len(coru) == 0 else B
         refs = list(kwargs.get("ref_latents") or [])
+        noise = list(kwargs.get("ref_noise") or [])
         slots = kwargs.get("image_slots")
         held: dict = {}
         rows = []
@@ -453,6 +455,11 @@ class RemoteForward:
                     key = None if base is None else base + ("ref", j, tuple(rr.shape))
                     hs.append(self._hash(key, rr, held))
                 row["ref_latents"] = hs
+            if noise:
+                # The same noise for every row: it follows the payload's seed.
+                row["ref_noise"] = [
+                    self._hash(None if base is None else base + ("noise", j, tuple(n.shape)),
+                               n, held) for j, n in enumerate(noise)]
             if slots:
                 row["image_slots"] = [int(s) for s in slots]
             if not prefix_cache:
@@ -508,26 +515,54 @@ class RemoteForward:
                             "on, and this call carries no transformer_options['sample_sigmas']")
         return torch.as_tensor(s).detach().float().reshape(-1).cpu()
 
-    def _h3_image_payload(self, kwargs: dict) -> None:
-        """Take MiniMax-H3-Image's minimax_payload off the DiT inputs, and
-        refuse what a gmlx model does not run of it: reference images,
-        vision tokens and keyframes. The rest is what the step derives
-        itself: the layout, the seed of the references' noise and an audio
-        scale of 1."""
+    def _h3_image_payload(self, kwargs: dict, context) -> None:
+        """Take MiniMax-H3-Image's minimax_payload off the DiT inputs as the
+        step reads it: the reference latents of one frame each, the noise
+        ComfyUI's forward mixes into their rows (a CPU torch generator
+        restarted at the payload's seed for each one, drawn in the rows'
+        shape), and the image slots of the vision rows the prompt's tags
+        name, each picture's block less its markers. Keyframes and a noise
+        mix other than ComfyUI's default are refused."""
         payload = kwargs.pop("minimax_payload", None) or {}
-        if payload.get("refs") or payload.get("cond_video_latents"):
-            raise GmlxRefusal("gmlx: reference images (minimax_refs, from the images of "
-                              "MiniMaxH3ImageConditioning with a VAE) reached the DiT forward, "
-                              f"and {self.b.model_id!r} runs text to image only; remove the "
-                              "images or the VAE from that node")
-        tags = payload.get("text_token_tags")
-        if tags is not None and not bool((torch.as_tensor(tags) == 1).all()):
-            raise GmlxRefusal("gmlx: the prompt's minimax_token_tags hold vision tokens, from "
-                              f"images given to its text encode, and {self.b.model_id!r} runs "
-                              "text to image only; encode the prompt without images")
         if payload.get("keyframes"):
             raise GmlxRefusal(f"gmlx: keyframes reached the DiT forward of {self.b.model_id!r}, "
                               "an image model, which takes none")
+        key, _name, value = H3_COND_AUG["video"]
+        if key in payload and float(payload[key]) != value:
+            raise GmlxRefusal(f"gmlx: a reference noise mix of {float(payload[key]):g} "
+                              f"(minimax_payload[{key!r}], which no stock node sets) reached the "
+                              f"DiT forward; a gmlx model mixes at ComfyUI's {value:g}")
+        tags = payload.get("text_token_tags")
+        if tags is not None:
+            n = torch.as_tensor(tags).numel()
+            if context is not None and n != context.shape[1]:
+                raise GmlxError(f"gmlx: the prompt's minimax_token_tags hold {n} tags for its "
+                                f"{context.shape[1]} rows; encode the prompt and its pictures "
+                                "with one text encode node")
+            slots = [r for a, b in tag_spans(tags) for r in range(a + 1, b - 1)]
+            if slots:
+                kwargs["image_slots"] = slots
+        lats = list(payload.get("cond_video_latents") or [])
+        if not lats:
+            return
+        caps = getattr(self.b.client, "capabilities", None) or {}
+        if "ref_noise" not in (caps.get("features") or ()):
+            raise GmlxRefusal("gmlx: this gmlx server runs no MiniMax-H3-Image reference images; "
+                              "update it")
+        pt, ph, pw = (int(p) for p in self.base_model.diffusion_model.patch_size)
+        seed = int(payload.get("seed", 0))
+        refs, noise = [], []
+        for z in lats:
+            z = z.detach().float().cpu()
+            if z.ndim != 5 or z.shape[0] != 1 or z.shape[2] != 1:
+                raise GmlxError(f"gmlx: a MiniMax-H3-Image reference latent is "
+                                f"{tuple(z.shape)}, not (1, C, 1, h, w)")
+            _, ch, t, h, w = z.shape
+            gen = torch.Generator("cpu").manual_seed(seed)
+            noise.append(torch.randn((t // pt * (h // ph) * (w // pw), ch * pt * ph * pw),
+                                     generator=gen, dtype=torch.float32))
+            refs.append(z[:, :, 0])
+        kwargs["ref_latents"], kwargs["ref_noise"] = refs, noise
 
     def _h3_conditions(self, payload: dict, kwargs: dict) -> None:
         """Refuse what MiniMax-H3 conditions on that a gmlx model does not
@@ -736,7 +771,7 @@ class RemoteForward:
         if kv and kv != KV_PATCHES:
             _refuse("part of the Flux KV Cache node's patches")
         if self.reads_target:
-            self._h3_image_payload(kwargs)
+            self._h3_image_payload(kwargs, context)
         skip = self._skip(to)
         checked = {k: v for k, v in to.items() if k != "patches_replace"} if skip else to
         prefix_cache = self._check(control, checked, kwargs, bool(kv))
@@ -818,24 +853,40 @@ def load_model(client: StepClient, model_id: str, int8: str = "entry") -> GmlxMo
 
 def _h3_image_keys(patcher) -> None:
     """Refuse a ComfyUI whose MiniMaxH3Image no longer writes a
-    minimax_payload key the forward refuses by, so renamed references or
-    vision tokens cannot run as text to image."""
+    minimax_payload key the forward reads, so renamed references, vision
+    tokens or a renamed seed cannot run as text to image or on other
+    noise."""
     from .version import COMFYUI_FLOOR, COMFYUI_TESTED
 
     tested = f"the gmlx nodes are tested on ComfyUI {COMFYUI_FLOOR} to {COMFYUI_TESTED}"
+    latent = torch.zeros(1, 24, 1, 2, 2)
+    ref = {"kind": "image", "latent_h": 2, "latent_w": 2, "latent": latent}
     try:
         conds = patcher.model.extra_conds(minimax_token_tags=torch.ones(1, dtype=torch.long),
-                                          minimax_refs=[{}], device=torch.device("cpu"))
+                                          minimax_refs=[ref], seed=PROBE_SEED,
+                                          device=torch.device("cpu"))
     except Exception as e:  # noqa: BLE001: a changed model is named
         raise GmlxError(f"gmlx: ComfyUI {comfyui_version()}'s MiniMaxH3Image model fails on the "
-                        f"extra_conds of a text prompt, which the gmlx nodes check it with "
-                        f"({type(e).__name__}: {e}); {tested}") from e
+                        f"extra_conds of a prompt with one picture, which the gmlx nodes check "
+                        f"it with ({type(e).__name__}: {e}); {tested}") from e
     held = getattr(conds.get("minimax_payload"), "cond", None)
     for key, (what, given) in H3_IMAGE_PAYLOAD.items():
-        if not isinstance(held, dict) or key not in held:
+        # The seed is written with a default and the latents from each
+        # reference, so the probe's own must come back.
+        if not isinstance(held, dict) or key not in held or (
+                key == "seed" and held[key] != PROBE_SEED) or (
+                key == "cond_video_latents"
+                and [getattr(z, "shape", None) for z in held[key]] != [latent.shape]):
             raise GmlxError(f"gmlx: ComfyUI {comfyui_version()}'s MiniMaxH3Image model does not "
                             f"write minimax_payload[{key!r}] from {given}, which the gmlx nodes "
                             f"read {what} from; {tested}")
+    import comfy.ldm.minimax.model as h3_model
+
+    _key, name, value = H3_COND_AUG["video"]
+    if getattr(h3_model, name, None) != value:
+        raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} mixes the reference rows at "
+                        f"{getattr(h3_model, name, None)} ({name}), and a gmlx model at "
+                        f"{value:g}; {tested}")
 
 
 # The keys of a MiniMax-H3 keyframe the AV step reads.

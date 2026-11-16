@@ -73,6 +73,11 @@ H3_NO_REFS = ("the gmlx nodes run MiniMax-H3 from the text prompt with keyframes
               "and take no references")
 # The server's family of MiniMax-H3 and FastH3, and FastH3's variant.
 H3_FAMILY = "h3"
+# The server's family of MiniMax-H3-Image, and the label ComfyUI's
+# MiniMaxH3ImageConditioning puts before each picture, the label the
+# server's encode reads it with.
+H3_IMAGE_FAMILY = "h3_image"
+H3_IMAGE_LABEL = "Picture %d: "
 FASTH3 = "fasth3"
 
 

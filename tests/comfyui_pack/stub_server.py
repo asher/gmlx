@@ -77,11 +77,13 @@ COMFY = {
            "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
                      "latents_per_second": 40}},
     # MiniMax-H3-Image steps on one latent frame, takes the timestep as sigma
-    # times 1000 and reads the sigma its step goes to from the schedule.
+    # times 1000 and reads the sigma its step goes to from the schedule. Its
+    # VAE samples an encode with the noise of seed 42, and its references
+    # come with the noise of their rows.
     "h3_image": {"model_class": "MiniMaxH3Image", "image_model": "minimax_h3_image",
                  "latent": {"channels": 24, "stride": 16, "patch": 2, "frames": 1},
-                 "vae": {"channels_out": 3, "stride": 16, "space": "model"}, "edit": False,
-                 "context": ("condition_proj.weight", 1), "time_scale": 0.001},
+                 "vae": {"channels_out": 3, "stride": 16, "space": "model", "encode_seed": 42},
+                 "edit": True, "context": ("condition_proj.weight", 1), "time_scale": 0.001},
 }
 # The families whose status names their entry's int8 setting.
 INT8 = {"h3", "h3_image"}
@@ -343,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
                              "skip_blocks", "av_step", "anchors", "keyframe_upsampling",
-                             "int8"],
+                             "int8", "ref_noise"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
                            "max_body_bytes": st.max_body}})
         if sub == "/models":
@@ -545,7 +547,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(409, "the encode was interrupted", code="interrupted")
         fam = m[0]
         spans = []
-        if images and fam == "h3":
+        if images and fam == "h3_image":
+            # Pictures: a 4-token label and a block of one pad per 32 x 32
+            # pixels with its two markers each, before the prompt.
+            at = 0
+            for im in images:
+                at += 4
+                spans.append([at, at + (im.shape[0] // 32) * (im.shape[1] // 32) + 2])
+                at = spans[-1][1]
+        elif images and fam == "h3":
             # Keyframes: a 3-token label and a block of one pad per 32 x 32
             # pixels with its two markers each, before the prompt.
             if m[1] == "fasth3":
@@ -594,7 +604,8 @@ class Handler(BaseHTTPRequestHandler):
         if "cond_typed" in hashes:
             fields.update(cond_typed=hashes["cond_typed"])
         if spans:
-            fields.update(spans=spans, image_slots=[])
+            fields.update(spans=spans, image_slots=[] if fam == "h3" else [
+                r for a, b in spans for r in range(a + 1, b - 1)])
         st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs,
                  frames=clip[0], keyframes=clip[1], revised=revised,
                  cond=hashes["cond"], cond_typed=hashes.get("cond_typed"), spans=spans,
@@ -622,7 +633,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, "x is (B, C, h, w) with one row per entry of rows")
         missing = []
         for r in rows:
-            for h in [r.get("cond")] + list(r.get("ref_latents") or []):
+            for h in [r.get("cond")] + list(r.get("ref_latents") or []) + list(
+                    r.get("ref_noise") or []):
                 if h not in st.tensors:
                     missing.append(h)
         if req.get("patch_table") and req["patch_table"] not in st.tables:
@@ -671,6 +683,10 @@ class Handler(BaseHTTPRequestHandler):
                  ref_shapes=[[list(st.tensors[h][1]) for h in r.get("ref_latents") or []]
                              for r in rows],
                  image_slots=[r.get("image_slots") for r in rows],
+                 ref_noise=[[list(st.tensors[h][1]) for h in r.get("ref_noise") or []]
+                            for r in rows],
+                 ref_noise_sums=[[float(st.tensors[h][2].astype(np.float64).sum())
+                                  for h in r.get("ref_noise") or []] for r in rows],
                  prefix_cache=[r.get("prefix_cache", True) for r in rows],
                  ref_cache=req.get("ref_cache", False), skip=skip,
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
@@ -884,7 +900,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, f"the image is not a multiple of {stride}")
         a = im[3].astype(np.float32)[..., 0].reshape(B, H // stride, stride, W // stride, stride)
         z = a.mean(axis=(2, 4))[:, None].repeat(ch, axis=1).astype(np.float32)
-        self.st.event(kind="vae_encode", shape=im[1])
+        noise = tensors.get("noise")
+        if noise is not None:
+            if "encode_seed" not in COMFY[fam]["vae"] or list(noise[1]) != list(z.shape):
+                return self._err(400, f"vae/encode takes noise {list(z.shape)} on a model "
+                                      "whose VAE samples")
+            z = z + np.float32(0.1) * noise[3].astype(np.float32)
+        self.st.event(kind="vae_encode", shape=im[1],
+                      noise=None if noise is None else list(noise[1]),
+                      noise_sum=None if noise is None
+                      else float(noise[3].astype(np.float64).sum()))
         self._send(200, write_body({"latents": z}), ctype=CONTENT_TYPE)
 
 

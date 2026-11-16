@@ -797,6 +797,49 @@ class Cases:
         self.check("image saved", any(f.startswith("h3-image_") and f.endswith(".png") for f in saved),
                    saved)
 
+    async def h3_image_edit(self):
+        """The MiniMax-H3-Image edit example workflow: the stock
+        MiniMaxH3ImageConditioning shows the gmlx CLIP each picture's vision
+        copy, and the gmlx VAE encodes each VAE copy with the noise of seed
+        42. Each step carries both references with the noise of their rows
+        and the vision rows of the prompt, on the latent of Picture 1's VAE
+        copy, which the decode gives back."""
+        wf = workflow("minimax-h3-image-edit-two-references.json")
+        wf["8"]["inputs"]["steps"] = 2
+        wf["10"]["inputs"]["filename_prefix"] = "h3-image-edit"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        # reference-1.png is 512 wide and 768 high, reference-2.png square:
+        # vision copies of 1024x1536 and 1024x1024.
+        self.check("the prompt encoded once with both vision copies in order",
+                   [(e["text"], e["image_shapes"], e["refs"]) for e in enc]
+                   == [(wf["6"]["inputs"]["prompt"], [[1536, 1024, 3], [1024, 1024, 3]], False)],
+                   [(e["text"][:20], e["image_shapes"]) for e in enc])
+        vae = kinds(log, "vae_encode")
+        self.check("each VAE copy encoded once with its noise",
+                   sorted(e["noise"] for e in vae) == [[1, 24, 64, 64], [1, 24, 96, 64]],
+                   [(e["shape"], e["noise"]) for e in vae])
+        steps = kinds(log, "step")
+        spans = enc[0]["spans"] if enc else []
+        slots = [r for a, b in spans for r in range(a + 1, b - 1)]
+        self.check("2 steps of one row on Picture 1's latent",
+                   len(steps) == 2 and {tuple(e["x_shape"]) for e in steps} == {(1, 24, 96, 64)},
+                   [e["x_shape"] for e in steps])
+        self.check("each step carries both references, their noise and the vision rows",
+                   all(e["ref_shapes"] == [[[1, 24, 96, 64], [1, 24, 64, 64]]]
+                       and e["ref_noise"] == [[[48 * 32, 96], [32 * 32, 96]]]
+                       and e["image_slots"] == [slots] for e in steps),
+                   [(e["ref_shapes"], e["ref_noise"]) for e in steps][:1])
+        dec = kinds(log, "vae_decode")
+        self.check("decoded once", [e["shape"] for e in dec] == [[1, 24, 96, 64]],
+                   [e["shape"] for e in dec])
+        d = os.path.join(self.work, "output")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("image saved",
+                   any(f.startswith("h3-image-edit_") and f.endswith(".png") for f in saved), saved)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -899,8 +942,10 @@ async def amain(a) -> dict:
                 out["skipped"] = ["flux-3-klein t2i", "flux-3-klein edit with two references"]
             if comfy_version(a.comfy) >= (0, 45, 0):
                 await c.case("minimax-h3-image t2i with the gmlx VAE", c.h3_image_t2i)
+                await c.case("minimax-h3-image edit with two pictures", c.h3_image_edit)
             else:
-                out.setdefault("skipped", []).append("minimax-h3-image t2i")
+                out.setdefault("skipped", []).extend(["minimax-h3-image t2i",
+                                                      "minimax-h3-image edit with two pictures"])
             out["cases"] = c.results
     except Exception:  # noqa: BLE001
         out["fatal"] = traceback.format_exc()

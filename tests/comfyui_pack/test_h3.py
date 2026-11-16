@@ -1329,8 +1329,9 @@ def image_cond(client, text="a lighthouse on a cliff at dusk"):
 class H3Image(Base):
     """MiniMax-H3-Image: the weightless model on the PDD heads its manifest's
     config names, a stock sample of one latent frame through the image step
-    with the sampler's schedule, the VAE's frame axis, and the refusals of
-    what a gmlx model does not run of what its conditioning node gives."""
+    with the sampler's schedule, the VAE's frame axis and its noise, an edit
+    through the stock conditioning node, and the refusals of what a gmlx
+    model does not run of what that node gives."""
 
     def ksample(self, model, pos=None, latent=None, steps=6):
         pos = pos or image_cond(self.client)
@@ -1386,28 +1387,105 @@ class H3Image(Base):
         self.assertEqual(len(self.stub.events("step")), 2)
 
     def test_the_vae_gives_and_takes_latents_of_one_frame(self):
+        """An encode sends the noise ComfyUI's H3ImageVAE samples with, a
+        generator at the status's seed in the shape of the latents."""
         vae = P.nodes.GmlxVAELoader().load(IID, self.stub.url, False)[0]
         (lat,) = comfy_nodes.VAEEncode().encode(vae, torch.rand(1, SIZE, SIZE, 3))
         self.assertEqual(tuple(lat["samples"].shape), (1, 24, 1, SIZE // 16, SIZE // 16))
+        enc = self.stub.events("vae_encode")[-1]
+        self.assertEqual(enc["noise"], [1, 24, 4, 4])
+        want = torch.randn((1, 24, 1, 4, 4), generator=torch.Generator().manual_seed(42))
+        self.assertAlmostEqual(enc["noise_sum"], float(want.double().sum()), places=4)
         (img,) = comfy_nodes.VAEDecode().decode(vae, lat)
         self.assertEqual(tuple(img.shape), (1, SIZE, SIZE, 3))
         self.assertEqual(self.stub.events("vae_decode")[-1]["shape"], [1, 24, 4, 4])
 
-    def test_references_vision_tokens_and_keyframes_are_refused_by_name(self):
+    def test_an_edit_steps_with_its_references_their_noise_and_its_vision_rows(self):
+        """MiniMaxH3ImageConditioning shows the gmlx CLIP each picture's
+        vision copy after its label, and its VAE node encodes each VAE copy
+        with the noise of seed 42. Each step carries the reference latents
+        of one frame, the noise ComfyUI's forward mixes into their rows,
+        drawn at the sampler's seed for each, and the vision rows of the
+        prompt's pictures, on the latent of image_1's VAE copy."""
+        clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]
+        vae = P.nodes.GmlxVAELoader().load(IID, self.stub.url, False)[0]
+        g = torch.Generator().manual_seed(3)
+        images = {"image_1": torch.randint(0, 256, (1, 48, 64, 3), generator=g) / 255.0,
+                  "image_2": torch.randint(0, 256, (1, 64, 64, 3), generator=g) / 255.0}
+        pos, latent = _out(H.MiniMaxH3ImageConditioning.execute(
+            clip, "put the cup of Picture 2 on the table of Picture 1", 0, 0, vae=vae,
+            images=images))
+        self.assertEqual(tuple(latent["samples"].shape), (1, 24, 1, 64, 86))
+        (enc,) = self.stub.events("encode")
+        self.assertEqual((enc["images"], enc["refs"]), (2, False))
+        self.assertEqual(enc["image_shapes"], [[1024, 1376, 3], [1024, 1024, 3]])
+        vae_enc = self.stub.events("vae_encode")
+        self.assertEqual([e["noise"] for e in vae_enc], [[1, 24, 64, 86], [1, 24, 64, 64]])
+        for e, (h, w) in zip(vae_enc, ((64, 86), (64, 64))):
+            want = torch.randn((1, 24, 1, h, w), generator=torch.Generator().manual_seed(42))
+            self.assertAlmostEqual(e["noise_sum"], float(want.double().sum()), places=3)
+        tags = pos[0][1]["minimax_token_tags"]
+        self.assertEqual(P.patcher.tag_spans(tags), enc["spans"])
+        self.ksample(self.model(IID), pos=pos, latent=latent, steps=2)
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), 2)
+        slots = [r for a, b in enc["spans"] for r in range(a + 1, b - 1)]
+        for st in steps:
+            self.assertEqual(st["x_shape"], [1, 24, 64, 86])
+            self.assertEqual(st["ref_shapes"], [[[1, 24, 64, 86], [1, 24, 64, 64]]])
+            self.assertEqual(st["ref_noise"], [[[32 * 43, 96], [32 * 32, 96]]])
+            self.assertEqual(st["image_slots"], [slots])
+            # Each reference's noise restarts the generator at the seed.
+            want = [float(torch.randn((n, 96), generator=torch.Generator().manual_seed(1))
+                          .double().sum()) for n in (32 * 43, 32 * 32)]
+            for got, w in zip(st["ref_noise_sums"][0], want):
+                self.assertAlmostEqual(got, w, places=3)
+            self.assertEqual(st["row_keys"], ["cond", "image_slots", "num_tokens",
+                                              "ref_latents", "ref_noise"])
+
+    def test_pictures_under_another_label_are_refused_by_name(self):
+        clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]
+        img = torch.zeros(1, 64, 64, 3)
+        for label in ("<Picture %d>: ", None):
+            with self.subTest(label):
+                kw = {} if label is None else {"picture_label": label}
+                tokens = clip.tokenize("a cup", images=[img], **kw)
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    clip.encode_from_tokens(tokens)
+                self.assertIn(f"after the label 'Picture %d: ', as MiniMaxH3ImageConditioning "
+                              f"puts them, and this encode names them {label!r}",
+                              str(e.exception))
+        self.assertEqual(self.stub.events("encode"), [])
+
+    def test_keyframes_another_mix_and_an_older_server_are_refused_by_name(self):
         f = self.model(IID).model.diffusion_model.forward
         cond = image_cond(self.client)[0][0]
         x, t = torch.zeros(1, 24, 1, 4, 4), torch.tensor([1000.0])
         to = {"sample_sigmas": torch.tensor([1.0, 0.5, 0.0])}
-        ref = {"kind": "image", "latent_h": 4, "latent_w": 4, "latent": torch.zeros(1, 24, 1, 4, 4)}
-        cases = {"reference images (minimax_refs": {"refs": [ref]},
-                 "minimax_token_tags hold vision tokens": {
-                     "text_token_tags": torch.tensor([1, 0, 0, 1])},
-                 "keyframes reached the DiT forward": {"keyframes": [{"latent": x}]}}
+        lat = [torch.zeros(1, 24, 1, 4, 4)]
+        cases = {"keyframes reached the DiT forward": {"keyframes": [{"latent": x}]},
+                 "a reference noise mix of 0.5 (minimax_payload['visual_cond_noise_aug']": {
+                     "cond_video_latents": lat, "visual_cond_noise_aug": 0.5}}
         for want, payload in cases.items():
             with self.subTest(want):
                 with self.assertRaises(C.GmlxRefusal) as e:
                     f(x, t, context=cond, transformer_options=dict(to), minimax_payload=payload)
                 self.assertIn(want, str(e.exception))
+        with self.assertRaises(C.GmlxError) as e:
+            f(x, t, context=cond, transformer_options=dict(to),
+              minimax_payload={"text_token_tags": torch.ones(cond.shape[1] + 1)})
+        self.assertIn(f"hold {cond.shape[1] + 1} tags for its {cond.shape[1]} rows",
+                      str(e.exception))
+        caps = self.client.capabilities
+        self.client.capabilities = dict(caps, features=[
+            k for k in caps["features"] if k != "ref_noise"])
+        try:
+            with self.assertRaises(C.GmlxRefusal) as e:
+                f(x, t, context=cond, transformer_options=dict(to),
+                  minimax_payload={"cond_video_latents": lat, "seed": 3})
+        finally:
+            self.client.capabilities = caps
+        self.assertIn("runs no MiniMax-H3-Image reference images; update it", str(e.exception))
         with self.assertRaises(C.GmlxError) as e:
             f(x, t, context=cond, transformer_options={})
         self.assertIn(f"{IID!r} runs PDD heads, which read the schedule the sampler runs on",
@@ -1415,14 +1493,17 @@ class H3Image(Base):
         self.assertEqual(self.stub.events("step"), [])
         # The payload of a text prompt steps.
         f(x, t, context=cond, transformer_options=dict(to), minimax_payload={
-            "text_token_tags": torch.ones(4, dtype=torch.long), "refs": [], "keyframes": [],
-            "cond_video_latents": [], "cond_audio_latents": [], "seed": 0, "audio_scale": 1.0})
-        self.assertEqual(len(self.stub.events("step")), 1)
+            "text_token_tags": torch.ones(cond.shape[1], dtype=torch.long), "refs": [],
+            "keyframes": [], "cond_video_latents": [], "cond_audio_latents": [], "seed": 0,
+            "audio_scale": 1.0})
+        (st,) = self.stub.events("step")
+        self.assertEqual(st["row_keys"], ["cond", "num_tokens"])
 
     def test_a_payload_key_comfyui_stops_writing_is_named_at_the_load(self):
-        """The forward refuses references and vision tokens by their payload
-        keys, so a ComfyUI that renames one is named at the load, not run
-        as text to image."""
+        """The forward reads the references, the vision tokens and the seed
+        of the references' noise by their payload keys, so a ComfyUI that
+        renames one is named at the load, not run as text to image or on
+        other noise."""
         owner = comfy.model_base.MiniMaxH3Image
         real = owner.__dict__["extra_conds"]
 
