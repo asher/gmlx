@@ -604,7 +604,8 @@ def test_a_vae_or_encoder_of_another_family_is_refused_from_its_header(monkeypat
     from gmlx.image.vae import VAEError, reader
 
     fam = get_family("z_image")
-    monkeypatch.setattr(reader, "read_header", lambda path: path)
+    monkeypatch.setattr(reader, "read_header",
+                        lambda path, own_names=False: path)
 
     def identify(header, family):
         if header == "/qwen-vae.gguf":

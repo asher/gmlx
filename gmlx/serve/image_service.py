@@ -455,7 +455,9 @@ def check_parts(spec, fam) -> None:
     )
     from gmlx.image.vae import reader
 
-    reader.identify(reader.read_header(str(spec.vae)), fam.name)
+    own = reader.vae_row(fam.name).own_names
+    reader.identify(reader.read_header(str(spec.vae), own_names=own),
+                    fam.name)
     if spec.encoder is not None:
         enc = encoder_spec(fam)
         check_encoder_file(_header_view(str(spec.encoder)), enc)

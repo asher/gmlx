@@ -311,6 +311,50 @@ def test_the_mask_token_is_read_and_left_unused(tiny):
     assert set(header.shapes) - params == {"decoder.mask_token"}
 
 
+@pytest.mark.parametrize("family", (None, "h3_image"))
+def test_the_packed_vae_loads_the_same_tensors_and_decodes_the_same(
+        tiny, tmp_path, family):
+    """pack-vae finds the VAE under its own names, as the loader reads it,
+    and the GGUF it writes loads the same tensors and decodes and encodes
+    as the safetensors file does, bit for bit."""
+    from mlx.utils import tree_flatten
+
+    from gmlx.image.vae import pack_vae
+
+    dst = tmp_path / "vae.gguf"
+    rep = pack_vae(tiny[0], dst, source_repo="org/repo",
+                   source_revision="abc", config_json="{}", family=family)
+    assert rep.family == "h3_image" and rep.lossless
+    a, b = _load(tiny[0], mx.float32), _load(dst, mx.float32)
+    assert b.source_format == "gguf"
+    pa, pb = dict(tree_flatten(a.parameters())), \
+        dict(tree_flatten(b.parameters()))
+    assert set(pa) == set(pb)
+    assert all(np.array_equal(np.array(pa[k]), np.array(pb[k])) for k in pa)
+    z = mx.random.normal((1, 17, 17, 24), key=mx.random.key(1))
+    x = mx.random.uniform(-1, 1, (1, 128, 128, 3), key=mx.random.key(2))
+    with mx.stream(mx.cpu):
+        assert np.array_equal(np.array(a.decode(z)), np.array(b.decode(z)))
+        assert np.array_equal(np.array(a.encode(x)[0]),
+                              np.array(b.encode(x)[0]))
+
+
+def test_serve_checks_the_vae_under_its_own_names(tiny):
+    """A served entry's VAE is checked from its header as the loader reads
+    it, so the H3-Image VAE is taken and another family's is refused."""
+    from types import SimpleNamespace
+
+    from gmlx.image.registry import get_family
+    from gmlx.image.vae import VAEError
+    from gmlx.serve import image_service
+
+    spec = SimpleNamespace(vae=str(tiny[0]), encoder=None,
+                           encoder_mmproj=None)
+    image_service.check_parts(spec, get_family("h3_image"))
+    with pytest.raises(VAEError):
+        image_service.check_parts(spec, get_family("z_image"))
+
+
 @pytest.mark.parametrize("tiled", (None, False, True))
 def test_tiling_gives_the_vae_the_whole_input_on_every_branch(
         tiny, monkeypatch, tiled):

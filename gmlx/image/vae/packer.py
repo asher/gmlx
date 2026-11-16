@@ -26,7 +26,7 @@ import numpy as np
 from ..fingerprint import canonical_bf16
 from .reader import (CONFIG_KEY, ORIG_SHAPE_KEY, VAES, VAEError,
                      check_config, check_names, identify, read_header,
-                     safetensors_header)
+                     safetensors_header, vae_row)
 
 PACKER_VERSION = "1"
 
@@ -56,24 +56,28 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _family(header, family: str | None) -> str:
+def _family(src: str, family: str | None) -> str:
     # A VAE that several families read, as FLUX.3 klein and FLUX.2 klein
     # read the FLUX.2 autoencoder, packs for the first row that names it.
+    # Each row reads the header under its own names, as the loader does.
     names = [family] if family else list(VAES)
-    errors = []
+    headers, errors = {}, []
     for name in names:
         try:
-            cfg = identify(header, name)
+            row = vae_row(name)
+            if row.own_names not in headers:
+                headers[row.own_names] = read_header(
+                    src, own_names=row.own_names)
+            cfg = identify(headers[row.own_names], name)
         except VAEError as e:
             errors.append(str(e))
             continue
-        row = VAES[name]
         params = dict(_tree_params(row.build(cfg)))
-        check_names(header, params, row, cfg)
+        check_names(headers[row.own_names], params, row, cfg)
         return name
     errors = list(dict.fromkeys(errors))
     raise VAEError(errors[0] if len(errors) == 1 else
-                   f"{header.path} matches no image family's VAE: "
+                   f"{src} matches no image family's VAE: "
                    + "; ".join(errors))
 
 
@@ -126,8 +130,7 @@ def pack_vae(src, dst, *, source_repo: str, source_revision: str,
     except ValueError as e:
         raise VAEError(f"config_json is not JSON: {e}") from None
 
-    vh = read_header(src)
-    fam = _family(vh, family)
+    fam = _family(src, family)
     check_config(src, config_json, fam)
     header, data_start = safetensors_header(src)
     header.pop("__metadata__", None)
