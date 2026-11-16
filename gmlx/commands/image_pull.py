@@ -382,6 +382,24 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
 _PACK_ITEMSIZE = {"BF16": 2, "F16": 2, "F32": 4}
 
 
+def encoder_download_price(name: str, whole: int) -> tuple[int, int]:
+    """(resident bytes, load transient) of the encoder file ``name`` of
+    ``whole`` bytes that a pull downloads, as the memory plan of the file
+    on disk counts them: less the output matrix the load reads and drops
+    (``catalog.ENCODER_OUTPUT_BYTES``), which the transient holds."""
+    from types import SimpleNamespace
+
+    from gmlx.image import memfit
+
+    out = min(whole, catalog.ENCODER_OUTPUT_BYTES.get(name, 0))
+    # A tensor of no bytes would count as one float32 scalar.
+    view = SimpleNamespace(tensors={
+        n: SimpleNamespace(nbytes=b, shape=(), codec="F32")
+        for n, b in (("weights", whole - out), ("output.weight", out)) if b})
+    return (memfit.file_bytes(view, skip=("output.weight",)),
+            memfit.load_transient(view, None, None))
+
+
 def _image_plan(plan: Plan, ram: int):
     """(size, memory plan) of a text to image request at the entry's size
     on a Mac with ``ram`` bytes of RAM, as ``image generate`` plans it at
@@ -433,14 +451,8 @@ def _image_plan(plan: Plan, ram: int):
     if got:
         enc_b, enc_load = got
     else:
-        whole = part["encoder"].size or 0
-        out = min(whole, catalog.ENCODER_OUTPUT_BYTES.get(
-            part["encoder"].name, 0))
-        view = SimpleNamespace(tensors={
-            n: SimpleNamespace(nbytes=b, shape=(), codec="F32")
-            for n, b in (("weights", whole - out), ("output.weight", out))})
-        enc_b = memfit.file_bytes(view, skip=("output.weight",))
-        enc_load = memfit.load_transient(view, None, None)
+        enc_b, enc_load = encoder_download_price(part["encoder"].name,
+                                                 part["encoder"].size or 0)
     got = held("vae", lambda f: (_header_bytes(f, "vae"),
                                  load_transient(None, f, None)))
     if got:

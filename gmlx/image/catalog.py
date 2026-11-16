@@ -464,6 +464,7 @@ ENCODER_OUTPUT_BYTES = {
     "Qwen3-VL-8B-Instruct-Q4_K_M.gguf": 510_504_960,
     "Qwen3.5-9B-Q8_0.gguf": 1_080_688_640,
     "Qwen3.5-9B-Q4_K_M.gguf": 834_355_200,
+    "Qwen3-VL-32B-Instruct-Q4_K_M.gguf": 638_131_200,
 }
 
 

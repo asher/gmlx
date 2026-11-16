@@ -2,8 +2,10 @@
 the VAE pack and its checks, and the image_models entry."""
 from __future__ import annotations
 
+import functools
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -2080,3 +2082,32 @@ def test_the_float16_opt_in_lets_only_z_image_pull_on_an_m1(
     err = capsys.readouterr().err
     assert ("needs an M3 or newer" not in err) == goes
     assert bool(got) == goes
+
+
+@functools.lru_cache(maxsize=None)
+def _on_disk(root: str) -> dict:
+    return {p.name: str(p) for p in Path(root).rglob("*.gguf")}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", sorted({
+    r.encoder_name(q) for r in catalog.RECIPES.values()
+    for q in r.encoder_quants}))
+def test_a_pull_prices_an_encoder_as_the_file_on_disk(gguf_dir, name):
+    """Each encoder file a recipe pulls, where the lab holds it: the price
+    of the file while it downloads is the price of its header on disk,
+    but for the GGUF header's own bytes, so a fresh pull plans what the
+    file holds once it is there."""
+    from gmlx.commands.image_preflight import load_transient
+    from gmlx.commands.image_pull import encoder_download_price
+    from gmlx.image.api import _header_bytes
+    from gmlx.image.text_encoder import _header_view
+
+    path = _on_disk(str(gguf_dir)).get(name)
+    if path is None:
+        pytest.skip(f"{name} is not under KQUANT_TEST_GGUF_DIR")
+    tensors = sum(t.nbytes for t in _header_view(path).tensors.values())
+    pull = encoder_download_price(name, os.path.getsize(path))
+    assert pull == (_header_bytes(path, "encoder")
+                    + os.path.getsize(path) - tensors,
+                    load_transient(path, None, None))
