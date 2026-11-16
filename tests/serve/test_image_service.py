@@ -1549,6 +1549,84 @@ def test_qwen_image_edits_on_a_shared_chat_model_need_its_mmproj():
     assert e.value.param == "image"
 
 
+def test_h3_image_edits_take_comfyuis_copies_and_the_first_sizes_them():
+    """A MiniMax-H3-Image edit takes up to 16 images on an entry with the
+    encoder's mmproj, each with its VAE copy and its vision copy by
+    ComfyUI's rules, alpha dropped. Without a size the result takes the
+    first image's VAE copy. An image outside 1:3 to 3:1 gets a 400 that
+    names it, and so does an edit on an entry without the tower."""
+    import numpy as np
+
+    served = _edit_served("h3_image")
+    req = _edit_req(1)
+    req.images = [np.zeros((480, 640, 3), np.uint8),
+                  np.zeros((3000, 1500, 4), np.uint8)]
+    image_service.check_family(req, served)
+    assert [(r.width, r.height) for r in req.refs] == [(1376, 1024),
+                                                       (1504, 3008)]
+    assert [r.vision.shape for r in req.refs] == [(1024, 1376, 3),
+                                                  (2048, 1024, 3)]
+    # The example of image-api.md.
+    assert image_service.target_size(req, served) == (1376, 1024)
+    sized = _edit_req(1, size="1024x1024")
+    sized.images = req.images
+    image_service.check_family(sized, served)
+    assert image_service.target_size(sized, served) == (1024, 1024)
+    image_service.check_family(_edit_req(16), served)
+    for req, match in (
+            (_edit_req(17), "MiniMax-H3-Image takes at most 16 images, and "
+                            "the request has 17"),
+            (_edit_req(2, (1000, 3100)), "image 1: a reference of 3100x1000 "
+                                         "pixels is outside the shapes "
+                                         "MiniMax-H3-Image takes, 1:3 to 3:1")):
+        with pytest.raises(image_service.ImageRequestError, match=match) as e:
+            image_service.check_family(req, served)
+        assert e.value.param == "image"
+    with pytest.raises(image_service.ImageRequestError,
+                       match="need the encoder's vision tower"):
+        image_service.check_family(_edit_req(1), _edit_served(
+            "h3_image", mmproj=False))
+
+
+def test_an_h3_image_edit_is_priced_with_its_copies_and_its_prompt():
+    """The fit check prices a MiniMax-H3-Image edit at the VAE copies the
+    job runs and the rows of the prompt with each label and vision block,
+    and the plan adds the vision rows of the copies and the tower."""
+    import numpy as np
+
+    from gmlx.commands.image_preflight import prompt_rows
+    from gmlx.image import memfit
+    from gmlx.image.registry import get_family
+
+    served = _qwen_served()
+    served.pipe.family = get_family("h3_image")
+    req = _edit_req(1, prompt="swap the hats")
+    req.images = [np.zeros((1024, 1024, 3), np.uint8),
+                  np.zeros((1000, 2000, 3), np.uint8)]
+    image_service.check_family(req, served)
+    seen = []
+    real = memfit.plan_memory
+
+    def record(*a, **k):
+        seen.append(k)
+        return real(*a, **k)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(memfit, "plan_memory", record)
+        image_service.fit_check(req, served, (1024, 1024), 1 << 40)
+    sizes = [(1024, 1024), (1024, 2048)]
+    assert seen[-1]["ref_sizes"] == sizes
+    rows = prompt_rows(served.pipe.family, "swap the hats", 2)
+    assert seen[-1]["caption_tokens"] == rows
+    # The plan prices the vision rows of those sizes beside the caption.
+    assert "vision" not in seen[-1]
+    row = memfit.PEAKS["h3_image"]
+    vision = memfit.vision_rows(row, sizes)
+    assert vision > 3 * 1024
+    peak = real(**seen[-1]).terms["step_peak"]
+    assert peak == real(**seen[-1], vision=vision).terms["step_peak"] > (
+        real(**seen[-1], vision=0).terms["step_peak"])
+
+
 @pytest.mark.parametrize("route", ["edits", "variations"])
 def test_one_flux3_reference_is_padded_and_sizes_the_request(route):
     """One image of 100 x 60 goes on a 112 x 64 canvas, the size of a

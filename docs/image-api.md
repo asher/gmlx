@@ -31,7 +31,8 @@ curl -s localhost:8080/v1/images/generations \
 Each route also answers without the `/v1` prefix. In `/v1/models` an image
 model has `"image": true`, its `family` and `variant`, and `edit: true` when
 it edits from reference images: FLUX.2 klein and FLUX.3 klein always, and
-Qwen-Image 2.1 when the entry has its encoder's vision tower. It carries
+Qwen-Image 2.1 and MiniMax-H3-Image when the entry has its encoder's vision
+tower. It carries
 `resident`, `pinned` and `default`, where `default` marks the default image
 model, and no context figures.
 
@@ -99,12 +100,12 @@ GIF.
 | Qwen-Image 2.1 | Up to 10 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
 | FLUX.2 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
 | FLUX.3 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
+| MiniMax-H3-Image | Up to 16 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
 
 Without `size`, the result takes the size of the first image, cut down to
 the model's size step and the size limits, its model's own where it has
-them. A first image that a model's own limits refuse, such as one under
-the least pixels of MiniMax-H3-Image or outside its 1:3 to 3:1 shapes,
-gets 400 asking for a size. With a `mask`, the edit starts from the first
+them. A first image that a model's own limits refuse gets 400 asking for
+a size. With a `mask`, the edit starts from the first
 image at `strength` 1 and changes only the masked region.
 
 FLUX.3 klein scales a single reference down to at most the area of
@@ -126,6 +127,15 @@ A reference needs sides of at least 64 pixels, and neither side more than
 reference as prepared, scaled into the same limits, and is not cropped
 back. A 500x300 image gives a 496x288 result, and an 8000x1000 image,
 prepared at 5712x704, gives a 4096x496 result.
+
+MiniMax-H3-Image prepares each reference as ComfyUI's
+`MiniMaxH3ImageConditioning` node does. The VAE encodes a copy whose short
+side is scaled into 1024 to 2048 pixels, and the prompt reads a copy
+whose short side is scaled to 1024, each side rounded to a multiple of
+32. The prompt names them as Picture 1, Picture 2 and on, in the order of
+the images. Without `size` the result has the size of the first image's
+VAE copy, so a 640x480 image gives a 1376x1024 result. An image outside
+1:3 to 3:1 gets 400 naming it.
 
 ## URL responses
 
