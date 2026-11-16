@@ -30,13 +30,15 @@ embeds the time in the model's dtype, as BFL's does. Under
 ``convention: "reference"`` a step embeds the time by the DiT's reference
 rule, as ``sample`` does, and is otherwise the comfy step.
 
-A FLUX.3 flow map DiT also reads the time its step goes to. ComfyUI's
-forward takes it from the schedule its sampler runs on: the entry after
-the one nearest the timestep, the last at most. A step on a flow map
-holds that schedule as ``sample_sigmas`` and the route takes the target
-of each row by the same rule. ComfyUI's FLUX.2 and FLUX.3 latents are
-the DiT's own model space, the VAE's latents in 2x2 patches and
-normalized, so their VAE routes take and give model-space latents.
+A FLUX.3 flow map DiT also reads the time its step goes to, and so do
+the PDD heads of MiniMax-H3-Image, a DiT whose ``reads_target`` is set.
+ComfyUI's forward takes it from the schedule its sampler runs on: the
+entry after the one nearest the step's sigma, the last at most. A step
+on such a DiT holds that schedule as ``sample_sigmas`` and the route
+takes the target of each row by the same rule. ComfyUI's FLUX.2 and
+FLUX.3 latents are the DiT's own model space, the VAE's latents in 2x2
+patches and normalized, so their VAE routes take and give model-space
+latents, as MiniMax-H3-Image's do.
 """
 
 from __future__ import annotations
@@ -92,7 +94,8 @@ CONVENTIONS = {
               "flux2_klein_9b": Convention(time="fp32"),
               "flux2_klein_9b_kv": Convention(time="fp32"),
               "flux3_klein": Convention(),
-              "moss_image": Convention(scale=0.001)},
+              "moss_image": Convention(scale=0.001),
+              "h3_image": Convention(scale=0.001)},
 }
 # Under "reference" a step reads the timestep and returns its output as
 # under "comfy", and embeds the time by the DiT's reference rule, as a
@@ -103,7 +106,10 @@ CONVENTIONS["reference"] = {fam: replace(c, time="reference")
 # What a client builds its model from, per family: ComfyUI's model class
 # and image model name, the latent format and the VAE's. The VAE's
 # latents on the wire are in the VAE's own space unless its ``space`` is
-# "model".
+# "model". A latent with ``frames`` carries a frame axis of that many
+# frames in ComfyUI. ``config_keys`` names the keys of the DiT's config
+# that ComfyUI's model detection reads from a file's ``config`` metadata,
+# which the manifest carries.
 COMFY = {
     "z_image": {"model_class": "ZImage", "image_model": "lumina2",
                 "latent": {"channels": 16, "stride": 8, "patch": 2},
@@ -153,6 +159,13 @@ COMFY = {
                    "encode_pieces": 7},
            "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
                      "latents_per_second": 40}},
+    # ComfyUI's MiniMax-H3-Image latents are its video VAE's, at one frame.
+    "h3_image": {"model_class": "MiniMaxH3Image",
+                 "image_model": "minimax_h3_image",
+                 "latent": {"channels": 24, "stride": 16, "patch": 2,
+                            "frames": 1},
+                 "vae": {"channels_out": 3, "stride": 16, "space": "model"},
+                 "config_keys": ("pdd_steps", "pdd_sigmas")},
 }
 # The families whose step is an AV step: a video and an audio stream.
 AV_FAMILIES = frozenset({"h3"})
@@ -163,10 +176,11 @@ def _model_space(family: str) -> bool:
     return COMFY.get(family, {}).get("vae", {}).get("space") == "model"
 
 
-def flow_targets(sample_sigmas, timesteps) -> list:
-    """The time each row's step goes to on a flow map DiT, as ComfyUI's
-    FLUX.3 forward takes it: the entry of the client's schedule after the
-    one nearest the row's timestep, the last at most."""
+def flow_targets(sample_sigmas, sigmas) -> list:
+    """The sigma each row's step goes to on a DiT that reads it, as
+    ComfyUI's FLUX.3 and MiniMax-H3-Image forwards take it: the entry of
+    the client's schedule after the one nearest the row's sigma, the last
+    at most."""
     import numpy as np
 
     s = np.asarray(sample_sigmas, np.float32).reshape(-1)
@@ -174,7 +188,7 @@ def flow_targets(sample_sigmas, timesteps) -> list:
         raise StepError(400, "sample_sigmas is a schedule of 2 or more "
                         "finite sigmas")
     out = []
-    for t in timesteps:
+    for t in sigmas:
         i = int(np.abs(s - np.float32(t)).argmin())
         out.append(float(s[min(i + 1, s.size - 1)]))
     return out
@@ -963,8 +977,9 @@ _DTYPE_CLASS = {"F32": "f32", "F16": "f16", "BF16": "bf16"}
 
 def manifest(spec) -> dict:
     """The DiT's tensor names in GGUF key naming, their shapes in PyTorch
-    order and their dtype class, and the values of the tensors a client's
-    model detection reads by value."""
+    order and their dtype class, the values of the tensors a client's
+    model detection reads by value, and the file metadata it reads, the
+    ``config`` of a family whose row names ``config_keys``."""
     import base64
 
     import gguf
@@ -996,9 +1011,18 @@ def manifest(spec) -> dict:
             inline[name] = {"dtype": "f32", "shape": list(a.shape),
                             "b64": base64.b64encode(
                                 a.astype("<f4").tobytes()).decode()}
-    return {"model": spec.id, "family": fam.name, "naming": "gguf",
-            "arch": kv.get("general.architecture"), "count": len(tensors),
-            "tensors": tensors, "inline": inline}
+    out = {"model": spec.id, "family": fam.name, "naming": "gguf",
+           "arch": kv.get("general.architecture"), "count": len(tensors),
+           "tensors": tensors, "inline": inline}
+    keys = COMFY.get(fam.name, {}).get("config_keys")
+    if keys:
+        from gmlx.image.loader import identify_dit
+
+        cfg = identify_dit(spec.path,
+                           variant=getattr(spec, "variant", None)).config
+        out["metadata"] = {"config": json.dumps(
+            {"transformer": {k: cfg[k] for k in keys}})}
+    return out
 
 
 def _inline_names(family: str, names: list) -> list:

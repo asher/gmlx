@@ -125,6 +125,7 @@ class DitFacts:
     flow_map: bool                  # the DiT is a flow map
     ref_cache: bool                 # the DiT keeps a cache of reference K and V
     blocks: int | None              # the blocks a step may skip, None for none
+    reads_target: bool = False      # the DiT reads the sigma a step goes to
 
 
 def dit_facts(pipe) -> DitFacts:
@@ -136,7 +137,8 @@ def dit_facts(pipe) -> DitFacts:
                     flow_map=bool(getattr(dit.cfg, "flow_map", False)),
                     ref_cache=hasattr(dit, "extract"),
                     blocks=(len(dit.layers)
-                            if getattr(dit, "skips_blocks", False) else None))
+                            if getattr(dit, "skips_blocks", False) else None),
+                    reads_target=bool(getattr(dit, "reads_target", False)))
 
 
 @dataclass(eq=False)

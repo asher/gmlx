@@ -174,8 +174,8 @@ def test_capabilities_answer_without_the_version_header(host):
     assert caps["contract"] == {"major": 1, "minor": 0}
     assert caps["families"] == ["flux2_klein", "flux2_klein_9b",
                                 "flux2_klein_9b_kv", "flux3_klein", "h3",
-                                "krea2", "moss_image", "qwen_image21",
-                                "z_image"]
+                                "h3_image", "krea2", "moss_image",
+                                "qwen_image21", "z_image"]
     assert {"skip_blocks", "av_step", "anchors", "keyframe_upsampling",
             "int8"} <= set(caps["features"])
     assert "int8_attention" not in caps["features"]
@@ -797,6 +797,142 @@ def test_flow_targets_follow_comfyuis_rule():
     assert steps.flow_targets(s, [0.625]) == [0.5]
 
 
+# MiniMax-H3-Image: ComfyUI's forward takes the timestep as sigma x 1000
+# and hands its PDD heads the sigma the step goes to, from the schedule
+# its sampler runs on.
+
+H3I_SHAPE = (1, 24, 4, 6)               # 64x96 pixels at the stride of 16
+
+
+@pytest.fixture(scope="module")
+def hpipe():
+    """The tiny MiniMax-H3-Image DiT of the check 3 self-test, without
+    the family's least pixels."""
+    def build():
+        import h3_image_gates as hg
+        from oracle_fixture import committed_fixture
+
+        from gmlx.image.families.h3_image import family as hi
+
+        weights, m = committed_fixture("selftest_h3_image_tiny_weights")
+        return api.ImagePipeline(
+            dit=hg.tiny_model(weights, m["inputs"]["config"]),
+            family=dataclasses.replace(hi.FAMILY, min_pixels=None),
+            variant="pruned")
+    return _on_worker(build)
+
+
+@pytest.mark.parametrize("schedule", ["grid", "simple_3"])
+def test_an_h3_image_step_reads_comfyuis_timestep_and_the_next_sigma(
+        host, hpipe, schedule):
+    """A timestep of sigma x 1000 in float32 gives the core step at that
+    sigma to the entry of ``sample_sigmas`` after it, bit for bit, on the
+    release's grid and on ComfyUI's simple schedule at 3 steps, which
+    lands off the grid and spans two heads a step."""
+    from oracle_fixture import committed_fixture
+
+    s = committed_fixture("check4_h3_image")[0][schedule]
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    feats = np.random.default_rng(12).standard_normal(
+        (1, 8, 40)).astype(np.float32)
+    x = noise_from_seed(7, H3I_SHAPE)
+    rows = _rows(c, feats)
+    for i in range(len(s) - 1):
+        t = np.float32(s[i]) * np.float32(1000)
+        out = c.step("h3i", None, x, [t], rows, sample_sigmas=s)
+        assert np.array_equal(out, _f3_velocity(
+            hpipe, x, s[i], _f3_cond(feats), s[i + 1])), i
+    # The next sigma of another schedule gives another step.
+    t = np.float32(s[0]) * np.float32(1000)
+    other = c.step("h3i", None, x, [t], rows,
+                   sample_sigmas=np.array([1.0, 0.0], np.float32))
+    assert not np.array_equal(other, c.step("h3i", None, x, [t], rows,
+                                            sample_sigmas=s))
+    assert host.held == 0
+
+
+def test_an_h3_image_step_without_its_schedule_is_refused(host, hpipe):
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    with pytest.raises(StepsClientError, match="reads the sigma its step "
+                       "goes to: a step body holds sample_sigmas"):
+        c.step("h3i", None, np.zeros(H3I_SHAPE, np.float32), [500.0],
+               _rows(c, np.ones((1, 8, 40), np.float32)))
+    assert host.held == 0
+
+
+def test_the_h3_image_status_names_comfyuis_model_and_the_entrys_int8(
+        host, hpipe, monkeypatch):
+    """The pack builds ComfyUI's MiniMaxH3Image on latents of one frame
+    and samples on the release's grid; the status names the int8 setting
+    the entry loads at, whose int8 linears the DiT's bytes count."""
+    from gmlx.image.families.h3_image import family as hi
+
+    monkeypatch.setattr(steps, "family_of", lambda spec: (hi.FAMILY,
+                                                          "pruned"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    monkeypatch.setattr(api, "_int8_bytes", lambda path, int8: (
+        5 if int8 in ("linears", "all") else 0))
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    for int8, dit in (("off", 7), ("attention", 7), ("linears", 12),
+                      ("all", 12)):
+        host.served["h3i"].spec.defaults = {"int8": int8}
+        st = c.status("h3i")
+        assert st["int8"] == int8 and st["memory"]["dit_bytes"] == dit
+    host.served["h3i"].spec.defaults = None
+    st = c.status("h3i")
+    assert st["int8"] == "off"
+    assert st["comfy"] == {"model_class": "MiniMaxH3Image",
+                           "image_model": "minimax_h3_image"}
+    assert st["latent"] == {"channels": 24, "stride": 16, "patch": 2,
+                            "frames": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model"}
+    assert not st["edit_capable"]
+    assert st["sampling"] == {"steps": 6, "cfg": 1.0, "shift": 1.0,
+                              "sigmas": [float(v) for v in hi.PDD_SIGMAS],
+                              "schedule": None, "neg_skip": []}
+
+
+def test_the_h3_image_manifest_carries_the_config_comfyui_detects_by(
+        tmp_path, monkeypatch):
+    """ComfyUI's detection of MiniMax-H3-Image reads the PDD steps and
+    sigmas from the file's ``config`` metadata, which the release does
+    not hold; the manifest carries them from the DiT's config, and a
+    family that reads no config gets no metadata."""
+    import gguf
+
+    from gmlx.image import loader
+    from gmlx.image.families.h3_image import family as hi
+
+    path = tmp_path / "dit.gguf"
+    w = gguf.GGUFWriter(str(path), "hyvid")
+    w.add_tensor("condition_proj.weight", np.ones((4, 40), np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    cfg = {"pdd_steps": 6, "pdd_sigmas": list(hi.PDD_SIGMAS),
+           "hidden_size": 32}
+    seen = []
+
+    def identify(p, variant=None):
+        seen.append((p, variant))
+        return SimpleNamespace(config=cfg)
+    monkeypatch.setattr(loader, "identify_dit", identify)
+    spec = SimpleNamespace(id="h3i", path=str(path), variant="pruned")
+    for fam, meta in (("h3_image", True), ("z_image", False)):
+        monkeypatch.setattr(steps, "family_of", lambda spec, f=fam: (
+            get_family(f), "v"))
+        out = steps.manifest(spec)
+        assert out["count"] == 1 and out["arch"] == "hyvid"
+        if not meta:
+            assert "metadata" not in out
+            continue
+        assert json.loads(out["metadata"]["config"]) == {"transformer": {
+            "pdd_steps": 6, "pdd_sigmas": list(hi.PDD_SIGMAS)}}
+    assert seen == [(str(path), "pruned")]
 
 
 # FLUX.2 klein: ComfyUI's Flux2 forward takes sigma as the timestep,

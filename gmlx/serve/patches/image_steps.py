@@ -1020,16 +1020,16 @@ async def step(request: Request):
         # In float64, so a scaled timestep gives back its time in float32.
         sig = [conv.scale * float(t) + conv.shift for t in ts]
         targets = None
-        if served.facts.flow_map:
-            # The schedule is in the client's timestep convention.
+        if served.facts.flow_map or served.facts.reads_target:
+            # The schedule is in sigmas, as the client's sampler holds it.
             s_w = tensors.get("sample_sigmas")
             if s_w is None:
-                raise StepError(400, f"the {served.pipe.family.title} DiT is "
-                                "a flow map: a step body holds "
-                                "sample_sigmas, the schedule the client "
-                                "samples on")
-            targets = [conv.scale * float(t) + conv.shift
-                       for t in flow_targets(s_w.numpy(), ts)]
+                what = ("is a flow map" if served.facts.flow_map
+                        else "reads the sigma its step goes to")
+                raise StepError(400, f"the {served.pipe.family.title} DiT "
+                                f"{what}: a step body holds sample_sigmas, "
+                                "the schedule the client samples on")
+            targets = flow_targets(s_w.numpy(), sig)
         gen = run.gen if run is not None else 0
         pool = _lora_pool()
         if pool is not None:
