@@ -273,6 +273,8 @@ FAMILY = Family(
     variants=VARIANTS,
     unknown_variant="pruned",
     sampling=SAMPLING,
+    # Every file runs the PDD heads, distilled to guidance 1.
+    unguided={"pruned": "", "unknown": ""},
     ref_encode_seed=42,
     # The release's sizes: 655,360 to 20,000,000 pixels at 1:3 to 3:1.
     # 7712 is the longest side on the 32 pixel grid inside all three:

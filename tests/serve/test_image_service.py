@@ -457,6 +457,34 @@ def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
         "base checkpoint, which takes guidance")
 
 
+@pytest.mark.parametrize("variant", ["pruned", "unknown"])
+@pytest.mark.parametrize("fields, param, text", [
+    ({}, None, None), ({"steps": 6, "guidance": 1.0}, None, None),
+    ({"negative_prompt": "blur"}, None, None),
+    ({"steps": 4}, "steps", "steps: MiniMax-H3-Image {v} runs 6 steps, the "
+     "schedule it was distilled to, not 4"),
+    ({"guidance": 2.0}, "guidance", "guidance: the MiniMax-H3-Image {v} DiT "
+     "samples without guidance: drop guidance 2")])
+def test_an_h3_image_request_takes_only_six_steps_at_guidance_1(
+        variant, fields, param, text):
+    """A negative prompt is no refusal: without guidance it goes unused."""
+    from gmlx.image.registry import get_family
+
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(family=get_family("h3_image"), variant=variant),
+        spec=SimpleNamespace(id="h3"), plan=SimpleNamespace(cfg=1.0),
+        facts=_facts())
+    req = image_service.parse_request("generations", {"prompt": "p",
+                                                      **fields})
+    if param is None:
+        image_service.check_family(req, served)
+        return
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.check_family(req, served)
+    assert e.value.param == param and e.value.status == 400
+    assert str(e.value) == text.format(v=variant)
+
+
 def _flux3_served(flow_map: bool, cfg: float = 1.0, defaults=None):
     """A FLUX.3 klein entry with its DiT out, as a staged entry's is after
     an encode: the checks read the facts the entry kept from its load."""

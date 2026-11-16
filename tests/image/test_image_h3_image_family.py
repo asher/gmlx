@@ -85,6 +85,25 @@ def test_a_request_without_a_size_takes_the_release_size():
             assert {r.size for r in fam.sampling.values()} <= {(1024, 1024)}
 
 
+@pytest.mark.parametrize("variant", ["pruned", "unknown"])
+def test_steps_other_than_six_and_guidance_other_than_one_are_refused(
+        variant):
+    """The release runs its six PDD steps at guidance 1, and a file of no
+    known identity samples as it does."""
+    from gmlx.image import api
+
+    fam = hi.FAMILY
+    api.check_steps(fam, variant, 6)
+    api.check_guidance(fam, variant, 1.0)
+    with pytest.raises(ValueError, match=f"MiniMax-H3-Image {variant} runs "
+                       "6 steps, the schedule it was distilled to, not 4"):
+        api.check_steps(fam, variant, 4)
+    with pytest.raises(ValueError) as e:
+        api.check_guidance(fam, variant, 2.0)
+    assert str(e.value) == (f"the MiniMax-H3-Image {variant} DiT samples "
+                            "without guidance: drop guidance 2")
+
+
 def test_the_label_rule_takes_hyvid_or_none():
     assert hi.FAMILY.arch_strings == frozenset({None})
     assert hi.FAMILY.shared_arch_strings == frozenset({"hyvid"})

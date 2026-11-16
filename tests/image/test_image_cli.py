@@ -754,6 +754,45 @@ def test_an_h3_image_run_by_path_takes_its_row_size(env, tmp_path,
     assert env.pipes == []
 
 
+@pytest.mark.parametrize("flags, text", [
+    (["--steps", "4"], "MiniMax-H3-Image pruned runs 6 steps, the schedule "
+     "it was distilled to, not 4"),
+    (["--guidance", "2"], "the MiniMax-H3-Image pruned DiT samples without "
+     "guidance: drop guidance 2")], ids=["steps", "guidance"])
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_an_h3_image_run_refuses_other_steps_or_guidance_before_the_loads(
+        env, tmp_path, monkeypatch, capsys, flags, text, command):
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:]
+    assert umbrella_main(args + flags) == 1
+    assert text in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
+
+
+def test_an_h3_image_run_with_a_negative_prompt_goes_on_and_says_it_is_unused(
+        env, tmp_path, monkeypatch, capsys):
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    args = env.base + ["--prompt", "p", "--negative-prompt", "blur",
+                       "--size", "1024x1024", "--output",
+                       str(tmp_path / "a.png")]
+    assert umbrella_main(args) == 0
+    assert ("--negative-prompt is unused, since --guidance 1 turns guidance "
+            "off") in capsys.readouterr().out
+    assert len(env.pipes) == 1
+
+
 @pytest.mark.parametrize("flags, code, text", [
     ([], 2, "--prompt or --prompt-file is required"),
     (["--prompt", "p", "--size", "40x32"], 2, "multiples of 16"),
