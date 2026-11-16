@@ -32,6 +32,10 @@ _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _DOC = {"image_models": {"zit": {"path": "/abs/zit.gguf",
                                  "encoder": "/abs/enc.gguf",
                                  "vae": "/abs/vae.gguf"}}}
+# Beside it, a MiniMax-H3-Image entry by its configured family.
+_H3_DOC = {"image_models": {**_DOC["image_models"], "h3": {
+    "path": "/abs/h3.gguf", "encoder": "/abs/h3-enc.gguf",
+    "vae": "/abs/h3-vae.gguf", "family": "minimax-h3-image"}}}
 
 
 def _png(w=32, h=32, alpha=False) -> bytes:
@@ -64,14 +68,16 @@ _REAL_CHECK_FAMILY = svc.check_family
 @pytest.fixture
 def served(monkeypatch, tmp_path, request):
     """Image routes over a registered image model whose acquire and job
-    are stubs. Returns a namespace with the recorded jobs and releases."""
-    cfg = build_config(_DOC)
+    are stubs, the config of _DOC or of the test's parameter. Returns a
+    namespace with the recorded jobs and releases."""
+    doc = getattr(request, "param", _DOC)
+    cfg = build_config(doc)
     serving.register_resolved_models(cfg)
     request.addfinalizer(serving.clear_resolved_models)
     rec = SimpleNamespace(jobs=[], released=[], job=None)
 
     def acquire(model):
-        if model not in ("", "zit"):
+        if model not in ("", *doc["image_models"]):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail={"error": {
                 "type": "model_not_found", "message": "unknown"}})
@@ -190,30 +196,32 @@ def test_generations_answer_b64_by_default(served):
     assert served.released == [1]
 
 
+@pytest.mark.parametrize("served", [_H3_DOC], indirect=True)
 def test_a_size_the_entry_family_refuses_is_a_400_before_admission(
         served, monkeypatch):
     """A MiniMax-H3-Image entry refuses 512x512 at parse time, naming the
     smallest size of its shape, before the queue and the model acquire,
-    and takes 4096x4096, past the image limits. A reload clears the
-    families read."""
-    from gmlx.image.registry import get_family
-
+    and takes 4096x4096, past the image limits, which the Z-Image entry
+    beside it refuses. A reload clears the families read."""
     acquired = []
     real = residency.acquire_image_model
     monkeypatch.setattr(residency, "acquire_image_model", lambda model: (
         acquired.append(model) or real(model)))
-    monkeypatch.setattr(svc, "request_family",
-                        lambda model: get_family("h3_image"))
-    r = _client().post("/v1/images/generations",
-                       json={"prompt": "a cat", "size": "512x512"})
+    r = _client().post("/v1/images/generations", json={
+        "prompt": "a cat", "size": "512x512", "model": "h3"})
     assert r.status_code == 400, r.text
     assert r.json()["error"]["param"] == "size"
     assert "832x832" in r.json()["error"]["message"]
     assert acquired == [] and served.jobs == []
-    r = _client().post("/v1/images/generations",
-                       json={"prompt": "a cat", "size": "4096x4096"})
+    r = _client().post("/v1/images/generations", json={
+        "prompt": "a cat", "size": "4096x4096", "model": "h3"})
     assert r.status_code == 200, r.text
-    assert served.jobs[0][0].size == (4096, 4096) and acquired == [""]
+    assert served.jobs[0][0].size == (4096, 4096) and acquired == ["h3"]
+    r = _client().post("/v1/images/generations", json={
+        "prompt": "a cat", "size": "4096x4096", "model": "zit"})
+    assert r.status_code == 400, r.text
+    assert "over the limit" in r.json()["error"]["message"]
+    assert len(served.jobs) == 1 and acquired == ["h3"]
     svc._FAMILIES[("zit", ())] = None
     images.install_image_routes(build_config(_DOC))
     assert svc._FAMILIES == {}
