@@ -1,0 +1,498 @@
+{
+ "schema": 1,
+ "name": "selftest_h3_image_vae",
+ "check": 5,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check5_h3_image_vae.py",
+ "argv": ["check5_h3_image_vae.py", "--comfy-dir", "ComfyUI-h3-image", "--self-test"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "vae": {
+   "name": "vae.safetensors",
+   "size": 11768704,
+   "sha256": "4ea19186809d751c3b40546a71424501f375cf6f99ed4721b16ff6afabf03748"
+  }
+ },
+ "inputs": {
+  "cases": {
+   "images": {
+    "128x128": [128, 128],
+    "464x32": [32, 464]
+   },
+   "latents": {
+    "17x17": [17, 17]
+   }
+  },
+  "seed": 5,
+  "encode_seed": 42,
+  "plans": {
+   "128x128": {
+    "tiles_y": {
+     "starts": [0],
+     "lengths": [128],
+     "overlaps": []
+    },
+    "tiles_x": {
+     "starts": [0],
+     "lengths": [128],
+     "overlaps": []
+    }
+   },
+   "464x32": {
+    "tiles_y": {
+     "starts": [0],
+     "lengths": [32],
+     "overlaps": []
+    },
+    "tiles_x": {
+     "starts": [0, 96, 208],
+     "lengths": [256, 256, 256],
+     "overlaps": [160, 144]
+    }
+   },
+   "17x17": {
+    "seeded": true,
+    "latent_shape": [17, 17]
+   }
+  },
+  "latent_stats": {
+   "latents_mean": [0.858090341091156, -0.9606591463088989, 1.0661640167236328, -0.5090325474739075, -0.2727581858634949, -1.3675414323806763, -0.2553254961967468, -0.26907554268836975, -0.5376840829849243, -0.0464097298681736, 0.6657370328903198, 0.19690127670764923, -0.5460608005523682, -0.4035342037677765, -0.23683024942874908, 0.25928452610969543, -0.30133944749832153, 0.211341992020607, -1.1206848621368408, 0.3581933379173279, -0.04225143790245056, 0.2604829967021942, 0.22864092886447906, 0.7056031823158264],
+   "latents_std": [1.2223774194717407, 1.2767263650894165, 1.6831774711608887, 1.7549455165863037, 1.5636216402053833, 2.194143533706665, 0.9653137922286987, 1.0569885969161987, 0.841948926448822, 0.7729952931404114, 1.8955937623977661, 0.946841835975647, 0.7996809482574463, 0.44988900423049927, 0.7197399735450745, 0.6936293244361877, 2.961095094680786, 2.7694199085235596, 3.0496184825897217, 2.1088054180145264, 3.276226282119751, 3.1627357006073, 2.2816812992095947, 2.6127843856811523]
+  },
+  "image": "h3_vae_tiny.clip(1, height, width, seed): (1, 3, 1, H, W) in [-1, 1]",
+  "seeded_latents": "numpy default_rng(seed).standard_normal((1, 24, 1, h, w)) in float32, drawn in the order of cases['latents']",
+  "latents": "the class's encode: the posterior sample mean + exp(0.5 logvar) noise, normalized, (1, 24, 1, h, w)",
+  "mean": "the mean of the class's moments, (1, 24, 1, h, w)",
+  "logvar": "the log variance of its moments clamped to [-30, 20]",
+  "noise": "torch.randn(mean shape, generator=torch.Generator().manual_seed(42)), the class's draws",
+  "decoded": "the class's decode: (1, 3, 1, H, W) float32 in [0, 1]",
+  "model": {
+   "ch": 32,
+   "ch_mult": [1, 1, 2, 2, 2, 2],
+   "num_res_blocks": 2,
+   "decoder": {
+    "num_layers": 2,
+    "heads": 2,
+    "dim_head": 64
+   }
+  },
+  "weights_seed": 55,
+  "shapes": {
+   "encoder.conv_in.weight": [32, 3, 3, 3, 3],
+   "encoder.conv_in.bias": [32],
+   "encoder.down.0.block.0.norm1.weight": [32],
+   "encoder.down.0.block.0.norm1.bias": [32],
+   "encoder.down.0.block.0.norm2.weight": [32],
+   "encoder.down.0.block.0.norm2.bias": [32],
+   "encoder.down.0.block.0.conv1.weight": [32, 32, 3, 3, 3],
+   "encoder.down.0.block.0.conv1.bias": [32],
+   "encoder.down.0.block.0.conv2.weight": [32, 32, 3, 3, 3],
+   "encoder.down.0.block.0.conv2.bias": [32],
+   "encoder.down.0.block.1.norm1.weight": [32],
+   "encoder.down.0.block.1.norm1.bias": [32],
+   "encoder.down.0.block.1.norm2.weight": [32],
+   "encoder.down.0.block.1.norm2.bias": [32],
+   "encoder.down.0.block.1.conv1.weight": [32, 32, 3, 3, 3],
+   "encoder.down.0.block.1.conv1.bias": [32],
+   "encoder.down.0.block.1.conv2.weight": [32, 32, 3, 3, 3],
+   "encoder.down.0.block.1.conv2.bias": [32],
+   "encoder.down.0.downsample.conv.weight": [32, 32, 3, 3, 3],
+   "encoder.down.0.downsample.conv.bias": [32],
+   "encoder.down.1.block.0.norm1.weight": [32],
+   "encoder.down.1.block.0.norm1.bias": [32],
+   "encoder.down.1.block.0.norm2.weight": [32],
+   "encoder.down.1.block.0.norm2.bias": [32],
+   "encoder.down.1.block.0.conv1.weight": [32, 32, 3, 3, 3],
+   "encoder.down.1.block.0.conv1.bias": [32],
+   "encoder.down.1.block.0.conv2.weight": [32, 32, 3, 3, 3],
+   "encoder.down.1.block.0.conv2.bias": [32],
+   "encoder.down.1.block.1.norm1.weight": [32],
+   "encoder.down.1.block.1.norm1.bias": [32],
+   "encoder.down.1.block.1.norm2.weight": [32],
+   "encoder.down.1.block.1.norm2.bias": [32],
+   "encoder.down.1.block.1.conv1.weight": [32, 32, 3, 3, 3],
+   "encoder.down.1.block.1.conv1.bias": [32],
+   "encoder.down.1.block.1.conv2.weight": [32, 32, 3, 3, 3],
+   "encoder.down.1.block.1.conv2.bias": [32],
+   "encoder.down.1.downsample.conv.weight": [32, 32, 3, 3, 3],
+   "encoder.down.1.downsample.conv.bias": [32],
+   "encoder.down.2.block.0.norm1.weight": [32],
+   "encoder.down.2.block.0.norm1.bias": [32],
+   "encoder.down.2.block.0.norm2.weight": [64],
+   "encoder.down.2.block.0.norm2.bias": [64],
+   "encoder.down.2.block.0.conv1.weight": [64, 32, 3, 3, 3],
+   "encoder.down.2.block.0.conv1.bias": [64],
+   "encoder.down.2.block.0.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.2.block.0.conv2.bias": [64],
+   "encoder.down.2.block.0.nin_shortcut.weight": [64, 32, 1, 1, 1],
+   "encoder.down.2.block.0.nin_shortcut.bias": [64],
+   "encoder.down.2.block.1.norm1.weight": [64],
+   "encoder.down.2.block.1.norm1.bias": [64],
+   "encoder.down.2.block.1.norm2.weight": [64],
+   "encoder.down.2.block.1.norm2.bias": [64],
+   "encoder.down.2.block.1.conv1.weight": [64, 64, 3, 3, 3],
+   "encoder.down.2.block.1.conv1.bias": [64],
+   "encoder.down.2.block.1.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.2.block.1.conv2.bias": [64],
+   "encoder.down.2.downsample.conv.weight": [64, 64, 3, 3, 3],
+   "encoder.down.2.downsample.conv.bias": [64],
+   "encoder.down.3.block.0.norm1.weight": [64],
+   "encoder.down.3.block.0.norm1.bias": [64],
+   "encoder.down.3.block.0.norm2.weight": [64],
+   "encoder.down.3.block.0.norm2.bias": [64],
+   "encoder.down.3.block.0.conv1.weight": [64, 64, 3, 3, 3],
+   "encoder.down.3.block.0.conv1.bias": [64],
+   "encoder.down.3.block.0.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.3.block.0.conv2.bias": [64],
+   "encoder.down.3.block.1.norm1.weight": [64],
+   "encoder.down.3.block.1.norm1.bias": [64],
+   "encoder.down.3.block.1.norm2.weight": [64],
+   "encoder.down.3.block.1.norm2.bias": [64],
+   "encoder.down.3.block.1.conv1.weight": [64, 64, 3, 3, 3],
+   "encoder.down.3.block.1.conv1.bias": [64],
+   "encoder.down.3.block.1.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.3.block.1.conv2.bias": [64],
+   "encoder.down.3.downsample.conv.weight": [64, 64, 3, 3, 3],
+   "encoder.down.3.downsample.conv.bias": [64],
+   "encoder.down.4.block.0.norm1.weight": [64],
+   "encoder.down.4.block.0.norm1.bias": [64],
+   "encoder.down.4.block.0.norm2.weight": [64],
+   "encoder.down.4.block.0.norm2.bias": [64],
+   "encoder.down.4.block.0.conv1.weight": [64, 64, 3, 3, 3],
+   "encoder.down.4.block.0.conv1.bias": [64],
+   "encoder.down.4.block.0.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.4.block.0.conv2.bias": [64],
+   "encoder.down.4.block.1.norm1.weight": [64],
+   "encoder.down.4.block.1.norm1.bias": [64],
+   "encoder.down.4.block.1.norm2.weight": [64],
+   "encoder.down.4.block.1.norm2.bias": [64],
+   "encoder.down.4.block.1.conv1.weight": [64, 64, 3, 3, 3],
+   "encoder.down.4.block.1.conv1.bias": [64],
+   "encoder.down.4.block.1.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.4.block.1.conv2.bias": [64],
+   "encoder.down.5.block.0.norm1.weight": [64],
+   "encoder.down.5.block.0.norm1.bias": [64],
+   "encoder.down.5.block.0.norm2.weight": [64],
+   "encoder.down.5.block.0.norm2.bias": [64],
+   "encoder.down.5.block.0.conv1.weight": [64, 64, 3, 3, 3],
+   "encoder.down.5.block.0.conv1.bias": [64],
+   "encoder.down.5.block.0.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.5.block.0.conv2.bias": [64],
+   "encoder.down.5.block.1.norm1.weight": [64],
+   "encoder.down.5.block.1.norm1.bias": [64],
+   "encoder.down.5.block.1.norm2.weight": [64],
+   "encoder.down.5.block.1.norm2.bias": [64],
+   "encoder.down.5.block.1.conv1.weight": [64, 64, 3, 3, 3],
+   "encoder.down.5.block.1.conv1.bias": [64],
+   "encoder.down.5.block.1.conv2.weight": [64, 64, 3, 3, 3],
+   "encoder.down.5.block.1.conv2.bias": [64],
+   "encoder.norm_out.weight": [64],
+   "encoder.norm_out.bias": [64],
+   "encoder.conv_out.weight": [48, 64, 3, 3, 3],
+   "encoder.conv_out.bias": [48],
+   "quant_conv.weight": [48, 48, 1, 1, 1],
+   "quant_conv.bias": [48],
+   "post_quant_conv.weight": [24, 24, 1, 1],
+   "post_quant_conv.bias": [24],
+   "decoder.register_tokens": [1, 4, 128],
+   "decoder.mask_token": [1, 1, 128],
+   "decoder.x_embedder.weight": [128, 24],
+   "decoder.x_embedder.bias": [128],
+   "decoder.transformer_blocks.0.scale1": [128],
+   "decoder.transformer_blocks.0.scale2": [128],
+   "decoder.transformer_blocks.0.norm1.weight": [128],
+   "decoder.transformer_blocks.0.attn.to_qkv.weight": [384, 128],
+   "decoder.transformer_blocks.0.attn.to_qkv.bias": [384],
+   "decoder.transformer_blocks.0.attn.to_out.weight": [128, 128],
+   "decoder.transformer_blocks.0.attn.to_out.bias": [128],
+   "decoder.transformer_blocks.0.norm2.weight": [128],
+   "decoder.transformer_blocks.0.ff.w1.weight": [1024, 128],
+   "decoder.transformer_blocks.0.ff.w1.bias": [1024],
+   "decoder.transformer_blocks.0.ff.w2.weight": [128, 512],
+   "decoder.transformer_blocks.0.ff.w2.bias": [128],
+   "decoder.transformer_blocks.1.scale1": [128],
+   "decoder.transformer_blocks.1.scale2": [128],
+   "decoder.transformer_blocks.1.norm1.weight": [128],
+   "decoder.transformer_blocks.1.attn.to_qkv.weight": [384, 128],
+   "decoder.transformer_blocks.1.attn.to_qkv.bias": [384],
+   "decoder.transformer_blocks.1.attn.to_out.weight": [128, 128],
+   "decoder.transformer_blocks.1.attn.to_out.bias": [128],
+   "decoder.transformer_blocks.1.norm2.weight": [128],
+   "decoder.transformer_blocks.1.ff.w1.weight": [1024, 128],
+   "decoder.transformer_blocks.1.ff.w1.bias": [1024],
+   "decoder.transformer_blocks.1.ff.w2.weight": [128, 512],
+   "decoder.transformer_blocks.1.ff.w2.bias": [128],
+   "decoder.norm_out.weight": [128],
+   "decoder.norm_out.bias": [128],
+   "decoder.proj_out.weight": [768, 128],
+   "decoder.proj_out.bias": [768]
+  },
+  "file_sha256": "4ea19186809d751c3b40546a71424501f375cf6f99ed4721b16ff6afabf03748",
+  "weights": "h3_vae_tiny.weights(shapes) written by h3_vae_tiny.write_safetensors as F32"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 6,
+   "comfyui": "2aa4d535a76e4b6acf6a94f263bc482430c396dd",
+   "f16_math": "each linear, convolution, norm and attention in float32 over float16 operands, one float16 rounding"
+  },
+  "gaps": {
+   "encode 128x128": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.146577009175885e-06,
+     "cosine": 0.9999999999993432,
+     "max_abs": 9.5367431640625e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0017896139774042556,
+     "cosine": 0.9999984101198521,
+     "max_abs": 0.015342235565185547
+    }
+   },
+   "mean 128x128": {
+    "fp32_vs_f64": {
+     "rel_l2": 3.42919034796667e-06,
+     "cosine": 0.9999999999941319,
+     "max_abs": 5.411937949562073e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.004958617459967618,
+     "cosine": 0.9999877141541428,
+     "max_abs": 0.006638142341810704
+    }
+   },
+   "encode 464x32": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.1072356127339663e-06,
+     "cosine": 0.9999999999993874,
+     "max_abs": 9.059906005859375e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0015812330512602224,
+     "cosine": 0.999998751201966,
+     "max_abs": 0.011570453643798828
+    }
+   },
+   "mean 464x32": {
+    "fp32_vs_f64": {
+     "rel_l2": 3.7790278919684443e-06,
+     "cosine": 0.9999999999928606,
+     "max_abs": 5.5651654145005836e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.005792251865199103,
+     "cosine": 0.9999832250875322,
+     "max_abs": 0.007039486750942514
+    }
+   },
+   "decode 128x128": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.3454532634828458e-07,
+     "cosine": 0.9999999999999917,
+     "max_abs": 3.733591694699001e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0004360938924432045,
+     "cosine": 0.9999999107209232,
+     "max_abs": 0.000986712390970701,
+     "psnr_db": 73.16363640672962
+    }
+   },
+   "decode 464x32": {
+    "fp32_vs_f64": {
+     "rel_l2": 1.2199780523718425e-07,
+     "cosine": 0.9999999999999932,
+     "max_abs": 3.7869118452160677e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.00041823114486928424,
+     "cosine": 0.9999999183388864,
+     "max_abs": 0.001076213407456006,
+     "psnr_db": 73.54101093346904
+    }
+   },
+   "decode 17x17": {
+    "fp32_vs_f64": {
+     "rel_l2": 9.605637228277146e-08,
+     "cosine": 0.9999999999999968,
+     "max_abs": 4.055480511411247e-07
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0003861621055424913,
+     "cosine": 0.9999999308069947,
+     "max_abs": 0.0012801029284425502,
+     "psnr_db": 74.22487531740788
+    }
+   }
+  },
+  "times": {
+   "fp32 encode 128x128": 0.0,
+   "fp32 encode 464x32": 0.0,
+   "fp32 decode 128x128": 0.0,
+   "fp32 decode 464x32": 0.0,
+   "fp32 decode 17x17": 0.0,
+   "fp32 peak rss gib": 0.37,
+   "f16 encode 128x128": 0.0,
+   "f16 encode 464x32": 0.0,
+   "f16 decode 128x128": 0.0,
+   "f16 decode 464x32": 0.0,
+   "f16 decode 17x17": 0.0,
+   "f16 peak rss gib": 0.38,
+   "f64 encode 128x128": 0.0,
+   "f64 encode 464x32": 0.0,
+   "f64 decode 128x128": 0.0,
+   "f64 decode 464x32": 0.0,
+   "f64 decode 17x17": 0.0,
+   "f64 peak rss gib": 0.44
+  }
+ },
+ "tolerances": {
+  "rule": "against the float64 result: fp32 relative L2 at twice the oracle's own fp32 relative L2; float16 decode PSNR at the oracle's own float16 PSNR less 20 log10(2) dB; float16 encode relative L2 at twice the oracle's own float16 relative L2",
+  "items": {
+   "encode 128x128": {
+    "fp32_rel_l2": 2.29315401835177e-06,
+    "f16_rel_l2": 0.0035792279548085113
+   },
+   "mean 128x128": {
+    "fp32_rel_l2": 6.85838069593334e-06,
+    "f16_rel_l2": 0.009917234919935236
+   },
+   "encode 464x32": {
+    "fp32_rel_l2": 2.2144712254679326e-06,
+    "f16_rel_l2": 0.003162466102520445
+   },
+   "mean 464x32": {
+    "fp32_rel_l2": 7.558055783936889e-06,
+    "f16_rel_l2": 0.011584503730398207
+   },
+   "decode 128x128": {
+    "fp32_rel_l2": 2.6909065269656916e-07,
+    "f16_psnr_db": 67.14303649345
+   },
+   "decode 464x32": {
+    "fp32_rel_l2": 2.439956104743685e-07,
+    "f16_psnr_db": 67.52041102018941
+   },
+   "decode 17x17": {
+    "fp32_rel_l2": 1.9211274456554293e-07,
+    "f16_psnr_db": 68.20427540412825
+   }
+  }
+ },
+ "notes": ["The model is ComfyUI's class at a tiny size with seeded weights, so the numbers say nothing about image quality."],
+ "created": "2026-11-16T00:21:26Z",
+ "npz": "selftest_h3_image_vae.npz",
+ "tensors": {
+  "decoded_f64_128x128": {
+   "shape": [1, 3, 1, 128, 128],
+   "dtype": "float64",
+   "sha256": "fc450549fb42f4838ed387cca93fd5717affe17e11d41d3ee432e0fc813149b7"
+  },
+  "decoded_f64_17x17": {
+   "shape": [1, 3, 1, 272, 272],
+   "dtype": "float64",
+   "sha256": "2c0df7c4c0293f3e135c0fd1d901d815fee2f41999c5d3c8faed5cc7b11bb141"
+  },
+  "decoded_f64_464x32": {
+   "shape": [1, 3, 1, 32, 464],
+   "dtype": "float64",
+   "sha256": "eae87e2317023ecea1d1d7dbc74db48206b061761bc2fc529ecbd412fb8e1d55"
+  },
+  "input_128x128": {
+   "shape": [1, 3, 1, 128, 128],
+   "dtype": "float32",
+   "sha256": "f2948975ab3c253a15a850377d314425f6cbfee19209a3fa1aae14ce7ce9115d"
+  },
+  "input_464x32": {
+   "shape": [1, 3, 1, 32, 464],
+   "dtype": "float32",
+   "sha256": "8bf4c33b75a12ed793b1f06424d38e50c20fa7aae654fcbba900d79c4d18a807"
+  },
+  "latents_f64_128x128": {
+   "shape": [1, 24, 1, 8, 8],
+   "dtype": "float64",
+   "sha256": "f3ff8e0abf4a368f379c9e4c229f87acf45bb8f6075815d2ac5133d5938b27f5"
+  },
+  "latents_f64_464x32": {
+   "shape": [1, 24, 1, 2, 29],
+   "dtype": "float64",
+   "sha256": "e1cb14fdb838464c61c90d2c53a3fd3d0346232d421ee901a2d4f773fbc724f1"
+  },
+  "latents_fp32_128x128": {
+   "shape": [1, 24, 1, 8, 8],
+   "dtype": "float32",
+   "sha256": "dee6a1a95dab0550e0d4cd6089cca5506ebef5ffc526abf9a4c359576bae9c07"
+  },
+  "latents_fp32_17x17": {
+   "shape": [1, 24, 1, 17, 17],
+   "dtype": "float32",
+   "sha256": "84c6b283816cd802e1d00941ca3d7d35d634ffe48e12232204b4093c70319304"
+  },
+  "latents_fp32_464x32": {
+   "shape": [1, 24, 1, 2, 29],
+   "dtype": "float32",
+   "sha256": "e55be8607337fb9d587e3fac5dedf8d17b9515772eda8b760912ccc816c99718"
+  },
+  "logvar_f64_128x128": {
+   "shape": [1, 24, 1, 8, 8],
+   "dtype": "float64",
+   "sha256": "942a43e037cf807e2b51d40e8cbac12da13baed412c701e034b9aaea84b1aa23"
+  },
+  "logvar_f64_464x32": {
+   "shape": [1, 24, 1, 2, 29],
+   "dtype": "float64",
+   "sha256": "866be4c29b2c21f04247cee2828e94c61df3f2ea109f3c3fedceb480a094239a"
+  },
+  "mean_f64_128x128": {
+   "shape": [1, 24, 1, 8, 8],
+   "dtype": "float64",
+   "sha256": "048a34c1de9618f72a5b5ec8e099d2ef4a9d56d4f60fd436fb19c8b99530025c"
+  },
+  "mean_f64_464x32": {
+   "shape": [1, 24, 1, 2, 29],
+   "dtype": "float64",
+   "sha256": "a0934a07f317f181e8c5fe7236229962ce6feb1502f5f7a26b55dcd26aea6ab5"
+  },
+  "noise_128x128": {
+   "shape": [1, 24, 1, 8, 8],
+   "dtype": "float32",
+   "sha256": "30dce20f4cf0bb7c09475bb33746b951454d8923c62fd7062218d9f7e1484149"
+  },
+  "noise_464x32": {
+   "shape": [1, 24, 1, 2, 29],
+   "dtype": "float32",
+   "sha256": "02d086f40bf23819bb68773de1c28a4a88e6ab7ba039be77b79e4b3adbdb5eb9"
+  }
+ }
+}
