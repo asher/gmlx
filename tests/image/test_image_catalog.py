@@ -422,8 +422,13 @@ def test_every_class_pulls_the_q8_encoder_and_the_largest_the_reference_dit():
     for r in catalog.RECIPES.values():
         # No 16 GB budget holds the 9.5 GB Q8_0 file of Qwen3.5-9B.
         small = {16} if r.family == "moss_image" else set()
-        assert {catalog.DEFAULT_QUANTS[r.name][c][1]
-                for c in catalog.MEMORY_CLASSES if c not in small} == {"Q8_0"}
+        if r.family == "h3_image":
+            # Video H3's Q4_K_M Qwen3-VL-32B file, the one the checks read.
+            assert r.encoder_quants == ("Q4_K_M",)
+            small = set(catalog.MEMORY_CLASSES)
+        rest = [c for c in catalog.MEMORY_CLASSES if c not in small]
+        assert {catalog.DEFAULT_QUANTS[r.name][c][1] for c in rest} == (
+            {"Q8_0"} if rest else set())
         assert {catalog.DEFAULT_QUANTS[r.name][c][1]
                 for c in small} <= {"Q4_K_M"}
         assert catalog.DEFAULT_QUANTS[r.name][64][0] == r.dit_quants[-1]
@@ -547,3 +552,35 @@ def test_each_class_default_encoder_has_its_own_size():
     m = catalog.RECIPES["moss-image"]
     assert catalog.companion_bytes(m, 16 << 30) == 5_680_522_464 + m.vae_bytes
     assert catalog.companion_bytes(m, 64 << 30) == m.encoder_bytes + m.vae_bytes
+
+
+def test_minimax_h3_image_needs_a_32_gb_mac():
+    """Its Q4_K_M encoder peaks at 19.5 GiB, more than a 24 GB Mac's
+    budget, so it makes no image under the 32 GB class, where every other
+    recipe does from 16 GB. The 32 GB class pulls UD-Q4_K_XL, which fits
+    4096x4096 there, and 64 GB the largest DiT."""
+    h3 = catalog.RECIPES["minimax-h3-image"]
+    assert h3.least_class == 32
+    assert {r.least_class for r in catalog.RECIPES.values()
+            if r is not h3} == {16}
+    for gb, none in ((8, True), (16, True), (24, True), (32, False),
+                     (64, False), (None, False)):
+        ram = None if gb is None else gb << 30
+        assert catalog.makes_no_image(ram, h3) == none, gb
+    assert not catalog.makes_no_image(16 << 30)
+    assert catalog.default_quants(h3, 32 << 30) == ("UD-Q4_K_XL", "Q4_K_M")
+    assert catalog.default_quants(h3, 64 << 30) == ("Q8_0", "Q4_K_M")
+
+
+def test_a_pull_makes_the_size_of_the_variants_sampling_row():
+    """A pull's image size is the class's DEFAULT_SIZES entry where the
+    recipe has one, else its variant's sampling row size: 2048x2048 for
+    MiniMax-H3-Image at any quant, so its entry needs no defaults.size."""
+    h3 = catalog.RECIPES["minimax-h3-image"]
+    for gb in (32, 64):
+        assert catalog.image_size(h3, gb << 30) == "2048x2048"
+        for q in h3.dit_quants:
+            assert catalog.default_size(h3, gb << 30, q) is None
+    k = catalog.RECIPES["krea-2-turbo"]
+    assert catalog.image_size(k, 16 << 30) == "512x512"
+    assert catalog.image_size(k, 32 << 30) == "1024x1024"

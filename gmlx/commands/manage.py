@@ -1323,9 +1323,9 @@ an unloadable GGUF unless --force.
 An image model name (z-image-turbo, qwen-image, qwen-image-turbo,
 krea-2-turbo, flux-2-klein, flux-2-klein-base, flux-2-klein-9b,
 flux-2-klein-base-9b, flux-2-klein-9b-kv, flux-3-klein, flux-3-klein-base,
-moss-image, moss-image-base) pulls the DiT, its text encoder and its VAE,
-uses the parts your model folders already hold, and adds the model under
-image_models: in the config.
+moss-image, moss-image-base, minimax-h3-image) pulls the DiT, its text
+encoder and its VAE, uses the parts your model folders already hold, and
+adds the model under image_models: in the config.
 It prints the model's license before it downloads. The license of
 flux-2-klein-9b, flux-2-klein-base-9b and flux-2-klein-9b-kv allows
 non-commercial use only.
@@ -2278,7 +2278,7 @@ def cmd_pull(argv: list | None = None, prog: str = "gmlx pull") -> int:
                          "qwen-image, qwen-image-turbo, krea-2-turbo, flux-2-klein, "
                          "flux-2-klein-base, flux-2-klein-9b, flux-2-klein-base-9b, "
                          "flux-2-klein-9b-kv, flux-3-klein, flux-3-klein-base, "
-                         "moss-image, moss-image-base), or "
+                         "moss-image, moss-image-base, minimax-h3-image), or "
                          "hf:<org>/<repo>[/<path>][@rev] naming a .gguf, a quant "
                          "folder, or the bare repo (the last two resolve by "
                          "listing), or an http(s):// URL - a huggingface.co "

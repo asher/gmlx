@@ -770,8 +770,8 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
     dit_q = next(h for h in r.dit_quants if h.upper() == dit_q.upper())
     enc_q = next(h for h in r.encoder_quants if h.upper() == enc_q.upper())
     cls = catalog.memory_class(ram)
-    if not a.quant and catalog.makes_no_image(ram):
-        least = catalog.MEMORY_CLASSES[0]
+    if not a.quant and catalog.makes_no_image(ram, r):
+        least = r.least_class
         msg = (f"no {r.title} DiT that gmlx pulls makes an image in this "
                f"Mac's {_gb(ram, 0)} RAM; the smallest Mac that runs one has "
                f"{least} GB. Pass --quant to pull one anyway")
@@ -825,7 +825,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                     f"GB Mac; the pull takes {enc_q}")
                 plan = own
     plan.default = (plan.dit_quant, plan.encoder_quant) == \
-        catalog.default_quants(r, ram) and not catalog.makes_no_image(ram)
+        catalog.default_quants(r, ram) and not catalog.makes_no_image(ram, r)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:
