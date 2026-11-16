@@ -1463,7 +1463,8 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
 | `--upsampler GGUF` | The entry's `upsampler` | Rewrite the prompt with this chat model, a GGUF or a `models` id, as [Prompt upsampling](images.md#prompt-upsampling) describes. |
 | `--no-upsample` | Off | Run the prompt as typed, without the upsampler. |
-| `--upsample-prompt FILE` | The entry's `upsample_prompt` | The upsampler takes the system prompt in this text file in place of the family's. Qwen-Image 2.1 ships none and needs one. |
+| `--upsample-prompt FILE` | The entry's `upsample_prompt` | Take the upsampler's system prompt from this file. Qwen-Image 2.1 ships none and needs one; MiniMax-H3-Image reads MiniMax's `prompt/manifest.json`. |
+| `--upsampler-mmproj GGUF` | The `mmproj` of the upsampler's `models` entry | Read the `--ref` images with this vision tower of `--upsampler`. MiniMax-H3-Image's upsampler sees the references, and needs it with `--ref`. |
 | `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps. |
 | `--seed N` | Random, and printed | Seed the first image. |
