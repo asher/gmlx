@@ -524,8 +524,11 @@ def test_check3_each_wrong_op_fails_the_site_gate(real, monkeypatch, name):
         pytest.skip("the GLU kernel route is not in force")
     over = {**qg.over_gate(sites), **_rows_over(by_row)}
     worst = qg.worst_by_op(sites)
+    rows = (f"; glu token rows {max(r / g for r, g in by_row.values()):.2f}"
+            if by_row else "")
     print(f"h3 image check3 sites, {name}: {len(over)} readings over the "
           "gate; the largest by op "
-          + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items())))
+          + ", ".join(f"{k} {v:.2f}" for k, v in sorted(worst.items()))
+          + rows)
     missed = {qg.site_op(k) for k in over if len(k) != 2}
     assert hit <= missed, (name, sorted(missed))
