@@ -1,8 +1,8 @@
 """Importing gmlx, gmlx.image, the image serve paths or the CLI never
 imports gmlx.video, and identifying a video file or a MiniMax-H3-Image
-file or importing the video encoder module, the image resizes or the VAE
-schedules loads no mlx. Checked in a child process so earlier tests
-cannot mask it."""
+file or importing the video encoder module, the image resizes, the H3
+picture prompt code or the VAE schedules loads no mlx. Checked in a
+child process so earlier tests cannot mask it."""
 from __future__ import annotations
 
 import subprocess
@@ -41,6 +41,7 @@ def test_identifying_a_video_file_loads_no_mlx():
         "import gmlx.video.vae.chunking\n"
         "import gmlx.image.int8, gmlx.image.h3.layout\n"
         "import gmlx.image.h3.encoder, gmlx.image.h3.tiles\n"
+        "import gmlx.image.h3.pictures, gmlx.video.families.h3.keyframes\n"
         "assert vfp.identify(fixture_view(H3_HEADER)).family.name == 'h3'\n"
         "sys.path.insert(0, 'tests/image')\n"
         "import image_fixtures\n"
