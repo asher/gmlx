@@ -1472,7 +1472,7 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
 | `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
 | `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, from 0.01 to 1. |
-| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1, FLUX.2 klein, FLUX.3 klein and MiniMax-H3-Image. Repeat the flag for up to 10 images, 16 on MiniMax-H3-Image, in the order the prompt names them. |
+| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1, FLUX.2 klein, FLUX.3 klein and MiniMax-H3-Image. Repeat it for each image, in the prompt's order. |
 | `--ref-size N` | `1024` | On Qwen-Image 2.1, resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
 | `--count N` | `1` | Generate N images. |
 | `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
@@ -1488,6 +1488,8 @@ and `crop`, the left, top, right and bottom of the image in it.
 
 With several images, a `--output` file gains `-<seed>` before its
 extension.
+
+`--ref` takes up to 10 images, and up to 16 on MiniMax-H3-Image.
 
 Under a `--ref-size` of 320, a reference that is not square can come out
 under the 256 x 256 pixels the text encoder takes. The command then exits 2
