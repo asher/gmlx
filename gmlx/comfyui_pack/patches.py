@@ -130,13 +130,19 @@ def h3_diffusers_keys(model, key_map: dict) -> dict:
 def install_key_map() -> None:
     """Wrap ComfyUI's ``model_lora_keys_unet`` once, so a model that sets
     ``H3_NAMES_FLAG`` gets MiniMax-H3-Image's diffusers names beside
-    ComfyUI's own. Every other model gets ComfyUI's map unchanged."""
+    ComfyUI's own. Every other model gets ComfyUI's map unchanged. The
+    flag is looked for down the ``__wrapped__`` chain, so a wrap another
+    node puts on top does not hide this one and add a second."""
     import functools
+    import inspect
 
     import comfy.lora
 
+    def _flagged(f):
+        return getattr(f, "gmlx_wrapped", False)
+
     real = comfy.lora.model_lora_keys_unet
-    if getattr(real, "gmlx_wrapped", False):
+    if _flagged(inspect.unwrap(real, stop=_flagged)):
         return
 
     @functools.wraps(real)

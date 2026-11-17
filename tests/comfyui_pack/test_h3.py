@@ -1512,6 +1512,22 @@ class H3Image(Base):
         plain = comfy.lora.model_lora_keys_unet(self.model(HID).model, {})
         self.assertNotIn("transformer_blocks.0.attn.to_q", plain)
 
+    def test_the_key_map_wraps_once_under_another_nodes_wrap(self):
+        """Another node's wrap on top links down by ``__wrapped__`` alone,
+        without the pack's flag; the next model load keeps it on top."""
+        ours = comfy.lora.model_lora_keys_unet
+
+        def other(model, key_map={}):  # noqa: B006
+            return ours(model, key_map)
+
+        other.__wrapped__ = ours
+        comfy.lora.model_lora_keys_unet = other
+        try:
+            self.model(IID)
+            self.assertIs(comfy.lora.model_lora_keys_unet, other)
+        finally:
+            comfy.lora.model_lora_keys_unet = ours
+
     def test_a_swap_off_fc1_is_refused_on_minimax_h3_image(self):
         LoRA = comfy.weight_adapter.LoRAAdapter
         up, down = torch.zeros(64, 4), torch.zeros(4, 32)
