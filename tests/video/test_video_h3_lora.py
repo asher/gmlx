@@ -14,7 +14,7 @@ from gmlx.image.lora import AdapterError, UnsupportedAdapterError
 from gmlx.video import memfit, pipeline, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
-from gmlx.video.families.h3.lora_map import lora_map
+from gmlx.video.families.h3.lora_map import lora_map, refusal
 from lora_fixtures import reference_delta, rel_l2, write_keys
 from test_video_h3_model import TINY, tiny_weights
 from video_fixtures import H3_HEADER, fixture_view
@@ -153,6 +153,38 @@ def test_fasth3s_key_map_adds_the_gate_of_each_block(form):
                      "lora_unet_" + g.replace(".", "_")):
             assert stem in fast.comfy_stems
             assert _dit_target(stem, fast.targets, under)[0] == g
+
+
+@pytest.mark.parametrize("form", ["header", "model"])
+def test_a_config_without_an_audio_stream_maps_and_refuses_no_audio_module(
+        form):
+    """A config without the audio stream, as H3-Image's, maps the video
+    modules alone, and the refusal reads its video head alone: a pair on
+    the audio head is no PDD bank there, and one over two video heads
+    is."""
+    import dataclasses
+
+    config = hf.FAMILY.synth_config(fixture_view(H3_HEADER))
+    key = "audio_in_channels"
+    if form == "model":
+        config, key = dataclasses.asdict(hm.H3Config.from_dict(config)), \
+            "audio"
+    bare = {k: v for k, v in config.items() if k != key}
+    assert set(lora_map(config).targets) - set(lora_map(bare).targets) == \
+        {"audio_patch_proj", "final_layer.audio_out"}
+    assert not {"audio_patch_proj", "final_layer.audio_out"} & \
+        set(lora_map(bare).targets)
+
+    def up(stem, rows):
+        return {f"{stem}.lora_B.weight": {"dtype": "F32",
+                                          "shape": [rows, 4]}}
+
+    audio = up("diffusion_model.final_layer.audio_out",
+               2 * hf.FAMILY.synth_config(fixture_view(H3_HEADER))[
+                   "audio_in_channels"])
+    assert refusal(audio, bare) is None
+    assert refusal(audio, config)[1] == "PDD"
+    assert refusal(up("final_layer.video_out", 192), bare)[1] == "PDD"
 
 
 def test_a_comfyui_lora_runs_live_as_the_merged_weights(tmp_path):

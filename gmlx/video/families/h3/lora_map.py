@@ -36,6 +36,8 @@ _GATE = "attn.to_gate_compress"
 _HEADS = ("final_layer.video_out", "final_layer.audio_out")
 _TOP = ("condition_proj", "video_patch_proj", "audio_patch_proj",
         "final_layer.adaln_proj.linear") + _HEADS
+# The modules of the audio stream, which a config without one lacks.
+_AUDIO = ("audio_patch_proj", _HEADS[1])
 _COMFY = ("", "diffusion_model.", "lora_unet_")
 COMFY_READS = ("the GGUF names bare, under diffusion_model. or as "
                "lora_unet_ underscores")
@@ -49,19 +51,26 @@ def _counts(config: dict) -> tuple[int, int]:
     return int(config["num_layers"]), int(config["num_refiner_layers"])
 
 
+def _audio(config: dict) -> int | None:
+    """The audio head's rows, from either form of config, or None for a
+    config without an audio stream."""
+    audio = config.get("audio", config.get("audio_in_channels"))
+    return None if audio is None else int(audio)
+
+
 def _head_rows(config: dict) -> dict:
-    """The output rows of each head, from either form of config."""
+    """The output rows of each head the config has, from either form of
+    config."""
     if "latent" in config:
-        latent, audio, patch = (config["latent"], config["audio"],
-                                config["patch"])
+        latent, patch = config["latent"], config["patch"]
     else:
-        latent, audio, patch = (config["in_channels"],
-                                config["audio_in_channels"],
-                                config["patch_size"])
+        latent, patch = config["in_channels"], config["patch_size"]
     rows = int(latent)
     for p in patch:
         rows *= int(p)
-    return {_HEADS[0]: rows, _HEADS[1]: int(audio)}
+    audio = _audio(config)
+    return {_HEADS[0]: rows} if audio is None else \
+        {_HEADS[0]: rows, _HEADS[1]: audio}
 
 
 def _spell(prefix: str, name: str) -> str:
@@ -77,7 +86,8 @@ def _gates(config: dict) -> tuple:
 
 def lora_map(config: dict) -> LoraKeyMap:
     blocks, refiner = _counts(config)
-    names = list(_TOP)
+    names = [n for n in _TOP if n not in _AUDIO
+             or _audio(config) is not None]
     block = _LEAVES + _BLOCK_ONLY
     if config.get("vsa_sparsity"):
         block += (_GATE,)
@@ -92,10 +102,10 @@ def lora_map(config: dict) -> LoraKeyMap:
         comfy_reads=COMFY_READS)
 
 
-def _head_ups(header: dict):
-    """(head, key, (rows, rank)) of each up matrix on an output head, in
-    every spelling the LoRA reader resolves."""
-    heads = {h: (h, None) for h in _HEADS}
+def _head_ups(header: dict, names):
+    """(head, key, (rows, rank)) of each up matrix on the output heads
+    ``names``, in every spelling the LoRA reader resolves."""
+    heads = {h: (h, None) for h in names}
     under = _underscore_index(heads)
     for k, info in header.items():
         split = _split(k)
@@ -131,7 +141,7 @@ def refusal(header: dict, config: dict) -> tuple[str, str] | None:
                         "which the model's file does not have",
                         "FastH3 gate")
     rows = _head_rows(config)
-    for head, k, shape in _head_ups(header):
+    for head, k, shape in _head_ups(header, rows):
         n = rows[head]
         if shape[0] > n and shape[0] % n == 0:
             return (f"its pair {k} has {shape[0]} rows, {shape[0] // n} "
