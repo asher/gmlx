@@ -245,19 +245,23 @@ class APCCoordinator:
         picks: Sequence[Optional[dict]],
         prefix_lens: Sequence[int],
         *,
+        lengths: Optional[Sequence[int]] = None,
+        prefill_step_size: Optional[int] = None,
         kv_quant_config: Optional[dict] = None,
     ) -> Tuple[Optional[List[Any]], int]:
-        """Materialize a mixed warm/cold batch at the common prefix boundary."""
+        """Materialize a mixed warm/cold batch at the common prefix boundary.
+
+        gmlx: ``lengths`` are the rows' full prompt lengths. With them the
+        rows' memory is planned before the merge allocates."""
         from .apc import (
             make_warm_batch_exact_cache_multi,
             make_warm_batch_kv_cache_multi,
         )
 
-        memory = self.manager.memory_plan
-        if len(prefix_lens) == len(memory.lengths):
+        if lengths is not None and len(prefix_lens) == len(lengths):
             self.prepare_prefill(
-                memory.lengths,
-                prefill_step_size=memory.chunk_size,
+                list(lengths),
+                prefill_step_size=prefill_step_size,
                 prefix_lengths=prefix_lens,
             )
 

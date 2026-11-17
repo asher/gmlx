@@ -43,6 +43,7 @@ FlashInfer/FA3), not a different cache design.
 
 from __future__ import annotations
 
+import array as _array
 import hashlib
 import importlib
 import json
@@ -388,6 +389,44 @@ def _checkpoint_match_len(
     while low < high:
         mid = (low + high + 1) // 2
         end = mid * block_size
+        if tokens[:end] == stored[:end]:
+            low = mid
+        else:
+            high = mid - 1
+    return low * block_size
+
+
+def _pack_token_ids(token_ids: Sequence[int]) -> Optional[bytes]:
+    """Token ids as signed int32 bytes, or None if an id is out of range."""
+    try:
+        return _array.array("i", token_ids).tobytes()
+    except TypeError:
+        pass
+    except OverflowError:
+        return None
+    try:
+        return _array.array("i", [int(t) for t in token_ids]).tobytes()
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def _packed_match_len(
+    tokens: bytes,
+    stored: bytes,
+    max_len: int,
+    block_size: int,
+    trimmable: bool,
+) -> int:
+    """``_checkpoint_match_len`` on ids packed by ``_pack_token_ids``."""
+    n = len(stored) // 4
+    if n <= max_len and tokens.startswith(stored):
+        return n
+    if not trimmable:
+        return 0
+    low, high = 0, min(max_len, n) // block_size
+    while low < high:
+        mid = (low + high + 1) // 2
+        end = mid * block_size * 4
         if tokens[:end] == stored[:end]:
             low = mid
         else:
@@ -1188,6 +1227,8 @@ class DiskBlockStore:
         self._index: dict[int, Tuple[Path, int]] = {}
         # exact full-prefix hash -> snapshot path
         self._exact_index: dict[int, Path] = {}
+        # gmlx: exact full-prefix hash -> (extra_hash, packed token ids, trimmable)
+        self._exact_meta: dict[int, Tuple[int, bytes, bool]] = {}
         self._index_lock = threading.RLock()
         # Bounded LRU of parsed safetensors headers:
         # shard_path -> (tensor_entries, file_metadata, data_start).
@@ -1289,6 +1330,7 @@ class DiskBlockStore:
             stale_exact = [h for h, sp in self._exact_index.items() if sp == path]
             for h in stale_exact:
                 del self._exact_index[h]
+                self._exact_meta.pop(h, None)
         with self._header_cache_lock:
             self._header_cache.pop(path, None)
 
@@ -1296,6 +1338,7 @@ class DiskBlockStore:
         with self._index_lock:
             self._index.clear()
             self._exact_index.clear()
+            self._exact_meta.clear()
         with self._header_cache_lock:
             self._header_cache.clear()
         self._disk_bytes = 0
@@ -1357,6 +1400,7 @@ class DiskBlockStore:
         with self._index_lock:
             self._index.clear()
             self._exact_index.clear()
+            self._exact_meta.clear()
             for p in self.dir.glob(f"*{self.SUFFIX}"):
                 if not self._is_canonical_store_file(p):
                     continue
@@ -1378,6 +1422,9 @@ class DiskBlockStore:
                     except (TypeError, ValueError):
                         continue
                     self._exact_index[cache_hash] = p
+                    meta = self._exact_meta_from_header(metadata)
+                    if meta is not None:
+                        self._exact_meta[cache_hash] = meta
                     continue
                 hashes_csv = metadata.get("block_hashes", "")
                 if not hashes_csv:
@@ -1389,6 +1436,32 @@ class DiskBlockStore:
                 for idx, bh in enumerate(block_hashes):
                     self._index[bh] = (p, idx)
         return total
+
+    @staticmethod
+    def _exact_meta_from_header(
+        metadata: dict,
+    ) -> Optional[Tuple[int, bytes, bool]]:
+        if metadata.get("layout") != "exact_cache_v1":
+            return None
+        try:
+            extra_hash = int(metadata.get("extra_hash", "0"))
+            tokens = _pack_token_ids(
+                [int(x) for x in metadata.get("token_ids", "").split(",") if x]
+            )
+        except (TypeError, ValueError):
+            return None
+        if tokens is None:
+            return None
+        return extra_hash, tokens, metadata.get("prefix_trimmable") == "1"
+
+    @staticmethod
+    def _exact_meta_from_snapshot(
+        snapshot: _DiskExactCacheSnapshot, trimmable: bool
+    ) -> Optional[Tuple[int, bytes, bool]]:
+        tokens = _pack_token_ids(snapshot.token_ids)
+        if tokens is None:
+            return None
+        return int(snapshot.extra_hash), tokens, trimmable
 
     @property
     def disk_bytes(self) -> int:
@@ -1536,39 +1609,24 @@ class DiskBlockStore:
         min_prefix_tokens: int = 0,
         block_size: int = DEFAULT_BLOCK_SIZE,
     ) -> Optional[Tuple[int, int]]:
-        token_tuple = tuple(int(t) for t in token_ids)
-        max_len = len(token_tuple) - 1
+        max_len = len(token_ids) - 1
         if max_prefix_tokens is not None and max_prefix_tokens > 0:
             max_len = min(max_len, int(max_prefix_tokens))
         if max_len <= min_prefix_tokens:
             return None
+        query = _pack_token_ids(token_ids)
+        if query is None:
+            return None
 
         with self._index_lock:
-            entries = list(self._exact_index.items())
+            entries = list(self._exact_meta.items())
 
         best: Optional[Tuple[int, int]] = None
-        for cache_hash, path in entries:
-            parsed = self._open_shard_header(path)
-            if parsed is None:
-                continue
-            _tensor_entries, metadata, _data_start = parsed
-            if metadata.get("layout") != "exact_cache_v1":
-                continue
-            try:
-                stored_extra = int(metadata.get("extra_hash", "0"))
-                stored_tokens = tuple(
-                    int(x) for x in metadata.get("token_ids", "").split(",") if x
-                )
-            except (TypeError, ValueError):
-                continue
+        for cache_hash, (stored_extra, stored, trimmable) in entries:
             if stored_extra != extra_hash:
                 continue
-            prefix_len = _checkpoint_match_len(
-                token_tuple,
-                stored_tokens,
-                max_len,
-                block_size,
-                metadata.get("prefix_trimmable") == "1",
+            prefix_len = _packed_match_len(
+                query, stored, max_len, block_size, trimmable
             )
             if prefix_len <= min_prefix_tokens:
                 continue
@@ -2603,7 +2661,17 @@ class DiskBlockStore:
             with self._index_lock:
                 # Make sure index reflects it (e.g. after restart).
                 if isinstance(payload, _DiskExactCacheSnapshot):
-                    self._exact_index.setdefault(int(block_hashes[0]), path)
+                    cache_hash = int(block_hashes[0])
+                    self._exact_index.setdefault(cache_hash, path)
+                    if cache_hash not in self._exact_meta:
+                        meta = self._exact_meta_from_snapshot(
+                            payload,
+                            _dense_checkpoint_trimmable(
+                                payload.prompt_cache, len(payload.token_ids)
+                            ),
+                        )
+                        if meta is not None:
+                            self._exact_meta[cache_hash] = meta
                 else:
                     for idx, block_hash in enumerate(block_hashes):
                         self._index.setdefault(int(block_hash), (path, idx))
@@ -2884,19 +2952,16 @@ class DiskBlockStore:
     ) -> List[int]:
         if not self._ensure_dir():
             raise OSError(f"APC disk cache directory unavailable: {self.dir}")
+        trimmable = _dense_checkpoint_trimmable(
+            snapshot.prompt_cache, len(snapshot.token_ids)
+        )
         metadata: dict[str, str] = {
             "layout": "exact_cache_v1",
             "cache_hash": str(int(snapshot.cache_hash)),
             "extra_hash": str(int(snapshot.extra_hash)),
             "token_ids": ",".join(str(int(t)) for t in snapshot.token_ids),
             "num_entries": str(len(snapshot.prompt_cache)),
-            "prefix_trimmable": str(
-                int(
-                    _dense_checkpoint_trimmable(
-                        snapshot.prompt_cache, len(snapshot.token_ids)
-                    )
-                )
-            ),
+            "prefix_trimmable": str(int(trimmable)),
             "store_id": self._exact_id_for(snapshot.cache_hash),
         }
         arrays: dict[str, mx.array] = {}
@@ -2928,8 +2993,13 @@ class DiskBlockStore:
             self._disk_bytes += path.stat().st_size
         except OSError:
             pass
+        meta = self._exact_meta_from_snapshot(snapshot, trimmable)
         with self._index_lock:
             self._exact_index[int(snapshot.cache_hash)] = path
+            if meta is None:
+                self._exact_meta.pop(int(snapshot.cache_hash), None)
+            else:
+                self._exact_meta[int(snapshot.cache_hash)] = meta
         self._maybe_evict()
         return [int(snapshot.cache_hash)]
 

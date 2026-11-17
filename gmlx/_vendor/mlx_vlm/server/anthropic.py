@@ -886,8 +886,10 @@ async def anthropic_messages_endpoint(http_request: Request):
                             stream=True,
                             error="stream_closed_before_completion",
                         )
+                    # gmlx: only media leaves enough garbage to collect here.
+                    if images:
+                        gc.collect()
                     mx.clear_cache()
-                    gc.collect()
 
             return StreamingResponse(
                 stream_generator(),
@@ -1040,8 +1042,11 @@ async def anthropic_messages_endpoint(http_request: Request):
                 tool_calls=bool(parsed_tool_calls),
             )
             runtime.metrics.record_success(envelope)
+            # gmlx: only media leaves enough garbage to collect here. The
+            # collect runs first, so clear_cache returns what it frees.
+            if images:
+                gc.collect()
             mx.clear_cache()
-            gc.collect()
             return response
 
         except PromptTooLongError as e:
@@ -1051,8 +1056,8 @@ async def anthropic_messages_endpoint(http_request: Request):
                 stream=False,
                 error=str(e),
             )
-            mx.clear_cache()
             gc.collect()
+            mx.clear_cache()
             return _anthropic_error_response(400, str(e))
         except Exception as e:
             runtime.metrics.record_failure(
@@ -1062,16 +1067,16 @@ async def anthropic_messages_endpoint(http_request: Request):
                 error=str(e),
             )
             traceback.print_exc()
-            mx.clear_cache()
             gc.collect()
+            mx.clear_cache()
             return _anthropic_error_response(
                 500, f"Generation failed: {e}", "api_error"
             )
 
     except Exception as e:
         traceback.print_exc()
-        mx.clear_cache()
         gc.collect()
+        mx.clear_cache()
         return _anthropic_error_response(500, str(e), "api_error")
 
 

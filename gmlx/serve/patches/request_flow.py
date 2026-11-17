@@ -146,6 +146,12 @@ def install_chat_load_offload() -> None:
                     pass
             try:
                 return await original(*args, **kwargs)
+            except BaseException:
+                # The task's failure can keep this context alive, and with
+                # it the hold the handler's resolve set. A stream reads that
+                # hold after the handler returns, so only a raise drops it.
+                residency._active_hold.set(None)
+                raise
             finally:
                 if hold is not None:
                     hold.release()

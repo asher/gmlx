@@ -36,6 +36,7 @@ import os
 import time
 
 from gmlx.serve.batch_rows import batch_rows
+from gmlx.serve.short_rows import admit_group, admit_width
 from gmlx.upstream.patching import link, wrapped_with
 
 from .media_salt import salt_at
@@ -163,10 +164,11 @@ def _keep_count(gen):
     num_to_add = gen.completion_batch_size - batch_rows(gen)
     if num_to_add < gen.prefill_batch_size:
         return None
+    admit_group(gen)
     wait = _wait_ms()
     if wait <= 0:
         return None
-    n = min(gen.prefill_batch_size, len(pending))
+    n = min(admit_width(gen), len(pending))
     if n < 2:
         return None
     floor = _hold_min()
@@ -222,6 +224,8 @@ def install_fresh_admission_gate() -> None:
             return _orig_next(self, **kwargs)
         pending = self._unprocessed_sequences
         kept, tail = pending[:k], pending[k:]
+        # insert() appends in place, so take the ids before the call.
+        kept_ids = {id(s) for s in kept}
         self._unprocessed_sequences = kept
         try:
             return _orig_next(self, **kwargs)
@@ -230,7 +234,6 @@ def install_fresh_admission_gate() -> None:
             # append mid-call; splice unconsumed candidates back ahead of
             # the held tail, arrivals behind it. Merge, never clobber.
             current = self._unprocessed_sequences
-            kept_ids = {id(s) for s in kept}
             leftover = [s for s in current if id(s) in kept_ids]
             arrivals = [s for s in current if id(s) not in kept_ids]
             self._unprocessed_sequences = leftover + tail + arrivals

@@ -3224,6 +3224,14 @@ def _warm_service_models(cfg) -> None:
             _LIVE_SERVICES.pop(key, None)
 
 
+def _freeze_startup_heap() -> None:
+    """Move every object that exists now into the permanent generation,
+    so each later collection scans only what startup did not create."""
+    import gc
+    gc.collect()
+    gc.freeze()
+
+
 def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     from . import bridge_vlm as serving
     from .residency import install_gguf_residency_pool
@@ -3415,7 +3423,6 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # The services resolve before the port binds, so a malformed value, or
     # a missing speech extra that a flag asked for, stops the start.
     _resolve_service_models(cfg, a)
-    _warm_service_models(cfg)
 
     # API key: the config `server.api_key` is the sole source (so a managed /
     # menu-bar client can read the same key the server enforces from the same file;
@@ -3470,6 +3477,13 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
         from .patches import install_ignore_eos
         install_ignore_eos()
         print("[server] ignore-eos: decode runs to max_tokens (EOS suppressed)")
+
+    import uvicorn
+
+    _freeze_startup_heap()
+    # The service loads start after the freeze, so no service model is
+    # frozen, and before the SIGHUP handler, so a reload cannot warm first.
+    _warm_service_models(cfg)
 
     import signal
 
@@ -3527,8 +3541,6 @@ def _serve(cfg: ServerCfg, a, reload_fn) -> int:
     # can write is skipped, and the log says so.
     from .media_programs import log_programs
     log_programs(cfg)
-
-    import uvicorn
 
     from . import patches
 

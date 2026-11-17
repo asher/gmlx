@@ -68,6 +68,9 @@ from gmlx.serve.tick_guard import mark_broken as _mark_broken
 from gmlx.serve.tick_guard import mark_prefill_broken as _mark_prefill_broken
 from gmlx.serve.tick_guard import salvage as _salvage
 from gmlx.serve import speech_rows as _speech_rows
+# gmlx: short-lived rows on the checkpoint tier skip the prompt cache and
+# prefill in groups.
+from gmlx.serve import short_rows as _short_rows
 # gmlx: what the process held before each clear prices the next count of
 # memory wired outside it.
 from gmlx.serve.capacity import note_own_before_clear as _note_own_before_clear
@@ -1338,24 +1341,39 @@ class GenerationBatch:
         # about to return. Before S1, so the new sample stays next.
         owed = getattr(self, "_kq_owed", None)
         if owed is not None:
-            mx.async_eval(
-                *[
-                    a
-                    for a in (
-                        self._next_tokens,
-                        self._next_lps,
-                        self._next_top_idx,
-                        self._next_top_lp,
-                    )
-                    if a is not None
-                ]
-            )
+            pending = [
+                a
+                for a in (
+                    self._next_tokens,
+                    self._next_lps,
+                    self._next_top_idx,
+                    self._next_top_lp,
+                )
+                if a is not None
+            ]
+            # gmlx: a step that skipped its forward has none.
+            if pending:
+                mx.async_eval(*pending)
             out = self._emit(*owed)
             self._kq_owed = None
             return out
         self._current_tokens = self._next_tokens
         self._current_lps = self._next_lps
         inputs = self._current_tokens
+
+        # gmlx: every row ends on this emit, so no row needs a next token.
+        if self._ends_on_this_emit():
+            prev_top_idx = self._next_top_idx
+            prev_top_lp = self._next_top_lp
+            self._next_tokens = None
+            self._next_lps = None
+            self._next_top_idx = None
+            self._next_top_lp = None
+            self._next_raw = None
+            self._kq_owed = (inputs, self._current_lps, prev_top_idx, prev_top_lp)
+            out = self._emit(inputs, self._current_lps, prev_top_idx, prev_top_lp)
+            self._kq_owed = None
+            return out
 
         fwd_kwargs = {}
         if self._rope_deltas is not None:
@@ -1429,6 +1447,13 @@ class GenerationBatch:
         out = self._emit(inputs, self._current_lps, prev_top_idx, prev_top_lp)
         self._kq_owed = None
         return out
+
+    def _ends_on_this_emit(self) -> bool:
+        # gmlx: host counters, so no sync. A speaking row ends on its reply
+        # state, not on its count.
+        return all(
+            n + 1 >= m for n, m in zip(self._num_tokens, self.max_tokens)
+        ) and not _speech_rows.rows_of(self)
 
     def _forward_and_sample(self, inputs, fwd_kwargs, wants_lp, k):
         # gmlx: a batch that holds a speaking row runs the text model for
@@ -1648,7 +1673,12 @@ class GenerationBatch:
         if failed is not None and _is_command_buffer_failure(failed):
             # gmlx: nothing the batch holds is valid; the caller drops it,
             # so the failure goes out before a refusal below can hide it.
-            raise failed
+            # The local goes, so the raised traceback is no cycle that
+            # keeps the batch alive.
+            try:
+                raise failed
+            finally:
+                failed = None
         # gmlx: the kept indices are allocated before the batch changes, so
         # a refusal here leaves every row in it.
         keep_arr = mx.array(keep, mx.int32) if keep else None
@@ -1690,6 +1720,7 @@ class GenerationBatch:
                     # guard drops it whole and rebuilds every row.
                     self._kq_torn = True
                     _mark_broken(e, self.uids)
+                    failed = None
                     raise
                 # gmlx: one layer's kept rows at a time, not every layer's
                 # at the next step.
@@ -1718,7 +1749,10 @@ class GenerationBatch:
             # gmlx: raised from a filtered batch. The next filter or step
             # evaluates the layers left.
             failed._kq_filtered = True
-            raise failed
+            try:
+                raise failed
+            finally:
+                failed = None
 
     def next(self) -> List[Response]:
         """Generate the next batch of tokens."""
@@ -1810,6 +1844,10 @@ class GenerationBatch:
         return responses
 
     def _force_next_tokens(self, forced_next_tokens) -> None:
+        if self._next_tokens is None:
+            # gmlx: the rows end on this emit; there is no next token.
+            self._next_raw = None
+            return
         has_forced_next_tokens = any(token is not None for token in forced_next_tokens)
         if has_forced_next_tokens:
             force_mask = mx.array(
@@ -3118,6 +3156,9 @@ class BatchGenerator:
         uid, ids_list, max_toks, prompt_kwargs, lps, criteria = sequence
         if not ids_list or len(ids_list) < 2:
             return None
+        # gmlx: a short-lived row on the checkpoint tier makes no lookup.
+        if _short_rows.is_short_lived(self, sequence):
+            return None
         coordinator = getattr(self, "apc", None)
         lookup_kwargs = {
             "extra_hash": self._apc_extra_hash(prompt_kwargs or {}),
@@ -3154,6 +3195,18 @@ class BatchGenerator:
         if self.apc_manager is None:
             return None
 
+        # gmlx: a lookup sees every queued disk write, and a restore inside
+        # it sizes its room from this admission's rows, not the last one's.
+        # The prompt batch makes room once the rows are known.
+        manager = self.apc_manager
+        coordinator = getattr(self, "apc", None)
+        if coordinator is not None and coordinator.enabled:
+            manager._prefill_reserve_bytes = manager.memory_plan.prepare(
+                [len(s[1]) for s in sequences],
+                chunk_size=self.prefill_step_size,
+            )
+        if manager.disk is not None:
+            manager.disk.flush()
         picks: List[Optional[dict]] = [self._apc_pick_for(s) for s in sequences]
         any_warm = any(p is not None for p in picks)
         if not any_warm:
@@ -3252,6 +3305,8 @@ class BatchGenerator:
             warm_cache, _ = coordinator.merge_rows(
                 picks,
                 prefix_lens,
+                lengths=[len(ids) for ids in full_ids],
+                prefill_step_size=self.prefill_step_size,
                 kv_quant_config=_quant_cfg,
             )
         elif apc_mode == "exact":
@@ -3433,10 +3488,8 @@ class BatchGenerator:
             self._unprocessed_sequences.append((uid, p, m, kw, lp, tc))
             uids.append(uid)
             self.uid_count += 1
-        # Sort in ascending order of length
-        self._unprocessed_sequences = sorted(
-            self._unprocessed_sequences, key=lambda x: len(x[1])
-        )
+        # gmlx: pending stays in arrival order, so no prompt waits behind
+        # a stream of shorter ones and a requeued row keeps the head.
         return uids
 
     def remove(self, uid) -> bool:
@@ -3681,14 +3734,10 @@ class BatchGenerator:
             # and at least one of them has a prefix hit, build a mixed
             # warm/cold PromptProcessingBatch with right-padded suffixes so
             # warm and cold rows prefill in a single forward pass.
-            n = min(self.prefill_batch_size, len(self._unprocessed_sequences))
+            # gmlx: on the checkpoint tier, a group of short-lived rows.
+            _short_rows.admit_group(self)
+            n = min(_short_rows.admit_width(self), len(self._unprocessed_sequences))
             sequences = self._unprocessed_sequences[:n]
-            coordinator = getattr(self, "apc", None)
-            if coordinator is not None:
-                coordinator.prepare_prefill(
-                    [len(s[1]) for s in sequences],
-                    prefill_step_size=self.prefill_step_size,
-                )
             if logger.isEnabledFor(logging.DEBUG) and os.environ.get("APC_DEBUG"):
                 logger.warning(
                     "APC admit n=%d (pending=%d)",
@@ -3743,6 +3792,7 @@ class BatchGenerator:
 
             # APC: also harvest cold-prefill prefixes so future requests hit.
             apc_meta = self._build_apc_meta_for_cold(input_ids, prompt_kwargs_list)
+            _short_rows.mark_short_meta(self, sequences, apc_meta)
             self._kq_admit = (uids, apc_meta)
 
             prompt_batch_cls = _generate_module_override(

@@ -1064,6 +1064,49 @@ def test_teardown_collects_the_model_cycle_before_returning():
     assert models["B"]() is not None
 
 
+def test_a_model_built_after_the_startup_freeze_is_freed_by_teardown(
+        frozen_startup_heap):
+    # The startup freeze leaves every model to the collector: a stand-in
+    # with the loader's feeder cycle is tracked, and its eviction frees it.
+    import gc
+    import weakref
+
+    class _Feeder:
+        def __init__(self, model):
+            self.model = model
+
+        def close(self):
+            pass
+
+    class _Model:
+        def __init__(self):
+            self._kq_decode_feeder = _Feeder(self)
+
+    proxy = _RuntimeProxy(_FakeOriginal())
+    models = {}
+
+    def fake_stock_get(model_path, adapter_path, *, model_kind="auto"):
+        models[model_path] = weakref.ref(m := _Model())
+        proxy.apc_manager = None
+        proxy.response_generator = None
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path,
+            "model": m,
+        }
+
+    pool = _ResidencyPool(
+        proxy, fake_stock_get, lambda: True, int(15 * GB), (),
+        max_models=None, footprint_fn=lambda p: int(10 * GB))
+    acquire(pool, "A")
+    a = models["A"]()
+    assert any(o is a for o in gc.get_objects())
+    del a
+    acquire(pool, "B")
+    assert models["A"]() is None
+    assert models["B"]() is not None
+
+
 def test_stats_in_flight_excludes_retained_holds():
     # The primary preload keeps a busy hold for the process lifetime; it
     # must not read as a generating stream.

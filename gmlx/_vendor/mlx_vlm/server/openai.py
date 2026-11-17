@@ -672,8 +672,8 @@ async def images_generations_endpoint(request: Request):
             error=str(e),
         )
         logger.exception("Image generation failed: %s", e)
-        mx.clear_cache()
         gc.collect()
+        mx.clear_cache()
         raise HTTPException(status_code=500, detail=f"Image generation failed: {e}")
 
 
@@ -806,8 +806,8 @@ async def images_edits_endpoint(request: Request):
             error=str(e),
         )
         logger.exception("Image edit failed: %s", e)
-        mx.clear_cache()
         gc.collect()
+        mx.clear_cache()
         raise HTTPException(status_code=500, detail=f"Image edit failed: {e}")
 
 
@@ -1523,8 +1523,10 @@ async def responses_endpoint(request: Request):
                     metrics.record_result(result)
                     finish_reason = getattr(result, "finish_reason", None) or "stop"
 
+                # gmlx: only media leaves enough garbage to collect here.
+                if images or audio:
+                    gc.collect()
                 mx.clear_cache()
-                gc.collect()
 
                 output_items, content, reasoning, output_finish_reason = (
                     _response_output_items_from_text(
@@ -1615,8 +1617,8 @@ async def responses_endpoint(request: Request):
                     stream=False,
                     error=str(e),
                 )
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
                 raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:
                 runtime.metrics.record_failure(
@@ -1626,16 +1628,16 @@ async def responses_endpoint(request: Request):
                     error=str(e),
                 )
                 logger.exception("Responses generation failed: %s", e)
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
                 raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
 
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
         logger.exception("Unexpected error in /responses endpoint: %s", e)
-        mx.clear_cache()
         gc.collect()
+        mx.clear_cache()
         raise HTTPException(
             status_code=500, detail=f"An unexpected error occurred: {e}"
         )
@@ -2360,8 +2362,10 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                     metrics.record_result(gen_result)
                     finish_reason = getattr(gen_result, "finish_reason", None) or "stop"
 
+                # gmlx: only media leaves enough garbage to collect here.
+                if images or audio or videos:
+                    gc.collect()
                 mx.clear_cache()
-                gc.collect()
 
                 reasoning, content = _split_thinking(
                     full_text,
@@ -2541,8 +2545,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                     stream=False,
                     error=str(e),
                 )
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
                 raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:
                 runtime.metrics.record_failure(
@@ -2552,8 +2556,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
                     error=str(e),
                 )
                 logger.exception("Chat completion generation failed: %s", e)
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
                 raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
 
     except HTTPException as http_exc:
@@ -2562,8 +2566,8 @@ async def chat_completions_endpoint(request: ChatRequest, http_request: Request)
     except Exception as e:
         # Catch unexpected errors
         logger.exception("Unexpected error in /chat/completions endpoint: %s", e)
-        mx.clear_cache()
         gc.collect()
+        mx.clear_cache()
         raise HTTPException(
             status_code=500, detail=f"An unexpected error occurred: {e}"
         )

@@ -174,6 +174,12 @@ def _install_apc_manager_stash() -> None:
                     "APC OFF for this model: manager stash failed -- "
                     "every request prefills cold", exc_info=True)
         _orig_init(self, model, processor, **kwargs)
+        pbs = getattr(self, "prefill_batch_size", None)
+        cbs = getattr(self, "completion_batch_size", None)
+        if pbs is not None and cbs is not None:
+            # The width of a group of short-lived rows on the ckpt tier
+            # (gmlx.serve.short_rows), where prefill_batch_size stays 1.
+            self._kq_short_group_width = min(pbs, cbs)
         # Stock admission forms a prompt batch only when free slots >=
         # prefill_batch_size. Stock pairs 32/8 (24 slots stay open); the
         # injected width cap pairs 8/8, where a full prefill group equals
@@ -181,8 +187,6 @@ def _install_apc_manager_stash() -> None:
         # serving degrades to FIFO. Groups of 1 keep insertion live at
         # every width; B>1 prompt batching is no throughput win (see the
         # ckpt formation gate below).
-        pbs = getattr(self, "prefill_batch_size", None)
-        cbs = getattr(self, "completion_batch_size", None)
         if pbs is not None and cbs is not None and pbs >= cbs:
             self.prefill_batch_size = 1
         # Ckpt-tier models form prompt batches one request at a time: the
@@ -190,6 +194,7 @@ def _install_apc_manager_stash() -> None:
         # all-cold, and B>1 prompt batching is not a throughput win anyway
         # (gemma-31b 2x27k: 130s batched vs 120s serialized). Applies to
         # the stock path too: its ckpt arming is B=1-gated the same way.
+        # Short-lived rows, which arm nothing, group by the saved width.
         if not _SPEC_APC_DISABLED:
             try:
                 manager, mode = _resolve_l1(model)
@@ -197,6 +202,13 @@ def _install_apc_manager_stash() -> None:
                     model, mode, int(manager.block_size)
                 ):
                     self.prefill_batch_size = 1
+                    self._kq_ckpt_tier = True
+                    if "arr" not in (_ckpt_layout_for(
+                            model, int(manager.block_size)) or ()):
+                        # Only layouts with recurrent state group short
+                        # rows: gemma 4's sliding-window layers change a
+                        # row's tokens with the prefill width.
+                        self._kq_short_group_width = 1
             except Exception:
                 _log.warning(
                     "APC ckpt formation gate failed; continuing", exc_info=True

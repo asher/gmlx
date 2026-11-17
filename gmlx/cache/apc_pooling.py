@@ -434,8 +434,10 @@ def install_pooled_prefill_batch_gate() -> None:
     def _gated_init(self, model, processor, **kwargs):
         _orig_init(self, model, processor, **kwargs)
         try:
-            if model_has_pools(model) and self.prefill_batch_size != 1:
-                self.prefill_batch_size = 1
+            if model_has_pools(model):
+                self._kq_short_group_width = 1
+                if self.prefill_batch_size != 1:
+                    self.prefill_batch_size = 1
         except Exception:
             _log.warning("pooled prefill gate failed; continuing",
                          exc_info=True)
