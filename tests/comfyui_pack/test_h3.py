@@ -27,12 +27,15 @@ import support
 support.setup_comfy()
 P = support.load_pack()
 
+import comfy.lora  # noqa: E402
 import comfy.model_base  # noqa: E402
 import comfy.model_management as mm  # noqa: E402
 import comfy.nested_tensor  # noqa: E402
 import comfy.samplers  # noqa: E402
 import comfy.sd  # noqa: E402
 import comfy.supported_models  # noqa: E402
+import comfy.utils  # noqa: E402
+import comfy.weight_adapter  # noqa: E402
 import node_helpers  # noqa: E402
 import nodes as comfy_nodes  # noqa: E402
 from comfy_extras import nodes_custom_sampler as CS  # noqa: E402
@@ -1442,6 +1445,83 @@ class H3Image(Base):
                 self.assertAlmostEqual(got, w, places=3)
             self.assertEqual(st["row_keys"], ["cond", "image_slots", "num_tokens",
                                               "ref_latents", "ref_noise"])
+
+    def _lora(self, stems, prefix):
+        """A rank 4 LoRA on ``stems`` of the image DiT, each (stem, module
+        name in the manifest), the stems under ``prefix``."""
+        names = {t["name"]: t["shape"] for t in self.client.manifest(IID)["tensors"]}
+        g = torch.Generator().manual_seed(0)
+        sd = {}
+        for stem, module in stems:
+            dout, din = names[f"{module}.weight"]
+            if stem.endswith(("to_q", "to_k", "to_v")):
+                dout //= 3
+            k = f"{prefix}{stem}"
+            sd[f"{k}.lora_A.weight"] = (torch.randn(4, din, generator=g) * 0.01).bfloat16()
+            sd[f"{k}.lora_B.weight"] = (torch.randn(dout, 4, generator=g) * 0.01).bfloat16()
+        return sd
+
+    def test_a_lora_in_the_release_names_steps_under_its_table(self):
+        stems = [(s, s) for s in ("blocks.0.attn.qkv_proj", "blocks.49.mlp.fc1",
+                                  "token_refiner.blocks.1.attn.out_proj")]
+        m, _ = comfy.sd.load_lora_for_models(self.model(IID), None,
+                                             self._lora(stems, "diffusion_model."), 0.8, 0.0)
+        self.assertEqual(set(m.patches), {f"diffusion_model.{s}.weight" for s, _ in stems})
+        self.ksample(m, steps=1)
+        (put,) = self.stub.events("put_table")
+        self.assertEqual((put["entries"], put["bands"], put["strengths"]), (3, 0, [0.8]))
+        (step,) = self.stub.events("step")
+        self.assertEqual(step["patch_table"], put["id"])
+
+    def test_a_lora_in_diffusers_names_steps_as_comfyui_reads_flux_ones(self):
+        """Stock ComfyUI drops these names on MiniMax-H3-Image; the pack's
+        key map puts q, k and v on thirds of qkv_proj's rows and
+        ff.net.0.proj on fc1 with the halves of its product swapped, under
+        transformer. or bare, and leaves the key map of any other model as
+        ComfyUI writes it."""
+        stems = [("transformer_blocks.0.attn.to_q", "blocks.0.attn.qkv_proj"),
+                 ("transformer_blocks.0.attn.to_k", "blocks.0.attn.qkv_proj"),
+                 ("transformer_blocks.0.attn.to_v", "blocks.0.attn.qkv_proj"),
+                 ("transformer_blocks.0.attn.to_out.0", "blocks.0.attn.out_proj"),
+                 ("transformer_blocks.49.ff.net.0.proj", "blocks.49.mlp.fc1"),
+                 ("transformer_blocks.49.ff.net.2", "blocks.49.mlp.fc2"),
+                 ("token_refiner.refiner_blocks.1.attn.to_out.0",
+                  "token_refiner.blocks.1.attn.out_proj")]
+        for prefix in ("transformer.", ""):
+            with self.subTest(prefix=prefix):
+                self.stub.forget()
+                self.stub.reset()
+                sd = self._lora(stems, prefix)
+                m, _ = comfy.sd.load_lora_for_models(self.model(IID), None, sd, 0.8, 0.0)
+                self.assertEqual(set(m.patches), {f"diffusion_model.{x}.weight" for _, x in stems})
+                qkv = m.patches["diffusion_model.blocks.0.attn.qkv_proj.weight"]
+                third = 56 * 128
+                self.assertEqual(sorted(t[3] for t in qkv),
+                                 [(0, 0, third), (0, third, third), (0, 2 * third, third)])
+                table, tensors = P.patches.build_table(IID, m.patches, family="h3_image")
+                (e,) = [e for e in table["entries"]
+                        if e["key"] == "diffusion_model.blocks.49.mlp.fc1.weight"]
+                (pp,) = e["patches"]
+                up = sd[f"{prefix}transformer_blocks.49.ff.net.0.proj.lora_B.weight"]
+                half = up.shape[0] // 2
+                self.assertTrue(torch.equal(tensors[pp["up"]], torch.cat([up[half:], up[:half]])))
+                self.ksample(m, steps=1)
+                (put,) = self.stub.events("put_table")
+                self.assertEqual((put["entries"], put["bands"]), (7, 3))
+                self.assertEqual(self.stub.events("step")[0]["patch_table"], put["id"])
+        plain = comfy.lora.model_lora_keys_unet(self.model(HID).model, {})
+        self.assertNotIn("transformer_blocks.0.attn.to_q", plain)
+
+    def test_a_swap_off_fc1_is_refused_on_minimax_h3_image(self):
+        LoRA = comfy.weight_adapter.LoRAAdapter
+        up, down = torch.zeros(64, 4), torch.zeros(4, 32)
+        for key in ("diffusion_model.blocks.0.mlp.fc2.weight",
+                    "diffusion_model.final_layer.adaln_proj.linear.weight"):
+            patches = {key: [(1.0, LoRA(set(), (up, down, 1.0, None, None, None)), 1.0, None,
+                              comfy.utils.swap_scale_shift)]}
+            with self.subTest(key), self.assertRaises(C.GmlxRefusal) as e:
+                P.patches.build_table(IID, patches, family="h3_image")
+            self.assertIn("swap_scale_shift", str(e.exception))
 
     def test_pictures_under_another_label_are_refused_by_name(self):
         clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]

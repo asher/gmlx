@@ -394,6 +394,10 @@ applies once.
 `LoraLoader` works at any `strength_model`. The text encoder half of a
 LoRA is not applied in ComfyUI, so set `strength_clip` to 0. To apply both
 halves, use the LoRA with [`gmlx image generate`](images.md#use-a-lora).
+A MiniMax-H3-Image LoRA works in either set of names: the release's
+own, such as `blocks.0.attn.qkv_proj`, or diffusers', such as
+`transformer_blocks.0.attn.to_q`. Stock ComfyUI drops the diffusers
+names on this model; the gmlx nodes apply them.
 
 ## Upgrades
 

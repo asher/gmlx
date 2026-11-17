@@ -560,7 +560,7 @@ class Refusals(Base):
         m.patches, m.patches_uuid = patches, uuid.uuid4()
         with self.assertRaises(C.GmlxRefusal) as err:
             m.sync_patches()
-        self.assertIn("not on z_image", str(err.exception))
+        self.assertIn("not here on z_image", str(err.exception))
 
     def forward(self, m, **kw):
         cond = self.cond(ZID, "x")[0][0]

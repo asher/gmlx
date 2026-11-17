@@ -86,6 +86,8 @@ H3_IMAGE_NAMES = (
     ("comfy.model_base", "MiniMaxH3Image.extra_conds"),
     ("comfy.ldm.minimax.model", "MiniMaxH3Model.preprocess_text_embeds"),
     ("comfy.ldm.minimax.model", "MiniMaxH3ImageModel.forward"),
+    ("comfy.lora", "model_lora_keys_unet"),
+    ("comfy.utils", "swap_scale_shift"),
 )
 
 # What GmlxH3ImageToVideo runs of ComfyUI's MiniMax-H3 nodes, probed when

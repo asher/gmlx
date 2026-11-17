@@ -86,7 +86,8 @@ The loaders start the server with the `gmlx` command that `gmlx comfyui install`
 
 Stock `LoraLoader` and `LoraLoaderModelOnly` work. The pack sends each LoRA's matrices to the server once and then refers to them by hash, so changing a strength or stacking LoRAs costs one small request.
 A LoRA stacks on the LoRA that `gmlx Model Loader` loads with a recipe that has one. A loader of the recipe's own LoRA file sets its strength in place of the recipe's, so that LoRA applies once.
-Plain LoRA pairs are applied, including those ComfyUI maps onto a band of a fused weight, and on FLUX.2 klein the diffusers `norm_out.linear` pair whose halves ComfyUI swaps. A swapped pair on any other family is refused by name.
+Plain LoRA pairs are applied, including those ComfyUI maps onto a band of a fused weight, and on FLUX.2 klein the diffusers `norm_out.linear` pair whose halves ComfyUI swaps. A swapped pair on any other family is refused by name, but for MiniMax-H3-Image's `fc1`.
+On MiniMax-H3-Image the pack also applies a LoRA in diffusers' module names, such as `transformer_blocks.0.attn.to_q`, which stock ComfyUI drops with a `lora key not loaded` warning. The pack's key map reads them as diffusers 0.43.0 defines them and as ComfyUI reads diffusers' names for Flux: `to_q`, `to_k` and `to_v` on thirds of `qkv_proj`'s rows, and `ff.net.0.proj` on `fc1` with the halves of its product swapped. A LoRA in the release's own names, such as `blocks.0.attn.qkv_proj`, applies through ComfyUI's map as before.
 LoHa, LoKr, GLoRA, OFT, BOFT, DoRA, LoRAs with a mid tensor, model merges and `strength_model` values other than 1 on a patch are refused by name.
 The text encoder part of a LoRA is not applied; set `strength_clip` to 0.
 

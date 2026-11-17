@@ -31,7 +31,7 @@ import comfy.patcher_extension
 import comfy.supported_models
 import comfy.utils
 
-from . import compat, discovery
+from . import compat, discovery, patches
 from .client import (INT8_FEATURE, GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal,
                      StepClient,
                      set_interrupt_check, tensor_hash)
@@ -174,6 +174,11 @@ def _built(cfg, sd):
         # MiniMax-H3's extra_conds runs the refiner on the encoder features
         # once a sample; the server runs it in each step, on those features.
         model.diffusion_model.preprocess_text_embeds = lambda text_states: text_states
+    if type(cfg).__name__ == H3_IMAGE_CLASS:
+        # A LoRA in diffusers' module names applies, which stock ComfyUI's
+        # key map drops.
+        patches.install_key_map()
+        setattr(model, patches.H3_NAMES_FLAG, True)
     _typed_for_edits_and_negatives(model)
     return model, cfg
 
