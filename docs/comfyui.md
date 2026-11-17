@@ -229,6 +229,24 @@ leaves block 22 out of the negative pass, as the OpenMOSS workflow does.
 That is ComfyUI's schedule, not the release's schedule that
 `gmlx image generate` and the server run.
 
+MiniMax-H3-Image reads its prompt with the Qwen3-VL-32B-Instruct GGUF on
+the server, and needs ComfyUI 0.45 or newer and a Mac with 32 GB or more.
+Its workflows take the three gmlx loaders with `minimax-h3-image` in
+`model_name` and ComfyUI's own `MiniMax H3 Image Conditioning`
+(`MiniMaxH3ImageConditioning`), which takes the prompt and the image's
+`width` and `height` and gives the latent. `KSampler` samples 6 steps at
+`cfg` 1 with `euler` and `simple`, and the negative can be a
+`Conditioning Zero Out` of the positive. For a larger image, set `width`
+and `height`, such as 4096 each in the `minimax-h3-image-t2i-4096`
+workflow. An edit gives the node up to 16 pictures, each from a
+`Load Image`, with the gmlx VAE in its `vae` input: `image_1` is the
+picture to edit, the prompt names them as Picture 1, Picture 2 and so on,
+and a `width` and `height` of 0 take the size of Picture 1. A LoRA in
+either set of names applies, as [LoRAs](#loras) says, and the `int8`
+input of `gmlx Model Loader` runs parts of the DiT in int8 on an M5 or
+newer, as [The model loader's int8](comfyui-reference.md#the-model-loaders-int8)
+describes.
+
 There are three more gmlx nodes. `gmlx Sigmas` gives the fixed schedule of a
 distilled model such as Qwen-Image 2.1 Turbo, for `SamplerCustom` or
 `SamplerCustomAdvanced`, though `KSampler` works on every model. The

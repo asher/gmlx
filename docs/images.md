@@ -1,19 +1,21 @@
 # Image generation
 
 gmlx makes images from a text prompt, and edits images you give it, with
-the Z-Image-Turbo, Qwen-Image 2.1, Krea 2 Turbo, MOSS-Image, FLUX.2 klein
-and FLUX.3 klein models. You can run them from the command line, call them from an
-app through the OpenAI image API, or use them in [ComfyUI](comfyui.md).
-Image generation came with gmlx 0.5 and needs a Mac with an M3 chip or
-newer and 16 GB of memory or more.
+the Z-Image-Turbo, Qwen-Image 2.1, Krea 2 Turbo, MOSS-Image, FLUX.2 klein,
+FLUX.3 klein and MiniMax-H3-Image models. You can run them from the command
+line, call them from an app through the OpenAI image API, or use them in
+[ComfyUI](comfyui.md). Image generation came with gmlx 0.5 and needs a Mac
+with an M3 chip or newer and 16 GB of memory or more, and 32 GB for
+[MiniMax-H3-Image](#minimax-h3-image).
 [An M1 or M2](troubleshooting.md#needs-an-m3-or-newer) runs only
 Z-Image-Turbo, in float16, when you allow it.
 
 ## Choose a model
 
-Every model runs on a Mac with 16 GB. `pull` downloads the quant that
-suits your Mac's memory, so the download is larger on a Mac with more.
-The image size is the one you get when you ask for none.
+Every model but MiniMax-H3-Image runs on a Mac with 16 GB. `pull`
+downloads the quant that suits your Mac's memory, so the download is
+larger on a Mac with more. The image size is the one you get when you ask
+for none.
 
 | Model | Download, 16 GB Mac | Download, 24 GB Mac | Image size | License |
 |-------|---------------------|---------------------|------------|---------|
@@ -30,6 +32,10 @@ The image size is the one you get when you ask for none.
 | `flux-2-klein-9b-kv` | 13.6 GB | 13.6 GB | 1024x1024 | Non-commercial only |
 | `flux-3-klein` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
 | `flux-3-klein-base` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
+| `minimax-h3-image` | Needs 32 GB | Needs 32 GB | 2048x2048 | No grant in the US, the EU, the UK or South Korea, and authorization from $1M of yearly revenue |
+
+MiniMax-H3-Image needs a Mac with 32 GB or more. Its download is 32.2 GB
+there, and 40.0 GB on a Mac with 64 GB or more.
 
 `gmlx pull --list` prints the same models under Image models with the
 download for this Mac, and a bare `gmlx pull` picks one from a list.
@@ -78,12 +84,137 @@ steps, edits from an image and several images at once. When a command
 stops with an error, [Troubleshooting](troubleshooting.md#image-generation)
 has the fix.
 
+- [MiniMax-H3-Image](#minimax-h3-image)
 - [Call it from an app](#call-it-from-an-app)
 - [Use a LoRA](#use-a-lora)
 - [Prompt upsampling](#prompt-upsampling)
 - [ComfyUI](#comfyui)
 - [Models and quants](#models-and-quants)
 - [Licenses](#licenses)
+
+## MiniMax-H3-Image
+
+MiniMax-H3-Image makes large, detailed images in 6 steps, 2048x2048 when
+you ask for no size, and edits up to 16 pictures. It needs a Mac with
+32 GB or more. Its license grants nothing in the United States, the
+European Union, the United Kingdom or South Korea without a separate
+license from MiniMax, as [Licenses](#licenses) says. Download it and make
+an image:
+
+```sh
+gmlx pull minimax-h3-image
+gmlx image generate minimax-h3-image --seed 1 --output cabin.png \
+    --prompt "a log cabin in a snowy pine forest at dusk, warm light in its windows, smoke rising from the chimney, photograph"
+```
+
+`pull` downloads the DiT, the Qwen3-VL-32B-Instruct text encoder with its
+vision tower, the VAE, and MiniMax's prompts for its
+[prompt expander](#prompt-expander). The model runs the 6 steps it was
+distilled to, at guidance 1, and refuses another guidance, or another
+step count without `--sigmas`. A LoRA such as pDMD-2steps brings steps of
+its own, as [Adapter schedules](#adapter-schedules) describes.
+
+### Larger images
+
+`--size` sets a larger image, up to 20 megapixels, such as 4096x4096:
+
+```sh
+gmlx image generate minimax-h3-image --size 4096x4096 --seed 1 --output cabin-4096.png \
+    --prompt "a log cabin in a snowy pine forest at dusk, warm light in its windows, smoke rising from the chimney, photograph"
+```
+
+A size has from 655,360 to 20,000,000 pixels, each side a multiple of 32
+and at most 7712, at a shape from 1:3 to 3:1, and another size exits 2.
+On a 32 GB Mac the DiT that `pull` takes makes 4096x4096 images.
+`image generate` and the server refuse a size that does not fit this
+Mac's memory, with the memory it needs.
+
+### Edit pictures
+
+`--ref` gives the model up to 16 pictures. The first is the picture to
+edit, and the prompt names them as Picture 1, Picture 2 and so on:
+
+```sh
+gmlx image generate minimax-h3-image --ref sofa.png --ref cat.png --seed 1 --output edit.png \
+    --prompt "Put the cat from Picture 2 on the sofa in Picture 1"
+```
+
+Without `--size` the output has the size of Picture 1, its short side
+scaled into 1024 to 2048 pixels. The text encoder reads the pictures
+through its vision tower, which `pull` sets as the entry's
+`encoder_mmproj`. A picture outside 1:3 to 3:1 exits 2. On the server an
+edit goes to the edits route, as
+[Edits and variations](image-api.md#edits-and-variations) describes.
+
+### Prompt expander
+
+MiniMax's prompt expander is a chat model of its own that rewrites your
+prompt as a detailed caption, and sees the pictures of an edit. Download
+its GGUF, 17.9 GB at Q5_K_M, and its vision tower from
+`mradermacher/MiniMax-H3-Image-PE-GGUF`. `pull` adds it to your
+configuration as `minimax-h3-image-pe`, with the tower as its `mmproj`:
+
+```sh
+gmlx pull hf:mradermacher/MiniMax-H3-Image-PE-GGUF/MiniMax-H3-Image-PE.Q5_K_M.gguf MiniMax-H3-Image-PE.mmproj-f16.gguf
+```
+
+Then name it as the entry's `upsampler`:
+
+```yaml
+image_models:
+  minimax-h3-image:
+    # the rest of the entry that pull wrote
+    upsampler: minimax-h3-image-pe
+```
+
+Every prompt of the entry is then rewritten, and `--no-upsample` runs one
+as typed. [The prompt expander](#minimax-h3-image-prompt-expander) under
+Prompt upsampling says how it reads an edit and how it samples.
+
+### Faster images with int8
+
+On an M5 or newer, `--int8` runs parts of the DiT in 8-bit integer math
+in place of the default products. It is off unless you set it. The image
+changes: it is not the one `off` makes from the same seed.
+
+```sh
+gmlx image generate minimax-h3-image --int8 linears --prompt "..."
+```
+
+| `--int8` | Runs in int8 | DiT memory |
+|---|---|---|
+| `off` | nothing (the default) | the file's |
+| `attention` | the attention | the file's |
+| `linears` | the linear layers of each block | 5.9 GB more on the UD-Q4_K_XL file |
+| `all` | the attention and the linear layers | 5.9 GB more on the UD-Q4_K_XL file |
+
+[Benchmarks](benchmarks.md#minimax-h3-image-pruned-6-steps) has the time
+of a step at each value. For `linears` and `all`, gmlx converts the
+weights of those layers as the DiT loads, and the memory check counts
+them, so a size that fits at `off` can be refused at `linears`. Set
+`int8` in the entry's [`defaults`](config.md#image_modelsdefaults) to run
+every image of the entry at one value. A server request's `int8` changes
+the attention alone, since the linear layers are set when the DiT loads,
+and in ComfyUI the `int8` input of `gmlx Model Loader` does the same, as
+[The model loader's int8](comfyui-reference.md#the-model-loaders-int8)
+says.
+
+### LoRA files
+
+A MiniMax-H3-Image LoRA can name MiniMax's modules, such as
+`blocks.0.attn.qkv_proj`, the names ComfyUI reads, or diffusers' modules,
+such as `transformer_blocks.0.attn.to_q`, bare or under `transformer.`,
+as pDMD-2steps does. gmlx applies both, and so do the gmlx nodes in
+ComfyUI. A LoRA in DiffSynth's form, one that sets a
+module's config and one that grows the output head into a bank of heads
+are refused with the reason. [Use a LoRA](#use-a-lora) has the commands.
+
+### In ComfyUI
+
+The gmlx nodes run MiniMax-H3-Image in ComfyUI 0.45 or newer, with
+workflows for 2048x2048, 4096x4096, an edit of two pictures and
+pDMD-2steps, as [The example workflows](comfyui.md#the-example-workflows)
+lists.
 
 ## Call it from an app
 
@@ -181,17 +312,25 @@ Some LoRAs are trained to sample on a schedule of their own. pDMD-2steps,
 a MiniMax-H3-Image LoRA that makes an image in 2 steps, samples at the
 noise levels, or sigmas, 1, 12/13 and 0, at 1024x1024. gmlx knows that
 file by its sha256, so it runs on that schedule unless you give another,
-and the command prints a line that names the adapter and what it sets:
+and the command prints a line that names the adapter and what it sets.
+The file is `pytorch_lora_weights.safetensors` in the Hugging Face
+repository `linoyts/MiniMax-H3-Image-pDMD-2steps`, here renamed:
 
 ```sh
-gmlx image generate minimax-h3-image --prompt "a lighthouse at dusk" \
+gmlx image generate minimax-h3-image \
+    --prompt "a log cabin in a snowy pine forest at dusk, warm light in its windows, smoke rising from the chimney, photograph" \
     --adapter ~/models/loras/minimax-h3-image-pdmd-2steps.safetensors \
-    --output lighthouse.png
+    --output cabin.png
 ```
 
 ```
 [image] adapter schedule of pDMD-2steps (gmlx's table of known adapters, linoyts/MiniMax-H3-Image-pDMD-2steps): sigmas 1, 0.923077, 0, heads in order, default size 1024x1024
 ```
+
+pDMD-2steps was trained on captions from MiniMax's prompt expander, so
+give it a long, descriptive prompt or turn on the
+[prompt expander](#prompt-expander): on a short prompt its image can show
+ghosted shapes and white bars at its edges.
 
 MiniMax-H3-Image has six step heads, one trained for each of its six
 steps. On a schedule of its own, step 1 reads head 1, step 2 reads head 2
@@ -228,7 +367,8 @@ once with `--save-adapter-schedule`. The command writes the sidecar from
 file, on the command line or the server, takes the schedule:
 
 ```sh
-gmlx image generate minimax-h3-image --prompt "a lighthouse at dusk" \
+gmlx image generate minimax-h3-image \
+    --prompt "a log cabin in a snowy pine forest at dusk, warm light in its windows, smoke rising from the chimney, photograph" \
     --adapter ~/models/loras/pdmd-v2.safetensors \
     --sigmas 1,12/13,0 --size 1024x1024 --save-adapter-schedule
 ```
@@ -406,6 +546,7 @@ gmlx node pack runs these image models in it, on the gmlx server.
 | `flux-2-klein-9b-kv` | FLUX.2 klein 9B KV, non-commercial | 4, with guidance 1 only | From up to 10 reference images | Qwen3-8B |
 | `flux-3-klein` | FLUX.3 klein | 16, with the `euler` sampler and guidance 1 only | From up to 10 reference images | Qwen3-VL-4B-Instruct |
 | `flux-3-klein-base` | FLUX.3 klein Base | 50 | From up to 10 reference images | Qwen3-VL-4B-Instruct |
+| `minimax-h3-image` | MiniMax-H3-Image | 6, with guidance 1 only | From up to 16 reference images | Qwen3-VL-32B-Instruct, with its mmproj |
 
 FLUX.3 klein is distilled to sample without guidance, and with `euler`
 alone, so a request or a flag that sets another guidance or sampler is
@@ -439,6 +580,12 @@ it is tuned from. Both run 50 steps at guidance 3, and leave block 22 out
 of the negative pass, as OpenMOSS runs them. They read the prompt with
 Qwen3.5-9B and edit from an init image, not from reference images.
 
+MiniMax-H3-Image is the pruned release of MiniMax's image model: the
+MiniMax-H3 DiT without its audio stream, distilled to 6 steps at
+guidance 1 with one output head trained for each step. It reads the
+prompt with Qwen3-VL-32B-Instruct, the text encoder of MiniMax-H3 video,
+and the pictures of an edit with that encoder's vision tower.
+
 `pull` takes the DiT at the quant for your Mac's memory, and the text
 encoder at Q8_0. A Mac takes the column of the largest class its memory
 holds. `--quant` and `--encoder-quant` pick others, and
@@ -459,6 +606,7 @@ holds. `--quant` and `--encoder-quant` pick others, and
 | `flux-2-klein-9b-kv` | Q4_K_M | Q4_K_M | Q8_0 | Q8_0 |
 | `flux-3-klein` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
 | `flux-3-klein-base` | Q4_K_M | Q8_0 | Q8_0 | Q8_0 |
+| `minimax-h3-image` | None | None | UD-Q4_K_XL | Q8_0 |
 
 No Krea 2 quant fits a 1024x1024 image on 16 GB, so a pull of the 16 GB
 default sets the entry's default size to 512x512, and a pull with another
@@ -467,6 +615,11 @@ Raw GGUF by name.
 
 On 16 GB a MOSS-Image pull takes the encoder at Q4_K_M, since the Q8_0
 encoder leaves too little memory for the DiT there.
+
+A MiniMax-H3-Image pull takes the encoder at Q4_K_M, the one quant it
+pulls. On a Mac with less than 32 GB it downloads nothing and names
+32 GB, unless `--quant` names a DiT. On 32 GB the UD-Q4_K_XL DiT makes
+4096x4096 images, and a Q5_K_M DiT makes 2048x2048 but not 4096x4096.
 
 On 16 GB the FLUX.2 klein 9B models make a 1024x1024 image from a prompt.
 An edit there fits at a smaller size: a 768x768 image from one 768x768
@@ -492,7 +645,8 @@ references and its Q8_0 DiT none, and on 32 GB its Q8_0 DiT takes two.
 | FLUX.2 klein 9B, FLUX.2 klein Base 9B | [FLUX Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md) | Non-commercial use only, on the terms below |
 | FLUX.2 klein 9B KV | [FLUX Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-kv/blob/main/LICENSE) | Non-commercial use only, on the terms below |
 | FLUX.3 klein, FLUX.3 klein Base | [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md) | Non-commercial, and commercial use of the images under $5M of yearly revenue, on the terms below |
-| Qwen3-4B, Qwen3-8B, Qwen3-VL-8B-Instruct, Qwen3-VL-4B-Instruct, Qwen3.5-9B | Apache 2.0 | Any, under the license's terms |
+| MiniMax-H3-Image, its VAE, its prompt expander and MiniMax's expander prompts | [MiniMax-H3-Image Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE) | On the terms below |
+| Qwen3-4B, Qwen3-8B, Qwen3-VL-8B-Instruct, Qwen3-VL-4B-Instruct, Qwen3-VL-32B-Instruct, Qwen3.5-9B | Apache 2.0 | Any, under the license's terms |
 
 Under the [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md),
 a user whose yearly revenue, affiliates counted, is under $5M may use
@@ -501,6 +655,18 @@ image for unlawful or infringing content before it is shared, and with a
 disclosure that the image is made with AI where the law requires one.
 Other commercial use of FLUX.3 klein needs a license from Black Forest
 Labs.
+
+Under the [MiniMax-H3-Image Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/LICENSE):
+
+- It grants nothing in the United States, the European Union, the United
+  Kingdom or South Korea without a separate license from MiniMax.
+- Use above $1 million of yearly revenue, affiliates counted, and hosting
+  the model for others need MiniMax's written authorization.
+- A commercial user interface must show MiniMax-H3-Image.
+- A service for others needs safeguards for its users.
+- Images you post publicly must be marked as made by a machine.
+
+The LoRAs published for it, such as pDMD-2steps, name the same license.
 
 Under the [FLUX Non-Commercial License](https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md),
 FLUX.2 klein 9B, FLUX.2 klein Base 9B and FLUX.2 klein 9B KV may be used
@@ -517,17 +683,21 @@ Space. The MOSS-Image caption prompt is gmlx's own, written from the
 prompt-enhancer skill of OpenMOSS's MOSS-Image repository, which is under
 Apache 2.0. Qwen's rewriter prompt, which
 `gmlx pull qwen-image` downloads, is under the Qwen Research License, for
-non-commercial use only.
+non-commercial use only. MiniMax's expander prompts, which
+`gmlx pull minimax-h3-image` downloads, are under the MiniMax-H3-Image
+Community License.
 
 gmlx has no content filter of its own, so a deployment that a license
 asks to filter adds its own.
 
 The GGUF files are quantized by unsloth, the Qwen-Image 2.1 Turbo files by
 AtomicChat, the Krea 2 Turbo files by Abiray, the FLUX.2 klein 9B KV files
-by QuantStack and the FLUX.3 klein and MOSS-Image files by realrebelai,
-under the same licenses. The Krea 2 VAE comes from Comfy-Org's Krea 2
-repository, and the MOSS-Image VAE from OpenMOSS-Team's MOSS-Image-SFT
-repository, under Apache 2.0. The
+by QuantStack, the FLUX.3 klein and MOSS-Image files by realrebelai and
+the MiniMax-H3-Image prompt expander files by mradermacher, under the same
+licenses. The Krea 2 VAE comes from Comfy-Org's Krea 2 repository, and
+the MOSS-Image VAE from OpenMOSS-Team's MOSS-Image-SFT repository, under
+Apache 2.0. The MiniMax-H3-Image VAE comes from Comfy-Org's
+MiniMax-H3-Image repository, under its model's license. The
 FLUX.2 VAE, which FLUX.2 klein at both sizes and FLUX.3 klein decode with,
 comes from Black Forest Labs' FLUX.2 klein 4B repository, under Apache
 2.0. The 9B repositories hold the same file.
