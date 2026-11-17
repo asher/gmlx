@@ -652,6 +652,8 @@ RESPONSE_FORMATS = ("b64_json", "url")
 MAX_N = 10
 MAX_PARTIALS = 3
 MAX_REFS = 16
+# The most steps a request runs, by steps or by sigmas.
+MAX_STEPS = 200
 # Model names an OpenAI client sends that mean the default image model.
 _ALIAS_PREFIXES = ("gpt-image-", "dall-e-", "chatgpt-image")
 # Accepted and ignored, with one warning line.
@@ -910,9 +912,14 @@ def _sigmas(value) -> tuple | None:
         except ValueError:
             raise _bad("sigmas must be a list of numbers", "sigmas") from None
     try:
-        return check_sigmas(value, "sigmas")
+        sigmas = check_sigmas(value, "sigmas")
     except ScheduleError as e:
         raise _bad(str(e), "sigmas") from None
+    if len(sigmas) > MAX_STEPS + 1:
+        raise _bad(f"sigmas holds {len(sigmas)} values, {len(sigmas) - 1} "
+                   f"steps, and a request runs at most {MAX_STEPS} steps",
+                   "sigmas")
+    return sigmas
 
 
 def parse_request(route: str, fields: dict) -> ImageRequest:
@@ -970,7 +977,7 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
         n=_int(fields, "n", 1, MAX_N) or 1,
         size=parse_size(size, family),
         quality=_choice({"quality": q}, "quality", QUALITIES, "auto"),
-        steps=_int(fields, "steps", 1, 200),
+        steps=_int(fields, "steps", 1, MAX_STEPS),
         seed=_int(fields, "seed", 0, (1 << 63) - 1),
         guidance=_float(fields, "guidance", 1.0, 30.0),
         sampler=sampler,
@@ -1339,11 +1346,13 @@ def request_schedule(req: ImageRequest, served: ServedImage,
                      model_dirs) -> None:
     """Set ``req.schedule``: the request's sigmas, steps and size over the
     schedules its adapters declare, each run at a strength other than 0
-    (``schedule.resolve``). An adapter's schedule is its config entry's,
-    else its sidecar's, else gmlx's table's. The request's images and
-    the entry's defaults.size are a size of the request's own. Logs the
-    line that names the adapters, and refuses with 400 adapters that
-    disagree, a bad sidecar, and heads in order past the DiT's bank."""
+    (``schedule.resolve``). Each field of an adapter's schedule is its
+    config entry's, else its sidecar's, else gmlx's table's. The
+    request's images and the entry's defaults.size are a size of the
+    request's own. Logs the line that names the adapters, and refuses
+    with 400 adapters that disagree, a bad sidecar, a size from an
+    adapter that a request could not give, and heads in order past the
+    DiT's bank."""
     from gmlx.image.lora import schedule
 
     table_rows, extra, _ = _request_rows(served, req.adapters, model_dirs)
@@ -1352,19 +1361,28 @@ def request_schedule(req: ImageRequest, served: ServedImage,
     entries = dict(getattr(served.spec, "adapter_schedules", ()) or ())
     steps = req.steps or quality_steps(served.pipe.family,
                                        served.pipe.variant, req.quality)
+    # A step count from quality is named as the request gave it.
+    names = {"steps": "quality"} if req.steps is None else None
     own = req.size is not None or bool(req.images) or bool(
         (served.spec.defaults or {}).get("size"))
     try:
         decls = [schedule.declared(path, entries.get(path))
                  for path, st in rows if st != 0]
         sched = schedule.resolve(
-            decls, sigmas=req.sigmas, steps=steps,
+            decls, sigmas=req.sigmas, steps=steps, names=names,
             size=target_size(req, served) if own else None,
             size_from=None if req.size is not None else
             "the request's images or the entry's defaults.size")
     except schedule.ScheduleError as e:
         raise _bad(str(e), "adapters" if req.sigmas is None else "sigmas"
                    ) from None
+    if sched.size_from is not None:
+        from gmlx.image.registry import schedule_size_refusal
+
+        why = schedule_size_refusal(served.pipe.family, _stride(served),
+                                    sched, image_limits=True)
+        if why:
+            raise _bad(f"{why}; give the request a size", "adapters")
     bank = served.facts.head_bank
     if sched.heads == "in_order" and bank and sched.sigmas is not None \
             and len(sched.sigmas) - 1 > bank:

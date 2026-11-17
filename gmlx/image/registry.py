@@ -280,6 +280,26 @@ def size_refusal(family, width: int, height: int) -> str | None:
     return None
 
 
+def schedule_size_refusal(family, unit: int, sched, *,
+                          image_limits: bool = False) -> str | None:
+    """Why ``family`` refuses the size that an adapter's schedule
+    ``sched`` (a ``schedule.Resolved`` whose size an adapter set) gives,
+    naming the adapter and where the size comes from, or None: a side off
+    the ``unit`` grid, or a size outside the family's limits, and with
+    ``image_limits`` outside the image limits for a family without its
+    own, as serve holds a request's size."""
+    w, h = sched.size
+    who = (f"the size {w}x{h} that the adapter schedule of "
+           f"{sched.size_from} sets")
+    if w % unit or h % unit:
+        return f"{who}: width and height must be multiples of {unit}"
+    why = size_refusal(family, w, h)
+    if why is None and image_limits and not limited(family) and (
+            w * h > MAX_PIXELS or max(w, h) > MAX_SIDE):
+        why = f"{w}x{h} is over {limits_text(None)}"
+    return None if why is None else f"{who}: {why}"
+
+
 def fit_size(width: int, height: int, unit: int, family=None) -> tuple:
     """(width, height) scaled down at its shape to the largest size in the
     limits of ``family`` (the image limits for None or a family without

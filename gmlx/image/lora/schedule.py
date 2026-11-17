@@ -6,10 +6,10 @@ An adapter declares its schedule in a sidecar next to its file,
 ``<file>.gmlx.json`` (``SIDECAR_SUFFIX``), which ``gmlx image generate
 --save-adapter-schedule`` writes. A serve config's adapter entry carries
 the same fields, and ``KNOWN`` holds the schedules of published adapters
-by the sha256 of their files. An adapter's schedule is its entry's, else
-its sidecar's, else its row of ``KNOWN``. Each field of a request's
-schedule is then the request's own setting, else the adapters' (which
-must agree), else the family's (``resolve``).
+by the sha256 of their files. Each field of an adapter's schedule is its
+entry's, else its sidecar's, else its row of ``KNOWN`` (``declared``).
+Each field of a request's schedule is then the request's own setting,
+else the adapters' (which must agree), else the family's (``resolve``).
 """
 
 from __future__ import annotations
@@ -58,10 +58,17 @@ class AdapterSchedule:
 @dataclass(frozen=True)
 class Declared:
     """The schedule of one adapter, under the ``name`` a message shows,
-    and where it comes from."""
+    and where it comes from: ``source`` names every place it takes a
+    field from, and ``fields`` maps a field to its own place where they
+    differ."""
     name: str
     source: str
     schedule: AdapterSchedule
+    fields: tuple = ()
+
+    def source_of(self, field: str) -> str:
+        """Where the schedule's ``field`` comes from."""
+        return dict(self.fields).get(field, self.source)
 
 
 @dataclass(frozen=True)
@@ -69,11 +76,13 @@ class Resolved:
     """A request's schedule: ``sigmas`` None for the family's schedule,
     ``heads`` "in_order" or None for the DiT's own rule, ``size`` None for
     the family's default, and ``line`` what to print, None when no
-    adapter sets anything."""
+    adapter sets anything. ``size_from`` names the adapter and the place
+    a size the request did not give comes from."""
     sigmas: tuple | None = None
     heads: str | None = None
     size: tuple | None = None
     line: str | None = None
+    size_from: str | None = None
 
 
 @dataclass(frozen=True)
@@ -247,22 +256,37 @@ def write_sidecar(path: str, sched: AdapterSchedule) -> str:
     return side
 
 
-def declared(path: str, entry: dict | None = None) -> Declared | None:
-    """The schedule the adapter at ``path`` declares: its config entry's
-    fields (``entry``), else its sidecar's, else its row of ``KNOWN``,
-    else None."""
+def declared(path: str, entry: dict | None = None, *,
+             sidecar: bool = True) -> Declared | None:
+    """The schedule the adapter at ``path`` declares, field by field: its
+    config entry's (``entry``), else its sidecar's, else its row of
+    ``KNOWN``; None when none declares a field. ``sidecar`` False leaves
+    the sidecar unread, for the run that replaces it."""
     name = os.path.basename(path)
+    layers = []
     if entry:
-        return Declared(name, "its entry in the config",
-                        parse(entry, f"the config's adapter {name}"))
-    sched = read_sidecar(path)
-    if sched is not None:
-        return Declared(name, f"its sidecar {sidecar_path(path)}", sched)
+        layers.append(("its entry in the config",
+                       parse(entry, f"the config's adapter {name}")))
+    side = read_sidecar(path) if sidecar else None
+    if side is not None:
+        layers.append((f"its sidecar {sidecar_path(path)}", side))
     row = KNOWN.get(file_sha256(path))
     if row is not None:
-        return Declared(row.name, f"gmlx's table of known adapters, "
-                        f"{row.source}", row.schedule)
-    return None
+        name = row.name
+        layers.append((f"gmlx's table of known adapters, {row.source}",
+                       row.schedule))
+    values, places = {}, {}
+    for field in FIELDS:
+        for place, sched in layers:
+            if getattr(sched, field) is not None:
+                values[field], places[field] = getattr(sched, field), place
+                break
+    if not values:
+        return None
+    used = [place for place, _ in layers if place in places.values()]
+    source = " and ".join(used)
+    return Declared(name, source, AdapterSchedule(**values),
+                    tuple(places.items()) if len(used) > 1 else ())
 
 
 def _shown(field: str, value) -> str:
@@ -273,19 +297,25 @@ def _shown(field: str, value) -> str:
     return {"in_order": "in order", "span": "by their span"}[value]
 
 
-def _agreed(decls: list, field: str, given: str):
+def _agreed(decls: list, field: str, given: str, *, who: bool = False):
     """The value the adapters agree on for ``field``, None when none
-    declares it; adapters that disagree are refused."""
+    declares it; adapters that disagree are refused. With ``who``, the
+    value and the first adapter that declares it, with its place."""
     vals = [(d, getattr(d.schedule, field)) for d in decls
             if getattr(d.schedule, field) is not None]
     for d, v in vals[1:]:
         if v != vals[0][1]:
             a = vals[0][0]
             raise ScheduleError(
-                f"adapters {a.name} ({a.source}) and {d.name} ({d.source}) "
-                f"declare different {field}: {_shown(field, vals[0][1])} "
-                f"and {_shown(field, v)}; give {given} to choose")
-    return vals[0][1] if vals else None
+                f"adapters {a.name} ({a.source_of(field)}) and {d.name} "
+                f"({d.source_of(field)}) declare different {field}: "
+                f"{_shown(field, vals[0][1])} and {_shown(field, v)}; give "
+                f"{given} to choose")
+    value = vals[0][1] if vals else None
+    if not who:
+        return value
+    d = vals[0][0] if vals else None
+    return value, (None if d is None else f"{d.name} ({d.source_of(field)})")
 
 
 def resolve(decls, *, sigmas=None, steps=None, size=None,
@@ -316,11 +346,12 @@ def resolve(decls, *, sigmas=None, steps=None, size=None,
             heads = "in_order"
     if heads == "span":
         heads = None
+    size_src = None
     if size is not None:
         out_size = tuple(size)
         given.append(size_from or names["size"])
     else:
-        out_size = _agreed(decls, "size", names["size"])
+        out_size, size_src = _agreed(decls, "size", names["size"], who=True)
     applied = []
     if sigmas is None and steps is None:
         if out_sigmas is not None:
@@ -338,4 +369,4 @@ def resolve(decls, *, sigmas=None, steps=None, size=None,
         if given:
             line += (f"; {' and '.join(given)} given, which "
                      f"{'wins' if len(given) == 1 else 'win'}")
-    return Resolved(out_sigmas, heads, out_size, line)
+    return Resolved(out_sigmas, heads, out_size, line, size_src)

@@ -255,10 +255,12 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "MiniMax's prompt/manifest.json.")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
-                        "on Qwen-Image 2.1 (default: the init image's, else "
-                        "on FLUX.2 klein and FLUX.3 klein the first "
-                        "reference's, else the entry's defaults.size, else "
-                        "the variant's). On FLUX.3 klein without it, the "
+                        "on Qwen-Image 2.1 and MiniMax-H3-Image (default: "
+                        "the init image's, else on FLUX.2 klein, FLUX.3 "
+                        "klein and MiniMax-H3-Image the first reference's, "
+                        "else the entry's defaults.size, else an adapter's "
+                        "schedule, else the variant's). On FLUX.3 klein "
+                        "without it, the "
                         "image of one reference is cropped to that "
                         "reference's own aspect.")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
@@ -916,9 +918,16 @@ def _schedule(a, ident, log, size=None):
     from gmlx.image.lora import schedule
 
     entry = getattr(a, "entry_schedules", None) or {}
+    # The sidecar that --save-adapter-schedule replaces is not read, so a
+    # stale or broken one does not stop its own rewrite.
+    saved = _save_target(a)
+    saved = None if saved is None else \
+        os.path.abspath(schedule.sidecar_path(saved))
     try:
-        decls = [schedule.declared(path, entry.get(path))
-                 for path, strength in a.adapter or () if strength != 0]
+        decls = [schedule.declared(
+            path, entry.get(path), sidecar=saved is None
+            or os.path.abspath(schedule.sidecar_path(path)) != saved)
+            for path, strength in a.adapter or () if strength != 0]
         sched = schedule.resolve(
             decls, sigmas=a.sigmas, steps=a.steps, size=size,
             names={"sigmas": "--sigmas", "steps": "--steps",
@@ -937,17 +946,29 @@ def _schedule(a, ident, log, size=None):
     return sched
 
 
+def _check_schedule_size(fam, stride: int, sched) -> None:
+    """Refuse the size an adapter's schedule sets when the family does not
+    take it, naming the adapter and where the size comes from."""
+    from gmlx.image.registry import schedule_size_refusal
+
+    why = schedule_size_refusal(fam, stride, sched)
+    if why:
+        raise _Usage(f"{why}; give --size to choose another")
+
+
 def _head_bank(ident) -> int:
     """The step heads of the identified DiT's bank, 0 for a DiT with
     none."""
     return int(ident.config.get("pdd_steps") or 0)
 
 
-def _save_schedule(a, sched, log) -> None:
-    """``--save-adapter-schedule``: the --adapter file's sidecar, from
-    --sigmas, heads in order with them, and --size."""
-    from gmlx.image.lora import schedule
-
+def _save_target(a) -> str | None:
+    """The path of the one --adapter file whose sidecar
+    ``--save-adapter-schedule`` writes, None without the flag. A command
+    that gives no such file, or neither --sigmas nor --size, is
+    refused."""
+    if not getattr(a, "save_adapter_schedule", False):
+        return None
     flags = getattr(a, "flag_adapters", None)
     flags = list(a.adapter or ()) if flags is None else flags
     if len(flags) != 1:
@@ -956,7 +977,15 @@ def _save_schedule(a, sched, log) -> None:
     if a.sigmas is None and a.size is None:
         raise _Usage("--save-adapter-schedule writes --sigmas and --size; "
                      "give one or both")
-    path = os.path.expanduser(flags[0][0])
+    return os.path.expanduser(flags[0][0])
+
+
+def _save_schedule(a, sched, log) -> None:
+    """``--save-adapter-schedule``: the --adapter file's sidecar, from
+    --sigmas, heads in order with them, and --size."""
+    from gmlx.image.lora import schedule
+
+    path = _save_target(a)
     try:
         side = schedule.write_sidecar(path, schedule.AdapterSchedule(
             sigmas=a.sigmas, heads="in_order" if a.sigmas else None,
@@ -1111,6 +1140,8 @@ def _generate(a) -> int:
     else:
         width, height = a.size or getattr(a, "entry_size", None) or \
             sched.size or (defaults.size if defaults else (1024, 1024))
+    if sched.size_from is not None:
+        _check_schedule_size(fam, stride, sched)
     if width % stride or height % stride:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")

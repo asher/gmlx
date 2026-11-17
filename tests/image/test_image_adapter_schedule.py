@@ -1,14 +1,16 @@
 """Adapter schedules: pDMD-2steps' schedule from gmlx's table by the
-sha256 of its file, a sidecar over the table and a config entry over the
-sidecar, the request's own settings over all of them, adapters that
+sha256 of its file, each field from a config entry over a sidecar over
+the table, the request's own settings over all of them, adapters that
 disagree refused, a bad sidecar refused with its path, and the sidecar
---save-adapter-schedule writes; the CLI's plan and sample under each;
+--save-adapter-schedule writes, over a stale or broken one; the CLI's
+plan and sample under each, and a schedule's size the family refuses;
 and heads in order on the tiny MiniMax-H3-Image DiT, step i reading head
 i. CPU."""
 from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -102,21 +104,41 @@ def test_adapters_that_disagree_are_refused_unless_the_request_chooses(
     assert sc.resolve([pdmd, big], size=(1024, 1024)).size == (1024, 1024)
 
 
-def test_a_sidecar_wins_over_the_table_and_an_entry_over_the_sidecar(known):
+def test_each_field_comes_from_the_entry_else_the_sidecar_else_the_table(
+        known):
+    table = ("gmlx's table of known adapters, "
+             "linoyts/MiniMax-H3-Image-pDMD-2steps")
     side = sc.write_sidecar(known.path, sc.AdapterSchedule(
         sigmas=(1.0, 0.75, 0.0)))
     assert side == known.path + ".gmlx.json"
     d = sc.declared(known.path)
     assert (d.name, d.source, d.schedule) == (
-        "pdmd.safetensors", f"its sidecar {side}",
-        sc.AdapterSchedule(sigmas=(1.0, 0.75, 0.0)))
-    # A declared schedule without heads reads them in order.
-    assert sc.resolve([d]).heads == "in_order"
+        "pDMD-2steps", f"its sidecar {side} and {table}",
+        dataclasses.replace(PDMD, sigmas=(1.0, 0.75, 0.0)))
+    assert (d.source_of("sigmas"), d.source_of("size")) == (
+        f"its sidecar {side}", table)
+    # An entry that sets the size alone keeps the sidecar's sigmas and
+    # the table's heads, and names where the size comes from.
+    got = sc.resolve([sc.declared(known.path, {"size": "1536x1536"})])
+    assert (got.sigmas, got.heads, got.size) == (
+        (1.0, 0.75, 0.0), "in_order", (1536, 1536))
+    assert got.size_from == "pDMD-2steps (its entry in the config)"
     d = sc.declared(known.path, {"heads": "span", "size": "1280x1280"})
-    assert (d.source, d.schedule) == ("its entry in the config",
-                                      sc.AdapterSchedule(heads="span",
-                                                         size=(1280, 1280)))
+    assert d.source == f"its entry in the config and its sidecar {side}"
     assert sc.resolve([d]).heads is None
+    # Without the sidecar the table's two steps stay under the entry's
+    # size.
+    os.unlink(side)
+    got = sc.resolve([sc.declared(known.path, {"size": "1536x1536"})])
+    assert (got.sigmas, got.heads, got.size) == (
+        (1.0, 12 / 13, 0.0), "in_order", (1536, 1536))
+    # A file the table does not know takes its own fields alone, and a
+    # declared schedule without heads reads them in order.
+    sc.write_sidecar(known.other, sc.AdapterSchedule(sigmas=(1.0, 0.5, 0.0)))
+    d = sc.declared(known.other, {"size": "1280x1280"})
+    assert (d.name, d.schedule) == ("other.safetensors", sc.AdapterSchedule(
+        sigmas=(1.0, 0.5, 0.0), size=(1280, 1280)))
+    assert sc.resolve([d]).heads == "in_order"
 
 
 @pytest.mark.parametrize("body, why", [
@@ -291,6 +313,56 @@ def test_the_cli_saves_a_schedule_that_its_later_runs_read(
     assert umbrella_main(h3.base + ["--adapter", other]) == 2
     assert f"the adapter schedule {side} does not read as JSON" in \
         capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stale", ["another file", "broken"])
+def test_save_adapter_schedule_replaces_a_stale_or_broken_sidecar(
+        h3, known, view, capsys, stale):
+    """The refusal of a sidecar written for an earlier version of the
+    file, or one that does not read, says to write it again with
+    --save-adapter-schedule, and that run replaces it."""
+    other = known.other
+    side = sc.write_sidecar(other, sc.AdapterSchedule(sigmas=(1.0, 0.5, 0.0)))
+    if stale == "broken":
+        with open(side, "w") as f:
+            f.write("{bad")
+    else:
+        _lora(other, view, seed=7)
+    assert umbrella_main(h3.base + ["--adapter", other]) == 2
+    err = capsys.readouterr().err
+    assert side in err and ("does not read as JSON" if stale == "broken"
+                            else "write it again with "
+                            "--save-adapter-schedule") in err
+    assert umbrella_main(h3.base + [
+        "--adapter", other, "--sigmas", "1,3/4,0", "--size", "1280x1280",
+        "--save-adapter-schedule"]) != 2
+    assert f"[image] wrote the adapter schedule {side}" in \
+        capsys.readouterr().err
+    assert sc.read_sidecar(other) == sc.AdapterSchedule(
+        sigmas=(1.0, 0.75, 0.0), heads="in_order", size=(1280, 1280))
+    assert umbrella_main(h3.base + ["--adapter", other]) != 2
+    assert h3.planned[-1] == (1280, 1280)
+
+
+def test_the_cli_refuses_a_schedules_size_the_family_does_not_take(
+        h3, known, capsys):
+    """A sidecar's size off MiniMax-H3-Image's 32 pixel grid, or outside
+    its limits, exits 2 naming the adapter and its sidecar, before the
+    plan; --size wins over it."""
+    other = known.other
+    for size, why in (((1000, 1000), "multiples of 32"),
+                      ((512, 512), "under the 655,360")):
+        side = sc.write_sidecar(other, sc.AdapterSchedule(size=size))
+        n = len(h3.planned)
+        assert umbrella_main(h3.base + ["--adapter", other]) == 2
+        err = capsys.readouterr().err
+        assert (f"the size {size[0]}x{size[1]} that the adapter schedule of "
+                f"other.safetensors (its sidecar {side}) sets: ") in err
+        assert why in err and "give --size to choose another" in err
+        assert len(h3.planned) == n
+    assert umbrella_main(h3.base + ["--adapter", other, "--size",
+                                    "1024x1024"]) != 2
+    assert h3.planned[-1] == (1024, 1024)
 
 
 @pytest.fixture(scope="module")
