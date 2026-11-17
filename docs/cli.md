@@ -1440,9 +1440,18 @@ its header, before any model loads. So is a file for another model family or one
 that match no module of the DiT, which its GGUF header names. An adapter's
 text encoder pairs are applied to the text encoder at the same strength.
 
+An adapter can bring the schedule it was trained on, from its entry in the
+config, its sidecar or gmlx's table of known adapters, as
+[Adapter schedules](images.md#adapter-schedules) describes. The command
+then prints a line that names the adapter and what it sets.
+`--sigmas`, `--steps` and `--size` win over it. Adapters that set
+different values exit 2 and name the flag that chooses, as does a sidecar
+that does not read or was written for another file.
+
 A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
 sampler, scheduler, guidance, adapters, file names and gmlx version, unless
-`--no-metadata` is set. Each adapter is recorded with its file name, its
+`--no-metadata` is set, with the `sigmas` and `heads` of a schedule
+other than the model's. Each adapter is recorded with its file name, its
 strength, the `sha256` of the file, and `rows_sha256`, a digest of the
 LoRA pairs gmlx applied and the layers it applied them to. Each reference
 is recorded with its file name, the size it ran at and the `sha256` of the
@@ -1465,8 +1474,10 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--no-upsample` | Off | Run the prompt as typed, without the upsampler. |
 | `--upsample-prompt FILE` | The entry's `upsample_prompt` | Take the upsampler's system prompt from this file. Qwen-Image 2.1 ships none and needs one; MiniMax-H3-Image reads MiniMax's `prompt/manifest.json`. |
 | `--upsampler-mmproj GGUF` | The `mmproj` of the upsampler's `models` entry | Read the `--ref` images with this vision tower of `--upsampler`. MiniMax-H3-Image's upsampler sees the references, and needs it with `--ref`. |
-| `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
-| `--steps N` | The variant's | Sample for N steps. |
+| `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else an adapter's [schedule](images.md#adapter-schedules), else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
+| `--steps N` | The variant's | Sample for N steps on the variant's schedule, in place of an adapter's. |
+| `--sigmas LIST` | An adapter's [schedule](images.md#adapter-schedules), else the variant's | Sample on these noise levels, such as `1,12/13,0`, one step between each two. On MiniMax-H3-Image step i reads step head i. |
+| `--save-adapter-schedule` | Off | Write the `--adapter` file's `--sigmas` and `--size` to its sidecar, `<file>.gmlx.json`, then generate. It takes one `--adapter`, and exits 2 when the folder is not writable. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
 | `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |

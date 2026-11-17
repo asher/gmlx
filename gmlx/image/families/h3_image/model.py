@@ -171,10 +171,20 @@ class FinalLayer(nn.Module):
         self.video_out = nn.Linear(b.dim, cfg.step_heads * b.patch_dim)
 
 
+def _head_index(head, bank: int) -> int:
+    """``head`` as an index into a bank of ``bank`` heads, refused by
+    name off it."""
+    if isinstance(head, bool) or not isinstance(head, (int, np.integer)) \
+            or not 0 <= int(head) < bank:
+        raise ValueError(f"the {fam.TITLE} bank holds heads 0 to {bank - 1}, "
+                         f"not {head!r}")
+    return int(head)
+
+
 class H3ImageDiT(H3Core):
     title = fam.TITLE
     # The heads a step reads follow the sigma it goes to, which sample
-    # passes as the target.
+    # passes as the target, or the head a step names (``head_bank``).
     reads_target = True
     # The caption takes the image slots of the prompt's pictures, and the
     # references take the request's seed or their noise.
@@ -197,19 +207,31 @@ class H3ImageDiT(H3Core):
         self.blocks = [DiTBlock(b) for _ in range(b.depth)]
         self.final_layer = FinalLayer(cfg)
 
-    def modulation(self, sigma, batch: int, target=None) -> StepModulation:
+    @property
+    def head_bank(self) -> int:
+        """The PDD heads of the bank, which a step may name by index."""
+        return self.cfg.step_heads
+
+    def modulation(self, sigma, batch: int, target=None,
+                   head: int | None = None) -> StepModulation:
         """The curve rows of a step from ``sigma`` to ``target``: t = 1 -
         sigma as the release's DiT reads sigma (``family.model_sigma``),
-        and the PDD heads the step spans (``family.step_heads``)."""
+        and the PDD heads the step spans (``family.step_heads``). A
+        ``head`` index reads that head alone, head 0 or head 0 plus head
+        k, as diffusers reads head i at step i, and takes no target."""
         if batch != 1:
             raise ValueError(f"{fam.TITLE} runs a batch of 1")
+        s = float(np.asarray(sigma, np.float32).reshape(-1)[0])
+        t = 1.0 - fam.model_sigma(s)
+        times = (t, pinned(t, fam.REF_RULE))
+        if head is not None:
+            k = _head_index(head, self.head_bank)
+            return StepModulation(self.curve(times), times,
+                                  ((k, 1.0),) if k else ())
         if target is None:
             raise ValueError(f"the {fam.TITLE} heads read the sigma the step "
                              f"goes to: pass target")
-        s = float(np.asarray(sigma, np.float32).reshape(-1)[0])
         to = float(np.asarray(target, np.float32).reshape(-1)[0])
-        t = 1.0 - fam.model_sigma(s)
-        times = (t, pinned(t, fam.REF_RULE))
         start, stop, w = fam.step_heads(s, to)
         first = max(start, 1)
         heads = tuple(zip(range(first, stop), w[first - start:]))

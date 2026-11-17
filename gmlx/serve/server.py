@@ -2924,7 +2924,10 @@ def _dump_cfg_yaml(cfg: ServerCfg) -> str:
     images = {}
     for iid, m in d.pop("image_models").items():
         m.pop("id")
-        m["adapters"] = [{"path": p, "strength": st} for p, st in m["adapters"]]
+        # An adapter's schedule fields go back on its entry.
+        sched = dict(m.pop("adapter_schedules"))
+        m["adapters"] = [{"path": p, "strength": st, **sched.get(p, {})}
+                         for p, st in m["adapters"]]
         if m["ttl_s"] is None:
             # An absent key inherits the server's; a written null never unloads.
             m.pop("ttl_s")

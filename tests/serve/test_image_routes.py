@@ -103,6 +103,7 @@ def served(monkeypatch, tmp_path, request):
     monkeypatch.setattr(svc, "run_job", run_job)
     monkeypatch.setattr(svc, "check_family", lambda req, s: None)
     monkeypatch.setattr(svc, "target_size", lambda req, s: (64, 32))
+    monkeypatch.setattr(svc, "request_schedule", lambda req, s, dirs: None)
     monkeypatch.setattr(svc, "fit_check", lambda req, s, size, budget: None)
     monkeypatch.setattr(svc, "default_store_root", lambda port=None: str(tmp_path / "files"))
     monkeypatch.setattr(images, "_hopeless",
@@ -641,7 +642,8 @@ def test_each_request_logs_one_line_and_warns_on_ignored_fields(served, capsys, 
     with caplog.at_level(logging.WARNING):
         r = _client().post("/v1/images/generations",
                            json={"prompt": "x", "user": "u", "style": "vivid",
-                                 "frobnicate": 1, "int8": "off"})
+                                 "frobnicate": 1, "int8": "off",
+                                 "sigmas": [1, 0.5, 0]})
     assert r.status_code == 200
     lines = [ln for ln in capsys.readouterr().out.splitlines()
              if ln.startswith("[req]")]
@@ -649,7 +651,7 @@ def test_each_request_logs_one_line_and_warns_on_ignored_fields(served, capsys, 
     warned = [m for m in caplog.messages if "ignoring unsupported" in m]
     assert len(warned) == 1
     assert "frobnicate" in warned[0] and "style" in warned[0] and "user" in warned[0]
-    assert "int8" not in warned[0]
+    assert "int8" not in warned[0] and "sigmas" not in warned[0]
 
 
 def test_the_access_log_drops_the_image_routes_and_file_tokens():

@@ -934,7 +934,8 @@ def _skip(served, raw) -> tuple:
 
 async def step(request: Request):
     from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE, Missing,
-                               StepError, flow_targets, row_hashes, run_step)
+                               StepError, flow_targets, ordered_heads,
+                               row_hashes, run_step)
 
     t0 = time.perf_counter()
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
@@ -1030,6 +1031,18 @@ async def step(request: Request):
                                 f"{what}: a step body holds sample_sigmas, "
                                 "the schedule the client samples on")
             targets = flow_targets(s_w.numpy(), sig)
+        heads = None
+        rule = fields.get("heads")
+        if rule not in (None, "span", "in_order"):
+            raise StepError(400, "heads is span or in_order",
+                            param="heads")
+        if rule == "in_order":
+            bank = served.facts.head_bank
+            if not bank:
+                raise StepError(400, f"the {title} DiT has no bank of step "
+                                "heads to read in order", param="heads")
+            heads = ordered_heads(tensors["sample_sigmas"].numpy(), sig,
+                                  bank, title)
         gen = run.gen if run is not None else 0
         pool = _lora_pool()
         if pool is not None:
@@ -1113,7 +1126,7 @@ async def step(request: Request):
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, core, run,
                                            gen, targets, conv.time,
-                                           ref_cache, skip)
+                                           ref_cache, skip, heads)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work, on=served)

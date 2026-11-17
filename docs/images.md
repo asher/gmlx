@@ -175,6 +175,70 @@ Chat models take the same id forms, as
 [Mixing adapters per request](lora.md#mixing-adapters-per-request)
 describes.
 
+### Adapter schedules
+
+Some LoRAs are trained to sample on a schedule of their own. pDMD-2steps,
+a MiniMax-H3-Image LoRA that makes an image in 2 steps, samples at the
+noise levels, or sigmas, 1, 12/13 and 0, at 1024x1024. gmlx knows that
+file by its sha256, so it runs on that schedule unless you give another,
+and the command prints a line that names the adapter and what it sets:
+
+```sh
+gmlx image generate minimax-h3-image --prompt "a lighthouse at dusk" \
+    --adapter ~/models/loras/minimax-h3-image-pdmd-2steps.safetensors \
+    --output lighthouse.png
+```
+
+```
+[image] adapter schedule of pDMD-2steps (gmlx's table of known adapters, linoyts/MiniMax-H3-Image-pDMD-2steps): sigmas 1, 0.923077, 0, heads in order, default size 1024x1024
+```
+
+MiniMax-H3-Image has six step heads, one trained for each of its six
+steps. On a schedule of its own, step 1 reads head 1, step 2 reads head 2
+and so on, as diffusers samples it. A schedule names three things, each
+optional:
+
+| Field | Meaning |
+|-------|---------|
+| `sigmas` | The noise levels from the first to the last, one step between each two |
+| `heads` | `in_order`, where step i reads head i, which `sigmas` imply, or `span`, where a step reads the heads of the six default steps it spans, by its share of each, as ComfyUI reads them |
+| `size` | The image size, `WxH`, when the request gives none |
+
+Each field comes from the first of these that sets it:
+
+1. The request: `--sigmas`, `--steps` and `--size`, or `sigmas`, `steps`
+   or `quality`, and `size` on the server. A step count runs the model's
+   own schedule. The size of an edit's or an init image and the entry's
+   `defaults.size` count as the request's size.
+2. The adapter's item in the entry's
+   [`adapters`](config.md#image_modelsadapters), which takes `sigmas`,
+   `heads` and `size` beside `path`.
+3. The adapter's sidecar, a file named as the adapter with `.gmlx.json`
+   added, such as `pdmd-v2.safetensors.gmlx.json`.
+4. gmlx's table of known adapters, which holds pDMD-2steps.
+5. The model's own schedule and size.
+
+Two adapters that set different values are refused, with a message that
+names both and the flag that chooses. An adapter at strength 0 sets
+nothing.
+
+To declare the schedule of a new LoRA, or of a new version of one, run it
+once with `--save-adapter-schedule`. The command writes the sidecar from
+`--sigmas` and `--size`, then makes the image, and every later run of that
+file, on the command line or the server, takes the schedule:
+
+```sh
+gmlx image generate minimax-h3-image --prompt "a lighthouse at dusk" \
+    --adapter ~/models/loras/pdmd-v2.safetensors \
+    --sigmas 1,12/13,0 --size 1024x1024 --save-adapter-schedule
+```
+
+The sidecar holds the file's sha256. A sidecar of another file is refused
+with its path, as is one that does not read: write it again or delete it.
+ComfyUI reads no sidecar. Give it the schedule with `ManualSigmas` and the
+heads with `gmlx PDD Heads`, as the `minimax-h3-image-pdmd-2steps-t2i`
+workflow does.
+
 ## Prompt upsampling
 
 Prompt upsampling turns your prompt into a long, detailed caption before

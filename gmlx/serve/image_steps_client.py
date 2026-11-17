@@ -203,14 +203,15 @@ class StepsClient:
     def step(self, model: str, run: str | None, x, timestep, rows: list,
              patch_table: str | None = None,
              sample_sigmas=None, ref_cache: bool = False,
-             skip=()) -> np.ndarray:
+             skip=(), heads: str | None = None) -> np.ndarray:
         """The model output for latents ``x`` (B, C, h, w) at ``timestep``
         under the client's convention, one row dict per batch row.
         ``sample_sigmas`` is the schedule the sampler runs on, which a flow
         map DiT reads its target times from. ``ref_cache`` steps on the
         run's cache of reference K and V, as ComfyUI's Flux KV Cache node
-        samples. Every row leaves out the blocks of ``skip``. Records the
-        times of the call."""
+        samples. Every row leaves out the blocks of ``skip``. ``heads``
+        "in_order" has a DiT with a bank of step heads read head i at step
+        i of ``sample_sigmas``. Records the times of the call."""
         t = np.asarray(timestep, np.float32).reshape(-1)
         fields = {"model": model, "run": run, "convention": self.convention,
                   "patch_table": patch_table, "rows": rows}
@@ -218,6 +219,8 @@ class StepsClient:
             fields["ref_cache"] = True
         if skip:
             fields["skip"] = [int(i) for i in skip]
+        if heads is not None:
+            fields["heads"] = heads
         tensors = {"x": np.ascontiguousarray(x, np.float32), "timestep": t}
         if sample_sigmas is not None:
             tensors["sample_sigmas"] = np.asarray(sample_sigmas,

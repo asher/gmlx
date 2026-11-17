@@ -852,6 +852,43 @@ def test_an_h3_image_step_reads_comfyuis_timestep_and_the_next_sigma(
     assert host.held == 0
 
 
+def test_an_h3_image_step_reads_head_i_at_step_i_under_heads_in_order(
+        host, hpipe, fpipes):
+    """On pDMD's schedule, 1, 12/13, 0, each step under heads in order is
+    the core step that names head i, bit for bit, where step 1 by its span
+    reads other heads. A step past the bank, a DiT with no bank and
+    another rule are refused."""
+    s = np.asarray((1.0, 12 / 13, 0.0), np.float32)
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    feats = np.random.default_rng(12).standard_normal(
+        (1, 8, 40)).astype(np.float32)
+    x = noise_from_seed(7, H3I_SHAPE)
+    rows = _rows(c, feats)
+    cond = _f3_cond(feats)
+    for i in range(2):
+        t = np.float32(s[i]) * np.float32(1000)
+        out = c.step("h3i", None, x, [t], rows, sample_sigmas=s,
+                     heads="in_order")
+        assert np.array_equal(out, _on_worker(lambda i=i: np.array(
+            api.denoise_step(hpipe, mx.array(x), s[i], cond, head=i)))), i
+    t = np.float32(s[1]) * np.float32(1000)
+    assert not np.array_equal(out, c.step("h3i", None, x, [t], rows,
+                                          sample_sigmas=s))
+    long = np.linspace(1.0, 0.0, 8).astype(np.float32)
+    with pytest.raises(StepsClientError, match="bank holds 6 heads; this "
+                       "is step 6 of the client's schedule"):
+        c.step("h3i", None, x, [long[6] * np.float32(1000)], rows,
+               sample_sigmas=long, heads="in_order")
+    with pytest.raises(StepsClientError, match="heads is span or in_order"):
+        c.step("h3i", None, x, [t], rows, sample_sigmas=s, heads="first")
+    _serve(host, "f3d", fpipes[True])
+    with pytest.raises(StepsClientError, match="no bank of step heads"):
+        c.step("f3d", None, np.zeros(SHAPE, np.float32), [0.5], rows,
+               sample_sigmas=SIGMAS, heads="in_order")
+    assert host.held == 0
+
+
 def test_an_h3_image_step_without_its_schedule_is_refused(host, hpipe):
     _serve(host, "h3i", hpipe)
     c = _client()

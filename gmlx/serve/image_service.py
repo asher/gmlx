@@ -128,6 +128,7 @@ class DitFacts:
     ref_cache: bool                 # the DiT keeps a cache of reference K and V
     blocks: int | None              # the blocks a step may skip, None for none
     reads_target: bool = False      # the DiT reads the sigma a step goes to
+    head_bank: int = 0              # the step heads a step may name, 0 for none
 
 
 def dit_facts(pipe) -> DitFacts:
@@ -140,7 +141,8 @@ def dit_facts(pipe) -> DitFacts:
                     ref_cache=hasattr(dit, "extract"),
                     blocks=(len(dit.layers)
                             if getattr(dit, "skips_blocks", False) else None),
-                    reads_target=bool(getattr(dit, "reads_target", False)))
+                    reads_target=bool(getattr(dit, "reads_target", False)),
+                    head_bank=int(getattr(dit, "head_bank", 0) or 0))
 
 
 @dataclass(eq=False)
@@ -715,6 +717,11 @@ class ImageRequest:
     revised_prompt: str | None = None
     # The request's int8 setting, None for the entry's.
     int8: str | None = None
+    # The request's sigmas, None when it gives none, and the schedule the
+    # job runs (gmlx.image.lora.schedule.Resolved), set by
+    # request_schedule.
+    sigmas: tuple | None = None
+    schedule: Any = None
 
 
 def default_model_field(model) -> str:
@@ -887,6 +894,27 @@ def _adapters(value) -> list:
     return rows
 
 
+def _sigmas(value) -> tuple | None:
+    """A request's ``sigmas``: a list of numbers, or in a form its JSON
+    text or the numbers separated by commas."""
+    from gmlx.image.lora.schedule import ScheduleError, check_sigmas
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        import json
+
+        try:
+            value = json.loads(value if value.lstrip().startswith("[")
+                               else f"[{value}]")
+        except ValueError:
+            raise _bad("sigmas must be a list of numbers", "sigmas") from None
+    try:
+        return check_sigmas(value, "sigmas")
+    except ScheduleError as e:
+        raise _bad(str(e), "sigmas") from None
+
+
 def parse_request(route: str, fields: dict) -> ImageRequest:
     """An :class:`ImageRequest` from the fields of a JSON body or of a
     multipart form, whose values are strings. Images are set by the
@@ -958,7 +986,12 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
         adapters=_adapters(fields.get("adapters")),
         prompt_upsampling=_opt_bool(fields, "prompt_upsampling"),
         int8=int8,
+        sigmas=_sigmas(fields.get("sigmas")),
     )
+    if req.sigmas is not None and req.steps is not None \
+            and req.steps != len(req.sigmas) - 1:
+        raise _bad(f"steps {req.steps} disagrees with the "
+                   f"{len(req.sigmas) - 1} steps of sigmas", "steps")
     if req.stream and req.n > 1:
         raise _bad("stream with n above 1 is not supported; the stream "
                    "events carry no image index", "n")
@@ -1272,6 +1305,9 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
             raise _bad(f"the first image sizes the result: {why}; give "
                        "the request a size", "size")
         return w, h
+    sched = req.schedule
+    if sched is not None and sched.size is not None:
+        return tuple(sched.size)
     return tuple(served.plan.size)
 
 
@@ -1297,6 +1333,48 @@ def _texts(req: ImageRequest, served: ServedImage) -> tuple:
         if neg is None:
             neg = (served.spec.defaults or {}).get("negative_prompt") or ""
     return prompt, req.revised_prompt or prompt, neg
+
+
+def request_schedule(req: ImageRequest, served: ServedImage,
+                     model_dirs) -> None:
+    """Set ``req.schedule``: the request's sigmas, steps and size over the
+    schedules its adapters declare, each run at a strength other than 0
+    (``schedule.resolve``). An adapter's schedule is its config entry's,
+    else its sidecar's, else gmlx's table's. The request's images and
+    the entry's defaults.size are a size of the request's own. Logs the
+    line that names the adapters, and refuses with 400 adapters that
+    disagree, a bad sidecar, and heads in order past the DiT's bank."""
+    from gmlx.image.lora import schedule
+
+    table_rows, extra, _ = _request_rows(served, req.adapters, model_dirs)
+    rows = [(ad.path, st) for ad, st in table_rows] + [
+        (path, st) for _aid, path, st in extra]
+    entries = dict(getattr(served.spec, "adapter_schedules", ()) or ())
+    steps = req.steps or quality_steps(served.pipe.family,
+                                       served.pipe.variant, req.quality)
+    own = req.size is not None or bool(req.images) or bool(
+        (served.spec.defaults or {}).get("size"))
+    try:
+        decls = [schedule.declared(path, entries.get(path))
+                 for path, st in rows if st != 0]
+        sched = schedule.resolve(
+            decls, sigmas=req.sigmas, steps=steps,
+            size=target_size(req, served) if own else None,
+            size_from=None if req.size is not None else
+            "the request's images or the entry's defaults.size")
+    except schedule.ScheduleError as e:
+        raise _bad(str(e), "adapters" if req.sigmas is None else "sigmas"
+                   ) from None
+    bank = served.facts.head_bank
+    if sched.heads == "in_order" and bank and sched.sigmas is not None \
+            and len(sched.sigmas) - 1 > bank:
+        raise _bad(f"heads in order read head i at step i, and the "
+                   f"{served.pipe.family.title} bank holds {bank} heads, "
+                   f"not the {len(sched.sigmas) - 1} steps of the schedule",
+                   "sigmas")
+    if sched.line:
+        _log.info("image model %s: %s", served.spec.id, sched.line)
+    req.schedule = sched
 
 
 def serves_edits(fam, tower: bool) -> bool:
@@ -1326,7 +1404,8 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     pipe = served.pipe
     fam = pipe.family
     n = fixed_steps(fam, pipe.variant)
-    if n is not None and req.steps is not None and req.steps != n:
+    if n is not None and req.steps is not None and req.steps != n \
+            and req.sigmas is None:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
     try:
@@ -2293,7 +2372,15 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
             timeout_s and time.monotonic() - last[0] > timeout_s)
 
     denoise = 1.0 if strength is None else float(strength)
-    sigmas = api.image_sigmas(pipe, steps, height, width)
+    sched = req.schedule
+    given = None if sched is None else sched.sigmas
+    heads = (sched.heads if sched is not None and served.facts.head_bank
+             else None)
+    if given is not None:
+        steps = len(given) - 1
+        sigmas = api.check_sigmas(given)
+    else:
+        sigmas = api.image_sigmas(pipe, steps, height, width)
     if init_latents is not None:
         sigmas = sigmas[img2img_start(len(sigmas) - 1, denoise):]
     run_steps = len(sigmas) - 1
@@ -2315,6 +2402,10 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
                 "adapters": adapters}
         if req.revised_prompt:
             meta["revised_prompt"] = req.revised_prompt
+        if given is not None:
+            meta["sigmas"] = list(given)
+        if heads is not None:
+            meta["heads"] = heads
         int8 = req.int8 or getattr(served.plan, "int8", "off")
         if int8 != "off":
             meta["int8"] = int8
@@ -2354,6 +2445,7 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
         try:
             x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
                            width=width, steps=steps, seed=s,
+                           sigmas=given, heads=heads,
                            sampler=sampler, init_latents=init_latents,
                            denoise=denoise, mask=mask, patch_table=table,
                            plan=plan, on_step=on_step,

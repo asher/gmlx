@@ -144,6 +144,7 @@ IMAGES_GENERATIONS_CONSUMED = frozenset({
     "output_format", "output_compression", "response_format", "stream",
     "partial_images", "negative_prompt", "steps", "seed", "guidance",
     "sampler", "scheduler", "adapters", "prompt_upsampling", "int8",
+    "sigmas",
 })
 IMAGES_EDITS_CONSUMED = IMAGES_GENERATIONS_CONSUMED | frozenset({
     "image", "image[]", "images", "mask", "strength",

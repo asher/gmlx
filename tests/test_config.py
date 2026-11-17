@@ -3404,6 +3404,34 @@ def test_image_model_defaults_and_adapters_normalize():
     assert m.ttl_s == 0.0 and m.pin is True
 
 
+def test_an_image_adapter_entry_declares_its_schedule():
+    """An adapter entry's sigmas, heads and size reach the resolved entry
+    by its path, change no load, and a bad one is refused by place."""
+    from gmlx.config import resolve_image_model
+
+    doc = _image_doc(adapters=["/a.safetensors", {
+        "path": "/b.safetensors", "sigmas": [1, 0.75, 0], "heads": "in_order",
+        "size": "1024x1024"}])
+    cfg = build_config(doc)
+    m = cfg.image_models["zit"]
+    assert m.adapters == (("/a.safetensors", 1.0), ("/b.safetensors", 1.0))
+    assert m.adapter_schedules == (("/b.safetensors", {
+        "sigmas": [1, 0.75, 0], "heads": "in_order", "size": "1024x1024"}),)
+    rm = resolve_image_model("zit", cfg)
+    assert rm.adapter_schedules == (("/b.safetensors", {
+        "sigmas": [1, 0.75, 0], "heads": "in_order", "size": "1024x1024"}),)
+    plain = resolve_image_model("zit", build_config(_image_doc(
+        adapters=["/a.safetensors", "/b.safetensors"])))
+    assert rm.load_signature() == plain.load_signature()
+    with pytest.raises(ConfigError, match=r"image model 'zit'.adapters\[0\]: "
+                       r"sigmas must not increase"):
+        build_config(_image_doc(adapters=[{"path": "/a.safetensors",
+                                           "sigmas": [0, 1]}]))
+    with pytest.raises(ConfigError, match="heads"):
+        build_config(_image_doc(adapters=[{"path": "/a.safetensors",
+                                           "heads": "first"}]))
+
+
 def test_image_model_int8_default_parses():
     """defaults.int8 takes the four settings, YAML's bare off among
     them."""
@@ -3656,13 +3684,17 @@ def test_image_models_round_trip_through_print_config():
     import yaml
 
     from gmlx.serve import server as srv
-    doc = _image_doc(adapters=[{"path": "/a.safetensors", "strength": 0.5}],
+    doc = _image_doc(adapters=[{"path": "/a.safetensors", "strength": 0.5},
+                               {"path": "/b.safetensors",
+                                "sigmas": [1.0, 0.5, 0.0], "size": "512x768"}],
                      defaults={"steps": 8})
     doc["server"] = {"image": {"max_queue": 2},
                      "defaults": {"image_model": "zit"}}
     cfg = build_config(doc)
     again = build_config(yaml.safe_load(srv._dump_cfg_yaml(cfg)))
     assert again.image_models == cfg.image_models
+    assert again.image_models["zit"].adapter_schedules == (
+        ("/b.safetensors", {"sigmas": [1.0, 0.5, 0.0], "size": "512x768"}),)
     assert again.image == cfg.image
     assert again.defaults.image_model == "zit"
 

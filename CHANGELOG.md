@@ -32,6 +32,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   images, video and sound on `/v1/systemone` and `gmlx systemone`, and
   `gmlx pull` has them as `d1-2b` and `d1-omni-2b`. See
   [Images, video and sound](docs/decisions.md#images-video-and-sound).
+- An image LoRA such as pDMD-2steps runs on the schedule it was trained on,
+  and `--sigmas` or a request's `sigmas` set one. See
+  [Adapter schedules](docs/images.md#adapter-schedules).
 
 ### Changed
 

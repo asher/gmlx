@@ -6,6 +6,7 @@ a guided edit takes the references. The sampler and the VAE are stubs,
 so nothing heavy runs."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from types import SimpleNamespace
@@ -405,3 +406,88 @@ def test_a_request_after_a_kv_edit_encodes_with_its_states_priced(
     pipe.captions.clear()
     (a, k), = calls
     assert plan.levers == real_plan(*a, **k).levers == levers
+
+
+def _h3_served(tmp_path, monkeypatch, entry=None):
+    """An H3-Image entry whose one adapter is a file gmlx's table knows as
+    pDMD-2steps, with the entry's schedule fields ``entry``."""
+    from gmlx.image.lora import schedule as sc
+
+    path = tmp_path / "pdmd.safetensors"
+    path.write_bytes(b"pdmd")
+    monkeypatch.setattr(sc, "KNOWN", {sc.file_sha256(str(path)): sc.Known(
+        "pDMD-2steps", "linoyts/MiniMax-H3-Image-pDMD-2steps",
+        sc.AdapterSchedule(sigmas=(1.0, 12 / 13, 0.0), heads="in_order",
+                           size=(1024, 1024)))})
+    served = _served()
+    served.pipe.family, served.pipe.variant = get_family("h3_image"), "pruned"
+    served.adapters = [(SimpleNamespace(path=str(path)), 1.0)]
+    served.spec.adapter_schedules = (
+        () if entry is None else ((str(path), entry),))
+    served.plan.size = (2048, 2048)
+    served.facts = dataclasses.replace(served.facts, head_bank=6)
+    return served
+
+
+def test_an_adapters_schedule_runs_on_serve_and_the_request_wins(
+        stubs, monkeypatch, tmp_path):
+    """The entry's pDMD runs its two steps with heads in order at its
+    1024x1024, and says so in the PNG; a request's sigmas, steps or size
+    win, and at strength 0 the adapter sets nothing."""
+    import io
+
+    from PIL import Image
+
+    served = _h3_served(tmp_path, monkeypatch)
+    # The table of a request that names an adapter reads no file here.
+    monkeypatch.setattr(svc, "_adapter_table", lambda *a, **k: (None, []))
+    seen = []
+    monkeypatch.setattr(api, "sample", lambda pipe, cond, **kw: (
+        seen.append(kw), mx.zeros((1, 16, 8, 8)))[1])
+    runs = [({}, (1024, 1024), ((1.0, 12 / 13, 0.0), "in_order", 2)),
+            ({"sigmas": [1, 0.5, 0]}, (1024, 1024),
+             ((1.0, 0.5, 0.0), "in_order", 2)),
+            ({"sigmas": "1, 0.5, 0", "size": "2048x2048"}, (2048, 2048),
+             ((1.0, 0.5, 0.0), "in_order", 2)),
+            ({"steps": 6}, (1024, 1024), (None, None, 6)),
+            ({"adapters": [{"id": "pdmd.safetensors", "strength": 0}]},
+             (2048, 2048), (None, None, 4))]
+    for fields, size, want in runs:
+        req = svc.parse_request("generations", {"prompt": "x", **fields})
+        svc.check_family(req, served)
+        svc.request_schedule(req, served, [])
+        assert svc.target_size(req, served) == size, fields
+        out = svc.run_job(served, req, size=size, budget=None,
+                          stop=threading.Event(), embed_metadata=True)
+        kw = seen[-1]
+        assert (kw["sigmas"], kw["heads"], kw["steps"]) == want, fields
+        with Image.open(io.BytesIO(out.images[0])) as im:
+            meta = json.loads(im.text["gmlx"])
+        assert (meta.get("sigmas"), meta.get("heads")) == (
+            None if want[0] is None else list(want[0]), want[1])
+
+
+def test_an_entrys_schedule_wins_and_a_bad_one_is_refused(
+        stubs, monkeypatch, tmp_path):
+    """The entry's fields replace the table's row; a request whose steps
+    disagree with its sigmas, and heads in order past the bank, get 400."""
+    served = _h3_served(tmp_path, monkeypatch,
+                        entry={"sigmas": [1.0, 0.75, 0.5, 0.0]})
+    req = svc.parse_request("generations", {"prompt": "x"})
+    svc.request_schedule(req, served, [])
+    assert (req.schedule.sigmas, req.schedule.heads, req.schedule.size) == (
+        (1.0, 0.75, 0.5, 0.0), "in_order", None)
+    assert "(its entry in the config)" in req.schedule.line
+    with pytest.raises(svc.ImageRequestError, match="steps 2 disagrees "
+                       "with the 3 steps of sigmas"):
+        svc.parse_request("generations", {"prompt": "x", "steps": 2,
+                                          "sigmas": [1, 0.6, 0.3, 0]})
+    with pytest.raises(svc.ImageRequestError, match="sigmas must not "
+                       "increase"):
+        svc.parse_request("generations", {"prompt": "x", "sigmas": [0, 1]})
+    req = svc.parse_request("generations", {
+        "prompt": "x", "sigmas": [1, .9, .8, .7, .6, .5, .4, 0]})
+    svc.check_family(req, served)
+    with pytest.raises(svc.ImageRequestError, match="bank holds 6 heads, "
+                       "not the 7 steps"):
+        svc.request_schedule(req, served, [])

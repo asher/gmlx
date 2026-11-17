@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
-import hashlib
 import json
 import math
 import os
@@ -80,6 +79,22 @@ def _check_limits(fam, width: int, height: int, flag: str | None,
     if why:
         raise _Usage(f"{flag} {why}" if flag else
                      f"the image size {why}; give one with {option}")
+
+
+def _sigmas(text: str) -> tuple:
+    """A comma-separated schedule of sigmas, each a number or a fraction
+    such as 12/13, two or more that do not increase."""
+    from fractions import Fraction
+
+    from gmlx.image.lora.schedule import ScheduleError, check_sigmas
+
+    try:
+        vals = [float(Fraction(t.strip())) for t in text.split(",")]
+        return check_sigmas(vals, "--sigmas")
+    except (ValueError, ZeroDivisionError, ScheduleError) as e:
+        why = str(e) if isinstance(e, ScheduleError) else (
+            f"a list such as 1,12/13,0 is required, got {text!r}")
+        raise argparse.ArgumentTypeError(why) from None
 
 
 def _positive(text: str) -> int:
@@ -248,6 +263,16 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "reference's own aspect.")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
+    p.add_argument("--sigmas", type=_sigmas, default=None, metavar="LIST",
+                   help="Sample on this schedule of sigmas, such as "
+                        "1,12/13,0, one step between each two, in place of "
+                        "the variant's (default: an adapter's schedule, "
+                        "else the variant's). On MiniMax-H3-Image step i "
+                        "reads PDD head i, as diffusers does.")
+    p.add_argument("--save-adapter-schedule", action="store_true",
+                   help="Write the --adapter file's --sigmas and --size to "
+                        "its sidecar, <file>.gmlx.json, which gmlx reads "
+                        "whenever that adapter runs, then generate.")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
                    help="Seed of the first image (default random, and "
                         "printed).")
@@ -526,6 +551,8 @@ def _from_config(a) -> None:
     a.entry_int8 = rm.defaults.get("int8")
     if getattr(a, "ref", None) and a.encoder_mmproj is None:
         a.encoder_mmproj = rm.encoder_mmproj
+    a.flag_adapters = list(a.adapter or ())
+    a.entry_schedules = dict(rm.adapter_schedules)
     if rm.adapters:
         a.adapter = list(rm.adapters) + list(a.adapter or ())
     if hasattr(a, "upsampler") and a.upsampler is None:
@@ -874,11 +901,69 @@ def _vet_adapters(a, ident=None) -> None:
 
 
 def _file_sha256(path: str) -> str:
-    h = hashlib.sha256()
-    with open(os.path.expanduser(path), "rb") as f:
-        while chunk := f.read(16 << 20):
-            h.update(chunk)
-    return h.hexdigest()
+    from gmlx.image.lora.schedule import file_sha256
+
+    return file_sha256(path)
+
+
+def _schedule(a, ident, log, size=None):
+    """The request's schedule (``schedule.resolve``) from the flags, the
+    request's own ``size``, and the declared schedules of the adapters it
+    runs at a strength other than 0, with the line that names them
+    logged. A schedule that heads
+    in order cannot run on the DiT's bank is refused before any file
+    loads."""
+    from gmlx.image.lora import schedule
+
+    entry = getattr(a, "entry_schedules", None) or {}
+    try:
+        decls = [schedule.declared(path, entry.get(path))
+                 for path, strength in a.adapter or () if strength != 0]
+        sched = schedule.resolve(
+            decls, sigmas=a.sigmas, steps=a.steps, size=size,
+            names={"sigmas": "--sigmas", "steps": "--steps",
+                   "size": "--size"},
+            size_from=None if a.size else "the request's size")
+    except schedule.ScheduleError as e:
+        raise _Usage(str(e)) from None
+    if sched.line:
+        log(f"[image] {sched.line}")
+    bank = _head_bank(ident)
+    if sched.heads == "in_order" and bank and sched.sigmas is not None \
+            and len(sched.sigmas) - 1 > bank:
+        raise _Usage(f"heads in order read head i at step i, and the "
+                     f"{ident.family.title} bank holds {bank} heads, not "
+                     f"the {len(sched.sigmas) - 1} steps of the schedule")
+    return sched
+
+
+def _head_bank(ident) -> int:
+    """The step heads of the identified DiT's bank, 0 for a DiT with
+    none."""
+    return int(ident.config.get("pdd_steps") or 0)
+
+
+def _save_schedule(a, sched, log) -> None:
+    """``--save-adapter-schedule``: the --adapter file's sidecar, from
+    --sigmas, heads in order with them, and --size."""
+    from gmlx.image.lora import schedule
+
+    flags = getattr(a, "flag_adapters", None)
+    flags = list(a.adapter or ()) if flags is None else flags
+    if len(flags) != 1:
+        raise _Usage("--save-adapter-schedule writes the schedule of one "
+                     f"--adapter file, and the command gives {len(flags)}")
+    if a.sigmas is None and a.size is None:
+        raise _Usage("--save-adapter-schedule writes --sigmas and --size; "
+                     "give one or both")
+    path = os.path.expanduser(flags[0][0])
+    try:
+        side = schedule.write_sidecar(path, schedule.AdapterSchedule(
+            sigmas=a.sigmas, heads="in_order" if a.sigmas else None,
+            size=a.size))
+    except schedule.ScheduleError as e:
+        raise _Usage(str(e)) from None
+    log(f"[image] wrote the adapter schedule {side}")
 
 
 def _adapter_bytes(a) -> list:
@@ -932,19 +1017,28 @@ def _load_adapters(a, pipe, log) -> tuple:
     return _adapter_table(pipe, _read_adapters(a, pipe, log), log)
 
 
-def _settings(a, ident, defaults):
-    """Steps, cfg and strength from the flags and the variant's defaults."""
+def _settings(a, ident, defaults, sigmas=None):
+    """Steps, cfg and strength from the flags and the variant's defaults.
+    A schedule of ``sigmas`` sets the steps, which --steps must agree
+    with, and takes any count."""
     why = ident.family.variant_needed(ident.variant)
     if why:
         raise ValueError(why)
-    if defaults is None and (a.steps is None or a.guidance is None):
+    if defaults is None and ((a.steps is None and sigmas is None)
+                             or a.guidance is None):
         raise ValueError(
             f"{a.model} matches no known {ident.family.title} variant; pass "
-            f"--steps and --guidance")
-    steps = a.steps if a.steps is not None else defaults.steps
+            f"--steps or --sigmas, and --guidance")
     from gmlx.image.api import check_sampling, check_steps
 
-    check_steps(ident.family, ident.variant, steps)
+    if sigmas is not None:
+        steps = len(sigmas) - 1
+        if a.steps is not None and a.steps != steps:
+            raise _Usage(f"--steps {a.steps} disagrees with the {steps} "
+                         f"steps of --sigmas")
+    else:
+        steps = a.steps if a.steps is not None else defaults.steps
+        check_steps(ident.family, ident.variant, steps)
     cfg = a.guidance if a.guidance is not None else defaults.cfg
     # Before any file loads.
     check_sampling(ident.family, ident.variant,
@@ -989,7 +1083,6 @@ def _generate(a) -> int:
     _vet_adapters(a, ident)
     fam = ident.family
     defaults = api.sampler_defaults(fam.name, ident.variant)
-    steps, cfg, strength = _settings(a, ident, defaults)
     int8 = _int8(a, ident)
     stride = _stride(fam)
     refs = _references(a, fam)
@@ -1004,18 +1097,26 @@ def _generate(a) -> int:
     init = crop = None
     if a.init_image is not None:
         init = read_image(a.init_image, a.size, stride)
+    # An adapter's default size applies where the request sets none.
+    sched = _schedule(a, ident, log, size=(
+        a.size or getattr(a, "entry_size", None) or ref_size
+        or (None if init is None else (init.shape[1], init.shape[0]))))
+    steps, cfg, strength = _settings(a, ident, defaults, sched.sigmas)
+    if init is not None:
         width, height = init.shape[1], init.shape[0]
     elif a.size is None and ref_size is not None:
         width, height = ref_size
         # The output of a padded reference is cropped back to its box.
         crop = getattr(refs, "crop", None)
     else:
-        width, height = a.size or getattr(a, "entry_size", None) or (
-            defaults.size if defaults else (1024, 1024))
+        width, height = a.size or getattr(a, "entry_size", None) or \
+            sched.size or (defaults.size if defaults else (1024, 1024))
     if width % stride or height % stride:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")
     _check_limits(fam, width, height, "--size" if a.size else None)
+    if a.save_adapter_schedule:
+        _save_schedule(a, sched, log)
     mask = read_mask(a.mask, (width, height)) if a.mask else None
     text_only = edit is not None and edit.text_only
     # The seed is drawn before the upsampler runs, which it seeds when it
@@ -1114,6 +1215,12 @@ def _generate(a) -> int:
                 "size": f"{width}x{height}", "sampler": a.sampler,
                 "scheduler": None, "guidance": cfg, "count": a.count,
                 "adapters": adapters}
+    # Heads in order on a DiT with a bank of step heads, else its own rule.
+    heads = sched.heads if _head_bank(ident) else None
+    if sched.sigmas is not None:
+        settings["sigmas"] = list(sched.sigmas)
+    if heads is not None:
+        settings["heads"] = heads
     if revised is not None:
         settings["revised_prompt"] = revised
     if int8 != "off":
@@ -1143,6 +1250,7 @@ def _generate(a) -> int:
         t0 = time.perf_counter()
         x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
                        width=width, steps=steps, seed=s, sampler=a.sampler,
+                       sigmas=sched.sigmas, heads=heads,
                        init_latents=init_latents,
                        denoise=1.0 if strength is None else strength,
                        mask=mask, patch_table=table, plan=plan)

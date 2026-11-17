@@ -567,6 +567,7 @@ def make_endpoint(route: str):
         check_family,
         fit_check,
         parse_request,
+        request_schedule,
         run_job,
         target_size,
     )
@@ -626,6 +627,9 @@ def make_endpoint(route: str):
             holds.append(hold)
             served = hold._entry.pipeline
             check_family(req, served)
+            # The schedule the request's adapters declare, and the size
+            # one gives a request with none of its own.
+            request_schedule(req, served, STATE.model_dirs)
             if req.prompt_upsampling and req.route != "generations" and \
                     not takes_pictures(served.pipe.family):
                 # A prompt with reference images runs as typed.

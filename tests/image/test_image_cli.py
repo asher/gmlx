@@ -649,7 +649,7 @@ def test_an_unknown_variant_needs_steps_and_guidance(env, tmp_path, capsys):
     out = str(tmp_path / "a.png")
     assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
                                      "--output", out]) == 1
-    assert "pass --steps and --guidance" in capsys.readouterr().err
+    assert "pass --steps or --sigmas, and --guidance" in capsys.readouterr().err
     assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
                                      "--steps", "2", "--guidance", "1",
                                      "--output", out]) == 0

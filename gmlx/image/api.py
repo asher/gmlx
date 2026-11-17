@@ -944,7 +944,7 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
                  patch_table=None, target=None,
                  time: str = "reference",
                  ref_cache: dict | None = None,
-                 skip=()) -> mx.array:
+                 skip=(), head=None) -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row.
     ``target`` is the sigma the step goes to, likewise, which a flow map
@@ -966,7 +966,9 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     ComfyUI's Flux KV Cache node samples. A family whose step runs in
     parts takes ``ref_cache`` under another time rule than the reference's
     only. ``skip`` holds blocks, zero-based, that every row of the call
-    leaves out, for a DiT that skips blocks."""
+    leaves out, for a DiT that skips blocks. ``head`` is the index of the
+    head each row reads, a scalar or one per row, on a DiT with a bank of
+    step heads (``head_bank``), in place of the heads its target spans."""
     if time not in getattr(pipe.dit, "time_rules", ("reference",)):
         raise ValueError(f"the {pipe.family.title} DiT has no time rule "
                          f"{time!r}")
@@ -999,13 +1001,14 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
 
     sig = per_row(sigma, "sigmas")
     tgt = None if target is None else per_row(target, "targets")
+    heads = _heads(pipe, head, b, time)
     rows = [conds] * b if isinstance(conds, Conditioning) else list(conds)
     if len(rows) != b:
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
     with state_scope(pipe, rows):
         out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table,
                     None if tgt is None else tgt[i], time, ref_cache, i,
-                    skip)
+                    skip, heads[i])
                for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
@@ -1193,17 +1196,43 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
                   lambda: parts.forward(dit, x, s, cond, state, mod))
 
 
+def _heads(pipe: ImagePipeline, head, b: int, time: str) -> list:
+    """The head index of each of ``b`` rows, None for each without
+    ``head``, refused on a DiT with no bank of step heads."""
+    if head is None:
+        return [None] * b
+    bank = getattr(pipe.dit, "head_bank", None)
+    if not bank:
+        raise ValueError(f"the {pipe.family.title} DiT has no bank of step "
+                         f"heads to name a head of")
+    if time != "reference":
+        raise ValueError("a step that names its head takes the reference's "
+                         "time rule")
+    a = np.asarray(head).reshape(-1)
+    if a.size not in (1, b):
+        raise ValueError(f"{a.size} heads for {b} rows")
+    out = []
+    for v in np.broadcast_to(a, (b,)):
+        if not np.issubdtype(a.dtype, np.integer) or not 0 <= v < bank:
+            raise ValueError(f"the {pipe.family.title} bank holds heads 0 "
+                             f"to {bank - 1}, not {v.tolist()!r}")
+        out.append(int(v))
+    return out
+
+
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
          cond: Conditioning, table, target=None,
          time: str = "reference", ref_cache: dict | None = None,
-         row: int = 0, skip: tuple = ()) -> mx.array:
+         row: int = 0, skip: tuple = (), head: int | None = None
+         ) -> mx.array:
     """One row. A DiT that takes reference images gets the tokens of the
     conditioning's reference latents from its ``references``, and a DiT
     that reads the sigma its step goes to the ``target``. A time rule other than the
     reference's reaches the DiT through its modulation, and a family whose
     step runs in parts runs it whole then. ``ref_cache`` is that of
     ``denoise_step``, and ``row`` the row's place in its call. ``skip``
-    reaches the DiT only when it holds a block."""
+    reaches the DiT only when it holds a block, and ``head`` its
+    modulation when it names one."""
     dit = pipe.dit
     modulated = hasattr(dit, "modulation") and hasattr(dit, "caption")
     kw = {"skip": skip} if skip else {}
@@ -1233,6 +1262,8 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
         if ref_cache is not None:
             if skip:
                 raise ValueError("a cached reference row skips no blocks")
+            if head is not None:
+                raise ValueError("a cached reference row names no head")
             return _cached_row(pipe, x, sigma, cond, table, time, refs,
                                ref_cache, _ref_key(cond, row))
         kw["refs"] = refs
@@ -1241,7 +1272,7 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
             kw["target"] = np.reshape(np.float32(target), (1,))
         return _under(pipe, table, lambda: dit(
             x, np.reshape(sigma, (1,)), cond.features[None], **kw))
-    mod = _modulation(pipe, sigma, table, target, time)
+    mod = _modulation(pipe, sigma, table, target, time, head)
     caption = _caption(pipe, cond, table)
     return _under(pipe, table, lambda: dit(
         x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption, **kw))
@@ -1283,11 +1314,16 @@ def _memo(cache: ByteLRU, key, make):
 
 
 def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None,
-                time: str = "reference"):
+                time: str = "reference", head: int | None = None):
     """The modulation of ``sigma``, and of ``target`` for a DiT that reads
     the sigma its step goes to, kept under their float32 bits and the
-    patch table, and under the time rule when it is not the reference's."""
+    patch table, and under the time rule when it is not the reference's.
+    A ``head`` index takes the place of the target."""
     s = np.float32(sigma)
+    if head is not None:
+        return _memo(pipe.modulations, (s.tobytes(), table, "head", head),
+                     lambda: _under(pipe, table, lambda: pipe.dit.modulation(
+                         np.reshape(s, (1,)), 1, head=head)))
     if time != "reference":
         if target is not None:
             raise ValueError("a flow map takes the reference's time rule")
@@ -1361,6 +1397,26 @@ def image_tokens(pipe: ImagePipeline, height: int, width: int) -> int:
     return (height // token_px) * (width // token_px)
 
 
+# The rules a sample reads step heads by: None, the heads each step's span
+# reads, and "in_order", head i at step i.
+HEAD_RULES = (None, "in_order")
+
+
+def check_heads(pipe, steps: int) -> None:
+    """Refuse heads in order on a DiT with no bank of step heads, or for
+    more steps than the bank holds heads. ``pipe`` needs ``dit`` and
+    ``family``."""
+    bank = getattr(pipe.dit, "head_bank", None)
+    if not bank:
+        raise RequestRefusal(f"the {pipe.family.title} DiT has no bank of "
+                             f"step heads to read in order")
+    if steps > bank:
+        raise RequestRefusal(
+            f"heads in order read head i at step i, and the "
+            f"{pipe.family.title} bank holds {bank} heads, not the {steps} "
+            f"steps of this schedule")
+
+
 def image_sigmas(pipe: ImagePipeline, steps: int, height: int,
                  width: int) -> np.ndarray:
     """The schedule of ``steps`` for an image of ``height`` by ``width``.
@@ -1375,7 +1431,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
            seed: int | None = None, noise=None, sampler: str = "euler",
            sigmas=None, init_latents=None, denoise: float = 1.0, mask=None,
            patch_table=None, on_step=None, should_stop=None,
-           plan=None, neg_skip=None) -> mx.array:
+           plan=None, neg_skip=None, heads: str | None = None) -> mx.array:
     """Sample latents for ``cond``. With ``init_latents`` the run is
     img2img from strength ``denoise``, and a ``mask`` (1 where the image
     changes) makes it inpainting. ``noise`` is (B, C, H, W) float32, else
@@ -1391,8 +1447,14 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     the blocks the negative pass of a guided step skips, the variant's
     sampling row's when None. A DiT that mixes noise into its reference
     rows draws it from the seed of the noise, given or random, unless the
-    conditioning holds that noise or a seed of its own."""
+    conditioning holds that noise or a seed of its own. ``heads``
+    "in_order" has step i of the schedule read head i of a DiT with a
+    bank of step heads, as diffusers samples one, in place of the heads
+    each step's span reads (None)."""
     patch_table = _table_id(pipe, patch_table)
+    if heads not in HEAD_RULES:
+        raise ValueError(f"heads is one of {', '.join(map(str, HEAD_RULES))}"
+                         f", not {heads!r}")
     if cfg is None:
         cfg = pipe.defaults.cfg
     if neg_skip is None:
@@ -1430,11 +1492,15 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             raise ValueError(f"steps {steps} disagrees with "
                              f"{len(s) - 1} steps of sigmas")
     init = None
+    first = 0
     if init_latents is not None:
         init = mx.array(init_latents).astype(mx.float32)
-        s = s[img2img_start(len(s) - 1, denoise):]
+        first = img2img_start(len(s) - 1, denoise)
+        s = s[first:]
         if len(s) < 2:
             raise RequestRefusal(f"denoise {denoise} leaves no step")
+    if heads == "in_order":
+        check_heads(pipe, len(s) - 1 + first)
 
     if init is not None:
         b = init.shape[0]
@@ -1481,14 +1547,16 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             if should_stop is not None and should_stop():
                 raise SampleStopped(i, x)
             to = s[i + 1] if reads_target else None
+            head = first + i if heads == "in_order" else None
             v = denoise_step(pipe, x, s[i], cond, patch_table=patch_table,
-                             target=to)
+                             target=to, head=head)
             if cfg != 1.0:
                 if one_row:
                     mx.eval(v)
                 v = guide(v, denoise_step(pipe, x, s[i], neg,
                                           patch_table=patch_table,
-                                          target=to, skip=neg_skip),
+                                          target=to, skip=neg_skip,
+                                          head=head),
                           cfg, act)
             x = smp.step(x, v, i)
             if m is not None:

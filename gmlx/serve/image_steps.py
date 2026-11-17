@@ -74,7 +74,7 @@ CLIENT_TABLE_BYTES = 16 << 20
 UNBOUNDED = 1 << 62
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
             "ref_cache", "skip_blocks", "av_step", "anchors",
-            "keyframe_upsampling", "int8", "ref_noise")
+            "keyframe_upsampling", "int8", "ref_noise", "heads_in_order")
 
 
 @dataclass(frozen=True)
@@ -195,6 +195,24 @@ def flow_targets(sample_sigmas, sigmas) -> list:
     for t in sigmas:
         i = int(np.abs(s - np.float32(t)).argmin())
         out.append(float(s[min(i + 1, s.size - 1)]))
+    return out
+
+
+def ordered_heads(sample_sigmas, sigmas, bank: int, title: str) -> list:
+    """The head each row's step reads under heads in order: the index in
+    the client's schedule of the entry nearest the row's sigma, which
+    must be a head of the DiT's bank of ``bank``."""
+    import numpy as np
+
+    s = np.asarray(sample_sigmas, np.float32).reshape(-1)
+    out = []
+    for t in sigmas:
+        i = int(np.abs(s - np.float32(t)).argmin())
+        if i >= bank:
+            raise StepError(400, f"heads in order read head i at step i, "
+                            f"and the {title} bank holds {bank} heads; this "
+                            f"is step {i} of the client's schedule")
+        out.append(i)
     return out
 
 
@@ -1308,12 +1326,13 @@ def step_pacer(run: Run | None, gen: int):
 
 def run_step(served, x, sigmas, conds, table, run, gen,
              targets=None, time_rule: str = "reference",
-             ref_cache: bool = False, skip=()) -> tuple:
+             ref_cache: bool = False, skip=(), heads=None) -> tuple:
     """One ``denoise_step`` over the rows on the image worker, to the
     ``targets`` of a flow map DiT, on the DiT's ``time_rule``, with
-    ``ref_cache`` on the run's cache of reference K and V, and with every
-    row leaving out the blocks of ``skip``. Returns (velocity f32
-    evaluated, forward seconds, prefix cache answer)."""
+    ``ref_cache`` on the run's cache of reference K and V, with every
+    row leaving out the blocks of ``skip``, and each row reading the head
+    of ``heads`` it names. Returns (velocity f32 evaluated, forward
+    seconds, prefix cache answer)."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -1329,7 +1348,7 @@ def run_step(served, x, sigmas, conds, table, run, gen,
     with paced(step_pacer(run, gen)):
         v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table,
                              target=targets, time=time_rule, ref_cache=held,
-                             skip=skip)
+                             skip=skip, head=heads)
         v = v.astype(mx.float32)
         mx.eval(v)
     # Without chat the step is one evaluation, which an interrupt or an end
