@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib
+import threading
 
 import mlx.core as mx
 import pytest
@@ -222,6 +223,90 @@ def test_holds_that_end_out_of_order_put_back_the_function_and_the_limit(
     assert calls == [0, 80] and mx.set_wired_limit is real
 
 
+class _Device:
+    """A fake MLX wired limit at ``start``. The first set to ``pause_at``
+    made on a thread named "paused" waits inside the call, before the
+    device takes it, until ``go`` is set, as a thread switch can leave a
+    hold's start or end in the middle of its edit."""
+
+    def __init__(self, monkeypatch, start: int, pause_at: int):
+        self.limit, self.pause_at = start, pause_at
+        self.reached, self.go = threading.Event(), threading.Event()
+        monkeypatch.setattr(mx, "set_wired_limit", self.set)
+        self.real = mx.set_wired_limit
+
+    def set(self, n, *_a, **_k):
+        if (threading.current_thread().name == "paused"
+                and n == self.pause_at and not self.reached.is_set()):
+            self.reached.set()
+            assert self.go.wait(10)
+        prev, self.limit = self.limit, int(n)
+        return prev
+
+    def race(self, paused, other) -> None:
+        """Run ``paused`` on the paused thread and, once it waits in the
+        device, ``other`` on another; give ``other`` time to run into it,
+        then let both finish."""
+        a = threading.Thread(target=paused, name="paused")
+        a.start()
+        assert self.reached.wait(10)
+        b = threading.Thread(target=other)
+        b.start()
+        b.join(0.2)
+        self.go.set()
+        a.join(10)
+        b.join(10)
+        assert not a.is_alive() and not b.is_alive()
+
+
+def test_a_hold_that_starts_while_the_last_one_ends_holds_the_limit_at_0(
+        monkeypatch):
+    """Holds start and end on several threads in a server: a request's
+    hold ends on the event loop as the image worker starts the next job.
+    A start that ran into the end in the middle of its edit once left the
+    device at the generator's limit for the whole of the new hold, or
+    left a dead recorder in place of mx.set_wired_limit for good."""
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    dev = _Device(monkeypatch, 120, pause_at=120)
+    first, second = wired_limit_held(), wired_limit_held()
+    first.__enter__()
+    assert dev.limit == 0
+    dev.race(lambda: first.__exit__(None, None, None), second.__enter__)
+    assert dev.limit == 0
+    second.__exit__(None, None, None)
+    assert dev.limit == 120 and mx.set_wired_limit is dev.real
+
+
+def test_two_holds_that_start_at_once_put_back_the_limit_last_asked_for(
+        monkeypatch):
+    """Two first starts at once, a video clip and an image job: both read
+    the device, and after both ended it once stayed at 0 where the
+    generator beside them had asked for its working set."""
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    dev = _Device(monkeypatch, 120, pause_at=0)
+    a, b = wired_limit_held(), wired_limit_held()
+    dev.race(a.__enter__, b.__enter__)
+    assert dev.limit == 0
+    a.__exit__(None, None, None)
+    assert dev.limit == 0
+    b.__exit__(None, None, None)
+    assert dev.limit == 120 and mx.set_wired_limit is dev.real
+
+
+def test_a_reference_taken_in_a_hold_reaches_mlx_after_it(monkeypatch):
+    """A generator that read mx.set_wired_limit inside a hold and calls it
+    after the hold ends sets MLX's limit."""
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    calls = _recorded_limit(monkeypatch, 90)
+    with wired_limit_held():
+        stale = mx.set_wired_limit
+    assert stale(70) == 90
+    assert calls == [0, 90, 70]
+
+
 def test_a_held_load_that_streams_keeps_the_limit_at_0(monkeypatch,
                                                       restore_wired_limit):
     from gmlx.stream.wired_limit import (_neutralize_wired_limit_sweep,
@@ -284,6 +369,31 @@ def test_a_caller_asking_for_the_working_set_gets_the_wired_cap(
     with _gen.wired_limit(model):
         pass
     assert calls[2:] == [0]
+
+
+@pytest.mark.host_gb(128)
+def test_a_cap_installed_inside_a_hold_goes_under_it(restore_wired_limit,
+                                                     monkeypatch):
+    """The cap decided while a hold is in force goes under the hold: the
+    hold's end puts back the clamp, and the limit asked for in the hold,
+    clamped to the cap."""
+    from gmlx.serve import capacity
+    from gmlx.stream.wired_limit import (_restore_mlx_memory_limit,
+                                         wired_limit_held)
+    from gmlx.upstream.patching import wrapped_with
+
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(capacity, "_OUTSIDE_WIRED", None)
+    calls = _recorded_limit(monkeypatch, 0)
+    try:
+        with wired_limit_held():
+            _decide_the_cap(monkeypatch)
+            assert mx.set_wired_limit(10**13) == 0
+            assert calls == [0]
+        assert calls == [0, pytest.approx(capacity.wired_cap_bytes(), abs=1)]
+        assert wrapped_with(mx.set_wired_limit, "_kq_wired_cap")
+    finally:
+        _restore_mlx_memory_limit()
 
 
 # The line a load prints when its table is untracked and the clamp and the

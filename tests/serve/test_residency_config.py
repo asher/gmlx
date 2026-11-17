@@ -851,9 +851,10 @@ def test_an_image_request_after_a_chat_turn_holds_mlxs_wired_limit_at_0_from_its
 
     from gmlx.serve import capacity as cap
     from gmlx.serve import image_service as svc
+    from gmlx.stream import wired_limit
 
     real = mx.set_wired_limit
-    assert not hasattr(real, "_kq_wired_real")
+    assert real is not wired_limit._recorder
     ws = mx.device_info()["max_recommended_working_set_size"]
     monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
     proxy, pool, _env, _td = make_pool()
