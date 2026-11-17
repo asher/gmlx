@@ -204,7 +204,8 @@ _H3_IMAGE = dict(
                   "service for others needs safeguards; outputs posted "
                   "publicly must be marked machine-generated"),
     encoder_license="apache-2.0", vae_license=_H3_IMAGE_LICENSE,
-    encoder_bytes=19_762_151_200, vae_bytes=1_168_494_144, least_class=32,
+    encoder_bytes=19_762_151_200 + 1_200_334_496, vae_bytes=1_168_494_144,
+    least_class=32,
     # MiniMax's prompt expander prompts, which gmlx does not ship: the
     # manifest the entry names and the files it lists, at the sha256 the
     # manifest gives each.

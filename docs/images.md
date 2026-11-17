@@ -34,8 +34,8 @@ for none.
 | `flux-3-klein-base` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
 | `minimax-h3-image` | Needs 32 GB | Needs 32 GB | 2048x2048 | No grant in the US, the EU, the UK or South Korea, and authorization from $1M of yearly revenue |
 
-MiniMax-H3-Image needs a Mac with 32 GB or more. Its download is 32.2 GB
-there, and 40.0 GB on a Mac with 64 GB or more.
+MiniMax-H3-Image needs a Mac with 32 GB or more. Its download is 33.3 GB
+there, and 41.1 GB on a Mac with 64 GB or more.
 
 `gmlx pull --list` prints the same models under Image models with the
 download for this Mac, and a bare `gmlx pull` picks one from a list.
