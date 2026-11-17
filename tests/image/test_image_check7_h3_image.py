@@ -293,7 +293,7 @@ def test_check7_delta_half(gguf_dir):
         res[k] = reader.resolve(reader.read_lora(path), keymap)
         assert len(res[k].dit) == PAIRS[k] and res[k].text == ()
         if k == ORIGINAL:
-            assert res[k].warnings == []
+            assert res[k].warnings == ()
         else:
             _check_warnings(res[k].warnings)
         own[k] = _own_rows(path, dims)
