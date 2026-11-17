@@ -8,7 +8,9 @@ lora_rules_digest.json records the sha256 of those results, written from
 the reader of the commit before both. A file whose header sets
 use_rslora was refused then, and it may change only to the outcome of
 the same pairs under a plain header with the rank-stabilized scale. The
-spellings run on the CPU; the files half skips without the directory."""
+spelling warnings since name stock ComfyUI and the gmlx nodes, and are
+read back in the words of that commit (``_REWORDED``). The spellings run
+on the CPU; the files half skips without the directory."""
 from __future__ import annotations
 
 import dataclasses
@@ -49,6 +51,23 @@ def keymaps() -> dict:
     return out
 
 
+# The spelling warnings' words since the digest, each read back in the
+# words the digest's reader wrote: the warnings name stock ComfyUI, and
+# say ComfyUI drops a key with or without the gmlx nodes.
+_REWORDED = (("a spelling that stock ComfyUI does not read",
+              "a spelling that ComfyUI does not read"),
+             (". Stock ComfyUI reads ", ". ComfyUI reads "),
+             ("and stock ComfyUI drops them", "and ComfyUI drops them"),
+             (", with or without the gmlx nodes, so the image",
+              ", so the image"))
+
+
+def _as_digested(warning: str) -> str:
+    for new, old in _REWORDED:
+        warning = warning.replace(new, old)
+    return warning
+
+
 def _outcome(fn, path: str, name: str) -> list:
     """The targets and warnings of ``fn()``, or the refusal, with the
     file's path as ``name``."""
@@ -61,8 +80,8 @@ def _outcome(fn, path: str, name: str) -> list:
                 getattr(e, "kind", None)]
     rows = sorted([t.module, list(t.band) if t.band else None, t.pair.stem,
                    t.pair.rank, t.pair.alpha] for t in res.dit + res.text)
-    return [rows, [w.replace(path, name) for w in res.warnings],
-            sorted(res.unmatched)]
+    return [rows, [_as_digested(w.replace(path, name))
+                   for w in res.warnings], sorted(res.unmatched)]
 
 
 def _digest(cases: list) -> dict:
