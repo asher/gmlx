@@ -52,12 +52,14 @@ def keymaps() -> dict:
 
 
 # The spelling warnings' words since the digest, each read back in the
-# words the digest's reader wrote: the warnings name stock ComfyUI, and
-# say ComfyUI drops a key with or without the gmlx nodes.
+# words the digest's reader wrote: the warnings name stock ComfyUI, say
+# ComfyUI drops a key with or without the gmlx nodes, and name the
+# prefix that ends on a dot first, where its period doubled that dot.
 _REWORDED = (("a spelling that stock ComfyUI does not read",
               "a spelling that ComfyUI does not read"),
              (". Stock ComfyUI reads ", ". ComfyUI reads "),
-             ("and stock ComfyUI drops them", "and ComfyUI drops them"),
+             ("under diffusion_model. or lora_unet_. gmlx",
+              "under lora_unet_ or diffusion_model.. gmlx"),
              (", with or without the gmlx nodes, so the image",
               ", so the image"))
 

@@ -494,6 +494,12 @@ def _listed(keys) -> str:
     return text + (f", and {more} more" if more > 0 else "")
 
 
+def _prefixes(prefixes) -> str:
+    """The prefixes joined by "or", those that end on a dot first, so the
+    period after them does not double it."""
+    return " or ".join(sorted(prefixes, key=lambda p: not p.endswith(".")))
+
+
 def _matrix(arr: mx.array, key: str, path: str) -> mx.array:
     """A factor as a matrix. A 1x1 kernel's trailing axes are dropped."""
     shape = tuple(arr.shape)
@@ -917,13 +923,13 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
             f"{raw.path}: {len(dropped)} keys have a spelling that stock "
             f"ComfyUI does not read for {keymap.title} "
             f"({_listed(dropped)}). Stock ComfyUI reads the GGUF names "
-            f"under {' or '.join(keymap.comfy_prefixes)}. gmlx applies "
+            f"under {_prefixes(keymap.comfy_prefixes)}. gmlx applies "
             f"them and ComfyUI drops them, {_WITH_NODES}")
     elif dropped:
         warnings.append(
             f"{raw.path}: {len(dropped)} underscore keys spell diffusers "
-            f"names ({_listed(dropped)}). gmlx applies them and stock "
-            f"ComfyUI drops them, {_WITH_NODES}")
+            f"names ({_listed(dropped)}). gmlx applies them and ComfyUI "
+            f"drops them, {_WITH_NODES}")
     _one_stem_per_target(raw.path, [(t.pair.stem, t.module, t.band)
                                     for t in dit + text])
     return ResolvedLora(path=raw.path, dit=tuple(dit), text=tuple(text),

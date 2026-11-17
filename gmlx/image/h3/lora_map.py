@@ -79,7 +79,7 @@ COMFY_READS = ("the GGUF names bare, under diffusion_model. or as "
 # h3_diffusers_keys), so ComfyUI with the nodes drops none of those.
 _PACK_DIFFUSERS = ("", "transformer.")
 PACK_READS = (COMFY_READS + ", and ComfyUI with the gmlx nodes also "
-              "reads diffusers' names bare or under transformer.")
+              "reads diffusers' names under transformer. or bare")
 
 
 def _blocks(config: dict) -> dict:

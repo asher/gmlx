@@ -203,9 +203,9 @@ def test_a_lora_runs_live_as_the_merged_weights(tiny, tmp_path, form):
             (w,) = ad.warnings
             assert f"{len(ad.dit)} keys have a spelling that stock " \
                    "ComfyUI does not read" in w and "ComfyUI with the gmlx " \
-                   "nodes also reads diffusers' names bare or under " \
-                   "transformer." in w and "with or without the gmlx " \
-                   "nodes" in w, w
+                   "nodes also reads diffusers' names under transformer. " \
+                   "or bare. gmlx applies them" in w and "with or without " \
+                   "the gmlx nodes" in w and ".." not in w, w
         else:
             assert ad.warnings == (), ad.warnings
         tid = api.define_patch_table(pipe,

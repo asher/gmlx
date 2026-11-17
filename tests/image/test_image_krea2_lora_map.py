@@ -154,9 +154,11 @@ def test_every_spelling_of_every_target_resolves(tmp_path, dialect):
         write_keys(tmp_path / "all.safetensors", keys)), lora_map(cfg))
     assert res.text == () and res.unmatched == ()
     if dialect == "kohya":
-        # ComfyUI reads the diffusers names under lycoris_ alone.
+        # ComfyUI reads the diffusers names under lycoris_ alone, with or
+        # without the gmlx nodes, which read no other Krea 2 names.
         assert len(res.warnings) == 1
-        assert "ComfyUI drops them" in res.warnings[0]
+        assert ". gmlx applies them and ComfyUI drops them, with or " \
+            "without the gmlx nodes" in res.warnings[0], res.warnings[0]
     else:
         assert res.warnings == ()
     assert len(res.dit) == len(want)
