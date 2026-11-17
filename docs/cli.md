@@ -1494,7 +1494,7 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--background opaque/transparent` | `opaque` | `transparent` writes the alpha channel that Qwen-Image 2.1 decodes, as a png or a webp. It exits 2 with jpeg, and on a model that decodes no alpha channel. |
 | `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
 | `--adapter PATH[:STRENGTH]` | None | Apply this LoRA safetensors file at this strength, 1 when left out. Repeat the flag to stack adapters. |
-| `--int8 {off,attention,linears,all}` | The entry's `defaults.int8`, else `off` | Run the DiT's attention, its linears or both in int8, on an M5 or newer, for MiniMax-H3-Image. Lossy; `linears` and `all` hold more memory. |
+| `--int8 {off,attention,linears,all}` | The entry's `defaults.int8`, else `off` | Run the DiT's attention, its linears or both in int8, on an M5 or newer, for MiniMax-H3-Image. Lossy; `linears` and `all` hold more memory. An `--adapter` applies at each setting, on the int8 linears too. |
 | `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. `never` exits 2 when the plan needs it. |
 | `--json` | Off | Print a JSON record on stdout, and progress on stderr. |
 
