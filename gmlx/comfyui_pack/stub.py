@@ -71,6 +71,11 @@ def _sigmas():
         "optional": {"width": size, "height": size}}
 
 
+def _heads():
+    return {"required": {"model": ("MODEL",),
+                         "heads_in_order": ("BOOLEAN", {"default": True})}}
+
+
 def _h3_prompt():
     size = {"min": 32, "max": 16384, "step": 32}
     return {"required": {
@@ -92,6 +97,7 @@ SPECS = {
     "GmlxVideoVAELoader": (_loader, ("VAE",), None, False),
     "GmlxAudioVAELoader": (_loader, ("VAE",), None, False),
     "GmlxSigmas": (_sigmas, ("SIGMAS", "FLOAT"), ("sigmas", "cfg"), False),
+    "GmlxPDDHeads": (_heads, ("MODEL",), None, False),
     "GmlxH3ImageToVideo": (_h3_prompt, ("CONDITIONING", "LATENT"), ("positive", "LATENT"), False),
     "GmlxServerStatus": (_loader, ("STRING",), None, True),
 }
@@ -103,6 +109,7 @@ DISPLAY_NAMES = {
     "GmlxVideoVAELoader": "gmlx Video VAE Loader",
     "GmlxAudioVAELoader": "gmlx Audio VAE Loader",
     "GmlxSigmas": "gmlx Sigmas",
+    "GmlxPDDHeads": "gmlx PDD Heads",
     "GmlxH3ImageToVideo": "gmlx MiniMax-H3 Image to Video",
     "GmlxServerStatus": "gmlx Server Status",
 }

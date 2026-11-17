@@ -32,8 +32,8 @@ import comfy.supported_models
 import comfy.utils
 
 from . import compat, discovery, patches
-from .client import (INT8_FEATURE, GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal,
-                     StepClient,
+from .client import (HEADS_FEATURE, HEADS_OPTION, INT8_FEATURE, GmlxError,
+                     GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
                      set_interrupt_check, tensor_hash)
 from .clip import TYPED, TypedPrompt
 from .compat import comfyui_version
@@ -69,7 +69,7 @@ H3_COND_AUG = {"video": ("visual_cond_noise_aug", "VISUAL_COND_TIMESTEP", 0.999)
 PROBE_SEED = 7
 # transformer_options keys and how the forward treats them.
 FORWARDED = {"sample_sigmas", "sigmas", "cond_or_uncond", "uuids", "qwen_image21_cache",
-             *H3_SHIFTS.values()}
+             HEADS_OPTION, *H3_SHIFTS.values()}
 REFUSED = {"patches", "patches_replace", "rope_options"}
 # Keys ComfyUI sets on every call that carry no behavior inside the forward.
 BENIGN = {"prefetch_dynamic_vbars", "wrappers", "callbacks", "hooks", "transformer_index",
@@ -694,6 +694,18 @@ class RemoteForward:
             log.warning("gmlx: this gmlx server has no int8 setting, so %r runs as its "
                         "entry says; update it", self.b.model_id)
 
+    def _heads(self, to: dict, fields: dict) -> None:
+        """Heads in order on the step, which gmlx PDD Heads sets on a
+        MiniMax-H3-Image model; a server without them is refused."""
+        rule = to.get(HEADS_OPTION)
+        if rule in (None, "span"):
+            return
+        caps = getattr(self.b.client, "capabilities", None) or {}
+        if HEADS_FEATURE not in (caps.get("features") or ()):
+            raise GmlxRefusal("gmlx: this gmlx server reads no PDD heads in order, which "
+                              "gmlx PDD Heads asks for; update it")
+        fields["heads"] = rule
+
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries
         them, the audio scale and the shifts, which the server's step reads
@@ -805,6 +817,7 @@ class RemoteForward:
             fields["ref_cache"] = True
         if skip:
             fields["skip"] = list(skip)
+        self._heads(to, fields)
         xs = x.float()
         ts = timesteps.float().reshape(-1)
         t1 = time.perf_counter()

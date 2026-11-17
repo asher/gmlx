@@ -150,7 +150,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 17
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 18
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -208,6 +208,7 @@ _WIDGETS = {
     "GmlxCLIPLoader": ["model_name", "server_url", "start_server"],
     "GmlxVAELoader": ["model_name", "server_url", "start_server"],
     "LoraLoader": ["lora_name", "strength_model", "strength_clip"],
+    "LoraLoaderModelOnly": ["lora_name", "strength_model"],
     "CLIPTextEncode": ["text"],
     "EmptySD3LatentImage": ["width", "height", "batch_size"],
     "KSampler": ["seed", "control_after_generate", "steps", "cfg", "sampler_name",
@@ -239,6 +240,8 @@ _WIDGETS = {
     "GmlxSigmas": ["steps", "denoise", "width", "height"],
     "GmlxH3ImageToVideo": ["prompt", "width", "height", "length"],
     "MiniMaxH3ImageConditioning": ["prompt", "width", "height"],
+    "GmlxPDDHeads": ["heads_in_order"],
+    "ManualSigmas": ["sigmas"],
     "BasicGuider": [],
     "VAEDecodeAudio": [],
     "CreateVideo": ["fps", "bit_depth", "color_space"],

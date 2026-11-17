@@ -1523,6 +1523,45 @@ class H3Image(Base):
                 P.patches.build_table(IID, patches, family="h3_image")
             self.assertIn("swap_scale_shift", str(e.exception))
 
+    def test_pdd_heads_in_order_reach_each_step_on_pdmds_manual_sigmas(self):
+        """pDMD's example graph: ManualSigmas 1, 12/13, 0 into SamplerCustom
+        on the model through gmlx PDD Heads. Each step asks for heads in
+        order beside the schedule; off, or without the node, a step names
+        no rule and reads the heads of its span."""
+        (sig,) = _out(CS.ManualSigmas.execute("1, 0.9230769230769231, 0"))
+        sampler = comfy.samplers.sampler_object("euler")
+        pos = image_cond(self.client)
+        for on, want in ((True, "in_order"), (False, None), (None, None)):
+            with self.subTest(on=on):
+                self.stub.forget()
+                self.stub.reset()
+                m = self.model(IID)
+                if on is not None:
+                    (m,) = P.nodes.GmlxPDDHeads().patch(m, on)
+                with torch.inference_mode():
+                    CS.SamplerCustom.execute(m, True, 42, 1.0, pos, pos, sampler, sig,
+                                             image_latent())
+                steps = self.stub.events("step")
+                self.assertEqual([e["heads"] for e in steps], [want, want])
+                for e in steps:
+                    self.assertEqual(e["sample_sigmas"], [1.0, torch.tensor(12 / 13).item(), 0.0])
+
+    def test_pdd_heads_on_another_model_or_an_older_server_are_refused(self):
+        with self.assertRaises(C.GmlxRefusal) as e:
+            P.nodes.GmlxPDDHeads().patch(self.model(HID), True)
+        self.assertIn("takes a gmlx MiniMax-H3-Image model", str(e.exception))
+        (m,) = P.nodes.GmlxPDDHeads().patch(self.model(IID), True)
+        caps = self.client.capabilities
+        self.client.capabilities = dict(caps, features=[
+            f for f in caps["features"] if f != "heads_in_order"])
+        try:
+            with self.assertRaises(C.GmlxRefusal) as e:
+                self.ksample(m, steps=1)
+            self.assertIn("reads no PDD heads in order", str(e.exception))
+        finally:
+            self.client.capabilities = caps
+        self.assertEqual(self.stub.events("step"), [])
+
     def test_pictures_under_another_label_are_refused_by_name(self):
         clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]
         img = torch.zeros(1, 64, 64, 3)

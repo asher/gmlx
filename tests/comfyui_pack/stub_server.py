@@ -345,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
                              "skip_blocks", "av_step", "anchors", "keyframe_upsampling",
-                             "int8", "ref_noise"],
+                             "int8", "ref_noise", "heads_in_order"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
                            "max_body_bytes": st.max_body}})
         if sub == "/models":
@@ -692,7 +692,7 @@ class Handler(BaseHTTPRequestHandler):
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
                  fields=sorted(req), tensors=sorted(tensors), targets=targets,
                  sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)],
-                 int8=req.get("int8"))
+                 int8=req.get("int8"), heads=req.get("heads"))
         self._send(200, write_body({"out": out.astype(np.float32)}), ctype=CONTENT_TYPE, headers={
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
             "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",

@@ -53,6 +53,10 @@ log = logging.getLogger("gmlx")
 KEYFRAME_UPSAMPLING = "keyframe_upsampling"
 # The server feature that runs an AV step at the int8 setting it names.
 INT8_FEATURE = "int8"
+# The server feature that reads a step's PDD head by its place in the
+# sampler's schedule, and the transformer_options key that asks for it.
+HEADS_FEATURE = "heads_in_order"
+HEADS_OPTION = "gmlx_heads"
 
 
 class GmlxError(RuntimeError):

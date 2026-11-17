@@ -44,7 +44,7 @@ At startup it checks the ComfyUI internals it uses. When one is missing, the nod
 2. Add `gmlx Model Loader`, `gmlx CLIP Loader` and `gmlx VAE Loader`, and pick the model in `model_name` on each. For MiniMax-H3, add `gmlx Video VAE Loader` and `gmlx Audio VAE Loader` in place of `gmlx VAE Loader`. The list holds the image and video models of the gmlx server, the default first, or only the default model's name when it has none. A model the server does not have stops the run with the `gmlx pull` or `gmlx video pull` command that adds it.
 3. Connect them to stock nodes as you would any checkpoint: `CLIPTextEncode`, `KSampler`, `VAEDecode`, `LoraLoader`, `ModelSamplingAuraFlow` and so on.
 
-The `example_workflows` folder has seventeen graphs, which ComfyUI's template browser lists under the pack:
+The `example_workflows` folder has eighteen graphs, which ComfyUI's template browser lists under the pack:
 
 - `z-image-turbo-t2i.json`: Z-Image-Turbo text to image.
 - `z-image-turbo-lora-t2i.json`: Z-Image-Turbo text to image through a stock `LoraLoader`. Put a Z-Image LoRA named `z-image-turbo-style.safetensors` in `models/loras`, or pick another one in the node.
@@ -62,6 +62,7 @@ The `example_workflows` folder has seventeen graphs, which ComfyUI's template br
 - `fasth3-t2v.json`: a FastH3 clip with sound from a text prompt, 5 seconds at 1344x768, the same graph on the 8 noise levels FastH3 was trained at, which `gmlx Sigmas` gives in place of `BasicScheduler`, with `MiniMaxH3SigmaShift` at the `fasth3` recipe's shifts, 10 and 3. It needs a Mac with an M5 chip or newer and 36 GB or more.
 - `minimax-h3-image-t2i.json`: MiniMax-H3-Image text to image at 2048x2048, the size the model is tuned for, in 6 steps at cfg 1 with `euler` on the `simple` schedule. The stock `MiniMaxH3ImageConditioning` encodes the prompt with the gmlx CLIP and gives the latent of one frame. It needs ComfyUI 0.45 or newer and a Mac with 32 GB or more.
 - `minimax-h3-image-t2i-4096.json`: the same graph at 4096x4096. On a Mac without the memory for it, the server refuses the size and names the largest it fits. It needs ComfyUI 0.45 or newer.
+- `minimax-h3-image-pdmd-2steps-t2i.json`: MiniMax-H3-Image text to image at 1024x1024 in 2 steps through the pDMD-2steps LoRA on `LoraLoaderModelOnly`, on the schedule it was distilled to: `ManualSigmas` at 1, 12/13 and 0, and `gmlx PDD Heads` with `heads_in_order` on. Put the `pytorch_lora_weights.safetensors` of `linoyts/MiniMax-H3-Image-pDMD-2steps` in `models/loras` as `minimax-h3-image-pdmd-2steps.safetensors`, or pick another name in the node. It needs ComfyUI 0.45 or newer and a Mac with 32 GB or more.
 - `minimax-h3-image-edit-two-references.json`: a MiniMax-H3-Image edit of Picture 1 with Picture 2 as a second reference, in 6 steps at cfg 1. The stock `MiniMaxH3ImageConditioning` shows the gmlx CLIP each picture's copy for the vision tower after its label, encodes each picture's copy for the VAE with the gmlx VAE, and gives the latent of Picture 1's VAE copy. Each picture must be between 1:3 and 3:1 in shape. Put `reference-1.png` and `reference-2.png` in ComfyUI's `input` folder, or pick other images. It needs ComfyUI 0.45 or newer and a Mac with 32 GB or more.
 
 ### Server address
@@ -99,6 +100,7 @@ FastH3's list is the 8 noise levels it was trained at, at video shift 10. A run 
 With `BasicScheduler` in place of `gmlx Sigmas`, FastH3 samples at the shifts in force, 12 and 3 without `ModelSamplingMiniMaxH3`, as ComfyUI does.
 The schedule of FLUX.2 klein and of Qwen-Image 2.1 follows the image size. On those, give `gmlx Sigmas` the image's `width` and `height`, and it outputs the schedule gmlx samples that image on. Without them it stops, and for FLUX.2 klein it names the stock `Flux2Scheduler`, which gives the same schedule.
 For any other variant without a fixed list, it gives ComfyUI's simple schedule over the variant's step count.
+MiniMax-H3-Image has six PDD heads, one for each of its six steps, and each step of another schedule reads the heads of the steps it spans, as ComfyUI does. `gmlx PDD Heads` with `heads_in_order` on has step i read head i, as diffusers samples it, which a schedule distilled that way, such as pDMD-2steps' 1, 12/13, 0, needs. ComfyUI's `ManualSigmas` cannot parse a fraction, so write 12/13 as 0.9230769230769231. A server without the setting stops the run and asks for an update.
 `KSampler` with its own scheduler still works on every variant; it samples on ComfyUI's schedule instead.
 
 ### What runs where
