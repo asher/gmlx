@@ -103,7 +103,7 @@ an image:
 
 ```sh
 gmlx pull minimax-h3-image
-gmlx image generate minimax-h3-image --seed 1 --output cabin.png \
+gmlx image generate minimax-h3-image --seed 3 --output cabin.png \
     --prompt "a log cabin in a snowy pine forest at dusk, warm light in its windows, smoke rising from the chimney, photograph"
 ```
 
