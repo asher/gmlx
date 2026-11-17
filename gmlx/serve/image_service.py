@@ -34,14 +34,13 @@ from typing import Any
 # The largest image a request makes: its pixels and its longer side.
 from gmlx.image.registry import MAX_PIXELS, MAX_SIDE
 
-from .cb_phase import hold as _caps_hold
-from .subservice import SingleWorker
+from .subservice import SingleWorker, media_job
 
 _log = logging.getLogger(__name__)
 
-# Each job holds the prefill caps: after a chat turn the device keeps the
-# decode's, under which an encode keeps every layer's transients live.
-WORKER = SingleWorker("image-worker", scope=_caps_hold)
+# Each job runs on the fine caps with the wired limit at 0, whatever a chat
+# turn left (subservice.media_job).
+WORKER = SingleWorker("image-worker", scope=media_job)
 
 # encoder_release auto keeps the encoder while the whole entry fits in
 # this share of the working budget.

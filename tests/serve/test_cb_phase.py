@@ -837,31 +837,50 @@ def test_a_hold_keeps_a_pin_or_the_switch(held):
 
 
 @pytest.mark.parametrize("service", ["image_service", "video_service"])
-def test_a_served_media_job_after_a_chat_turn_runs_on_the_fine_caps(
-        fake_kq, service):
-    """A chat turn leaves the device on its decode caps, (400, 100000),
-    under which a MiniMax-H3-Image edit's encode held 43 GB more than on
-    FINE. Each job on the image or video worker, a reserved block's
-    included, runs on FINE however the chat engine flips meanwhile, and
-    the engine decodes on its own caps again once the job has ended."""
+def test_a_served_media_job_after_a_chat_turn_runs_unwired_on_the_fine_caps(
+        fake_kq, monkeypatch, service):
+    """A chat turn's generator leaves the working set as the wired limit
+    and the device on its decode caps, (400, 100000), under which a
+    MiniMax-H3-Image edit's encode held 43 GB more than on FINE and wired
+    all it loaded. Each job on the image or video worker, a reserved
+    block's included, runs with the wired limit at 0 on FINE however the
+    chat engine flips and asks meanwhile. After the job the limit is the
+    one the engine last asked for, and the engine decodes on its own caps
+    again."""
+    import mlx.core as mx
+
     import gmlx.serve.cb_phase as cb_phase
 
+    device = [0]
+
+    def set_wired_limit(n, *_a, **_k):
+        prev, device[0] = device[0], int(n)
+        return prev
+
+    monkeypatch.setattr(mx, "set_wired_limit", set_wired_limit)
     worker = importlib.import_module(f"gmlx.serve.{service}").WORKER
     model = _model(False)
+    ws = 120_259_084_288
+    mx.set_wired_limit(ws)
     cb_phase.flip("decode", model)
 
+    def engine_step():
+        cb_phase.flip("decode", model)
+        mx.set_wired_limit(ws)
+
     def job():
-        caps = [cb_phase._state["caps"]]
-        engine = threading.Thread(target=cb_phase.flip,
-                                  args=("decode", model))
+        seen = [(device[0], cb_phase._state["caps"])]
+        engine = threading.Thread(target=engine_step)
         engine.start()
         engine.join(5)
-        caps.append(cb_phase._state["caps"])
-        return caps
+        seen.append((device[0], cb_phase._state["caps"]))
+        return seen
 
-    assert worker.submit(job).result(10) == [cb_phase.FINE] * 2
+    assert worker.submit(job).result(10) == [(0, cb_phase.FINE)] * 2
+    assert device[0] == ws
     with worker.reserved():
-        assert worker.run(job) == [cb_phase.FINE] * 2
+        assert worker.run(job) == [(0, cb_phase.FINE)] * 2
+    assert device[0] == ws and mx.set_wired_limit is set_wired_limit
     cb_phase.flip("decode", model)
     assert cb_phase._state["caps"] == cb_phase.RAM_DECODE
     assert cb_phase._state["holds"] == 0

@@ -67,7 +67,10 @@ def wired_limit_held():
     ``mx.set_wired_limit`` (a generation starting or ending) are recorded
     and return the limit last asked for. A sweep neutralized inside the
     block (``_neutralize_wired_limit_sweep``, a load that streams) keeps
-    the limit at 0. A no-op once the sweep is neutralized."""
+    the limit at 0. A no-op once the sweep is neutralized. Blocks on
+    other threads may end in either order: a block that ends under a later
+    one still in force leaves the chain, and the later one's end puts back
+    the function under both and the limit last asked for."""
     if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
         yield
         return
@@ -93,6 +96,19 @@ def wired_limit_held():
             mx.set_wired_limit = real[0]
             if want[0]:
                 real[0](want[0])
+        else:
+            # A later block is still in force: the block above this one
+            # takes the function under it. Its start read this block's
+            # limit, and every ask since went to it, so it ends on the
+            # limit last asked for.
+            above = mx.set_wired_limit
+            while hasattr(above, "_kq_wired_real"):
+                cell = above._kq_wired_real
+                if cell[0] is _held:
+                    cell[0] = real[0]
+                    link(above, real[0])
+                    break
+                above = cell[0]
 
 
 def install_wired_cap(announce: bool = False) -> None:

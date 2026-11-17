@@ -14,6 +14,23 @@ import sys
 import threading
 
 
+@contextlib.contextmanager
+def media_job():
+    """The state a served image or video job runs in on its worker: the
+    fine command-buffer caps (``cb_phase.hold``) and the wired limit held
+    at 0 (``wired_limit_held``), whatever a chat engine beside it asks
+    for. After a chat turn the engine's generator keeps the decode caps
+    and the working set as the wired limit, under which a MiniMax-H3-Image
+    edit's encode held 43 GB more and everything the job loaded wired.
+    Every image and video measurement ran in this state."""
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    from .cb_phase import hold
+
+    with hold(), wired_limit_held():
+        yield
+
+
 class SingleWorker:
     """Lazily-created single-thread executor owning all of one sub-service's
     model work (the load and every forward). MLX streams are per-thread:

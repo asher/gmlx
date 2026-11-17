@@ -200,6 +200,28 @@ def test_a_held_load_gets_the_limit_last_asked_for_at_its_end(monkeypatch):
     assert calls == [0, 90] and mx.set_wired_limit is real
 
 
+def test_holds_that_end_out_of_order_put_back_the_function_and_the_limit(
+        monkeypatch):
+    """A served image job's hold and a model load's hold on another thread
+    can end in either order. The first to end, under the later one, leaves
+    the chain: the limit stays at 0 until the later one ends, which puts
+    back the function under both and the limit last asked for."""
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    calls = _recorded_limit(monkeypatch, 90)
+    real = mx.set_wired_limit
+    job, load = wired_limit_held(), wired_limit_held()
+    job.__enter__()
+    load.__enter__()
+    assert calls == [0]
+    assert mx.set_wired_limit(90) == 90
+    job.__exit__(None, None, None)
+    assert calls == [0]
+    assert mx.set_wired_limit(80) == 90
+    load.__exit__(None, None, None)
+    assert calls == [0, 80] and mx.set_wired_limit is real
+
+
 def test_a_held_load_that_streams_keeps_the_limit_at_0(monkeypatch,
                                                       restore_wired_limit):
     from gmlx.stream.wired_limit import (_neutralize_wired_limit_sweep,
