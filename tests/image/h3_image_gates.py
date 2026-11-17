@@ -82,6 +82,12 @@ def step_target(arrays: dict) -> float:
     return float(s[min(i + 1, s.size - 1)])
 
 
+def step_head(arrays: dict) -> int | None:
+    """The head of the bank a heads-in-order fixture's step reads by
+    index, None for the heads of the grid intervals the step spans."""
+    return int(arrays["step_head"]) if "step_head" in arrays else None
+
+
 def case(arrays: dict):
     """The fixture's step: latents (1, C, H, W), features (1, L, text dim),
     sigma and the sigma the step goes to."""
@@ -110,7 +116,7 @@ def plan_of(model, arrays: dict):
     _, _, h, w = lat.shape
     refs, slots = edit_of(model, arrays)
     spans = spans_of(arrays["text_tags"]) if "text_tags" in arrays else ()
-    return (model.modulation(sigma, 1, target),
+    return (model.modulation(sigma, 1, target, head=step_head(arrays)),
             model.plan(feats.shape[1], h, w, spans,
                        () if refs is None else refs.sizes))
 
@@ -176,7 +182,8 @@ def free_rows(model, arrays: dict) -> dict:
     taps: dict = {}
     with pacing.paced(_eval_blocks):
         caption = model.caption(feats, taps, slots=slots)
-        vel = model(lat, sigma, None, taps, target=target, caption=caption,
+        mod = model.modulation(sigma, 1, target, head=step_head(arrays))
+        vel = model(lat, sigma, None, taps, mod=mod, caption=caption,
                     refs=refs)
     got = {k: _np(v) for k, v in taps.items()}
     got[VELOCITY] = _np(vel)

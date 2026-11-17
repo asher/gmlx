@@ -19,7 +19,12 @@ the conversion where the oracle reads the original. The rows:
 - stacked: the same with pDMD at 0.5 on the extended key map;
 - pdmd2 s0 and s1: pDMD at 1.0 at both steps of the schedule its card
   gives, [1, 12/13, 0], where ComfyUI's step reads the PDD heads of the
-  grid intervals it spans, as gmlx's does.
+  grid intervals it spans, as gmlx's does;
+- pdmd2 in order s0 and s1: the same steps with step k reading head k
+  of the bank alone, as diffusers samples pDMD and gmlx does on an
+  adapter's schedule, where the oracle departs from ComfyUI on one line
+  (check7_h3_image.py --heads-in-order). Read by the heads of its span,
+  each misses the product gate by SEEN at least.
 
 Every row is in fp32, with the oracle's own bf16 against fp32 gap of
 each and check 3's rule.
@@ -82,7 +87,9 @@ SWAP = "check7_h3_image_swap_512x512_s3"
 STACKED = "check7_h3_image_lora_512x512_s3"
 PDMD2 = ("check7_h3_image_pdmd2_512x512_s0",
          "check7_h3_image_pdmd2_512x512_s1")
-ROWS = (SWAP, STACKED, *PDMD2)
+PDMD2_IN_ORDER = ("check7_h3_image_pdmd2_in_order_512x512_s0",
+                  "check7_h3_image_pdmd2_in_order_512x512_s1")
+ROWS = (SWAP, STACKED, *PDMD2, *PDMD2_IN_ORDER)
 STEP = "check3_h3_image_512x512_s3"
 HEADER = "h3_image_pruned_ud_q4_k_xl.header.json"
 # pDMD-2steps' schedule, from its model card.
@@ -100,7 +107,7 @@ PAIRS = {ORIGINAL: 208, CONVERTED: 312, PDMD: 312}
 # What each row merges, (file, strength).
 MERGED = {SWAP: ((ORIGINAL, 1.0),),
           STACKED: ((ORIGINAL, 1.0), (PDMD, 0.5)),
-          PDMD2[0]: ((PDMD, 1.0),), PDMD2[1]: ((PDMD, 1.0),)}
+          **{row: ((PDMD, 1.0),) for row in PDMD2 + PDMD2_IN_ORDER}}
 DELTA_TOL = 1e-6
 # A wrong table is seen when it moves a measure this many times its gate.
 SEEN = 1.5
@@ -123,8 +130,16 @@ def _manifest(name: str) -> dict:
     return committed(name)
 
 
+def _pdmd_step(name: str) -> int | None:
+    """The step of pDMD's schedule a pDMD row runs, None for another."""
+    for rows in (PDMD2, PDMD2_IN_ORDER):
+        if name in rows:
+            return rows.index(name)
+    return None
+
+
 def _schedule(name: str) -> tuple:
-    return PDMD2_SIGMAS if name in PDMD2 else hi.PDD_SIGMAS
+    return hi.PDD_SIGMAS if _pdmd_step(name) is None else PDMD2_SIGMAS
 
 
 @pytest.mark.parametrize("name", ROWS)
@@ -140,12 +155,17 @@ def test_the_manifests_follow_the_rule(name):
     inp, step = m["inputs"], committed(STEP)
     for k in ("dit", "oracle_dit"):
         assert m["files"][k] == step["files"][k], k
+    k_step = _pdmd_step(name)
     for k, v in step["inputs"].items():
-        if name not in PDMD2 or k not in ("sigma", "sample_sigmas"):
+        if k_step is None or k not in ("sigma", "sample_sigmas"):
             assert inp[k] == v, k
-    if name in PDMD2:
-        assert inp["sigma"] == float(np.float32(
-            PDMD2_SIGMAS[PDMD2.index(name)]))
+    if k_step is not None:
+        assert inp["sigma"] == float(np.float32(PDMD2_SIGMAS[k_step]))
+    if name in PDMD2_IN_ORDER:
+        assert (inp["heads"], inp["step_head"]) == ("in_order", k_step)
+        assert sum("one departure" in n for n in m["notes"]) == 1
+    else:
+        assert "heads" not in inp and "step_head" not in inp
     assert inp["lora_merge"] == "float32"
     rows = inp["adapters"]
     assert [(r["file"], r["strength"]) for r in rows] == list(MERGED[name])
@@ -452,6 +472,8 @@ def test_check7_exact_gate(request, name):
 def test_check7_rows(real, name):
     pipe, _, tables = real
     arrays, m = fixture(_manifest(name)["name"])
+    assert hg.step_head(arrays) == (_pdmd_step(name) if name in PDMD2_IN_ORDER
+                                    else None)
     assert pipe.dit.act_dtype == mx.bfloat16
     assert not hg.layout_misses(pipe.dit, arrays, m)
     got = _under(pipe, tables[name], hg.measures, arrays, m)
@@ -459,6 +481,24 @@ def test_check7_rows(real, name):
     print(hg.worst_line(f"h3 image check7 {name}", got, m))
     out = hg.missed(got, m["tolerances"])
     assert not out, out
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", PDMD2_IN_ORDER)
+def test_the_span_rule_fails_the_heads_in_order_rows(real, name):
+    """Each heads-in-order row, run by the heads of the grid intervals its
+    step spans, misses a row's product gate by SEEN at least."""
+    pipe, _, tables = real
+    arrays, m = fixture(_manifest(name)["name"])
+    span = {k: v for k, v in arrays.items() if k != "step_head"}
+    tols = m["tolerances"]
+    got = _under(pipe, tables[name], hg.measures, span, m)
+    ratio = {k: v / hg.gate(tols[k]) for k, v in got.items()
+             if not k.startswith("cosine ")}
+    top = max(ratio, key=ratio.get)
+    print(f"h3 image check7 {name} by the span's heads: {ratio[top]:.2f} of "
+          f"its gate at {top}")
+    assert ratio[top] >= SEEN, (top, ratio[top])
 
 
 @pytest.mark.integration

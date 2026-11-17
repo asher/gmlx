@@ -45,6 +45,13 @@ step, its rows, its passes and their tolerances are check 3's.
       --lora character_swap.safetensors:1.0 \\
       --lora pytorch_lora_weights.safetensors:0.5 --case 512x512:0.75 \\
       [--converted h3_image_character_swap_diffusers.safetensors]
+
+--heads-in-order departs from ComfyUI on one line: step k of
+--sample-sigmas reads head k of the bank (head 0, or head 0 plus the
+bank's block k), as diffusers' MiniMax-H3-Image pipeline reads pdd head
+k at step k, in place of the dt-weighted heads of the grid intervals the
+step spans (comfy/ldm/minimax/model.py:349-381). The fixture records the
+head as step_head.
 """
 
 from __future__ import annotations
@@ -221,6 +228,10 @@ def main(argv=None) -> int:
     ap.add_argument("--sample-sigmas", default=None, metavar="S,S,...",
                     help="the sampler's schedule the step is part of, "
                          "ending at 0; the PDD grid by default")
+    ap.add_argument("--heads-in-order", action="store_true",
+                    help="step k of --sample-sigmas reads PDD head k, as "
+                         "diffusers samples, in place of ComfyUI's heads of "
+                         "the grid intervals it spans")
     ap.add_argument("--text-len", type=int, default=8)
     ap.add_argument("--feature-std", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
@@ -267,6 +278,15 @@ def main(argv=None) -> int:
     if sched[-1] != 0.0 or list(sched) != sorted(sched, reverse=True):
         raise SystemExit("error: --sample-sigmas must decrease to 0")
     k = min(range(len(sched)), key=lambda i: abs(sched[i] - sigma))
+    if a.heads_in_order:
+        import comfy.ldm.minimax.model as cmm
+
+        if k >= dm.final_layer.pdd_steps:
+            raise SystemExit(f"error: step {k} has no head of its own")
+        span = cmm._pdd_head
+        # The one departure: head k alone, in place of the span's heads.
+        cmm._pdd_head = lambda head, h, grid, start, stop: span(
+            head, h, grid, k, k + 1)
     inputs = {"shape": [w, h], "blocks": len(dm.blocks), "seed": a.seed,
               "features": f"seeded normal, std {a.feature_std}",
               "text_rows": int(feats.shape[0]),
@@ -295,9 +315,16 @@ def main(argv=None) -> int:
              "oracle_dit is dit with the config key {\"transformer\": "
              "{\"pdd_steps\": 6, \"pdd_sigmas\": [...]}} and every tensor "
              "unchanged"]
+    if a.heads_in_order:
+        notes.append("heads in order: step k of sample_sigmas reads PDD head "
+                     "k of the bank, head 0 or head 0 plus block k, as "
+                     "diffusers samples; ComfyUI's _pdd_head is called "
+                     "with start k and stop k + 1 in place of the span of "
+                     "grid intervals the step covers (one departure)")
     c3.run_case(torch, dm, lat, feats, sigma, f"{a.name}_{w}x{h}_s{k}",
                 inputs, files, notes, check=7, script=SCRIPT,
-                sample_sigmas=None if a.sample_sigmas is None else sched)
+                sample_sigmas=None if a.sample_sigmas is None else sched,
+                step_head=k if a.heads_in_order else None)
     return 0
 
 

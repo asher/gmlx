@@ -301,12 +301,14 @@ def layout_rows(torch, dm, cap: Capture, layout, sigma) -> dict:
 def run_case(torch, dm, lat, feats, sigma, name, inputs, files, notes, *,
              compressed: bool = False, edit: dict | None = None,
              check: int = 3, script: str = SCRIPT,
-             sample_sigmas=None) -> None:
+             sample_sigmas=None, step_head: int | None = None) -> None:
     """One step in fp32 and bf16, written as fixture ``name`` of check
     ``check`` by ``script``. ``edit`` holds the references' latents, their
     sizes' spans of the prompt and the seed of an edit step.
     ``sample_sigmas`` is the sampler's schedule the step is part of, the
-    grid by default, from which ComfyUI picks the heads the step reads."""
+    grid by default, from which ComfyUI picks the heads the step reads.
+    ``step_head`` records the head a step that reads its head by index
+    reads, which the caller has the model read."""
     payload = None
     fx = fixtures.FixtureWriter(name, check=check, family=FAMILY,
                                 script=script)
@@ -338,6 +340,9 @@ def run_case(torch, dm, lat, feats, sigma, name, inputs, files, notes, *,
     fx.add("sigma", np.float32(sigma))
     fx.add("timestep", oracle.to_numpy(timestep(torch, sigma)))
     fx.add("sample_sigmas", grid.numpy())
+    if step_head is not None:
+        fx.inputs.update(heads="in_order", step_head=int(step_head))
+        fx.add("step_head", np.int64(step_head))
     vel, caps, times = {}, {}, {}
     for mode in ("fp32", "bf16"):
         t0 = time.perf_counter()
