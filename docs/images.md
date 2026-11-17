@@ -19,15 +19,15 @@ for none.
 
 | Model | Download, 16 GB Mac | Download, 24 GB Mac | Image size | License |
 |-------|---------------------|---------------------|------------|---------|
-| `z-image-turbo` | 8.8 GB | 10.9 GB | 1024x1024 | Apache 2.0, any use |
+| `z-image-turbo` | 7.7 GB | 10.9 GB | 1024x1024 | Apache 2.0, any use |
 | `qwen-image-turbo` | 14.4 GB | 17.5 GB | 1024x1024 | Research and evaluation only |
 | `qwen-image` | 14.4 GB | 17.6 GB | 1024x1024 | Research and evaluation only |
 | `krea-2-turbo` | 9.8 GB | 14.1 GB | 512x512 on 16 GB, else 1024x1024 | Free commercial use under $1M of yearly revenue |
-| `moss-image` | 10.5 GB | 15.5 GB | 1024x1024 | Apache 2.0, any use |
-| `moss-image-base` | 10.5 GB | 15.5 GB | 1024x1024 | Apache 2.0, any use |
+| `moss-image` | 9.8 GB | 14.4 GB | 1024x1024 | Apache 2.0, any use |
+| `moss-image-base` | 9.8 GB | 14.4 GB | 1024x1024 | Apache 2.0, any use |
 | `flux-2-klein` | 6.6 GB | 8.1 GB | 1024x1024 | Apache 2.0, any use |
-| `flux-2-klein-base` | 6.6 GB | 8.1 GB | 1024x1024 | Apache 2.0, any use |
-| `flux-2-klein-9b` | 13.8 GB | 13.8 GB | 1024x1024 | Non-commercial only |
+| `flux-2-klein-base` | 6.4 GB | 8.3 GB | 1024x1024 | Apache 2.0, any use |
+| `flux-2-klein-9b` | 13.6 GB | 13.6 GB | 1024x1024 | Non-commercial only |
 | `flux-2-klein-base-9b` | 13.8 GB | 13.8 GB | 1024x1024 | Non-commercial only |
 | `flux-2-klein-9b-kv` | 13.6 GB | 13.6 GB | 1024x1024 | Non-commercial only |
 | `flux-3-klein` | 7.3 GB | 9.8 GB | 1024x1024 | Non-commercial, and commercial use of the images under $5M of yearly revenue |
@@ -63,11 +63,11 @@ adds the model to your configuration. On a 16 GB Mac it prints:
 
 ```text
 pull z-image-turbo (Z-Image-Turbo): DiT Q4_K_M, encoder Q8_0, the default for a 16 GB Mac
-  dit      z-image-turbo-Q4_K_M.gguf                  4.7 GB  download
+  dit      z-image-turbo-Q4_K_M.gguf                  3.6 GB  download
   encoder  Qwen3-4B-Q8_0.gguf                         4.0 GB  download
   vae      vae/diffusion_pytorch_model.safetensors    0.2 GB  download, packed to z-image-vae-BF16.gguf
   ...
-  the three parts: 8.8 GB, which fit this Mac's 16 GB RAM
+  the three parts: 7.7 GB, which fit this Mac's 16 GB RAM
   license: Z-Image-Turbo apache-2.0 (https://huggingface.co/Tongyi-MAI/Z-Image-Turbo); encoder apache-2.0
 ...
 registered z-image-turbo in /Users/you/.config/gmlx/gmlx.yaml (the image default)
