@@ -193,6 +193,7 @@ most with short prompts and with text in the image.
 | Z-Image, Z-Image-Turbo | Ships with gmlx, from the Z-Image-Turbo demo of Tongyi-MAI |
 | MOSS-Image, MOSS-Image Base | Ships with gmlx, written by gmlx from the prompt-enhancer skill of OpenMOSS |
 | Qwen-Image 2.1, Qwen-Image 2.1 Turbo | Your own file, as [Qwen-Image 2.1](#qwen-image-21-rewriter-prompt) describes |
+| MiniMax-H3-Image | MiniMax's, as [MiniMax-H3-Image](#minimax-h3-image-prompt-expander) describes |
 
 OpenMOSS publishes its prompt enhancer as an agent skill, not a system
 prompt, so gmlx's MOSS-Image prompt follows the skill's rules for a
@@ -224,16 +225,18 @@ With an upsampler set, each prompt is rewritten:
 - `gmlx serve` writes the caption with the chat model, which loads and
   unloads as it does for a chat request, and returns the caption as
   `revised_prompt` with the image. A request with the same prompt and
-  another seed reuses the caption. With the
+  another seed reuses the caption, except on MiniMax-H3-Image. With the
   [prompt cache](config.md#prompt-cache) on, a new prompt reuses the
   system prompt's prefill. The first caption also loads the chat model,
   which `pin: true` on its `models` entry keeps loaded.
 - The ComfyUI pack rewrites the prompt of its text encode node, and
   ComfyUI's log shows the caption.
 
-The chat model writes the same caption for the same prompt. The PNG keeps
+The chat model writes the same caption for the same prompt, and
+MiniMax-H3-Image's expander for the same prompt and seed. The PNG keeps
 the caption beside your prompt. A prompt with reference images or an
-init image runs as typed, and the negative prompt is never rewritten. In
+init image runs as typed, except a MiniMax-H3-Image edit, and the
+negative prompt is never rewritten. In
 ComfyUI the text encode node does not see the references of an edit, so
 the server also encodes the prompt as typed, and the pack samples an edit
 and a negative prompt on that encoding.
@@ -290,6 +293,25 @@ that already names the file keeps naming it, as the warning says. Without
 the file, a Qwen-Image request with an upsampler set is refused with a
 message that says where to get it. The rewrite keeps the image size you ask for; the aspect ratio in
 Qwen's reply is not used.
+
+### MiniMax-H3-Image prompt expander
+
+MiniMax's prompt expander, `MiniMaxAI/MiniMax-H3-Image-PE`, is a chat
+model of its own, a Qwen3.8-27B fine-tune: set its GGUF as the
+`upsampler`. Its prompts are under the MiniMax-H3-Image Community
+License, and gmlx ships none of them. `gmlx pull minimax-h3-image`
+downloads `prompt/manifest.json` and the files it lists, and names the
+manifest as the entry's `upsample_prompt`.
+
+The expander also sees the reference images of an edit, through the
+vision tower that `mmproj` on its `models` entry names, or
+`--upsampler-mmproj` for one run. An edit with prompt upsampling and no
+tower is refused. It samples as MiniMax's request does, seeded by the
+image's seed, so the same prompt and seed write the same caption and
+another seed writes another. It thinks before it answers: the thinking
+closes after 3072 tokens, and the reply has 2048 more. The caption is
+`expanded_caption` of its JSON reply. The image keeps the size you ask
+for; the aspect ratio in the reply is not used.
 
 ## ComfyUI
 
