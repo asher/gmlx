@@ -1447,6 +1447,12 @@ async def _av_step(t0, tensors, fields, run):
         hold.release()
 
 
+# The step encode has no image seed. An upsampler that samples writes the
+# caption at this seed, so a graph reruns its caption and the caption table
+# keeps it; a greedy upsampler reads no seed.
+ENCODE_SEED = 0
+
+
 async def encode(request: Request):
     from ..image_service import ImageRequestError, JobStopped, decode_image
     from ..image_steps import STATE, StepError
@@ -1499,7 +1505,7 @@ async def encode(request: Request):
             seen = {"pictures": images} if images else {}
             revised = await asyncio.to_thread(
                 revise, fields.get("model"), text, requested, bool(images),
-                **clip, **seen)
+                seed=ENCODE_SEED, **clip, **seen)
         except JobStopped:
             raise StepError(409, "the encode was interrupted",
                             code="interrupted") from None
@@ -1551,6 +1557,10 @@ async def encode(request: Request):
         else:
             chat_hold = None
         try:
+            # The prompt as typed is encoded beside the caption: the encode
+            # cannot tell a negative prompt from a positive one, and the
+            # pack samples a negative on the typed prompt, as it does an
+            # edit whose references come after the encode.
             typed = (text,) if revised else ()
             got = await _on_worker(_settled(hold, do_encode), served,
                                    revised or text,

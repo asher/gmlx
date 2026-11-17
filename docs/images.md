@@ -232,14 +232,18 @@ With an upsampler set, each prompt is rewritten:
 - The ComfyUI pack rewrites the prompt of its text encode node, and
   ComfyUI's log shows the caption.
 
-The chat model writes the same caption for the same prompt, and
-MiniMax-H3-Image's expander for the same prompt and seed. The PNG keeps
-the caption beside your prompt. A prompt with reference images or an
-init image runs as typed, except a MiniMax-H3-Image edit, and the
-negative prompt is never rewritten. In
-ComfyUI the text encode node does not see the references of an edit, so
-the server also encodes the prompt as typed, and the pack samples an edit
-and a negative prompt on that encoding.
+The chat model writes the same caption for the same prompt.
+MiniMax-H3-Image's expander samples, so the same prompt and seed rerun
+its caption on the surface that wrote it: the CLI and the server write
+different captions for one seed. In ComfyUI the expander writes at a
+fixed seed, so a graph reruns its caption at any sampler seed. The PNG
+keeps the caption beside your prompt. A prompt with reference images or
+an init image runs as typed, except a MiniMax-H3-Image edit, and the
+negative prompt is never rewritten. In ComfyUI the text encode node does
+not see the references of an edit, so the server also encodes the prompt
+as typed, and the pack samples an edit and a negative prompt on that
+encoding. MiniMax-H3-Image's conditioning node shows the expander the
+edit's pictures, so that edit samples on the caption.
 
 To run a prompt as typed, pass `--no-upsample`, send
 `"prompt_upsampling": false` in the request, or set `upsample: false` on
@@ -298,17 +302,20 @@ Qwen's reply is not used.
 
 MiniMax's prompt expander, `MiniMaxAI/MiniMax-H3-Image-PE`, is a chat
 model of its own, a Qwen3.8-27B fine-tune: set its GGUF as the
-`upsampler`. Its prompts are under the MiniMax-H3-Image Community
-License, and gmlx ships none of them. `gmlx pull minimax-h3-image`
-downloads `prompt/manifest.json` and the files it lists, and names the
-manifest as the entry's `upsample_prompt`.
+`upsampler`. `mradermacher/MiniMax-H3-Image-PE-GGUF` has GGUF files of
+it, which `gmlx pull` does not fetch. Its prompts are under the
+MiniMax-H3-Image Community License, and gmlx ships none of them.
+`gmlx pull minimax-h3-image` downloads `prompt/manifest.json` and the
+files it lists, and names the manifest as the entry's `upsample_prompt`.
 
 The expander also sees the reference images of an edit, through the
 vision tower that `mmproj` on its `models` entry names, or
-`--upsampler-mmproj` for one run. An edit with prompt upsampling and no
-tower is refused. It samples as MiniMax's request does, seeded by the
-image's seed, so the same prompt and seed write the same caption and
-another seed writes another. It thinks before it answers: the thinking
+`--upsampler-mmproj` for one run. The expander's own mmproj and
+Qwen3.8-27B's are the same tower, every tensor equal, so either serves.
+An edit with prompt upsampling and no tower is refused. It samples as
+MiniMax's request does, seeded by the image's seed, so the same prompt
+and seed write the same caption and another seed writes another; in
+ComfyUI it writes at a fixed seed. It thinks before it answers: the thinking
 closes after 3072 tokens, and the reply has 2048 more. The caption is
 `expanded_caption` of its JSON reply. The image keeps the size you ask
 for; the aspect ratio in the reply is not used.

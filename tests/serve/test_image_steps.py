@@ -1837,8 +1837,8 @@ def test_an_upsampled_encode_also_answers_the_prompt_as_typed(host, monkeypatch)
         return {"cond": cond, "refs": [], "image_slots": [], "typed": typed}
 
     monkeypatch.setattr(steps, "encode", encode)
-    monkeypatch.setattr(host, "revise", lambda model, text, requested, has_refs:
-                        "a caption of " + text, raising=False)
+    monkeypatch.setattr(host, "revise", lambda model, text, requested, has_refs,
+                        **kw: "a caption of " + text, raising=False)
     fields, got = _client().encode("zit", "a cat")
     assert seen == [("a caption of a cat", "a cat")]
     assert fields["revised_prompt"] == "a caption of a cat"
@@ -1849,7 +1849,9 @@ def test_an_upsampled_encode_also_answers_the_prompt_as_typed(host, monkeypatch)
 
 def test_an_encode_with_images_gives_them_to_the_rewrite(host, monkeypatch):
     """The rewrite of an encode with images gets them as its pictures, for
-    a family whose upsampler sees them; one without images gets none."""
+    a family whose upsampler sees them; one without images gets none. Each
+    rewrite has the same seed, so an upsampler that samples, as
+    MiniMax-H3-Image's does, writes a graph's caption again on a rerun."""
     seen = []
 
     def encode(served, text, images, borrow=None, ref_latents=True, also=None):
@@ -1867,10 +1869,11 @@ def test_an_encode_with_images_gives_them_to_the_rewrite(host, monkeypatch):
                      headers={**V, "Content-Type": wire.CONTENT_TYPE})
     assert r.status_code == 200, r.text
     ((has_refs, kw),) = seen
-    assert has_refs is True
+    seed = kw["seed"]
+    assert has_refs is True and isinstance(seed, int)
     assert [np.asarray(i).shape for i in kw["pictures"]] == [(8, 16, 3)]
     _client().encode("zit", "a cat")
-    assert seen[-1] == (False, {})
+    assert seen[-1] == (False, {"seed": seed})
 
 
 def _stub_step_encode(monkeypatch):

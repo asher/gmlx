@@ -115,7 +115,11 @@ taking the mean. A server whose features list `ref_noise` takes both.
 An encode that upsamples the prompt returns the caption as
 `revised_prompt` and its conditioning as `cond`, and the prompt as typed
 as `cond_typed`. A client that adds reference images after the encode,
-as ComfyUI does, samples an edit and a negative on `cond_typed`.
+as ComfyUI does, samples an edit and a negative on `cond_typed`. The
+encode cannot tell a negative from a positive prompt, so it answers
+`cond_typed` beside every caption. An upsampler that samples, as
+MiniMax-H3-Image's does, writes the caption at a fixed seed, so a graph
+reruns its caption.
 
 On a server whose features list `keyframe_upsampling`, the encode of a
 video model takes the clip's `frames` and `keyframes`, the role of each
