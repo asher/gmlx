@@ -124,7 +124,8 @@ def test_the_key_map_names_each_linear_of_the_release_file():
 def test_diffusers_names_map_to_the_gguf_leaves():
     """The names of diffusers' converter: q, k and v on thirds of the
     fused qkv's rows, fc1 with its halves swapped back, the head on head
-    0, bare and under transformer., and ComfyUI drops every one."""
+    0, bare and under transformer., which ComfyUI with the gmlx nodes
+    reads too; under diffusion_model. it drops them."""
     view = fixture_view(HEADER)
     km = hi.FAMILY.lora_map(hi.synth_config(view))
     inner = 56 * 128
@@ -156,7 +157,8 @@ def test_diffusers_names_map_to_the_gguf_leaves():
     for p in ("", "transformer."):
         for stem in stems:
             assert _dit_target(p + stem, t, under) == (stem, False), stem
-            assert p + stem not in km.comfy_stems
+            assert p + stem in km.comfy_stems
+    assert not {"diffusion_model." + s for s in stems} & km.comfy_stems
 
 
 def test_the_built_models_config_maps_as_the_header_does():
@@ -166,13 +168,20 @@ def test_the_built_models_config_maps_as_the_header_does():
     assert lora_map(built).targets == lora_map(config).targets
 
 
-@pytest.mark.parametrize("form", ["comfy", "diffusers", "transformer"])
+_DIFFUSERS_PREFIX = {"diffusers": "", "transformer": "transformer.",
+                     "diffusion_model": "diffusion_model."}
+
+
+@pytest.mark.parametrize("form", ["comfy", "diffusers", "transformer",
+                                  "diffusion_model"])
 def test_a_lora_runs_live_as_the_merged_weights(tiny, tmp_path, form):
     """A step under the table equals the step of the DiT whose weights
     hold the deltas, the head's pair on head 0, the one head the step
-    reads, with the file in the GGUF names or in diffusers' form, bare or
-    under transformer.; the caption the base step keeps does not leak
-    into it, nor its into a later base step."""
+    reads, with the file in the GGUF names or in diffusers' form, bare,
+    under transformer. or under diffusion_model.; the caption the base
+    step keeps does not leak into it, nor its into a later base step.
+    ComfyUI with the gmlx nodes reads the first three as gmlx does, so
+    only diffusers' names under diffusion_model., which it drops, warn."""
     from gmlx.image import lora
 
     weights, config, arrays = tiny
@@ -180,7 +189,7 @@ def test_a_lora_runs_live_as_the_merged_weights(tiny, tmp_path, form):
     pipe = _pipe(weights, config)
     adapter = _adapter(pipe, config, 1)
     keys = _comfy_keys(adapter) if form == "comfy" else h3_diffusers_keys(
-        adapter, "transformer." if form == "transformer" else "")
+        adapter, _DIFFUSERS_PREFIX[form])
     path = write_keys(tmp_path / "a.safetensors", keys)
     merged = _pipe(_merged(weights, adapter, strength, _head_rows(config)),
                    config)
@@ -190,8 +199,13 @@ def test_a_lora_runs_live_as_the_merged_weights(tiny, tmp_path, form):
         ad = lora.load_adapter(pipe, path)
         # Each of the two qkv pairs is three pairs in diffusers' form.
         assert len(ad.dit) == len(APPLIED) + 4 * (form != "comfy")
-        assert bool(ad.warnings) == (form != "comfy"), ad.warnings
-        assert all("ComfyUI does not read" in w for w in ad.warnings)
+        if form == "diffusion_model":
+            (w,) = ad.warnings
+            assert f"{len(ad.dit)} keys have a spelling that ComfyUI does " \
+                   "not read" in w and "with the gmlx nodes diffusers' " \
+                   "names bare or under transformer." in w, w
+        else:
+            assert ad.warnings == (), ad.warnings
         tid = api.define_patch_table(pipe,
                                      lora.table_entries([(ad, strength)]))
         got = _step(pipe, arrays, cond, tid)

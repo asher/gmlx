@@ -212,10 +212,9 @@ def _gmlx_files(m: dict) -> list:
 # The delta half.
 
 def _check_warnings(warnings) -> None:
-    """The one warning a file carries: its keys spell diffusers' names,
-    which ComfyUI drops."""
-    assert len(warnings) == 1 and "ComfyUI does not read" in warnings[0], \
-        warnings
+    """No warning: ComfyUI with the gmlx nodes reads every key of each
+    file, diffusers' names bare or under transformer. among them."""
+    assert warnings == (), warnings
 
 
 def _dims() -> dict:
@@ -292,10 +291,7 @@ def test_check7_delta_half(gguf_dir):
     for k, path in paths.items():
         res[k] = reader.resolve(reader.read_lora(path), keymap)
         assert len(res[k].dit) == PAIRS[k] and res[k].text == ()
-        if k == ORIGINAL:
-            assert res[k].warnings == ()
-        else:
-            _check_warnings(res[k].warnings)
+        _check_warnings(res[k].warnings)
         own[k] = _own_rows(path, dims)
     swap = [(CONVERTED, 1.0)]
     # (label, what gmlx reads, the references it is held to)

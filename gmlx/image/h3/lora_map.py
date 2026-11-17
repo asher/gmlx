@@ -71,6 +71,12 @@ _DIFF_QKV = ("attn.to_q", "attn.to_k", "attn.to_v")
 _COMFY = ("", "diffusion_model.", "lora_unet_")
 COMFY_READS = ("the GGUF names bare, under diffusion_model. or as "
                "lora_unet_ underscores")
+# The prefixes under which the gmlx ComfyUI nodes also read diffusers'
+# names on a MiniMax-H3-Image model (comfyui_pack/patches.py,
+# h3_diffusers_keys), so ComfyUI with the nodes drops none of those.
+_PACK_DIFFUSERS = ("", "transformer.")
+PACK_READS = (COMFY_READS + ", and with the gmlx nodes diffusers' names "
+              "bare or under transformer.")
 
 
 def _blocks(config: dict) -> dict:
@@ -162,7 +168,11 @@ def _gates(config: dict) -> tuple:
 
 
 def lora_map(config: dict, *, family: str = "h3",
-             title: str = "MiniMax-H3") -> LoraKeyMap:
+             title: str = "MiniMax-H3",
+             pack_reads_diffusers: bool = False) -> LoraKeyMap:
+    """The H3 key map of ``config``. ``pack_reads_diffusers`` counts
+    diffusers' names among the stems ComfyUI reads, as the gmlx nodes
+    read them on MiniMax-H3-Image, so no warning names them."""
     blocks, refiner = _counts(config)
     names = [n for n in _TOP if n not in _AUDIO
              or _audio(config) is not None]
@@ -177,11 +187,13 @@ def lora_map(config: dict, *, family: str = "h3",
     if _bank(config) > 1:
         targets[_HEADS[0]] = (_HEADS[0], (0, 0, _head_rows(config)[_HEADS[0]]))
     diffusers, swapped = _diffusers(targets, _inner(config))
+    comfy = {_spell(p, n) for n in names for p in _COMFY}
+    if pack_reads_diffusers:
+        comfy |= {p + n for n in diffusers for p in _PACK_DIFFUSERS}
     return LoraKeyMap(
         family=family, title=title, targets={**targets, **diffusers},
-        swapped=swapped,
-        comfy_stems=frozenset(_spell(p, n) for n in names for p in _COMFY),
-        comfy_reads=COMFY_READS)
+        swapped=swapped, comfy_stems=frozenset(comfy),
+        comfy_reads=PACK_READS if pack_reads_diffusers else COMFY_READS)
 
 
 def _head_ups(header: dict, names):

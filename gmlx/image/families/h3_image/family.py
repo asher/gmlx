@@ -294,7 +294,8 @@ def _edit(name: str):
 def lora_map(config: dict):
     from gmlx.image.h3.lora_map import lora_map as build_map
 
-    return build_map(config, family="h3_image", title=TITLE)
+    return build_map(config, family="h3_image", title=TITLE,
+                     pack_reads_diffusers=True)
 
 
 def lora_refusal(header: dict, config: dict):

@@ -187,7 +187,8 @@ class LoraKeyMap:
     ComfyUI finds the family's targets, and only those that are not
     ``diffusers_only``: ComfyUI drops every other spelling.
     ``comfy_stems``, when not None, is every DiT stem that ComfyUI's key
-    map reads for the family, and ComfyUI drops every other stem;
+    map reads for the family, the gmlx nodes' additions to it included,
+    and ComfyUI drops every other stem;
     ``comfy_reads`` says which stems those are, for the warning. None
     keeps the prefix rules above."""
     family: str
