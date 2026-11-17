@@ -284,7 +284,7 @@ entries.
 | <a id="image_modelsupsampler"></a>`upsampler` | none | The `models` id of the chat model that rewrites each prompt, as [Prompt upsampling](images.md#prompt-upsampling) describes |
 | <a id="image_modelsupsample_prompt"></a>`upsample_prompt` | the family's | A text file with the system prompt for the `upsampler`, found in `model_dirs` when relative. Qwen-Image 2.1 needs one, which `gmlx pull qwen-image` fetches |
 | <a id="image_modelsupsample"></a>`upsample` | `true` | Rewrite prompts with the `upsampler`. `false` runs them as typed, unless a request sends `prompt_upsampling: true`. |
-| <a id="image_modelsdefaults"></a>`defaults` | the family's | Request defaults: `size` as `WxH`, `steps`, `guidance`, `sampler` (`euler` or `uni_pc_bh2`) and `negative_prompt` |
+| <a id="image_modelsdefaults"></a>`defaults` | the family's | Request defaults: `size` as `WxH`, `steps`, `guidance`, `sampler` (`euler` or `uni_pc_bh2`), `negative_prompt`, and `int8` (`off`, `attention`, `linears` or `all`) for MiniMax-H3-Image |
 | <a id="image_modelsencoder_release"></a>`encoder_release` | `auto` | Release the text encoder after each encode: `always`, `never`, or `auto`, which keeps it while the whole model fits in 80 percent of the working budget |
 | <a id="image_modelspin"></a>`pin` | `false` | Load at start and stay loaded, as a model's [`pin`](#modelspin) |
 | <a id="image_modelsttl_s"></a>`ttl_s` | `server.defaults.ttl_s` | Seconds without a request before the model unloads. `null` or `0` turns off the timeout. |

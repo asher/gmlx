@@ -641,7 +641,7 @@ def test_each_request_logs_one_line_and_warns_on_ignored_fields(served, capsys, 
     with caplog.at_level(logging.WARNING):
         r = _client().post("/v1/images/generations",
                            json={"prompt": "x", "user": "u", "style": "vivid",
-                                 "frobnicate": 1})
+                                 "frobnicate": 1, "int8": "off"})
     assert r.status_code == 200
     lines = [ln for ln in capsys.readouterr().out.splitlines()
              if ln.startswith("[req]")]
@@ -649,6 +649,7 @@ def test_each_request_logs_one_line_and_warns_on_ignored_fields(served, capsys, 
     warned = [m for m in caplog.messages if "ignoring unsupported" in m]
     assert len(warned) == 1
     assert "frobnicate" in warned[0] and "style" in warned[0] and "user" in warned[0]
+    assert "int8" not in warned[0]
 
 
 def test_the_access_log_drops_the_image_routes_and_file_tokens():
