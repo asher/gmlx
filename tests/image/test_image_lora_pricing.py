@@ -310,6 +310,24 @@ def _qwen(tmp_path, monkeypatch):
                                               patch_table=tid)
 
 
+def _h3_image(tmp_path, monkeypatch):
+    """The tiny DiT of its committed weights at sigma 0.75, whose step
+    reads head 0 and head 3 of the bank."""
+    import h3_image_gates
+    from oracle_fixture import committed_fixture
+
+    from gmlx.image import api
+
+    weights, wm = committed_fixture("selftest_h3_image_tiny_weights")
+    arrays, _ = committed_fixture("selftest_h3_image_tiny_s3")
+    pipe = _image_pipe("h3_image", h3_image_gates.tiny_model(
+        weights, wm["inputs"]["config"]), "pruned")
+    lat, feats, sigma, target = h3_image_gates.case(arrays)
+    cond = api.Conditioning(feats[0], "")
+    return pipe, lambda tid: api.denoise_step(
+        pipe, lat, sigma, cond, patch_table=tid, target=target)
+
+
 def _h3(tmp_path, monkeypatch):
     import h3_gates
     from test_video_h3_model import TINY, tiny_weights
@@ -333,7 +351,7 @@ def _h3(tmp_path, monkeypatch):
 
 FAMILIES = {"flux2_klein": _flux2, "flux3_klein": _flux3, "krea2": _krea2,
             "moss_image": _moss, "z_image": _z, "qwen_image21": _qwen,
-            "h3": _h3}
+            "h3": _h3, "h3_image": _h3_image}
 
 
 def test_every_family_a_lora_loads_on_is_traced_or_takes_a_traced_list():

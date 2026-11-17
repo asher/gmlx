@@ -291,6 +291,18 @@ def _edit(name: str):
     return call
 
 
+def lora_map(config: dict):
+    from gmlx.image.h3.lora_map import lora_map as build_map
+
+    return build_map(config, family="h3_image", title=TITLE)
+
+
+def lora_refusal(header: dict, config: dict):
+    from gmlx.image.h3.lora_map import refusal
+
+    return refusal(header, config)
+
+
 # H3 video's int8 linears less the VSA gate, which this DiT lacks: the
 # four linears of each block, fc2 with one activation scale per 1024 of
 # its input columns.
@@ -331,6 +343,12 @@ FAMILY = Family(
     aspect=((1, 3), (3, 1)),
     int8_linears=INT8_LINEARS,
     int8_attention=True,
+    lora_map=lora_map,
+    lora_refusal=lora_refusal,
+    # The adaLN projections on the float32 curve rows, and the patch
+    # projection and the head bank on their float32 rows.
+    lora_f32=("blocks.*.adaln_proj.linear", "final_layer.adaln_proj.linear",
+              "video_patch_proj", "final_layer.video_out"),
     edit=EditParts(max_refs=REFERENCES.values["max_refs"],
                    prepare_all=_edit("prepare"), size=_edit("default_size"),
                    token_ids=_edit("token_ids"), encode=_edit("encode"),

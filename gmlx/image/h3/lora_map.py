@@ -1,4 +1,4 @@
-"""MiniMax-H3 LoRA key map.
+"""MiniMax-H3 LoRA key map, of the video DiT and of MiniMax-H3-Image's.
 
 The GGUF keeps ComfyUI's module names, which ComfyUI's generic LoRA files
 target, such as lightx2v's Turbo LoRAs. Every linear leaf of the DiT maps
@@ -7,7 +7,10 @@ to itself: in each block and each token refiner block ``attn.qkv_proj``,
 ``adaln_proj.linear``, and outside the blocks ``condition_proj``, the two
 patch projections, the two output heads and the final adaLN linear.
 FastH3 (config ``vsa_sparsity``) adds ``attn.to_gate_compress`` in each
-block, its VSA gate, and only FastH3's files have that module. A
+block, its VSA gate, and only FastH3's files have that module.
+MiniMax-H3-Image has no audio stream, and its ``video_out`` is a bank of
+one head per PDD step: as ComfyUI does for a baked bank (comfy/lora.py
+426-428), a pair on the head patches head 0, the rows every step reads. A
 pair on the fused qkv covers the whole weight, as those files write it:
 one A over the three ranks, and a B that is zero outside each
 projection's rows. ComfyUI reads these names bare, under
@@ -20,7 +23,7 @@ other spelling.
   and fc1 halves gmlx has not read
 - one with ``.config`` keys, which ComfyUI reads as a module's config,
   such as int8 or sparse attention in a block
-- one whose head pairs have a multiple of the head's rows, as a PDD LoRA
+- one whose head pairs have a multiple of a head's rows, as a PDD LoRA
   grows each head into a bank of heads
 - on a file without FastH3's gate, one with a pair on it
 """
@@ -43,12 +46,26 @@ COMFY_READS = ("the GGUF names bare, under diffusion_model. or as "
                "lora_unet_ underscores")
 
 
+def _blocks(config: dict) -> dict:
+    """The fields the blocks read: a built H3-Image config holds them under
+    ``block``, the other forms at the top."""
+    return config.get("block", config)
+
+
 def _counts(config: dict) -> tuple[int, int]:
     """Blocks and refiner blocks, from the config synthesized from a
-    header or the fields of a built model's config."""
-    if "depth" in config:
-        return int(config["depth"]), int(config["refiner_depth"])
-    return int(config["num_layers"]), int(config["num_refiner_layers"])
+    header or the fields of a built model's config, of either family."""
+    c = _blocks(config)
+    if "depth" in c:
+        return int(c["depth"]), int(c["refiner_depth"])
+    refiner = c.get("num_refiner_layers", c.get("token_refiner_num_layers"))
+    return int(c["num_layers"]), int(refiner)
+
+
+def _bank(config: dict) -> int:
+    """The heads of ``video_out``: one per PDD step of H3-Image, else
+    one."""
+    return int(config.get("step_heads", config.get("pdd_steps", 1)))
 
 
 def _audio(config: dict) -> int | None:
@@ -59,12 +76,14 @@ def _audio(config: dict) -> int | None:
 
 
 def _head_rows(config: dict) -> dict:
-    """The output rows of each head the config has, from either form of
-    config."""
-    if "latent" in config:
-        latent, patch = config["latent"], config["patch"]
+    """The output rows of one head of each output the config has, from
+    any form of config."""
+    c = _blocks(config)
+    if "latent" in c:
+        latent, patch = c["latent"], c["patch"]
     else:
-        latent, patch = config["in_channels"], config["patch_size"]
+        latent = c["in_channels"] if "in_channels" in c else c["latents_dim"]
+        patch = c["patch_size"]
     rows = int(latent)
     for p in patch:
         rows *= int(p)
@@ -84,7 +103,8 @@ def _gates(config: dict) -> tuple:
     return tuple(f"blocks.{i}.{_GATE}" for i in range(blocks))
 
 
-def lora_map(config: dict) -> LoraKeyMap:
+def lora_map(config: dict, *, family: str = "h3",
+             title: str = "MiniMax-H3") -> LoraKeyMap:
     blocks, refiner = _counts(config)
     names = [n for n in _TOP if n not in _AUDIO
              or _audio(config) is not None]
@@ -95,9 +115,11 @@ def lora_map(config: dict) -> LoraKeyMap:
                                  ("token_refiner.blocks", refiner, _LEAVES)):
         names += [f"{group}.{i}.{leaf}" for i in range(count)
                   for leaf in leaves]
+    targets = {n: (n, None) for n in names}
+    if _bank(config) > 1:
+        targets[_HEADS[0]] = (_HEADS[0], (0, 0, _head_rows(config)[_HEADS[0]]))
     return LoraKeyMap(
-        family="h3", title="MiniMax-H3",
-        targets={n: (n, None) for n in names},
+        family=family, title=title, targets=targets,
         comfy_stems=frozenset(_spell(p, n) for n in names for p in _COMFY),
         comfy_reads=COMFY_READS)
 
@@ -140,12 +162,14 @@ def refusal(header: dict, config: dict) -> tuple[str, str] | None:
                 return (f"its pair {k} targets FastH3's attention gate, "
                         "which the model's file does not have",
                         "FastH3 gate")
-    rows = _head_rows(config)
+    rows, bank = _head_rows(config), _bank(config)
     for head, k, shape in _head_ups(header, rows):
         n = rows[head]
         if shape[0] > n and shape[0] % n == 0:
+            runs = "gmlx runs one plain head per stream" if bank == 1 else \
+                (f"gmlx patches head 0 of the model's bank of {bank} heads "
+                 "with a pair on the head, as ComfyUI does")
             return (f"its pair {k} has {shape[0]} rows, {shape[0] // n} "
                     f"heads of {n}, as a PDD LoRA grows each head into a "
-                    "bank of heads, and gmlx runs one plain head per "
-                    "stream", "PDD")
+                    f"bank of heads, and {runs}", "PDD")
     return None

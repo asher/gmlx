@@ -375,6 +375,9 @@ class Family:
     # given by name, as when the schedule depends on the variant.
     needs_variant: bool = False
     lora_map: Callable | None = None   # config -> lora.reader.LoraKeyMap
+    # (safetensors header, config) -> (why, kind) of a LoRA file gmlx does
+    # not run on the family, or None; None refuses none by its header.
+    lora_refusal: Callable | None = None
     # Path patterns (fnmatch) of the linear leaves that see float32 rows
     # under any activation dtype, whose LoRA factors are built and priced
     # in float32.

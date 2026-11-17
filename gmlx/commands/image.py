@@ -852,8 +852,8 @@ def _references(a, family) -> tuple:
 def _vet_adapters(a, ident=None) -> None:
     """Refuse an ``--adapter`` file gmlx does not apply from its header,
     before any model loads. With the identified DiT, also refuse a file
-    whose keys name no module of its family or a module the DiT file does
-    not hold."""
+    its family refuses by name (``lora_refusal``) or whose keys name no
+    module of its family or a module the DiT file does not hold."""
     if not a.adapter:
         return
     from gmlx.image import lora
@@ -867,6 +867,9 @@ def _vet_adapters(a, ident=None) -> None:
         modules = {n[:-len(".weight")] for n in ident.view.tensors
                    if n.endswith(".weight")}
     for path, _ in a.adapter:
+        if ident is not None:
+            lora.refuse(ident.family, dict(ident.config),
+                        os.path.expanduser(path))
         lora.vet_header(path, keymap=keymap, modules=modules)
 
 
