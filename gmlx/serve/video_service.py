@@ -56,11 +56,13 @@ from typing import Any
 
 import numpy as np
 
+from .cb_phase import hold as _caps_hold
 from .subservice import SingleWorker
 
 _log = logging.getLogger(__name__)
 
-WORKER = SingleWorker("video-worker")
+# Each job holds the prefill caps, as the image worker's do.
+WORKER = SingleWorker("video-worker", scope=_caps_hold)
 
 _F32 = np.float32
 # The text rows an entry's encode phase is priced at.

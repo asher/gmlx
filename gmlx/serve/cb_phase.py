@@ -26,10 +26,19 @@ caps at each step.
 The CLI lifts the caps to COARSE for the load of a streamed model, and
 the streamed install ends the lift (end_lift), so no phase of a streamed
 model runs on the lift, with GMLX_CB_PHASE=0 too.
+
+A served image or video job runs its forwards on its own worker thread,
+beside the engines, on thousands of rows at once: an encode, a DiT step,
+a VAE pass. The decode caps a chat turn leaves on the device keep every
+layer's transients of such a forward live: a MiniMax-H3-Image edit's
+encode after a chat turn held 43 GB more than on FINE. The job runs
+under hold, which keeps FINE on the device until it ends, whatever phase
+an engine flips to meanwhile.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import weakref
@@ -57,8 +66,11 @@ _ENV_CAPS = ("MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER")
 _UNSET = object()
 # model: a weak reference to the model the caps were last set for, None
 # for a flip without a model, _UNSET when the last set had no model.
+# holds: the jobs in a hold block, which keep FINE on the device.
 _state: dict = {"phase": None, "caps": None, "kq": None, "lifted": False,
-                "pre_lift": None, "model": _UNSET}
+                "pre_lift": None, "model": _UNSET, "holds": 0}
+# The phase a hold records, which no engine flips to.
+_HOLD = "hold"
 # Engines on separate threads share the device fields: the compare, the
 # write and the record go together, so the record matches the device.
 # flip's repeat check reads phase and model without the lock: a torn
@@ -146,9 +158,12 @@ def _set(caps: tuple[int, int], ph: str | None,
     """Set ``caps`` on the device. Dedupes on the caps set, so a phase
     change that keeps the caps costs nothing and a model change that
     moves them under one phase still applies. Records the phase and the
-    model it was set for. Returns the caps the device held before, None
-    when they are not known."""
+    model it was set for. While a job is in a hold block, every set is of
+    FINE and records the hold's phase. Returns the caps the device held
+    before, None when they are not known."""
     with _LOCK:
+        if _state["holds"]:
+            caps, ph = FINE, _HOLD
         prev = _state["caps"]
         if prev != caps:
             kq = _kq()
@@ -189,6 +204,27 @@ def flip(phase: str, model=None) -> None:
         return
     caps = decode_caps(model) if phase == "decode" else prefill_caps(model)
     _set(caps, phase, model)
+
+
+@contextlib.contextmanager
+def hold():
+    """Keep FINE on the device for the block, whatever phase an engine
+    flips to meanwhile, for a served image or video job's forwards on its
+    worker thread. Blocks nest and may run on several threads. No engine
+    flips to the hold's phase, so when the last block ends, the next flip
+    of each engine sets its own caps again. Nothing under the user's pin
+    or GMLX_CB_PHASE=0, or without kq."""
+    if not _live() or not _kq():
+        yield
+        return
+    with _LOCK:
+        _state["holds"] += 1
+    try:
+        _set(FINE, _HOLD)
+        yield
+    finally:
+        with _LOCK:
+            _state["holds"] -= 1
 
 
 def lift() -> None:

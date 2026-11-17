@@ -34,6 +34,7 @@ def fake_kq(monkeypatch):
     monkeypatch.setitem(cb_phase._state, "lifted", False)
     monkeypatch.setitem(cb_phase._state, "pre_lift", None)
     monkeypatch.setitem(cb_phase._state, "model", cb_phase._UNSET)
+    monkeypatch.setitem(cb_phase._state, "holds", 0)
     return calls
 
 
@@ -782,3 +783,85 @@ def test_a_repeat_flip_for_the_same_model_reads_nothing(monkeypatch, fake_kq):
     cb_phase.flip("decode", None)
     cb_phase.flip("decode", None)
     assert len(picks) == 7
+
+
+def test_a_hold_keeps_the_fine_caps_through_the_engines_flips(fake_kq):
+    """A served image job holds FINE from the decode caps a chat turn left.
+    An engine's decode or prefill flip and a restore of caps taken before
+    the hold all keep FINE until the hold ends, and the engine's next step
+    after it sets its own caps."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    model = _model(False)
+    cb_phase.flip("decode", model)
+    before = cb_phase.snapshot()
+    assert fake_kq == [cb_phase.RAM_DECODE]
+    with cb_phase.hold():
+        assert fake_kq == [cb_phase.RAM_DECODE, cb_phase.FINE]
+        cb_phase.flip("prefill", model)
+        cb_phase.flip("decode", model)
+        cb_phase.restore(before)
+        assert fake_kq == [cb_phase.RAM_DECODE, cb_phase.FINE]
+    assert cb_phase._state["holds"] == 0
+    cb_phase.flip("decode", model)
+    assert fake_kq == [cb_phase.RAM_DECODE, cb_phase.FINE,
+                       cb_phase.RAM_DECODE]
+
+
+def test_holds_nest_and_the_last_one_out_ends_them(fake_kq):
+    """The image and video workers each hold; the caps go back to the
+    engines only when both jobs have ended."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    model = _model(False)
+    cb_phase.flip("decode", model)
+    with cb_phase.hold():
+        with cb_phase.hold():
+            pass
+        cb_phase.flip("decode", model)
+        assert cb_phase._state["caps"] == cb_phase.FINE
+    cb_phase.flip("decode", model)
+    assert cb_phase._state["caps"] == cb_phase.RAM_DECODE
+
+
+def test_a_hold_keeps_a_pin_or_the_switch(held):
+    """A hold writes no caps under the pin or the switch, and the flips in
+    it write none either."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    _, writes = held
+    with cb_phase.hold():
+        cb_phase.flip("decode", _model(False))
+    assert writes == []
+    assert cb_phase._state["holds"] == 0
+
+
+@pytest.mark.parametrize("service", ["image_service", "video_service"])
+def test_a_served_media_job_after_a_chat_turn_runs_on_the_fine_caps(
+        fake_kq, service):
+    """A chat turn leaves the device on its decode caps, (400, 100000),
+    under which a MiniMax-H3-Image edit's encode held 43 GB more than on
+    FINE. Each job on the image or video worker, a reserved block's
+    included, runs on FINE however the chat engine flips meanwhile, and
+    the engine decodes on its own caps again once the job has ended."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    worker = importlib.import_module(f"gmlx.serve.{service}").WORKER
+    model = _model(False)
+    cb_phase.flip("decode", model)
+
+    def job():
+        caps = [cb_phase._state["caps"]]
+        engine = threading.Thread(target=cb_phase.flip,
+                                  args=("decode", model))
+        engine.start()
+        engine.join(5)
+        caps.append(cb_phase._state["caps"])
+        return caps
+
+    assert worker.submit(job).result(10) == [cb_phase.FINE] * 2
+    with worker.reserved():
+        assert worker.run(job) == [cb_phase.FINE] * 2
+    cb_phase.flip("decode", model)
+    assert cb_phase._state["caps"] == cb_phase.RAM_DECODE
+    assert cb_phase._state["holds"] == 0
