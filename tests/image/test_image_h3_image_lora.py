@@ -1,8 +1,9 @@
 """MiniMax-H3-Image LoRA files: the key map against the release file's
-names in each form of config, a LoRA run live on the tiny DiT against the
-merged weights, with a pair on the head patching head 0 of the bank as
-ComfyUI places it, and the files gmlx refuses by name, at the load and in
-the CLI before a model loads. CPU."""
+names in each form of config, and diffusers' names, which the published
+adapters spell; a LoRA run live on the tiny DiT against the merged
+weights, with a pair on the head patching head 0 of the bank as ComfyUI
+places it, in the GGUF names and in diffusers' form; and the files gmlx
+refuses by name, at the load and in the CLI before a model loads. CPU."""
 from __future__ import annotations
 
 import dataclasses
@@ -15,7 +16,8 @@ import pytest
 
 import h3_image_gates as hg
 from image_fixtures import fixture_view
-from lora_fixtures import reference_delta, rel_l2, write_keys
+from lora_fixtures import h3_diffusers_keys, reference_delta, rel_l2, \
+    write_keys
 from oracle_fixture import committed_fixture
 
 from gmlx.image import api
@@ -24,6 +26,7 @@ from gmlx.image.families.h3_image import family as hi
 from gmlx.image.families.h3_image import model as him
 from gmlx.image.h3.lora_map import lora_map
 from gmlx.image.lora import UnsupportedAdapterError, install
+from gmlx.image.lora.reader import _dit_target, _underscore_index
 
 HEADER = "h3_image_pruned_ud_q4_k_xl.header.json"
 TINY = "selftest_h3_image_tiny"
@@ -111,10 +114,49 @@ def test_the_key_map_names_each_linear_of_the_release_file():
     km = hi.FAMILY.lora_map(hi.synth_config(view))
     names = {n.removesuffix(".weight") for n, t in view.tensors.items()
              if n.endswith(".weight") and len(t.shape) == 2}
-    assert set(km.targets) == names
+    assert {p for p, (m, _) in km.targets.items() if m == p} == names
+    assert {m for m, _ in km.targets.values()} == names
     assert km.targets[HEAD] == (HEAD, (0, 0, 96))
     assert all(km.targets[p] == (p, None) for p in names - {HEAD})
     assert (km.family, km.title) == ("h3_image", hi.TITLE)
+
+
+def test_diffusers_names_map_to_the_gguf_leaves():
+    """The names of diffusers' converter: q, k and v on thirds of the
+    fused qkv's rows, fc1 with its halves swapped back, the head on head
+    0, bare and under transformer., and ComfyUI drops every one."""
+    view = fixture_view(HEADER)
+    km = hi.FAMILY.lora_map(hi.synth_config(view))
+    inner = 56 * 128
+    t = km.targets
+    assert t["transformer_blocks.3.attn.to_k"] == \
+        ("blocks.3.attn.qkv_proj", (0, inner, inner))
+    assert t["token_refiner.refiner_blocks.1.attn.to_v"] == \
+        ("token_refiner.blocks.1.attn.qkv_proj", (0, 2 * inner, inner))
+    assert t["transformer_blocks.49.attn.to_q"] == \
+        ("blocks.49.attn.qkv_proj", (0, 0, inner))
+    assert t["transformer_blocks.0.ff.net.0.proj"] == ("blocks.0.mlp.fc1", None)
+    assert t["proj_out"] == (HEAD, (0, 0, 96))
+    assert (t["context_embedder"], t["proj_in"], t["norm_out.linear"]) == (
+        ("condition_proj", None), ("video_patch_proj", None),
+        ("final_layer.adaln_proj.linear", None))
+    assert not {"audio_proj_in", "audio_proj_out"} & set(t)
+    assert km.swapped == {f"{g}.{i}.ff.net.0.proj" for g, n in
+                          (("transformer_blocks", 50),
+                           ("token_refiner.refiner_blocks", 2))
+                          for i in range(n)}
+    under = _underscore_index(t)
+    leaves = ("attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0",
+              "ff.net.0.proj", "ff.net.2")
+    stems = [f"{g}.{i}.{leaf}" for g, n in (("transformer_blocks", 50),
+                                            ("token_refiner.refiner_blocks",
+                                             2))
+             for i in range(n) for leaf in leaves]
+    assert len(stems) == 312
+    for p in ("", "transformer."):
+        for stem in stems:
+            assert _dit_target(p + stem, t, under) == (stem, False), stem
+            assert p + stem not in km.comfy_stems
 
 
 def test_the_built_models_config_maps_as_the_header_does():
@@ -124,25 +166,32 @@ def test_the_built_models_config_maps_as_the_header_does():
     assert lora_map(built).targets == lora_map(config).targets
 
 
-def test_a_lora_runs_live_as_the_merged_weights(tiny, tmp_path):
+@pytest.mark.parametrize("form", ["comfy", "diffusers", "transformer"])
+def test_a_lora_runs_live_as_the_merged_weights(tiny, tmp_path, form):
     """A step under the table equals the step of the DiT whose weights
     hold the deltas, the head's pair on head 0, the one head the step
-    reads; the caption the base step keeps does not leak into it, nor its
-    into a later base step."""
+    reads, with the file in the GGUF names or in diffusers' form, bare or
+    under transformer.; the caption the base step keeps does not leak
+    into it, nor its into a later base step."""
     from gmlx.image import lora
 
     weights, config, arrays = tiny
     strength = 0.7
     pipe = _pipe(weights, config)
     adapter = _adapter(pipe, config, 1)
-    path = write_keys(tmp_path / "a.safetensors", _comfy_keys(adapter))
+    keys = _comfy_keys(adapter) if form == "comfy" else h3_diffusers_keys(
+        adapter, "transformer." if form == "transformer" else "")
+    path = write_keys(tmp_path / "a.safetensors", keys)
     merged = _pipe(_merged(weights, adapter, strength, _head_rows(config)),
                    config)
     cond = Conditioning(mx.array(arrays["features"]), "h3-lora")
     with mx.stream(mx.cpu):
         base = _step(pipe, arrays, cond)
         ad = lora.load_adapter(pipe, path)
-        assert len(ad.dit) == len(APPLIED)
+        # Each of the two qkv pairs is three pairs in diffusers' form.
+        assert len(ad.dit) == len(APPLIED) + 4 * (form != "comfy")
+        assert bool(ad.warnings) == (form != "comfy"), ad.warnings
+        assert all("ComfyUI does not read" in w for w in ad.warnings)
         tid = api.define_patch_table(pipe,
                                      lora.table_entries([(ad, strength)]))
         got = _step(pipe, arrays, cond, tid)
@@ -162,6 +211,7 @@ def _keys(stem: str, down_shape, up_shape, *, a="lora_A", b="lora_B"):
 
 # A pair over the whole bank of six heads, as a PDD LoRA writes it.
 _BANK = _keys(f"diffusion_model.{HEAD}", (4, _D), (576, 4))
+_BANK_DIFFUSERS = _keys("transformer.proj_out", (4, _D), (576, 4))
 _DIFFSYNTH = _keys("diffusion_model.blocks.0.attn.qkv_proj", (4, _D),
                    (384, 4), a="lora_A.default", b="lora_B.default")
 _CONFIG = {"diffusion_model.blocks.0.attn.comfy_attention.config":
@@ -172,10 +222,11 @@ _GATE = _keys("diffusion_model.blocks.1.attn.to_gate_compress", (4, _D),
 
 @pytest.mark.parametrize("extra, kind, names", [
     (_BANK, "PDD", "head 0 of the model's bank of 6 heads"),
+    (_BANK_DIFFUSERS, "PDD", "transformer.proj_out.lora_B.weight has 576"),
     (_DIFFSYNTH, "DiffSynth", ".default."),
     (_CONFIG, "config", "blocks.0.attn.comfy_attention.config"),
     (_GATE, "FastH3 gate", "blocks.1.attn.to_gate_compress"),
-], ids=["bank", "diffsynth", "config", "gate"])
+], ids=["bank", "bank-diffusers", "diffsynth", "config", "gate"])
 def test_a_lora_gmlx_does_not_run_is_refused_by_name(tiny, tmp_path, extra,
                                                      kind, names):
     """At the load, alone and second after a file that loads, before

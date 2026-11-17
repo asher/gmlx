@@ -15,7 +15,8 @@ from gmlx.video import memfit, pipeline, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
 from gmlx.image.h3.lora_map import lora_map, refusal
-from lora_fixtures import reference_delta, rel_l2, write_keys
+from lora_fixtures import h3_diffusers_keys, reference_delta, rel_l2, \
+    write_keys
 from test_video_h3_model import TINY, tiny_weights
 from video_fixtures import H3_HEADER, fixture_view
 
@@ -114,14 +115,18 @@ def _run(pipe, table=None) -> list:
 
 
 def test_the_key_map_names_each_linear_of_the_gguf():
+    """Each linear of the GGUF maps to itself, and every other name of
+    the map, diffusers', to one of them."""
     view = fixture_view(H3_HEADER)
     km = lora_map(hf.FAMILY.synth_config(view))
     names = {n.removesuffix(".weight") for n, t in view.tensors.items()
              if n.endswith(".weight") and len(t.shape) == 2}
-    assert set(km.targets) == names
-    assert all(km.targets[p] == (p, None) for p in km.targets)
+    assert {p for p, (m, _) in km.targets.items() if m == p} == names
+    assert all(km.targets[p] == (p, None) for p in names)
+    assert {m for m, _ in km.targets.values()} == names
+    assert km.targets["audio_proj_out"] == ("final_layer.audio_out", None)
     # The 208 pairs of each lightx2v file.
-    assert len([p for p in km.targets if "blocks." in p
+    assert len([p for p in names if "blocks." in p
                 and "adaln" not in p]) == 208
 
 
@@ -170,10 +175,11 @@ def test_a_config_without_an_audio_stream_maps_and_refuses_no_audio_module(
         config, key = dataclasses.asdict(hm.H3Config.from_dict(config)), \
             "audio"
     bare = {k: v for k, v in config.items() if k != key}
+    audio_names = {"audio_patch_proj", "final_layer.audio_out",
+                   "audio_proj_in", "audio_proj_out"}
     assert set(lora_map(config).targets) - set(lora_map(bare).targets) == \
-        {"audio_patch_proj", "final_layer.audio_out"}
-    assert not {"audio_patch_proj", "final_layer.audio_out"} & \
-        set(lora_map(bare).targets)
+        audio_names
+    assert not audio_names & set(lora_map(bare).targets)
 
     def up(stem, rows):
         return {f"{stem}.lora_B.weight": {"dtype": "F32",
@@ -210,6 +216,26 @@ def test_a_comfyui_lora_runs_live_as_the_merged_weights(tmp_path):
             assert rel_l2(b, w) > 1e-2, stream
     assert all(np.array_equal(a, b) for a, b in zip(_run(pipe), base))
     print(f"tiny H3 LoRA run: worst relative L2 {worst:.3e}")
+
+
+@pytest.mark.parametrize("prefix", ["", "transformer."])
+def test_a_lora_in_diffusers_form_runs_live_as_the_merged_weights(tmp_path,
+                                                                  prefix):
+    """The tiny LoRA as diffusers' converter writes it, its qkv pairs as
+    three pairs on bands and fc1's halves in diffusers' order, runs as
+    the GGUF form's merged weights, with the warning that ComfyUI drops
+    its keys."""
+    params, one = _params(), _adapter(1)
+    path = write_keys(tmp_path / "d.safetensors",
+                      h3_diffusers_keys(one, prefix))
+    logged: list = []
+    pipe = _pipe(params)
+    pipe.log = logged.append
+    tid = pipeline.adapter_table(pipe, [(path, 0.6)])
+    want = _run(_pipe(_merged(params, [(one, 0.6)])))
+    for stream, g, w in zip(("video", "audio"), _run(pipe, tid), want):
+        assert rel_l2(g, w) <= RUN_TOL, (stream, rel_l2(g, w))
+    assert [w for w in logged if "ComfyUI does not read" in w], logged
 
 
 def test_each_pair_of_the_tiny_lora_moves_the_run():

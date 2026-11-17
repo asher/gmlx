@@ -154,3 +154,52 @@ def reference_delta(parts, dims: tuple) -> np.ndarray:
 def rel_l2(got: np.ndarray, ref: np.ndarray) -> float:
     got = np.asarray(got, np.float64)
     return float(np.linalg.norm(got - ref) / np.linalg.norm(ref))
+
+
+# diffusers 0.43.0's MiniMax-H3 names
+# (_convert_non_diffusers_minimax_h3_lora_to_diffusers): of each module
+# outside the blocks, of each block group and of each block leaf but qkv.
+H3_DIFFUSERS_TOP = {"condition_proj": "context_embedder",
+                    "video_patch_proj": "proj_in",
+                    "audio_patch_proj": "audio_proj_in",
+                    "final_layer.adaln_proj.linear": "norm_out.linear",
+                    "final_layer.video_out": "proj_out",
+                    "final_layer.audio_out": "audio_proj_out"}
+H3_DIFFUSERS_GROUPS = {"token_refiner.blocks": "token_refiner.refiner_blocks",
+                       "blocks": "transformer_blocks"}
+H3_DIFFUSERS_LEAVES = {"attn.out_proj": "attn.to_out.0",
+                       "mlp.fc1": "ff.net.0.proj", "mlp.fc2": "ff.net.2",
+                       "adaln_proj.linear": "adaln_proj.linear"}
+H3_DIFFUSERS_QKV = ("attn.to_q", "attn.to_k", "attn.to_v")
+
+
+def h3_diffusers_keys(adapter: dict, prefix: str = "") -> dict:
+    """The keys of an H3 adapter in the GGUF names, target to (down, up,
+    alpha), as diffusers' converter writes it, under ``prefix``: the alpha
+    folded into the up rows, a pair on the fused qkv as three pairs with
+    its down and a third of its up rows each, fc1's up rows with their
+    halves swapped to diffusers' value rows first, and diffusers' names."""
+    out = {}
+    for target, (down, up, alpha) in adapter.items():
+        if alpha is not None:
+            up = (up * np.float32(alpha / down.shape[0])).astype(np.float32)
+        if target in H3_DIFFUSERS_TOP:
+            pairs = [(H3_DIFFUSERS_TOP[target], up)]
+        else:
+            group = next(g for g in H3_DIFFUSERS_GROUPS
+                         if target.startswith(g + "."))
+            idx, _, leaf = target[len(group) + 1:].partition(".")
+            base = f"{H3_DIFFUSERS_GROUPS[group]}.{idx}."
+            if leaf == "attn.qkv_proj":
+                pairs = [(base + q, u) for q, u in
+                         zip(H3_DIFFUSERS_QKV, np.split(up, 3))]
+            elif leaf == "mlp.fc1":
+                gate, value = np.split(up, 2)
+                pairs = [(base + H3_DIFFUSERS_LEAVES[leaf],
+                          np.concatenate([value, gate]))]
+            else:
+                pairs = [(base + H3_DIFFUSERS_LEAVES[leaf], up)]
+        for name, u in pairs:
+            out[f"{prefix}{name}.lora_A.weight"] = down
+            out[f"{prefix}{name}.lora_B.weight"] = np.ascontiguousarray(u)
+    return out
