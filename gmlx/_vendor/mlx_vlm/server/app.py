@@ -247,8 +247,8 @@ async def _preflight_stream_context_budget(
             stream=True,
             error=str(e),
         )
-        mx.clear_cache()
         gc.collect()
+        mx.clear_cache()
         raise HTTPException(status_code=400, detail=str(e))
 
 

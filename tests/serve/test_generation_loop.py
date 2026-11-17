@@ -374,3 +374,113 @@ def test_each_new_batch_numbers_on_from_the_last(monkeypatch):
         _stop(rg, thread)
     assert len(_Batch.made) == 2
     assert uids == [0, 1]
+
+
+class _Cache:
+    """Stands in for a batch's KV cache."""
+
+
+class _Fault(RuntimeError):
+    """The engine's error, weakly referable."""
+
+
+class _FailingBatch(_Batch):
+    """A batch whose step fails once armed, from a frame that holds the
+    batch. Its text prompts stay pending, so an embedding request drains
+    them through a step first."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.cache = _Cache()
+        self.unprocessed_prompts = []
+        self.armed = False
+
+    @property
+    def has_pending_prompts(self):
+        return bool(self.unprocessed_prompts)
+
+    def insert(self, prompts, **kw):
+        self.unprocessed_prompts.append(
+            (None, prompts[0], None, kw["prompt_kwargs"][0]))
+        return super().insert(prompts, **kw)
+
+    def step(self):
+        if self.armed:
+            raise _Fault("[metal::malloc] Attempting to allocate 1 bytes")
+
+
+def test_a_gpu_thread_error_frees_the_batch_by_refcount(monkeypatch):
+    """Seven rows decode and an eighth waits for its context when the
+    engine fails. Every request gets the error: the seven from their
+    token streams, the eighth from generate. With the collector off and
+    no epilogue collect, the batch and the error are freed once the
+    requests and the loop let go of them."""
+    rg = _response_generator(monkeypatch)
+    monkeypatch.setattr(_GEN, "BatchGenerator", _FailingBatch)
+    # Log records keep the frames; the error must be the only holder.
+    monkeypatch.setattr(_GEN.logger, "disabled", True)
+    collected = threading.Event()
+    monkeypatch.setattr(_GEN, "gc", types.SimpleNamespace(
+        collect=collected.set))
+    rg._make_thinking_budget_criteria = lambda args, ids: None
+    rg._preprocess_request = lambda prompt, images, audio, videos: (
+        {"input_ids": [1, 2], "embeds": audio} if audio
+        else {"input_ids": [1, 2]})
+    batch = []
+
+    def gpu_embed(raw, images, apc_semantic_hash=None, row_settings=None):
+        if "embeds" not in raw:
+            return mx.array([[1, 2]]), {}
+        batch[0]().armed = True
+        return mx.array([[1, 2]]), {"inputs_embeds": raw["embeds"]}
+
+    rg._gpu_embed = gpu_embed
+    rg._step = lambda batch_gen, active: batch_gen.step()
+    idle = threading.Event()
+    collect = rg._collect_pending_requests
+
+    def collect_pending(**kw):
+        if collected.is_set():
+            idle.set()
+        return collect(**{**kw, "idle_timeout": 0.01})
+
+    rg._collect_pending_requests = collect_pending
+    started: queue.Queue = queue.Queue()
+    errors, faults = [], []
+
+    def request(audio=None):
+        try:
+            _ctx, tokens = rg.generate(
+                "p", audio=audio, args=_GEN.GenerationArguments(max_tokens=4))
+            started.put(True)
+            for _ in tokens:
+                pass
+        except _Fault as e:
+            errors.append(str(e))
+            faults.append(weakref.ref(e))
+
+    gc.disable()
+    loop = threading.Thread(target=rg._run_impl, daemon=True)
+    loop.start()
+    try:
+        rows = [threading.Thread(target=request) for _ in range(7)]
+        for t in rows:
+            t.start()
+        for _ in rows:
+            assert started.get(timeout=5)
+        (made,) = _Batch.made
+        _Batch.made.clear()
+        batch.append(weakref.ref(made))
+        cache = weakref.ref(made.cache)
+        del made
+        rows.append(threading.Thread(target=request, args=(["clip"],)))
+        rows[-1].start()
+        for t in rows:
+            t.join(timeout=5)
+        assert idle.wait(timeout=5)
+        assert len(errors) == 8 and len(set(errors)) == 1
+        assert batch[0]() is None and cache() is None
+        assert [f() for f in faults] == [None] * 8
+    finally:
+        gc.enable()
+        _stop(rg, loop)

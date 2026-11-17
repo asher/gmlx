@@ -39,7 +39,6 @@ import contextlib
 import contextvars
 
 import mlx.core as mx
-import mlx.nn as nn
 
 from gmlx.tune.checkpoint import layer_list
 from gmlx.upstream.patching import link, wrapped_with
@@ -202,22 +201,12 @@ def _trunk_owner(model):
     """The module whose ``model`` attribute is the trunk that holds the
     layers, found under the text wrapper and any ``language_model`` links
     below it (qwen3.5 nests its text model so), or None."""
-    from gmlx.models.vlm_text_only import LanguageModel
+    from gmlx.models.vlm_text_only import LanguageModel, trunk_owner
 
     lm = getattr(model, "language_model", None)
     if not isinstance(lm, LanguageModel):
         return None
-    owner = lm._model
-    for _ in range(4):
-        if "model" in vars(owner):
-            return None
-        trunk = getattr(owner, "model", None)
-        if isinstance(trunk, nn.Module) and getattr(trunk, "layers", None) is not None:
-            return owner
-        owner = getattr(owner, "language_model", None)
-        if not isinstance(owner, nn.Module):
-            return None
-    return None
+    return trunk_owner(lm._model, layers=True)
 
 
 def _chunks(n: int, positions: int, step: int | None) -> list[int]:

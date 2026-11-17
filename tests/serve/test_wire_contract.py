@@ -1920,3 +1920,217 @@ def test_a_missing_adapter_identity_is_a_server_error(wire, route, status, shown
     r = wire.client.post(path, json=body(MIX_ID))
     assert r.status_code == status, r.text
     assert shown in r.text
+
+
+# 14. A request without media frees nothing worth a full collect on success:
+#     its epilogue only clears the buffer cache. Media and errors still
+#     collect.
+
+def _png_uri():
+    import base64
+    import io
+
+    from PIL import Image
+
+    png = io.BytesIO()
+    Image.new("RGB", (2, 2)).save(png, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(png.getvalue()).decode()
+
+
+def _text_part(route):
+    return ({"type": "input_text", "text": "hi"} if route == "responses"
+            else {"type": "text", "text": "hi"})
+
+
+def _image_part(route):
+    uri = _png_uri()
+    if route == "messages":
+        return {"type": "image", "source": {
+            "type": "base64", "media_type": "image/png",
+            "data": uri.split(",", 1)[1]}}
+    if route == "responses":
+        return {"type": "input_image", "image_url": uri}
+    return {"type": "image_url", "image_url": {"url": uri}}
+
+
+def _request(route, *, image=False, stream=False):
+    content = [_text_part(route)] + ([_image_part(route)] if image else [])
+    message = {"role": "user", "content": content}
+    if route == "responses":
+        return "/v1/responses", {"model": MODEL_ID, "input": [message],
+                                 "stream": stream}
+    if route == "messages":
+        return "/v1/messages", {"model": MODEL_ID, "max_tokens": 32,
+                                "messages": [message], "stream": stream}
+    return "/v1/chat/completions", _chat_body(messages=[message], stream=stream)
+
+
+class _Collects:
+    def __init__(self):
+        self.calls = 0
+
+    def collect(self, *a):
+        self.calls += 1
+
+
+@pytest.fixture
+def collects(monkeypatch):
+    seen = _Collects()
+    for name in ("openai", "anthropic"):
+        monkeypatch.setattr(importlib.import_module(
+            f"gmlx._vendor.mlx_vlm.server.{name}"), "gc", seen)
+    return seen
+
+
+_COLLECT_ROUTES = [("chat", False), ("responses", False), ("messages", False),
+                   ("messages", True)]
+
+
+@pytest.mark.parametrize("route,stream", _COLLECT_ROUTES,
+                         ids=["chat", "responses", "messages", "messages-stream"])
+def test_a_text_success_makes_no_collect(wire, collects, route, stream):
+    path, body = _request(route, stream=stream)
+    r = wire.client.post(path, json=body)
+    assert r.status_code == 200, r.text
+    assert "Hello" in r.text
+    assert collects.calls == 0
+
+
+@pytest.mark.parametrize("route,stream", _COLLECT_ROUTES,
+                         ids=["chat", "responses", "messages", "messages-stream"])
+def test_a_media_success_still_collects(wire, collects, route, stream):
+    path, body = _request(route, image=True, stream=stream)
+    r = wire.client.post(path, json=body)
+    assert r.status_code == 200, r.text
+    assert len(wire.gen.calls) == 1
+    assert collects.calls == 1
+
+
+@pytest.mark.parametrize("route", ["chat", "responses", "messages"])
+def test_an_error_epilogue_still_collects(wire, collects, route):
+    wire.gen.raise_on_generate = RuntimeError("engine failed")
+    path, body = _request(route)
+    r = wire.client.post(path, json=body)
+    assert r.status_code == 500, r.text
+    assert collects.calls == 1
+
+
+# 15. The request's busy hold, through the residency seam: the pooled
+#     resolver takes a hold, and the runtime proxy hands the handler a
+#     generation guard that carries it into the token stream.
+
+@pytest.fixture
+def held(wire, monkeypatch):
+    """The wire app over a residency pool. Returns ``(pool, seen)``:
+    ``seen`` gets the model's busy count at each token the engine yields."""
+    from gmlx.serve import residency
+    from gmlx.serve.residency import (_BusyHold, _ResidencyPool, _RuntimeProxy,
+                                      _active_entry, _active_hold)
+
+    proxy = _RuntimeProxy(_RUNTIME)
+
+    def stock_get(model_path, adapter_path, *, model_kind="auto"):
+        proxy.apc_manager = None
+        proxy.response_generator = wire.gen
+        proxy.model_cache = {
+            "cache_key": (model_path, adapter_path, model_kind),
+            "model_path": model_path, "model": object(),
+            "processor": _PROCESSOR, "config": _CONFIG}
+
+    pool = _ResidencyPool(proxy, stock_get, lambda: True, 15 * 1024**3, (),
+                          max_models=None, footprint_fn=lambda p: 1024**3)
+
+    def pooled_get_cached_model(model_path, adapter_path=None, *,
+                                model_kind="auto"):
+        # The residency seam's resolve: the entry and a fresh hold, bound
+        # in the caller's context.
+        load_path, spec = serving.resolve_request_model(
+            str(model_path), profile_field=serving.get_request_profile())
+        serving.set_active_spec(spec)
+        entry = pool.acquire(load_path, None, model_kind)
+        _active_entry.set(entry)
+        prev = _active_hold.get()
+        if prev is not None:
+            prev.release()
+        _active_hold.set(_BusyHold(pool, entry))
+        mc = entry.model_cache
+        return mc["model"], mc["processor"], mc["config"]
+
+    for target in (_PKG, _APP):
+        monkeypatch.setattr(target, "get_cached_model", pooled_get_cached_model)
+    for name in residency._RUNTIME_MODULES:
+        mod = importlib.import_module(name)
+        if getattr(mod, "runtime", None) is _RUNTIME:
+            monkeypatch.setattr(mod, "runtime", proxy)
+
+    seen = []
+    generate = wire.gen.generate
+
+    def observed(*a, **k):
+        ctx, tokens = generate(*a, **k)
+
+        def stream():
+            for t in tokens:
+                seen.append(busy(pool))
+                yield t
+        return ctx, stream()
+
+    monkeypatch.setattr(wire.gen, "generate", observed)
+    return pool, seen
+
+
+def busy(pool):
+    (entry,) = pool.stats()["resident"]
+    return entry["busy"]
+
+
+@pytest.mark.host_gb(64)
+@pytest.mark.parametrize("route", ["chat", "responses", "messages"])
+def test_a_stream_keeps_its_hold_until_its_last_chunk(held, wire, route):
+    """The stream body takes the generator after the handler returned, so
+    the hold the handler's resolve set must still be in its context."""
+    pool, seen = held
+    path, body = _request(route, stream=True)
+    r = wire.client.post(path, json=body)
+    assert r.status_code == 200, r.text
+    assert "Hello" in r.text
+    assert seen == [1, 1, 1]
+    assert busy(pool) == 0
+
+
+@pytest.mark.host_gb(64)
+@pytest.mark.parametrize("route", ["chat", "responses", "messages"])
+def test_a_success_keeps_its_hold_through_its_generate(held, wire, route):
+    pool, seen = held
+    path, body = _request(route)
+    r = wire.client.post(path, json=body)
+    assert r.status_code == 200, r.text
+    assert seen == [1, 1, 1]
+    assert busy(pool) == 0
+
+
+@pytest.mark.host_gb(64)
+@pytest.mark.parametrize("route", ["chat", "responses", "messages"])
+def test_a_handler_that_fails_after_its_resolve_leaves_no_hold(
+        held, wire, collects, monkeypatch, route):
+    """The template fails after the resolve took the hold, before any
+    generate. With the collector off and no epilogue collect, the busy
+    count is back to zero once the error answer is out."""
+    import gc
+
+    def fail(*a, **k):
+        raise RuntimeError("template failed")
+
+    for name in ("openai", "anthropic"):
+        monkeypatch.setattr(importlib.import_module(
+            f"gmlx._vendor.mlx_vlm.server.{name}"), "apply_chat_template", fail)
+    pool, seen = held
+    path, body = _request(route)
+    gc.disable()
+    try:
+        r = wire.client.post(path, json=body)
+        assert r.status_code == 500, r.text
+        assert busy(pool) == 0
+    finally:
+        gc.enable()
+    assert seen == [] and wire.gen.calls == []

@@ -607,10 +607,12 @@ def _ckpt_replay_boundary(batch, meta, restored: int,
     query, and the interval/terminal schedule never places one there
     for prompts under one interval (the depth e2e's bug 1); N-1 is the
     deepest position that is both adoptable and drift-free (the warm
-    turn forwards exactly one token), and the pause is free on the cold
-    side -- both prefill loops already stop at N-1 to feed the first
-    decode step, so the boundary lands on a natural chunk edge and
-    perturbs no chunk shape. arr layouts gate on a minimum N:
+    turn forwards exactly one token). On the cold side the pause is free
+    where the loop already stops at N-1 to feed the first decode step:
+    the MTP body, and a model that projects every column. A model that
+    keeps only the last logits runs the last chunk and the first token
+    in one forward, so there the boundary costs a split at N-1 and
+    changes the chunk shape. arr layouts gate on a minimum N:
     recurrent state is prompt-length-independent (>100 MB per record on
     27B-class), and short-prompt records would churn the LRU out of the
     deep-conversation records it exists to protect. Rotating layouts
@@ -1378,6 +1380,8 @@ def _plain_retire(stash: dict, prompt_cache: list) -> None:
     Offset invariants mirror ``speculative._retire_b1``: the stock step
     loop forwards each token as it emits it, so a clean finish leaves
     ``offset == len(seq)`` (an abort between steps leaves the same).
+    A step on which every row ends skips that forward, so its finish
+    leaves ``offset == len(seq) - 1`` and the key drops the last token.
     ``stash["mode"]`` picks the tier arm: "ckpt" stores blocks +
     sidecar, "exact" a whole-row snapshot (DeepSeek-V4-class pooling
     stacks).

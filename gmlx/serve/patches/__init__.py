@@ -145,6 +145,7 @@ from .sampling import (
     install_fast_sampler,
     install_gen_args_profile_injection,
     install_max_completion_tokens,
+    install_short_lived_mark,
     install_thinking_budget_fields,
     install_thinking_budget_route,
     install_xtc_sampling,
@@ -184,6 +185,7 @@ __all__ = [
     "install_keep_route",
     "install_loopback_host_guard",
     "install_max_completion_tokens",
+    "install_short_lived_mark",
     "install_thinking_budget_fields",
     "install_thinking_budget_route",
     "install_messages_route",
@@ -243,6 +245,7 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     install_health_liveness_override()
     install_gen_args_profile_injection()
     install_max_completion_tokens()
+    install_short_lived_mark()
     install_thinking_budget_fields()
     install_vanilla_stream_chunks()
     install_xtc_sampling()

@@ -74,6 +74,7 @@ import time
 from gmlx.upstream.patching import link, wrapped_with
 
 from .batch_rows import batch_rows
+from .short_rows import admit_group, admit_width
 
 _log = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def _defer_max_s() -> float:
 
 
 def _candidate_uids(gen) -> list:
-    n = min(gen.prefill_batch_size, len(gen._unprocessed_sequences))
+    n = min(admit_width(gen), len(gen._unprocessed_sequences))
     return [s[0] for s in gen._unprocessed_sequences[:n]]
 
 
@@ -132,6 +133,8 @@ def _should_decline(gen) -> bool:
     num_to_add = gen.completion_batch_size - batch_rows(gen)
     if num_to_add < gen.prefill_batch_size:
         return False
+    # Before any pricing: the group is what the stock body takes.
+    admit_group(gen)
     # Nothing to wait for: admitting is the only way to make progress.
     if batch_rows(gen) == 0:
         _price_lone_join(gen)

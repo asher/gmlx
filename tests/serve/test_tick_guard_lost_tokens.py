@@ -10,8 +10,10 @@ prompt and its delivered tokens; it is 0 in an uninjected run.
 
 from __future__ import annotations
 
+import gc
 import sys
 import types
+import weakref
 
 import pytest
 
@@ -890,3 +892,247 @@ def test_x_after_extend_changes_the_batch(engine, monkeypatch, shot):
 
     monkeypatch.setattr(ar, "_extend_cache", extend_cache)
     check(engine, shot, plan=_arm_at(shot, 4))
+
+
+
+# A batch a failure drops is freed when the path that drops it returns,
+# with no full collect from a later request's epilogue.
+
+
+def _decoding(make, *prompts, **kw):
+    """A generator whose decode batch holds a row per prompt."""
+    prompts = prompts or (A_PROMPT, B_PROMPT)
+    gen, lm = make(**kw)
+    for p in prompts:
+        gen.insert([p], 12, prompt_kwargs=[_kw(lm, p)])
+    while len(gen._generation_batch.uids) < len(prompts):
+        gen.next()
+    return gen, lm
+
+
+def _refs(*batches):
+    return [weakref.ref(c) for b in batches for c in b.prompt_cache]
+
+
+def _dead_after(path, refs):
+    """Run ``path`` with the automatic collector off, so only refcount or
+    the path's own collect can free the caches ``refs`` point at."""
+    gc.disable()
+    try:
+        path()
+        return [r() is None for r in refs]
+    finally:
+        gc.enable()
+
+
+def _armed(shot):
+    shot.armed = True
+    return shot
+
+
+def _fail_pending_eval(monkeypatch, text):
+    """An error at the eval a filter makes before it changes the batch."""
+    shot = _armed(Shot(text))
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_eval_pending_state",
+                                      name="eval"))
+    return shot
+
+
+def _fail_layer_filter(monkeypatch, gb):
+    """The second layer's own filter throws. The hook holds the layer by
+    id, so it keeps no cache alive."""
+    shot = _armed(Shot(MEM))
+    cls, target = type(gb.prompt_cache[1]), id(gb.prompt_cache[1])
+    orig = cls.filter
+
+    def filt(c, idx):
+        if id(c) == target:
+            shot.fire()
+        return orig(c, idx)
+
+    monkeypatch.setattr(cls, "filter", filt)
+    return shot
+
+
+def _fail_kept_eval(monkeypatch):
+    """The eval of a layer's kept rows inside a filter is refused."""
+    shot = _armed(Shot(MEM))
+    orig = ar._eval_cache
+
+    def eval_cache(c):
+        if sys._getframe(1).f_code.co_name == "filter":
+            shot.fire()
+        return orig(c)
+
+    monkeypatch.setattr(ar, "_eval_cache", eval_cache)
+    return shot
+
+
+@pytest.mark.parametrize("where", ["cbfail", "kept-eval", "layer"])
+def test_a_failed_filter_keeps_no_cycle_on_its_batch(engine, monkeypatch,
+                                                     where):
+    """A filter raises a command buffer failure early, a refused eval of
+    the kept rows at its end, or a layer's own failure after a refused
+    eval. Once the caller lets go of the batch, refcount frees it."""
+    gen, _lm = _decoding(engine)
+    gb = gen._generation_batch
+    if where == "cbfail":
+        shots = [_fail_pending_eval(monkeypatch, OOM)]
+    elif where == "kept-eval":
+        shots = [_fail_kept_eval(monkeypatch)]
+    else:
+        shots = [_fail_pending_eval(monkeypatch, MEM),
+                 _fail_layer_filter(monkeypatch, gb)]
+    refs = _refs(gb)
+
+    def path():
+        nonlocal gb
+        try:
+            gb.filter([0])
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the filter did not fail")
+        gb = None
+        gen._kq_empty_generation_batch()
+
+    try:
+        assert _dead_after(path, refs) == [True] * len(refs)
+        assert [s.fired for s in shots] == [1] * len(shots)
+    finally:
+        gen.close()
+
+
+def _keep_error_in_a_cycle(monkeypatch, cls, name):
+    """``cls.name`` keeps the error it raises in its own frame, which holds
+    the batch: only a collect after the error is gone frees the batch."""
+    orig = getattr(cls, name)
+
+    def held(self, *a, **k):
+        try:
+            return orig(self, *a, **k)
+        except RuntimeError as e:
+            failed = e
+            raise failed
+
+    monkeypatch.setattr(cls, name, held)
+
+
+@pytest.mark.parametrize("cycle", [False, True], ids=["plain", "cycle"])
+@pytest.mark.parametrize("err", [OOM, FAULT], ids=["cb-oom", "gpu-fault"])
+def test_a_tick_guard_drop_frees_the_batch(engine, monkeypatch, err, cycle):
+    """A command buffer failure in the decode step drops the engine. The
+    old batch is freed when the guarded tick returns, also when the error
+    sat in a frame cycle."""
+    gen, _lm = _decoding(engine)
+    shot = _armed(Shot(err))
+    monkeypatch.setattr(ar, "mx", _Mx(ar.mx, shot, "_step"))
+    if cycle:
+        _keep_error_in_a_cycle(monkeypatch, ar.GenerationBatch, "next")
+    refs = _refs(gen._generation_batch)
+    try:
+        assert _dead_after(gen.next, refs) == [True] * len(refs)
+        assert shot.fired == 1 and gen._generation_batch.uids == []
+        assert [q[0] for q in gen._unprocessed_sequences] == [0, 1]
+    finally:
+        gen.close()
+
+
+def test_a_contained_rebuild_frees_the_torn_and_prompt_batches(
+        engine, monkeypatch):
+    """A memory error marks a torn decode batch and the prompt batch
+    broken. ``_rebuild_broken`` drops both, and both are freed when the
+    guarded tick returns, though the error sat in a frame cycle."""
+    gen, lm = _decoding(engine, prefill_step_size=2)
+    long_prompt = list(range(70, 79))
+    gen.insert([long_prompt], 4, prompt_kwargs=[_kw(lm, long_prompt)])
+    gen.next()
+    assert gen._prompt_batch is not None
+    assert gen._prompt_batch.needs_processing()
+    inject = tg._maybe_inject
+    armed = []
+
+    def maybe_inject(g, st):
+        if not armed:
+            return inject(g, st)
+        armed.clear()
+        gb, pb = g._generation_batch, g._prompt_batch
+        gb._kq_torn = True
+        e = RuntimeError(MEM)
+        tg.mark_broken(e, list(gb.uids))
+        tg.mark_prefill_broken(e, list(pb.uids))
+        failed = e
+        raise failed
+
+    monkeypatch.setattr(tg, "_maybe_inject", maybe_inject)
+    refs = _refs(gen._generation_batch, gen._prompt_batch)
+    armed.append(True)
+    try:
+        assert _dead_after(gen.next, refs) == [True] * len(refs)
+        assert gen._prompt_batch is None
+        assert gen._generation_batch.uids == []
+        assert [q[0] for q in gen._unprocessed_sequences] == [0, 1, 2]
+    finally:
+        gen.close()
+
+
+def _cancel_path(gen, uid):
+    from gmlx._vendor.mlx_vlm.server import generation as srv
+
+    rg = object.__new__(srv.ResponseGenerator)
+    rg._cancel_lock, rg._cancelled = srv.Lock(), {uid}
+    active = {u: {"rqueue": srv.Queue(), "request_id": u}
+              for u in gen._generation_batch.uids}
+
+    def path():
+        assert rg._drop_cancelled(gen, active) is gen
+        assert uid not in active
+    return path
+
+
+@pytest.mark.parametrize("where", ["cbfail", "layer"])
+def test_a_cancel_that_drops_the_batch_frees_it(engine, monkeypatch, where):
+    """The cancel branch's removal hits a command buffer failure, and the
+    engine drops; or a layer's filter tears the batch, and it is dropped
+    whole. The old batch is freed when the cancel branch returns."""
+    gen, _lm = _decoding(engine)
+    gb = gen._generation_batch
+    if where == "cbfail":
+        shot = _fail_pending_eval(monkeypatch, OOM)
+    else:
+        shot = _fail_layer_filter(monkeypatch, gb)
+    refs = _refs(gb)
+    del gb
+    try:
+        assert _dead_after(_cancel_path(gen, 1), refs) == [True] * len(refs)
+        assert shot.fired == 1
+        assert [q[0] for q in gen._unprocessed_sequences] == [0]
+    finally:
+        gen.close()
+
+
+@pytest.mark.parametrize("action", ["retire", "fail"])
+def test_a_governor_removal_that_drops_the_engine_frees_the_batch(
+        engine, monkeypatch, action):
+    """The governor's orange retire and red fail each take the largest row
+    out, and the removal hits a command buffer failure. The old batch is
+    freed when the governor's call returns."""
+    from gmlx.serve import governor as gov
+
+    monkeypatch.setattr(tg, "_row_failed_callbacks", [])
+    gen, _lm = _decoding(engine)
+    shot = _fail_pending_eval(monkeypatch, OOM)
+    refs = _refs(gen._generation_batch)
+
+    def path():
+        if action == "retire":
+            assert gov._retire_largest(gen, gov._GovState()) \
+                is gov.RetireOutcome.RETIRED
+        else:
+            assert gov._fail_largest(gen, gov._GovState(), "red")
+
+    try:
+        assert _dead_after(path, refs) == [True] * len(refs)
+        assert shot.fired == 1 and gen._generation_batch.uids == []
+    finally:
+        gen.close()

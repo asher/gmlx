@@ -141,6 +141,7 @@ from gmlx.device import metal_value
 from gmlx.upstream.patching import link, wrapped_with
 
 from .batch_rows import batch_rows
+from .short_rows import admit_group
 
 _log = logging.getLogger(__name__)
 
@@ -1077,7 +1078,10 @@ def _prompt_may_step(gen) -> bool:
     room = getattr(gen, "completion_batch_size", None)
     if room is None:
         return True
-    return room - batch_rows(gen) >= getattr(gen, "prefill_batch_size", 1)
+    if room - batch_rows(gen) < getattr(gen, "prefill_batch_size", 1):
+        return False
+    admit_group(gen)
+    return True
 
 
 def _kernel_sample(gen, st: "_GovState", floor: float):

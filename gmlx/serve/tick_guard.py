@@ -39,6 +39,7 @@ disables.
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 
@@ -462,7 +463,9 @@ def _take_out_or_drop(gen, st: _TickState, uid, *, keep_out: bool,
             _drop_engine(gen, st, err, also=[*also, uid])
         if keep_out:
             _close_speech(gen, uid)
-        return _DROPPED, []
+    # Out here the error's frames, which hold the dropped batch, are gone.
+    gc.collect()
+    return _DROPPED, []
 
 
 def remove_row(gen, uid) -> bool:
@@ -921,20 +924,26 @@ def install_tick_guard() -> bool:
                 if not _contain_fault(st, e):
                     raise
                 _drop_engine(self, st, e)
-                return [], []
-            if not is_memory_error(e):
-                raise
-            # A refusal ran no work, so what the tick computed goes out,
-            # and a rebuild below replays after it.
-            saved = (list(getattr(e, "_kq_salvage", ()))
-                     if is_allocator_refusal(e) else [])
-            _harvest_responses(st, saved)
-            _contain(self, st, e)
-            return [], saved
-        st.fail_streak = 0
-        st.fault_streak = 0
-        _harvest_responses(st, out[1])
-        return out
+                contained = [], []
+            else:
+                if not is_memory_error(e):
+                    raise
+                # A refusal ran no work, so what the tick computed goes
+                # out, and a rebuild below replays after it.
+                saved = (list(getattr(e, "_kq_salvage", ()))
+                         if is_allocator_refusal(e) else [])
+                _harvest_responses(st, saved)
+                _contain(self, st, e)
+                contained = [], saved
+        else:
+            st.fail_streak = 0
+            st.fault_streak = 0
+            _harvest_responses(st, out[1])
+            return out
+        # The error's frames held the batches the guard dropped, and they
+        # are gone only out here.
+        gc.collect()
+        return contained
 
     setattr(_guarded_next, _INSTALLED_FLAG, True)
     _ar.BatchGenerator._next = link(_guarded_next, _orig)

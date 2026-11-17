@@ -76,6 +76,15 @@ def _notify_queues(queues, *items):
                 break
 
 
+def _drop_tracebacks(exc):
+    """gmlx: detach the frames of ``exc`` and of the exceptions it chains."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        exc.__traceback__ = None
+        exc = exc.__cause__ or exc.__context__
+
+
 def get_prefill_step_size():
     return int(os.environ.get("PREFILL_STEP_SIZE", DEFAULT_PREFILL_STEP_SIZE))
 
@@ -969,7 +978,11 @@ class _TokenIterator:
             raise StopIteration
         if isinstance(item, Exception):
             self._ended = True
-            raise item
+            # gmlx: the local goes, so the raised traceback is no cycle.
+            try:
+                raise item
+            finally:
+                item = None
         if getattr(item, "finish_reason", None):
             self._ended = True
         return item
@@ -1359,7 +1372,11 @@ class ResponseGenerator:
         # Block until the GPU thread sends back the context
         ctx = rqueue.get()
         if isinstance(ctx, Exception):
-            raise ctx
+            # gmlx: the local goes, so the raised traceback is no cycle.
+            try:
+                raise ctx
+            finally:
+                ctx = None
 
         return ctx, _TokenIterator(
             rqueue, ctx.uid, self._cancel, get_token_queue_timeout()
@@ -1658,6 +1675,8 @@ class ResponseGenerator:
             top_k=max(0, top_k),
             key=key,
             lora=lora,
+            # gmlx: the client capped the reply short (gmlx.serve.short_rows).
+            short_lived=bool(getattr(args, "_kq_short_lived", False)),
         )
 
     def _speech_settings(self, settings, spec, prompt_ids, args):
@@ -2047,8 +2066,12 @@ class ResponseGenerator:
 
                     # Vision encoder runs on the GPU thread; text tokenization
                     # already happened on the caller thread.
+                    # gmlx: only a media request makes room here, before its
+                    # encoder allocates. The prompt batch makes room for text.
                     coordinator = getattr(batch_gen, "apc", None)
-                    if coordinator is not None:
+                    if coordinator is not None and (
+                        request.images or request.videos or request.audio
+                    ):
                         coordinator.prepare_prefill(
                             prompt_tokens,
                             prefill_step_size=self._effective_prefill_step_size(),
@@ -2151,6 +2174,9 @@ class ResponseGenerator:
 
             except Exception as e:
                 logger.exception("Error in generation thread")
+                # gmlx: every waiting request gets this exception. Its frames
+                # hold the failed batch, so they go before it is shared.
+                _drop_tracebacks(e)
                 error_queues = {
                     id(info["rqueue"]): info["rqueue"] for info in active.values()
                 }
@@ -2160,8 +2186,8 @@ class ResponseGenerator:
                 _notify_queues(error_queues.values(), e, None)
                 active.clear()
                 batch_gen = None
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
 
         if batch_gen is not None and callable(getattr(batch_gen, "close", None)):
             batch_gen.close()
@@ -2212,8 +2238,8 @@ class ResponseGenerator:
                     mx.clear_cache()
             except Exception:
                 logger.exception("Error in diffusion generation thread")
-                mx.clear_cache()
                 gc.collect()
+                mx.clear_cache()
 
     def _generate_diffusion(
         self,

@@ -226,12 +226,10 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
     """``(warm_tokens, tier)``: how much of ``ids`` the APC already holds,
     from the memory block chain, the exact-cache index and (for models on
     the checkpoint tier) the pinned checkpoint records. No probe assembles
-    or restores a cache; matched blocks are released at once. The exact
-    index probe does open the header of every on-disk exact shard it
-    considers (``estimate_ms`` carries that cost). ``tier`` names the
-    deepest tier holding the prefix, which is the warm count's source,
-    not necessarily the tier the real request would restore from (the
-    runtime picks by its own precedence)."""
+    or restores a cache; matched blocks are released at once. ``tier``
+    names the deepest tier holding the prefix, which is the warm count's
+    source, not necessarily the tier the real request would restore from
+    (the runtime picks by its own precedence)."""
     best, tier = 0, None
     if manager is None or len(ids) < 2:
         return best, tier
@@ -260,14 +258,20 @@ def _warm_tokens(manager, ids: list, extra_hash: int, model=None) -> tuple:
     # Exact-tier entries carry the manager's wire salt (kvarn widths);
     # the block and ckpt tiers key on the caller's hash.
     exact_hash = extra_hash ^ int(getattr(manager, "_exact_extra_salt", 0) or 0)
-    try:
-        hit = manager.find_exact_prefix(ids, extra_hash=exact_hash)
-        if hit:                                  # (cache_hash, prefix_len): disk shards
-            n = int(hit[1]) if isinstance(hit, (tuple, list)) else int(hit)
-            if n > best:
-                best, tier = n, "exact"
-    except Exception:  # noqa: S110 - exact peek is advisory
-        pass
+    disk = getattr(manager, "disk", None)
+    if disk is not None:
+        try:
+            hit = disk.find_exact_prefix(
+                ids,
+                extra_hash=exact_hash,
+                max_prefix_tokens=None,
+                min_prefix_tokens=0,
+                block_size=int(manager.block_size),
+            )
+            if hit and int(hit[1]) > best:       # (cache_hash, prefix_len)
+                best, tier = int(hit[1]), "exact"
+        except Exception:  # noqa: S110 - exact peek is advisory
+            pass
     n = _exact_peek(manager, ids, exact_hash)
     if n > best:
         best, tier = n, "exact"

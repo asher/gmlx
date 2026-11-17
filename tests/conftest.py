@@ -412,6 +412,21 @@ def empty_hf_cache(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_frozen_heap():
+    # A frozen heap never frees the cycles it holds, so a test that
+    # freezes must unfreeze. Python 3.12 counts its immortal objects as
+    # frozen, so the check is against the count at the start.
+    import gc
+    before = gc.get_freeze_count()
+    yield
+    if gc.get_freeze_count() > before:
+        gc.unfreeze()
+        gc.collect()
+        pytest.fail("the test left the heap frozen (gc.freeze without "
+                    "gc.unfreeze)")
+
+
+@pytest.fixture(autouse=True)
 def _shutdown_read_pools():
     n = len(_read_pools)
     yield

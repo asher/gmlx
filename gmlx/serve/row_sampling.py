@@ -51,6 +51,7 @@ class RowSettings:
     key: tuple = GREEDY_KEY           # sampler config without the seed
     lora: Any = None                  # gmlx.serve.lora_request.RowLora, salted
     speech: Any = None                # gmlx.serve.speech_rows.SpeechRow
+    short_lived: bool = False         # gmlx.serve.short_rows
 
 
 def sampler_key(args) -> tuple:

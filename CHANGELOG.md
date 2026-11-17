@@ -72,6 +72,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prompt whose table rows are not in the page cache faster.
 - A chat turn whose template renders the last reply differently restores from
   inside a reply decoded beside other requests too, unless `--kv-bits` is set.
+- On a model with recurrent or sliding-window layers, such as Qwen3.5, a
+  request with a short prompt and a reply cap of 16 tokens or fewer skips the
+  prompt cache, and on models with recurrent layers such requests that arrive
+  together prefill together. Requests that run together can return logprobs
+  that differ slightly from the same request sent alone.
 
 ### Fixed
 

@@ -2392,7 +2392,9 @@ def test_sync_from_hf_cache_implied_by_config_flag(monkeypatch, tmp_path):
 def _stub_serving_stack(monkeypatch):
     """Stub every install/registration _serve performs, plus uvicorn.run, so the
     policy logic runs without touching mlx-vlm state or binding a port.
-    Returns the call-recorder dict."""
+    Returns the call-recorder dict; ``calls["order"]`` lists the patch
+    install, the heap freeze, the signal handler and the preload in the
+    order they ran. The freeze is stubbed so no test freezes its heap."""
     import signal
 
     import uvicorn
@@ -2401,7 +2403,8 @@ def _stub_serving_stack(monkeypatch):
     import gmlx.serve.patches as sp_mod
     import gmlx.serve.bridge_vlm as serving_mod
 
-    calls = {}
+    calls = {"order": []}
+    order = calls["order"]
     monkeypatch.setattr(serving_mod, "register_resolved_models", lambda cfg: None)
     monkeypatch.setattr(serving_mod, "resolved_models", lambda: {})
     monkeypatch.setattr(serving_mod, "install_gguf_server_bridge",
@@ -2410,16 +2413,21 @@ def _stub_serving_stack(monkeypatch):
                         lambda **kw: calls.__setitem__("pool", kw))
     monkeypatch.setattr(sp_mod, "install_server_patches",
                         lambda cfg, reload_fn=None:
-                        calls.__setitem__("patches_cfg", cfg))
+                        (order.append("patches"),
+                         calls.__setitem__("patches_cfg", cfg)))
+    monkeypatch.setattr(srv, "_freeze_startup_heap",
+                        lambda: order.append("freeze"))
     monkeypatch.setattr(sp_mod, "spawn_preload_warm",
                         lambda mid, extras=(), retain=True:
-                        (calls.__setitem__("preload_warm", mid),
+                        (order.append("preload_warm"),
+                         calls.__setitem__("preload_warm", mid),
                          calls.__setitem__("preload_extras", list(extras)),
                          calls.__setitem__("preload_retain", retain)))
     monkeypatch.setattr(uvicorn, "run",
                         lambda *a, **kw: calls.__setitem__("uvicorn", kw))
     monkeypatch.setattr(signal, "signal",
-                        lambda num, fn: calls.__setitem__("signal", (num, fn)))
+                        lambda num, fn: (order.append("signal"),
+                                         calls.__setitem__("signal", (num, fn))))
     # The boot stamp writes the runfile of the port, which can be the
     # runfile of a real server on 127.0.0.1:8080.
     import gmlx.serve.lifecycle as lifecycle_mod
@@ -2430,6 +2438,58 @@ def _stub_serving_stack(monkeypatch):
 
 def _one_model_cfg(**server_kw):
     return ServerCfg(models={"m": ModelCfg(id="m", path="/m.gguf")}, **server_kw)
+
+
+def test_serve_freezes_the_startup_heap_before_any_load(monkeypatch):
+    # The freeze runs once, after the patches import their modules and
+    # before a service or chat model starts to load. The service warm runs
+    # before the SIGHUP handler exists, so a reload cannot warm first.
+    calls = _stub_serving_stack(monkeypatch)
+    order = calls["order"]
+    monkeypatch.setattr(srv, "_warm_service_models",
+                        lambda cfg: order.append("warm"))
+    assert srv._serve(_one_model_cfg(), _ns(), lambda: {}) == 0
+    assert order == ["patches", "freeze", "warm", "signal", "preload_warm"]
+
+
+def test_serve_warms_the_services_after_the_freeze_with_no_preload(
+        monkeypatch, tmp_path):
+    import json
+
+    import gmlx.serve.embeddings as emb
+
+    calls = _stub_serving_stack(monkeypatch)
+    order = calls["order"]
+    warm = srv._warm_service_models
+    monkeypatch.setattr(srv, "_warm_service_models",
+                        lambda cfg: (order.append("warm"), warm(cfg)))
+    monkeypatch.setattr(emb, "prewarm",
+                        lambda path: order.append(("prewarm", path)))
+    folder = tmp_path / "bge-m3"
+    folder.mkdir()
+    (folder / "config.json").write_text(json.dumps({"model_type": "xlm-roberta"}))
+    cfg = ServerCfg(models={}, embeddings=str(folder))
+    assert srv._serve(cfg, _ns(), None) == 0
+    assert "preload_warm" not in calls
+    assert order == ["patches", "freeze", "warm", ("prewarm", str(folder)),
+                     "signal"]
+
+
+def test_a_cycle_made_after_the_startup_freeze_is_collected(frozen_startup_heap):
+    import gc
+    import weakref
+
+    class _Node:
+        pass
+
+    assert gc.get_freeze_count() > 0
+    node = _Node()
+    node.self = node
+    assert any(o is node for o in gc.get_objects())
+    ref = weakref.ref(node)
+    del node
+    gc.collect()
+    assert ref() is None
 
 
 def test_serve_refuses_nonloopback_without_key(monkeypatch, capsys):

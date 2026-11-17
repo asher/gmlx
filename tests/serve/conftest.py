@@ -152,6 +152,23 @@ def engine_seams():
                                  restore=_restore_engine_seams)
 
 
+@pytest.fixture
+def frozen_startup_heap():
+    """The heap frozen as ``_serve`` freezes it at startup, unfrozen after
+    the test."""
+    import gc
+
+    from gmlx.serve import server as srv_mod
+    srv_mod._freeze_startup_heap()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
+        # Python 3.12 keeps its immortal objects in the permanent
+        # generation, and a collection moves them back there.
+        gc.collect()
+
+
 @pytest.fixture(autouse=True)
 def _restore_mlxvlm(request):
     if _APP is None or request.module.__name__ not in _PATCH_MODULES:
