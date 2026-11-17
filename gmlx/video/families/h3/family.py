@@ -397,13 +397,13 @@ def _keyframe_encode(handle, prompt: str, images) -> tuple:
 
 
 def _lora_map(config: dict):
-    from .lora_map import lora_map
+    from gmlx.image.h3.lora_map import lora_map
 
     return lora_map(config)
 
 
 def _lora_refusal(header: dict, config: dict):
-    from .lora_map import refusal
+    from gmlx.image.h3.lora_map import refusal
 
     return refusal(header, config)
 

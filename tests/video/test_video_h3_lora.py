@@ -14,7 +14,7 @@ from gmlx.image.lora import AdapterError, UnsupportedAdapterError
 from gmlx.video import memfit, pipeline, schedule
 from gmlx.video.families.h3 import family as hf
 from gmlx.video.families.h3 import model as hm
-from gmlx.video.families.h3.lora_map import lora_map, refusal
+from gmlx.image.h3.lora_map import lora_map, refusal
 from lora_fixtures import reference_delta, rel_l2, write_keys
 from test_video_h3_model import TINY, tiny_weights
 from video_fixtures import H3_HEADER, fixture_view
