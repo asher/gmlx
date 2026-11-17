@@ -76,7 +76,9 @@ def served(monkeypatch, tmp_path, request):
     request.addfinalizer(serving.clear_resolved_models)
     rec = SimpleNamespace(jobs=[], released=[], job=None)
 
-    def acquire(model):
+    def acquire(model, **kw):
+        # The route holds the wired limit from the build to the release.
+        assert kw == {"hold_wired": True}
         if model not in ("", *doc["image_models"]):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail={"error": {
@@ -205,8 +207,8 @@ def test_a_size_the_entry_family_refuses_is_a_400_before_admission(
     beside it refuses. A reload clears the families read."""
     acquired = []
     real = residency.acquire_image_model
-    monkeypatch.setattr(residency, "acquire_image_model", lambda model: (
-        acquired.append(model) or real(model)))
+    monkeypatch.setattr(residency, "acquire_image_model", lambda model, **k: (
+        acquired.append(model) or real(model, **k)))
     r = _client().post("/v1/images/generations", json={
         "prompt": "a cat", "size": "512x512", "model": "h3"})
     assert r.status_code == 400, r.text
@@ -375,7 +377,7 @@ def test_a_flux3_flow_map_with_guidance_is_a_400_before_any_stream(
                            flow_map=True, ref_cache=False, blocks=None))
     hold = _Hold(served.released)
     hold._entry = SimpleNamespace(footprint=0, pipeline=flux3)
-    monkeypatch.setattr(residency, "acquire_image_model", lambda m: hold)
+    monkeypatch.setattr(residency, "acquire_image_model", lambda m, **_k: hold)
     monkeypatch.setattr(svc, "check_family", _REAL_CHECK_FAMILY)
     images.install_image_routes(build_config(_DOC))
     r = _client().post("/v1/images/generations", json={

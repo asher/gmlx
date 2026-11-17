@@ -3,9 +3,11 @@
 two profiles -> two entries), the per-build env window is set then restored (no
 leak to a sibling load), and the idle-TTL reaper unloads idle non-pinned entries
 only when the server is drained. CPU-only - fake stock load/teardown, injected
-footprint + clock + in-flight reader, so no GPU and no model files."""
+footprint + clock + in-flight reader, so no GPU and no model files - save the
+media wired hold tests, which read MLX's own wired limit on a Metal device."""
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import os
 import sys
@@ -26,6 +28,12 @@ from gmlx.serve.residency import (  # noqa: E402
 pytestmark = pytest.mark.host_gb(64)
 
 GB = 1024**3
+
+
+def _metal() -> bool:
+    import mlx.core as mx
+
+    return mx.metal.is_available()
 
 
 class _Clock:
@@ -779,6 +787,141 @@ def test_acquire_image_model_builds_the_image_kind(monkeypatch, mixed_cfg):
     assert entry.ttl == 60 and entry.loaded_as == "zit"
     assert entry.cache_key[:3] == ("/abs/zit.safetensors", None,
                                    residency.IMAGE_KIND)
+
+
+needs_metal = pytest.mark.skipif(
+    bool(os.environ.get("KQUANT_FORCE_CPU")) or not _metal(),
+    reason="reads MLX's own wired limit on a Metal device")
+
+
+@contextlib.contextmanager
+def _chat_turn_left_open():
+    """A chat engine's generator after its turn, as the server keeps it
+    until the next chat request: the engine thread inside mlx-vlm's
+    wired_limit context, the one ar.BatchGenerator enters, on its own
+    stream."""
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    from gmlx._vendor.mlx_vlm.generate.common import wired_limit
+
+    entered, done, failed = threading.Event(), threading.Event(), []
+
+    def engine():
+        try:
+            stream = mx.new_stream(mx.gpu)
+            with wired_limit(nn.Linear(4, 4), [stream]):
+                entered.set()
+                done.wait()
+        except BaseException as e:  # noqa: BLE001 - to the test
+            failed.append(e)
+            entered.set()
+
+    th = threading.Thread(target=engine, name="engine")
+    th.start()
+    entered.wait()
+    try:
+        yield
+    finally:
+        done.set()
+        th.join()
+    assert failed == []
+
+
+def _mlx_wired_limit(real):
+    """MLX's own wired limit, through the function ``real`` that MLX
+    exports, past any hold installed over ``mx.set_wired_limit``."""
+    cur = real(0)
+    real(cur)
+    return cur
+
+
+@needs_metal
+def test_an_image_request_after_a_chat_turn_holds_mlxs_wired_limit_at_0_from_its_build_to_its_release(
+        monkeypatch, mixed_cfg):
+    """The order of a served edit with prompt upsampling: the chat turn's
+    generator raises MLX's wired limit to the working set and stays open,
+    then the image request acquires its entry, which builds on the image
+    worker (load_on_worker), then its job runs on the worker, then the
+    request releases. MLX's limit is 0 in the build, between the build and
+    the job, in the job and until the release, and the generator's limit
+    is back after it. Between the build and the job the limit once came
+    back, and everything the build loaded wired at once."""
+    import mlx.core as mx
+
+    from gmlx.serve import capacity as cap
+    from gmlx.serve import image_service as svc
+
+    real = mx.set_wired_limit
+    assert not hasattr(real, "_kq_wired_real")
+    ws = mx.device_info()["max_recommended_working_set_size"]
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, _env, _td = make_pool()
+    seen = {}
+
+    def build(spec):
+        seen["build"] = _mlx_wired_limit(real)
+        return "PIPE"
+
+    monkeypatch.setattr(svc, "_load", build)
+    pool._image_fns = (lambda spec: 9 * GB, svc.load_on_worker,
+                       lambda box: box.clear())
+    found = _mlx_wired_limit(real)
+    with _chat_turn_left_open():
+        seen["turn"] = _mlx_wired_limit(real)
+        hold = residency.acquire_image_model("zit", pool=pool,
+                                             hold_wired=True)
+        seen["after the build"] = _mlx_wired_limit(real)
+        seen["job"] = svc.WORKER.submit(_mlx_wired_limit, real).result()
+        seen["after the job"] = _mlx_wired_limit(real)
+        hold.release()
+        seen["released"] = _mlx_wired_limit(real)
+    assert seen == {"turn": ws, "build": 0, "after the build": 0, "job": 0,
+                    "after the job": 0, "released": ws}
+    assert mx.set_wired_limit is real
+    assert _mlx_wired_limit(real) == found
+
+
+@needs_metal
+@pytest.mark.parametrize("path", ["the build fails",
+                                  "refused after the build"])
+def test_an_image_request_that_ends_without_its_job_gives_the_wired_limit_back(
+        monkeypatch, mixed_cfg, path):
+    """A build that raises (an image part of another family, the 400) and
+    a request refused after its build, which releases with no job (a fit
+    refusal, a client gone before the submit): the generator's limit is
+    back when the request ends."""
+    import mlx.core as mx
+    from fastapi import HTTPException
+
+    from gmlx.image.vae import VAEError
+    from gmlx.serve import capacity as cap
+    from gmlx.serve import image_service as svc
+
+    real = mx.set_wired_limit
+    ws = mx.device_info()["max_recommended_working_set_size"]
+    monkeypatch.setattr(cap, "preload_gate", lambda *a, **k: None)
+    proxy, pool, _env, _td = make_pool()
+
+    def build(spec):
+        if path == "the build fails":
+            raise VAEError("this VAE holds the qwen_image21 VAE")
+        return "PIPE"
+
+    monkeypatch.setattr(svc, "_load", build)
+    pool._image_fns = (lambda spec: 9 * GB, svc.load_on_worker,
+                       lambda box: box.clear())
+    with _chat_turn_left_open():
+        if path == "the build fails":
+            with pytest.raises(HTTPException) as e:
+                residency.acquire_image_model("zit", pool=pool,
+                                              hold_wired=True)
+            assert e.value.status_code == 400
+        else:
+            residency.acquire_image_model("zit", pool=pool,
+                                          hold_wired=True).release()
+        assert _mlx_wired_limit(real) == ws
+        assert mx.set_wired_limit is real
 
 
 _VIDEO = {**_MIXED, "video_models": {"h3": {

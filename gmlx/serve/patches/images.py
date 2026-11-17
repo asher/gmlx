@@ -619,7 +619,10 @@ def make_endpoint(route: str):
                 req.model, req.prompt, req.prompt_upsampling,
                 req.route != "generations", stop=stop, seed=req.seed,
                 **seen)
-            hold = residency.acquire_image_model(req.model)
+            # The wired limit stays at 0 from the build to the job's
+            # release (residency._media_wired_hold).
+            hold = residency.acquire_image_model(req.model,
+                                                 hold_wired=True)
             holds.append(hold)
             served = hold._entry.pipeline
             check_family(req, served)
