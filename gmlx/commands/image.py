@@ -749,14 +749,20 @@ def _chat_pictures(model, processor, req, kwargs) -> str:
     turn holds its pictures in place, as gmlx run --mmproj generates: the
     template renders each image part where it stands, and the processor
     takes the pictures in that order."""
-    from gmlx._vendor.mlx_vlm import generate as vlm_generate
-    from gmlx._vendor.mlx_vlm.prompt_utils import get_chat_template
+    import importlib
+
     from gmlx.image.upsample import reply_lead
 
     from .cli import unfit_request
 
-    rendered = get_chat_template(processor, [dict(m) for m in req.messages],
-                                 True, **kwargs)
+    # Through importlib, as the served turn reaches them
+    # (serve/image_upsample.py).
+    prompt_utils = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.prompt_utils")
+    vlm_generate = importlib.import_module(
+        "gmlx._vendor.mlx_vlm").generate
+    rendered = prompt_utils.get_chat_template(
+        processor, [dict(m) for m in req.messages], True, **kwargs)
     text_tok = getattr(processor, "tokenizer", processor)
     why = unfit_request(model, text_tok, rendered, 0, req.max_tokens, None)
     if why:
