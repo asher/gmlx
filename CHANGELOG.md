@@ -75,6 +75,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An image or video request served after a chat turn no longer takes tens of
+  GB more memory than the same request alone, nor wires all of it.
 - Qwen3.8-Flash-Next requests that decoded together past 2052 tokens of
   context attended to all of it and answered unlike a request decoding alone.
 - Two Qwen3.8-Flash-Next requests failed when they decoded together with the
