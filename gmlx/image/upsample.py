@@ -78,7 +78,8 @@ class ChatRequest:
     switch. A turn that sees pictures has a user turn of content parts,
     text and ``{"type": "image"}`` in order, and ``pictures`` holds the
     images in that order. ``seed`` seeds a turn that samples, None for a
-    greedy one or an unseeded one."""
+    greedy one or an unseeded one. ``thinking_budget`` closes the
+    thinking after that many tokens, None for no budget."""
     messages: tuple
     max_tokens: int
     temperature: float
@@ -89,6 +90,7 @@ class ChatRequest:
     min_p: float = 0.0
     seed: int | None = None
     pictures: tuple = field(default=())
+    thinking_budget: int | None = None
 
     @property
     def system(self) -> str | None:
@@ -186,7 +188,8 @@ def chat_request(family, prompt: str, system: str | None = None, *,
         temperature=parts.temperature,
         presence_penalty=parts.presence_penalty, thinking=parts.thinking,
         top_p=parts.top_p, top_k=parts.top_k, min_p=parts.min_p,
-        seed=seed if parts.temperature > 0 else None, pictures=pictures)
+        seed=seed if parts.temperature > 0 else None, pictures=pictures,
+        thinking_budget=parts.thinking_budget)
 
 
 def _spans(reply: str, thinking: bool):

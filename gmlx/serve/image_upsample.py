@@ -244,7 +244,8 @@ def _chat_in_context(up: str, req, stop) -> str:
     token_iter = None
     try:
         # Every sampling field is set, so no profile of the chat model
-        # changes the decode. A null budget still takes the environment's.
+        # changes the decode. A family's thinking budget closes the
+        # thinking; a null one still takes the environment's.
         seeded = {} if req.seed is None else {"seed": req.seed}
         # The request schema takes no bare image part, and the sampling
         # it builds reads no message, so it gets the turn's text.
@@ -257,7 +258,7 @@ def _chat_in_context(up: str, req, stop) -> str:
             temperature=req.temperature, top_p=req.top_p, top_k=req.top_k,
             min_p=req.min_p, presence_penalty=req.presence_penalty,
             repetition_penalty=None, frequency_penalty=None,
-            xtc_probability=0.0, thinking_budget=None,
+            xtc_probability=0.0, thinking_budget=req.thinking_budget,
             thinking_budget_message=None, thinking=req.thinking,
             stream=False, **seeded)
         gen_args = app_mod._build_gen_args(request, processor)

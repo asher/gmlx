@@ -14,11 +14,13 @@ each picture's label and shape before the picture, then the typed prompt
 as a JSON string and the aspect ratio the request selects, ``adaptive``
 when the image takes its size from the references. The turn samples as
 MiniMax's request does, at temperature 1 with top-p 0.95 and top-k 20,
-thinking on at the template's default effort, in 4096 tokens with the
-thinking; the image's seed seeds it. The reply's ``expanded_caption`` is
-the caption. MiniMax's JSON schema, which its server decodes under, and
-the aspect ratio the reply recommends are not read: the image keeps the
-size the request asks for.
+thinking on at the template's default effort; the image's seed seeds it.
+MiniMax's request caps the turn at 4096 tokens with the thinking, which
+an edit's thinking can fill before the reply, so the thinking closes at
+``THINKING_BUDGET`` tokens and the reply has ``REPLY_TOKENS`` after it.
+The reply's ``expanded_caption`` is the caption. MiniMax's JSON schema,
+which its server decodes under, and the aspect ratio the reply
+recommends are not read: the image keeps the size the request asks for.
 """
 
 from __future__ import annotations
@@ -37,6 +39,16 @@ MANIFEST = "prompt/manifest.json"
 SYSTEM, TASK = "system_prompt.txt", "task_prompt.txt"
 _FILES = (("t2i", SYSTEM, "system"), ("t2i", TASK, "task"),
           ("edit", TASK, "edit"))
+
+# The thinking closes at THINKING_BUDGET tokens, and the reply has
+# REPLY_TOKENS after it, the close's own tokens among them. Measured on
+# the PE at Q5_K_M over t2i, 2-picture and 16-picture edits at four
+# seeds each: a thinking that closes on its own takes 762 to 2328
+# tokens, and an edit's that loops runs on to the cap; the reply
+# takes 226 to 868. The budget sits about a third over the longest
+# thinking, and the reply's room is over twice the longest reply.
+THINKING_BUDGET = 3072
+REPLY_TOKENS = 2048
 
 NEEDS = ("MiniMax-H3-Image ships no upsampler prompt: its upsampler reads "
          f"MiniMax's prompt files, {MANIFEST} and the files it lists, in "
@@ -129,11 +141,12 @@ UPSAMPLE = UpsampleParts(
     prompts=None,
     sha256="",
     key=None,
-    # prompt/t2i/request_params.json: max_tokens 4096 with the thinking,
-    # temperature 1.0, top_p 0.95, top_k 20, min_p 0, presence and
-    # repetition penalties off, enable_thinking true, reasoning_effort
-    # xhigh (the template's default).
-    max_tokens=4096,
+    # prompt/t2i/request_params.json: temperature 1.0, top_p 0.95, top_k
+    # 20, min_p 0, presence and repetition penalties off, enable_thinking
+    # true, reasoning_effort xhigh (the template's default). Its
+    # max_tokens, 4096 with the thinking, gives way to the budget.
+    max_tokens=THINKING_BUDGET + REPLY_TOKENS,
+    thinking_budget=THINKING_BUDGET,
     temperature=1.0,
     presence_penalty=0.0,
     thinking="on",

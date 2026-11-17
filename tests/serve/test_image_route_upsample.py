@@ -62,7 +62,9 @@ def server(monkeypatch):
 
     def build_gen_args(request, processor, tenant_id=None):
         rec.requests.append(request)
+        # The engine's budget is the request's, as the server builds it.
         return SimpleNamespace(logprobs=True,
+                               thinking_budget=request.thinking_budget,
                                to_template_kwargs=lambda: {})
 
     def apply_chat_template(processor, config, messages, **kw):
@@ -277,12 +279,24 @@ def h3(server, monkeypatch, tmp_path):
     monkeypatch.setattr(prompt_utils, "get_chat_template", get_chat_template)
 
     class Engine:
+        """A chat model whose thinking loops: the engine's budget closes it
+        with a newline and the end marker, as the server's criteria does,
+        and the model writes its JSON; without a budget it loops to the
+        cap and writes none."""
+
         def generate(self, prompt, args, **media):
             server.events.append("chat")
             server.media.append((prompt, media))
-            tok = SimpleNamespace(text='</think>{"expanded_caption": "'
-                                  + H3_CAPTION + '"}', finish_reason="stop")
-            return SimpleNamespace(prompt_tokens=9), iter([tok])
+            thought = SimpleNamespace(text="The door is the second subject. ",
+                                      finish_reason=None)
+            if args.thinking_budget is None:
+                toks = [thought] * 40 + [SimpleNamespace(
+                    text="", finish_reason="length")]
+            else:
+                toks = [thought, SimpleNamespace(
+                    text='\n</think>\n\n{"expanded_caption": "'
+                    + H3_CAPTION + '"}', finish_reason="stop")]
+            return SimpleNamespace(prompt_tokens=9), iter(toks)
 
     runtime = __import__("gmlx._vendor.mlx_vlm.server.runtime",
                          fromlist=["runtime"])
@@ -299,15 +313,18 @@ def _pictures():
 def test_minimax_h3_image_edit_sends_its_pictures_to_the_upsamplers_tower(h3):
     """The edit's rewrite renders MiniMax's edit turn with each picture in
     place, sends the pictures in order to the chat engine, samples at
-    MiniMax's settings, and is seeded by the image's seed."""
+    MiniMax's settings, and is seeded by the image's seed. Its thinking
+    closes at its budget, with room for the reply after it, so a chat
+    model that would think to the cap still writes the caption."""
     caption = image_upsample.revise("h3", "paint the door blue", True, True,
                                     pictures=_pictures(), seed=5,
                                     canvas=(1024, 768))
     assert caption == H3_CAPTION
     (sent,) = h3.requests
     assert (sent.temperature, sent.top_p, sent.top_k, sent.min_p,
-            sent.max_tokens, sent.thinking, sent.seed) == (
-        1.0, 0.95, 20, 0.0, 4096, "on", 5)
+            sent.max_tokens, sent.thinking, sent.seed,
+            sent.thinking_budget) == (1.0, 0.95, 20, 0.0, 5120, "on", 5,
+                                      3072)
     ((msg,),) = h3.messages
     assert msg["role"] == "user" and msg["content"][0]["text"] == "Edit task."
     assert [c["text"] for c in msg["content"] if "Media" in c.get("text", "")

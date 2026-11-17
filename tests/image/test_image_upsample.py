@@ -200,9 +200,10 @@ def _picture(w, h, fill=0, channels=3):
 
 def test_minimax_h3_image_takes_minimaxs_t2i_turn_and_sampling(h3_prompts):
     """The system prompt without its trailing newlines, the task prompt
-    with the typed prompt in its slot, and MiniMax's request settings:
-    temperature 1, top-p 0.95, top-k 20, thinking on, 4096 tokens. The
-    image's seed seeds the turn."""
+    with the typed prompt in its slot, and MiniMax's sampling:
+    temperature 1, top-p 0.95, top-k 20, thinking on. The thinking closes
+    at its budget of 3072 tokens, in 5120 with the reply. The image's
+    seed seeds the turn."""
     fam = get_family("h3_image")
     system = upsample.system_prompt(fam, str(h3_prompts))
     req = upsample.chat_request(fam, "a red bicycle", system, seed=7)
@@ -211,8 +212,9 @@ def test_minimax_h3_image_takes_minimaxs_t2i_turn_and_sampling(h3_prompts):
         {"role": "user", "content": "Expand the prompt below.\n\nPrompt: "
                                     "a red bicycle\n"})
     assert (req.temperature, req.top_p, req.top_k, req.min_p,
-            req.presence_penalty, req.max_tokens, req.thinking) == (
-        1.0, 0.95, 20, 0.0, 0.0, 4096, "on")
+            req.presence_penalty, req.max_tokens, req.thinking,
+            req.thinking_budget) == (1.0, 0.95, 20, 0.0, 0.0, 5120, "on",
+                                     3072)
     assert (req.seed, req.pictures) == (7, ())
     assert upsample.upsample(
         fam, "a red bicycle", lambda r: '</think>\n{"expanded_caption": '
@@ -308,8 +310,8 @@ def test_minimax_h3_image_captions_are_keyed_by_seed_pictures_and_canvas(
 
 def test_every_other_familys_upsampler_sees_no_pictures_and_keeps_its_turn():
     """Only MiniMax-H3-Image's upsampler takes pictures. Every other
-    family's turn is greedy, unseeded and text alone, and its caption key
-    leaves out the seed, as before."""
+    family's turn is greedy, unseeded, text alone and without a thinking
+    budget, and its caption key leaves out the seed, as before."""
     from gmlx.image.registry import families
 
     others = [f for f in families()
@@ -319,7 +321,8 @@ def test_every_other_familys_upsampler_sees_no_pictures_and_keeps_its_turn():
         assert not upsample.takes_pictures(fam)
         system = "Rewrite the prompt."
         req = upsample.chat_request(fam, "a red bicycle", system, seed=5)
-        assert (req.seed, req.pictures, req.temperature) == (None, (), 0.0)
+        assert (req.seed, req.pictures, req.temperature,
+                req.thinking_budget) == (None, (), 0.0, None)
         assert (req.top_p, req.top_k, req.min_p) == (1.0, 0, 0.0)
         assert all(isinstance(m["content"], str) for m in req.messages)
         assert upsample.cache_key("up", fam, "x", system, seed=1) == \
@@ -457,7 +460,7 @@ def cli(tmp_path, monkeypatch):
         p.write_bytes(b"x")
         files[name] = str(p)
     # ``fam`` is the family the DiT identifies as, and ``reply`` what the
-    # upsampler writes.
+    # upsampler writes, or a function of the turn's settings that writes it.
     rec = SimpleNamespace(events=[], turns=[], model=None,
                           fam=get_family("flux3_klein"), reply=f" {CAPTION}\n",
                           rendered=None)
@@ -478,7 +481,7 @@ def cli(tmp_path, monkeypatch):
     def generate(model, tok, prompt, **kw):
         rec.events.append("chat")
         rec.turns.append({"prompt": prompt, **kw})
-        return rec.reply
+        return rec.reply(kw) if callable(rec.reply) else rec.reply
 
     class Enc:
         owned, released = True, False
@@ -697,7 +700,8 @@ def h3_cli(cli, tmp_path, monkeypatch, h3_prompts):
     def vlm_generate(model, proc, prompt, image=(), **kw):
         cli.events.append("chat")
         rec.turns.append({"prompt": prompt, "image": image, **kw})
-        return SimpleNamespace(text=cli.reply)
+        return SimpleNamespace(
+            text=cli.reply(kw) if callable(cli.reply) else cli.reply)
 
     monkeypatch.setattr(vlm, "load_vlm_model", load_vlm_model)
     monkeypatch.setattr(mlx_vlm, "generate", vlm_generate)
@@ -751,10 +755,10 @@ def test_minimax_h3_image_cli_shows_its_upsampler_the_references(h3_cli):
     assert "User Aspect Ratio Selection:\nadaptive" in prompt
     assert [im.size for im in turn["image"]] == [(768, 1024), (512, 512)]
     assert (turn["temperature"], turn["top_p"], turn["top_k"], turn["min_p"],
-            turn["max_tokens"]) == (1.0, 0.95, 20, 0.0, 4096)
+            turn["max_tokens"]) == (1.0, 0.95, 20, 0.0, 5120)
     # About the turn's text over 3, the vision tokens of a 768x1024 and a
-    # 512x512 picture, and the reply.
-    assert rec.ctx[0] > 4096 + 24 * 32 + 16 * 16
+    # 512x512 picture, and the thinking and the reply.
+    assert rec.ctx[0] > 5120 + 24 * 32 + 16 * 16
     assert ("encode", CAPTION) in h3_cli.events
     assert "upsampler" not in h3_cli.events
 
@@ -780,3 +784,45 @@ def test_minimax_h3_image_cli_without_the_upsamplers_tower_refuses(
             turn["template_kwargs"]) == (1.0, 0.95, 20,
                                          {"enable_thinking": True})
     assert h3_cli.h3.loads == []
+
+
+def _thinks_until_stopped(kw):
+    """The reply of a chat model whose thinking loops: the engine's budget
+    closes it with a newline and the end marker, as mlx-vlm's criteria
+    does, and the model writes its JSON; without a budget it loops to the
+    cap and writes none."""
+    thought = "Picture 1 holds a bicycle, so the lighthouse goes behind.\n"
+    if kw.get("thinking_budget") is None:
+        return thought * 40
+    return thought * 3 + "\n</think>\n\n" + json.dumps(
+        {"expanded_caption": CAPTION, "target_aspect_ratio": "1:1"})
+
+
+def test_a_minimax_h3_image_turn_that_thinks_past_its_budget_gives_its_caption(
+        h3_cli, capsys):
+    """The turn closes the thinking at its budget and leaves the reply its
+    room after it, with the tower and on the text model alone: a chat
+    model that would think to the cap still writes its caption. The
+    tower's turn arms mlx-vlm's criteria on the template's markers."""
+    from gmlx.commands.cli import umbrella_main
+
+    rec = h3_cli.h3
+    h3_cli.reply = _thinks_until_stopped
+    assert umbrella_main(rec.base + rec.args + [
+        "--upsampler-mmproj", rec.tower]) == 0
+    (turn,) = rec.turns
+    assert (turn["thinking_budget"], turn["max_tokens"],
+            turn["enable_thinking"], turn["thinking_start_token"],
+            turn["thinking_end_token"]) == (3072, 5120, True, "<think>",
+                                            "</think>")
+    assert ("encode", CAPTION) in h3_cli.events
+    del h3_cli.events[:]
+    prompts = rec.args[rec.args.index("--upsample-prompt") + 1]
+    assert umbrella_main(rec.base + [
+        "--prompt", "a red bicycle", "--upsampler",
+        h3_cli.files["writer.gguf"], "--upsample-prompt", prompts,
+        "--output", "b.png"]) == 0
+    (text_turn,) = h3_cli.turns
+    assert (text_turn["thinking_budget"], text_turn["max_tokens"]) == (
+        3072, 5120)
+    assert ("encode", CAPTION) in h3_cli.events

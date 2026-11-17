@@ -155,6 +155,8 @@ class UpsampleParts:
     from, ``turn(text, prompt, pictures, canvas)``. ``pictures`` is True for a
     family whose upsampler sees a prompt's reference images, through the
     chat model's vision tower, so ``turn`` gets each as a ``Picture``.
+    ``thinking_budget`` closes the chat model's thinking after that many
+    tokens, so the reply is written within ``max_tokens``; None sets none.
     """
     prompts: str | None
     sha256: str
@@ -177,6 +179,7 @@ class UpsampleParts:
     read: Callable | None = None
     turn: Callable | None = None
     pictures: bool = False
+    thinking_budget: int | None = None
 
 
 # The image limits of a family without its own: the pixels and the

@@ -717,6 +717,7 @@ def run_upsampler(path: str, family, prompt: str, log,
                              top_p=req.top_p, top_k=req.top_k,
                              min_p=req.min_p,
                              presence_penalty=req.presence_penalty,
+                             thinking_budget=req.thinking_budget,
                              template_kwargs=kwargs, verbose=False)
             # A template that opens the thinking block or the message
             # header in the prompt leaves its marker out of the reply, which
@@ -760,11 +761,21 @@ def _chat_pictures(model, processor, req, kwargs) -> str:
     why = unfit_request(model, text_tok, rendered, 0, req.max_tokens, None)
     if why:
         raise _Usage(f"the upsampler: {why}")
+    budget = {}
+    if req.thinking_budget is not None:
+        # mlx-vlm's criteria closes the thinking, on the template's
+        # markers, as gmlx run --mmproj --thinking-budget does.
+        from gmlx.gen.thinking_budget import vlm_budget_kwargs
+
+        budget = {"thinking_budget": req.thinking_budget,
+                  **vlm_budget_kwargs(req.thinking_budget, None, None,
+                                      processor, rendered)}
     result = vlm_generate(
         model, processor, rendered, image=[p.image() for p in req.pictures],
         max_tokens=req.max_tokens, temperature=req.temperature,
         top_p=req.top_p, top_k=req.top_k, min_p=req.min_p,
-        presence_penalty=req.presence_penalty or None, verbose=False)
+        presence_penalty=req.presence_penalty or None, verbose=False,
+        **budget)
     return reply_lead(rendered, tokenizer=text_tok) + (result.text or "")
 
 
