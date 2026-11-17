@@ -46,8 +46,8 @@ model, and no context figures.
 | `size` | `WxH`, or `auto` for the entry's default size. Sides are multiples of the model's size step, at most 4096, and an image at most 2048x2048 pixels. |
 | `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. |
 | `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. |
-| `sigmas` | The schedule to sample on, as a list of noise levels from the first to the last, such as `[1, 0.9230769, 0]`, one step between each two, in place of `quality` and `steps`. On MiniMax-H3-Image step i reads step head i. Unset, a LoRA's [schedule](images.md#adapter-schedules), else the model's. |
-| `int8` | `off`, `attention`, `linears` or `all`: the parts of a MiniMax-H3-Image DiT that run in int8, on an M5 or newer. Unset, the entry's `defaults.int8`, else `off`. Other models take `off`. |
+| `sigmas` | Noise levels, first to last, as `[1, 0.9230769, 0]`, in place of `quality` and `steps`. Unset, a LoRA's [schedule](images.md#adapter-schedules) or the model's. |
+| `int8` | `off`, `attention`, `linears` or `all`: the MiniMax-H3-Image DiT parts run in int8 on an M5 or newer; others take `off`. Unset, `defaults.int8`, else `off`. |
 | `seed` | The seed of the first image, random without it. |
 | `guidance` | [Guidance](glossary.md#guidance), 1 to 30. 1 turns it off. |
 | `negative_prompt` | What to steer away from, read when `guidance` is above 1. It is never rewritten. |
@@ -180,7 +180,8 @@ for event in stream:
 | The request's `adapters` need more memory than the budget leaves beside the model, its shared encoder and the pinned models | 413 naming the GB they need and the room |
 | The request's `adapters` need memory that is not free now | 503 `server_overloaded` with `Retry-After` and what to wait for or free ([A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)) |
 | A request LoRA over a set [`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) | 400 naming that key |
-| LoRAs whose [schedules](images.md#adapter-schedules) disagree, a LoRA sidecar that does not read or was written for another file, `sigmas` whose step count differs from `steps`, or more steps than MiniMax-H3-Image has step heads | 400 naming them |
+| LoRAs whose [schedules](images.md#adapter-schedules) disagree, or a LoRA sidecar that does not read or was written for another file | 400 naming them |
+| `sigmas` whose step count differs from `steps`, or more steps than MiniMax-H3-Image has step heads | 400 naming them |
 | An `int8` off the list, one whose linears differ from the entry's, or one this Mac or install cannot run | 400 naming `int8`, as in [Int8 refusals](troubleshooting.md#int8-refusals) |
 | One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
 | A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |

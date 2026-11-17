@@ -201,7 +201,7 @@ optional:
 | Field | Meaning |
 |-------|---------|
 | `sigmas` | The noise levels from the first to the last, one step between each two |
-| `heads` | `in_order`, where step i reads head i, which `sigmas` imply, or `span`, where a step reads the heads of the six default steps it spans, by its share of each, as ComfyUI reads them |
+| `heads` | `in_order`: step i reads head i, as `sigmas` imply. `span`: a step reads the heads of the default steps it spans, by its share of each, as ComfyUI does |
 | `size` | The image size, `WxH`, when the request gives none |
 
 Each field comes from the first of these that sets it:

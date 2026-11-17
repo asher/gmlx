@@ -1474,10 +1474,10 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--no-upsample` | Off | Run the prompt as typed, without the upsampler. |
 | `--upsample-prompt FILE` | The entry's `upsample_prompt` | Take the upsampler's system prompt from this file. Qwen-Image 2.1 ships none and needs one; MiniMax-H3-Image reads MiniMax's `prompt/manifest.json`. |
 | `--upsampler-mmproj GGUF` | The `mmproj` of the upsampler's `models` entry | Read the `--ref` images with this vision tower of `--upsampler`. MiniMax-H3-Image's upsampler sees the references, and needs it with `--ref`. |
-| `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else an adapter's [schedule](images.md#adapter-schedules), else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
+| `--size WxH` | The init image's, else a FLUX.2 or FLUX.3 klein reference's, else `defaults.size`, else a LoRA's [schedule](images.md#adapter-schedules), else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
 | `--steps N` | The variant's | Sample for N steps on the variant's schedule, in place of an adapter's. |
 | `--sigmas LIST` | An adapter's [schedule](images.md#adapter-schedules), else the variant's | Sample on these noise levels, such as `1,12/13,0`, one step between each two. On MiniMax-H3-Image step i reads step head i. |
-| `--save-adapter-schedule` | Off | Write the `--adapter` file's `--sigmas` and `--size` to its sidecar, `<file>.gmlx.json`, then generate. It takes one `--adapter`, and exits 2 when the folder is not writable. |
+| `--save-adapter-schedule` | Off | Write `--sigmas` and `--size` to the sidecar of the one `--adapter` file, `<file>.gmlx.json`, then generate. Exits 2 when the folder is not writable. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
 | `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
@@ -1494,7 +1494,7 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--background opaque/transparent` | `opaque` | `transparent` writes the alpha channel that Qwen-Image 2.1 decodes, as a png or a webp. It exits 2 with jpeg, and on a model that decodes no alpha channel. |
 | `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
 | `--adapter PATH[:STRENGTH]` | None | Apply this LoRA safetensors file at this strength, 1 when left out. Repeat the flag to stack adapters. |
-| `--int8 {off,attention,linears,all}` | The entry's `defaults.int8`, else `off` | Run the DiT's attention, its linears or both in int8, on an M5 or newer, for MiniMax-H3-Image. Lossy; `linears` and `all` hold more memory. An `--adapter` applies at each setting, on the int8 linears too. |
+| `--int8 {off,attention,linears,all}` | The entry's `defaults.int8`, else `off` | Run the DiT's attention, its linears or both in int8 on an M5 or newer, for MiniMax-H3-Image, with any `--adapter`. Lossy; `linears` and `all` hold more memory. |
 | `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. `never` exits 2 when the plan needs it. |
 | `--json` | Off | Print a JSON record on stdout, and progress on stderr. |
 
