@@ -299,12 +299,17 @@ def layout_rows(torch, dm, cap: Capture, layout, sigma) -> dict:
 
 
 def run_case(torch, dm, lat, feats, sigma, name, inputs, files, notes, *,
-             compressed: bool = False, edit: dict | None = None) -> None:
-    """One step in fp32 and bf16, written as fixture ``name``. ``edit``
-    holds the references' latents, their sizes' spans of the prompt and
-    the seed of an edit step."""
+             compressed: bool = False, edit: dict | None = None,
+             check: int = 3, script: str = SCRIPT,
+             sample_sigmas=None) -> None:
+    """One step in fp32 and bf16, written as fixture ``name`` of check
+    ``check`` by ``script``. ``edit`` holds the references' latents, their
+    sizes' spans of the prompt and the seed of an edit step.
+    ``sample_sigmas`` is the sampler's schedule the step is part of, the
+    grid by default, from which ComfyUI picks the heads the step reads."""
     payload = None
-    fx = fixtures.FixtureWriter(name, check=3, family=FAMILY, script=SCRIPT)
+    fx = fixtures.FixtureWriter(name, check=check, family=FAMILY,
+                                script=script)
     if edit is not None:
         refs = edit["latents"]
         payload = edit_payload(torch, refs, feats.shape[0], edit["spans"],
@@ -324,7 +329,8 @@ def run_case(torch, dm, lat, feats, sigma, name, inputs, files, notes, *,
         fx.add_file(role, path)
     for n in notes:
         fx.note(n)
-    grid = torch.tensor(dm.pdd_sigmas, dtype=torch.float32)
+    grid = torch.tensor(dm.pdd_sigmas if sample_sigmas is None
+                        else sample_sigmas, dtype=torch.float32)
     fx.inputs.update(sigma=float(np.float32(sigma)),
                      sample_sigmas=[float(v) for v in grid])
     fx.add("latents", lat)
@@ -378,7 +384,7 @@ def run_case(torch, dm, lat, feats, sigma, name, inputs, files, notes, *,
     fx.results["times"] = times
     fx.tolerances["rule"] = RULE
     path = fx.write(compressed=compressed)
-    print(f"[check3] {name}: velocity bf16 vs fp32 rel L2 "
+    print(f"[check{check}] {name}: velocity bf16 vs fp32 rel L2 "
           f"{g['rel_l2']:.3e}, {times}, wrote {path}", flush=True)
 
 

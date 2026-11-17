@@ -285,12 +285,13 @@ def gated_rows(m: dict) -> set:
     return rows | {f"cosine {VELOCITY}"}
 
 
-def assert_manifest_rule(m: dict) -> None:
+def assert_manifest_rule(m: dict, sigmas=hi.PDD_SIGMAS) -> None:
     """Every row tolerance is twice the gap beside it, or the float32
     floor for a row the oracle runs in float32 in both modes, each
     teacher-forced row run free is twice its free gap, the velocity
     floors follow its gap, the fixture holds every row of its depth with
-    a gap for each, and its layout holds a segment for each reference."""
+    a gap for each, its layout holds a segment for each reference, and
+    its step is part of the schedule ``sigmas``, the grid by default."""
     tols, res = m["tolerances"], m["results"]
     gap = res["velocity_bf16_vs_fp32"]
     assert tols[VELOCITY]["rel_l2"] == 2 * gap["rel_l2"]
@@ -319,7 +320,7 @@ def assert_manifest_rule(m: dict) -> None:
     assert m["inputs"]["segment_kinds"] == ["text", *["ref_img"] * len(refs),
                                             "video"]
     assert m["inputs"]["sample_sigmas"] == [
-        float(np.float32(s)) for s in hi.PDD_SIGMAS]
+        float(np.float32(s)) for s in sigmas]
 
 
 def unmeasured(got: dict, m: dict) -> list[str]:

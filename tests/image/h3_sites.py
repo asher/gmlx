@@ -18,7 +18,10 @@ chunk of query rows; the feed-forward from its input to the rows of fc2,
 swiglu, which rounds over the rounding of fc1 on the stock path; and
 every linear leaf. A refiner block also norms q and k as modules, has no
 RoPE and no modulation, and adds its residuals in line. The shift of
-each modulation is added in line, and the exact gate holds it.
+each modulation is added in line, and the exact gate holds it. Under a
+patch table each adapted leaf is read whole, its delta included, against
+the stock product with the table's delta in float32, and held to two
+more roundings, or to the low-rank op's own count where that op ran.
 """
 from __future__ import annotations
 
@@ -73,7 +76,7 @@ def qk_stock_n(model) -> int:
 @contextmanager
 def step_sites(model, sites: dict, routed: dict | None = None,
                heads: dict | None = None, skipped: set | None = None,
-               by_row: dict | None = None):
+               by_row: dict | None = None, built=None):
     """Fill ``sites`` with a reading for every op of every block and every
     call of a linear leaf while steps run: key to (relative L2, gate).
     ``routed`` takes the mlx-kquant op of each site a kernel route ran,
@@ -81,7 +84,9 @@ def step_sites(model, sites: dict, routed: dict | None = None,
     (0, batch, head, token). ``skipped`` takes the path of a leaf called
     on a float32 input, which runs in float32 and has no site. ``by_row``
     takes the worst token row of each site on the GLU kernel, at the
-    site's gate (block_gates.ROW_RULE)."""
+    site's gate (block_gates.ROW_RULE). ``built`` is the built table of
+    the patch table the step runs under, from ``install.build_table`` in
+    the block form, and gives the exact side each leaf's delta."""
     import mlx.nn as nn
     import mlx_kquant as kq
     from mlx_kquant.nn import KQuantLinear
@@ -97,21 +102,35 @@ def step_sites(model, sites: dict, routed: dict | None = None,
     counts: dict = {}
     calls: dict = {}
     ran: list = []
-    paths = {id(m): p for p, m in install.linear_leaves(model).items()}
+    wrapped = any(isinstance(m, install.ImageLoRALinear)
+                  for m in install.modules(model).values())
+    paths = {id(m): p for p, m in install.modules(model).items()
+             if install.linear_dims(m) is not None}
+
+    def factors(path):
+        g = None if built is None else built.get(path)
+        return None if g is None else (g.a_t.astype(f), g.b_t.astype(f))
 
     def exact_leaf(mod, x32):
-        """The leaf's product in float32 on its dequantized weight."""
-        codec = getattr(mod, "kquant_type", None)
-        w = mod["weight"].astype(f) if codec is None else \
-            kq.dequantize(mod["weight"], mod["scales"], codec, f)
+        """The leaf's product in float32 on its dequantized weight, with
+        its delta."""
+        base = getattr(mod, "base", mod)
+        codec = getattr(base, "kquant_type", None)
+        w = base["weight"].astype(f) if codec is None else \
+            kq.dequantize(base["weight"], base["scales"], codec, f)
         y = x32 @ w.T
-        if "bias" in mod:
-            y = y + mod["bias"].astype(f)
+        if "bias" in base:
+            y = y + base["bias"].astype(f)
+        fac = factors(paths[id(mod)])
+        if fac is not None:
+            y = y + (x32 @ fac[0]) @ fac[1]
         return y
 
     def leaf_rounds(mod) -> int:
-        quant = getattr(mod, "kquant_type", None) is not None
-        return 2 if quant and "bias" in mod else 1
+        base = getattr(mod, "base", mod)
+        quant = getattr(base, "kquant_type", None) is not None
+        n = 2 if quant and "bias" in base else 1
+        return n + (2 if factors(paths[id(mod)]) is not None else 0)
 
     def read(op, got, want, rounds, by_head=False, rows=False):
         key = (cur[-1], "step", op)
@@ -233,6 +252,7 @@ def step_sites(model, sites: dict, routed: dict | None = None,
 
     def leaf(orig):
         def run(mod, x, *a, **k):
+            before = len(ran)
             y = orig(mod, x, *a, **k)
             path = paths.get(id(mod))
             if path is None:
@@ -243,13 +263,20 @@ def step_sites(model, sites: dict, routed: dict | None = None,
                 return y
             with mx.stream(mx.cpu):
                 rel_l2 = qg._rel_l2(y, exact_leaf(mod, x.astype(f)))
+            kernel = "lora" in ran[before:]
+            rounds = bg.KERNEL_ROUNDINGS["lora"] if kernel else \
+                leaf_rounds(mod)
             n = calls[path] = calls.get(path, 0) + 1
-            sites[(path, n)] = (rel_l2, 2 * leaf_rounds(mod) * qg.SITE_UNIT)
+            sites[(path, n)] = (rel_l2, 2 * rounds * qg.SITE_UNIT)
+            if kernel and routed is not None:
+                routed[(path, n)] = bg.KERNEL_OPS["lora"]
             return y
         return run
 
     leaf_types = {type(m) for m in install.linear_leaves(model).values()}
     assert leaf_types <= {nn.Linear, KQuantLinear}, leaf_types
+    if wrapped:
+        leaf_types = {install.ImageLoRALinear}
     hooks = [(blocks.DiTBlock, "__call__", within),
              (blocks.RefinerBlock, "__call__", within),
              (norms.RMSNorm, "__call__", norm),
