@@ -30,13 +30,15 @@ embeds the time in the model's dtype, as BFL's does. Under
 ``convention: "reference"`` a step embeds the time by the DiT's reference
 rule, as ``sample`` does, and is otherwise the comfy step.
 
-A FLUX.3 flow map DiT also reads the time its step goes to. ComfyUI's
-forward takes it from the schedule its sampler runs on: the entry after
-the one nearest the timestep, the last at most. A step on a flow map
-holds that schedule as ``sample_sigmas`` and the route takes the target
-of each row by the same rule. ComfyUI's FLUX.2 and FLUX.3 latents are
-the DiT's own model space, the VAE's latents in 2x2 patches and
-normalized, so their VAE routes take and give model-space latents.
+A FLUX.3 flow map DiT also reads the time its step goes to, and so do
+the PDD heads of MiniMax-H3-Image, a DiT whose ``reads_target`` is set.
+ComfyUI's forward takes it from the schedule its sampler runs on: the
+entry after the one nearest the step's sigma, the last at most. A step
+on such a DiT holds that schedule as ``sample_sigmas`` and the route
+takes the target of each row by the same rule. ComfyUI's FLUX.2 and
+FLUX.3 latents are the DiT's own model space, the VAE's latents in 2x2
+patches and normalized, so their VAE routes take and give model-space
+latents, as MiniMax-H3-Image's do.
 """
 
 from __future__ import annotations
@@ -72,7 +74,7 @@ CLIENT_TABLE_BYTES = 16 << 20
 UNBOUNDED = 1 << 62
 FEATURES = ("prefix_cache", "noise_mask", "rgba_vae", "tiled_vae",
             "ref_cache", "skip_blocks", "av_step", "anchors",
-            "keyframe_upsampling", "int8")
+            "keyframe_upsampling", "int8", "ref_noise", "heads_in_order")
 
 
 @dataclass(frozen=True)
@@ -92,7 +94,8 @@ CONVENTIONS = {
               "flux2_klein_9b": Convention(time="fp32"),
               "flux2_klein_9b_kv": Convention(time="fp32"),
               "flux3_klein": Convention(),
-              "moss_image": Convention(scale=0.001)},
+              "moss_image": Convention(scale=0.001),
+              "h3_image": Convention(scale=0.001)},
 }
 # Under "reference" a step reads the timestep and returns its output as
 # under "comfy", and embeds the time by the DiT's reference rule, as a
@@ -103,7 +106,10 @@ CONVENTIONS["reference"] = {fam: replace(c, time="reference")
 # What a client builds its model from, per family: ComfyUI's model class
 # and image model name, the latent format and the VAE's. The VAE's
 # latents on the wire are in the VAE's own space unless its ``space`` is
-# "model".
+# "model". A latent with ``frames`` carries a frame axis of that many
+# frames in ComfyUI. ``config_keys`` names the keys of the DiT's config
+# that ComfyUI's model detection reads from a file's ``config`` metadata,
+# which the manifest carries.
 COMFY = {
     "z_image": {"model_class": "ZImage", "image_model": "lumina2",
                 "latent": {"channels": 16, "stride": 8, "patch": 2},
@@ -153,6 +159,17 @@ COMFY = {
                    "encode_pieces": 7},
            "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
                      "latents_per_second": 40}},
+    # ComfyUI's MiniMax-H3-Image latents are its video VAE's, at one frame.
+    "h3_image": {"model_class": "MiniMaxH3Image",
+                 "image_model": "minimax_h3_image",
+                 "latent": {"channels": 24, "stride": 16, "patch": 2,
+                            "frames": 1},
+                 # ComfyUI's H3ImageVAE samples an encode with the noise of
+                 # a CPU generator at this seed, the family's
+                 # ref_encode_seed, drawn in the shape of the latents.
+                 "vae": {"channels_out": 3, "stride": 16, "space": "model",
+                         "encode_seed": 42},
+                 "config_keys": ("pdd_steps", "pdd_sigmas")},
 }
 # The families whose step is an AV step: a video and an audio stream.
 AV_FAMILIES = frozenset({"h3"})
@@ -163,10 +180,11 @@ def _model_space(family: str) -> bool:
     return COMFY.get(family, {}).get("vae", {}).get("space") == "model"
 
 
-def flow_targets(sample_sigmas, timesteps) -> list:
-    """The time each row's step goes to on a flow map DiT, as ComfyUI's
-    FLUX.3 forward takes it: the entry of the client's schedule after the
-    one nearest the row's timestep, the last at most."""
+def flow_targets(sample_sigmas, sigmas) -> list:
+    """The sigma each row's step goes to on a DiT that reads it, as
+    ComfyUI's FLUX.3 and MiniMax-H3-Image forwards take it: the entry of
+    the client's schedule after the one nearest the row's sigma, the last
+    at most."""
     import numpy as np
 
     s = np.asarray(sample_sigmas, np.float32).reshape(-1)
@@ -174,9 +192,27 @@ def flow_targets(sample_sigmas, timesteps) -> list:
         raise StepError(400, "sample_sigmas is a schedule of 2 or more "
                         "finite sigmas")
     out = []
-    for t in timesteps:
+    for t in sigmas:
         i = int(np.abs(s - np.float32(t)).argmin())
         out.append(float(s[min(i + 1, s.size - 1)]))
+    return out
+
+
+def ordered_heads(sample_sigmas, sigmas, bank: int, title: str) -> list:
+    """The head each row's step reads under heads in order: the index in
+    the client's schedule of the entry nearest the row's sigma, which
+    must be a head of the DiT's bank of ``bank``."""
+    import numpy as np
+
+    s = np.asarray(sample_sigmas, np.float32).reshape(-1)
+    out = []
+    for t in sigmas:
+        i = int(np.abs(s - np.float32(t)).argmin())
+        if i >= bank:
+            raise StepError(400, f"heads in order read head i at step i, "
+                            f"and the {title} bank holds {bank} heads; this "
+                            f"is step {i} of the client's schedule")
+        out.append(i)
     return out
 
 
@@ -887,9 +923,15 @@ def status(spec, resident: bool, plan=None) -> dict:
         return video_status(spec, resident, plan)
     fam, variant = family_of(spec)
     facts = COMFY[fam.name]
-    from gmlx.image.api import _header_bytes
+    from gmlx.image.api import _header_bytes, _int8_bytes
 
-    mem = {"dit_bytes": _header_bytes(spec.path, "dit"),
+    from .image_service import entry_int8
+
+    # The entry's int8 setting, on a family that takes one.
+    int8 = (entry_int8(spec) if fam.int8_linears or fam.int8_attention
+            else None)
+    mem = {"dit_bytes": (_header_bytes(spec.path, "dit")
+                         + (_int8_bytes(spec.path, int8) if int8 else 0)),
            "encoder_bytes": (_header_bytes(spec.encoder, "encoder")
                              if spec.encoder else 0),
            "vae_bytes": _header_bytes(spec.vae, "vae")}
@@ -899,7 +941,7 @@ def status(spec, resident: bool, plan=None) -> dict:
         mem["resident_bytes"] = plan.footprint if resident else 0
     act = image_activation(fam.name)
     return {"model": spec.id, "family": fam.name, "variant": variant,
-            "resident": resident,
+            "resident": resident, **({"int8": int8} if int8 else {}),
             "comfy": {"model_class": facts["model_class"],
                       "image_model": facts["image_model"]},
             "latent": dict(facts["latent"]), "vae": dict(facts["vae"]),
@@ -957,8 +999,9 @@ _DTYPE_CLASS = {"F32": "f32", "F16": "f16", "BF16": "bf16"}
 
 def manifest(spec) -> dict:
     """The DiT's tensor names in GGUF key naming, their shapes in PyTorch
-    order and their dtype class, and the values of the tensors a client's
-    model detection reads by value."""
+    order and their dtype class, the values of the tensors a client's
+    model detection reads by value, and the file metadata it reads, the
+    ``config`` of a family whose row names ``config_keys``."""
     import base64
 
     import gguf
@@ -990,9 +1033,18 @@ def manifest(spec) -> dict:
             inline[name] = {"dtype": "f32", "shape": list(a.shape),
                             "b64": base64.b64encode(
                                 a.astype("<f4").tobytes()).decode()}
-    return {"model": spec.id, "family": fam.name, "naming": "gguf",
-            "arch": kv.get("general.architecture"), "count": len(tensors),
-            "tensors": tensors, "inline": inline}
+    out = {"model": spec.id, "family": fam.name, "naming": "gguf",
+           "arch": kv.get("general.architecture"), "count": len(tensors),
+           "tensors": tensors, "inline": inline}
+    keys = COMFY.get(fam.name, {}).get("config_keys")
+    if keys:
+        from gmlx.image.loader import identify_dit
+
+        cfg = identify_dit(spec.path,
+                           variant=getattr(spec, "variant", None)).config
+        out["metadata"] = {"config": json.dumps(
+            {"transformer": {k: cfg[k] for k in keys}})}
+    return out
 
 
 def _inline_names(family: str, names: list) -> list:
@@ -1048,17 +1100,62 @@ def _cond_key(h: str) -> str:
 
 def row_hashes(row) -> list:
     """The tensor hashes a step row names: its cond, its reference
-    latents and its attention mask."""
+    latents, their noise and its attention mask."""
     if not isinstance(row, dict) or not isinstance(row.get("cond"), str):
         raise StepError(400, "each row is an object with a cond hash")
-    refs = row.get("ref_latents") or []
-    if not isinstance(refs, list) or not all(isinstance(r, str)
-                                             for r in refs):
-        raise StepError(400, "a row's ref_latents is a list of hashes")
+    lists = []
+    for k in ("ref_latents", "ref_noise"):
+        got = row.get(k) or []
+        if not isinstance(got, list) or not all(isinstance(r, str)
+                                                for r in got):
+            raise StepError(400, f"a row's {k} is a list of hashes")
+        lists.append(got)
+    refs, noise = lists
+    if noise and len(noise) != len(refs):
+        raise StepError(400, f"a row's ref_noise names {len(noise)} "
+                        f"tensor{'' if len(noise) == 1 else 's'} and its "
+                        f"ref_latents {len(refs)}: one for each reference")
     mask = row.get("attention_mask")
     if mask is not None and not isinstance(mask, str):
         raise StepError(400, "a row's attention_mask is a hash")
-    return [row["cond"], *refs, *([mask] if mask else [])]
+    return [row["cond"], *refs, *noise, *([mask] if mask else [])]
+
+
+# Families whose DiT mixes noise into the rows of each reference, by the
+# patch of their latents. A step row with reference latents names in
+# ``ref_noise`` the noise of each, (h / p * w / p, C * p * p) float32 for
+# latents (C, h, w), as the client's generator drew it, since the server
+# cannot draw a torch generator's numbers.
+NOISE_FAMILIES = {"h3_image": 2}
+# Families whose encode gives the vision spans of the prompt's pictures,
+# each [start, stop) with its markers, beside the image slots.
+SPAN_FAMILIES = frozenset({"h3_image"})
+
+
+def _ref_noise(family: str, noise: list, latents: list) -> tuple:
+    """The noise of each reference of a row on ``family``, float32, with
+    its shape checked against the reference's latents."""
+    patch = NOISE_FAMILIES.get(family)
+    if patch is None:
+        if noise:
+            raise StepError(400, f"a {family} row takes no ref_noise: its DiT "
+                            "mixes no noise into its references")
+        return ()
+    if len(noise) != len(latents):
+        raise StepError(400, f"a {family} row names the noise of each of its "
+                        "reference latents in ref_noise, which its DiT mixes "
+                        "into their rows")
+    out = []
+    for i, (n, z) in enumerate(zip(noise, latents)):
+        c, h, w = (int(d) for d in z.shape[-3:])
+        want = ((h // patch) * (w // patch), c * patch * patch)
+        x = _f32(n)
+        if h % patch or w % patch or tuple(x.shape) != want:
+            raise StepError(400, f"ref_noise {i} is {tuple(x.shape)}, and the "
+                            f"rows of reference latents ({c}, {h}, {w}) take "
+                            f"{want}")
+        out.append(x)
+    return tuple(out)
 
 
 # Families whose conditioning splices reference latents into the text at
@@ -1169,13 +1266,29 @@ def conditioning(row: dict, tensors: _Bytes, family: str = ""):
     for _r, t in refs:
         z = _f32(t)
         latents.append(z[0] if z.ndim == 4 else z)
+    names = row.get("ref_noise") or []
+    noise = _ref_noise(family, [held[n] for n in names], latents)
     slots = tuple(int(s) for s in row.get("image_slots") or ())
+    if family in SPAN_FAMILIES and slots:
+        from gmlx.image.h3.pictures import slot_spans
+
+        try:
+            end = slot_spans(slots)[-1][1]
+        except ValueError as e:
+            raise StepError(400, str(e)) from None
+        if end > x.shape[0]:
+            raise StepError(400, f"image slot {slots[-1]} and its end marker "
+                            f"are past the cond's {x.shape[0]} rows")
     if family in SLOT_FAMILIES and latents:
         x, slots = slots_from_wire(x, slots,
                                    [tuple(z.shape[-2:]) for z in latents])
+    # A reference's noise joins its hash, so the states a DiT derives from
+    # its rows are named by both.
+    hashes = tuple(r if not names else f"{r}+{n}"
+                   for (r, _), n in zip(refs, names or [None] * len(refs)))
     return Conditioning(x, key, ref_latents=tuple(latents),
-                        image_slots=slots,
-                        ref_hashes=tuple(r for r, _ in refs))
+                        image_slots=slots, ref_hashes=hashes,
+                        ref_noise=noise)
 
 
 def _mask_tokens(mask: WireTensor, n) -> int:
@@ -1213,12 +1326,13 @@ def step_pacer(run: Run | None, gen: int):
 
 def run_step(served, x, sigmas, conds, table, run, gen,
              targets=None, time_rule: str = "reference",
-             ref_cache: bool = False, skip=()) -> tuple:
+             ref_cache: bool = False, skip=(), heads=None) -> tuple:
     """One ``denoise_step`` over the rows on the image worker, to the
     ``targets`` of a flow map DiT, on the DiT's ``time_rule``, with
-    ``ref_cache`` on the run's cache of reference K and V, and with every
-    row leaving out the blocks of ``skip``. Returns (velocity f32
-    evaluated, forward seconds, prefix cache answer)."""
+    ``ref_cache`` on the run's cache of reference K and V, with every
+    row leaving out the blocks of ``skip``, and each row reading the head
+    of ``heads`` it names. Returns (velocity f32 evaluated, forward
+    seconds, prefix cache answer)."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -1234,7 +1348,7 @@ def run_step(served, x, sigmas, conds, table, run, gen,
     with paced(step_pacer(run, gen)):
         v = api.denoise_step(pipe, x, sigmas, conds, patch_table=table,
                              target=targets, time=time_rule, ref_cache=held,
-                             skip=skip)
+                             skip=skip, head=heads)
         v = v.astype(mx.float32)
         mx.eval(v)
     # Without chat the step is one evaluation, which an interrupt or an end
@@ -1426,11 +1540,19 @@ def encode(served, text: str, images: list, borrow=None,
             raise StepError(400, f"the {pipe.family.title} encoder reads the "
                             "prompt alone; a step takes the reference "
                             "latents the VAE route encodes")
+        images = images[:edit.max_refs + 1]
         try:
-            refs = api.references(pipe, [
-                api.references(pipe, [im],
-                               area=im.shape[0] * im.shape[1])[0]
-                for im in images[:edit.max_refs + 1]])
+            if edit.prepare_all is not None:
+                # A family that sizes its references by its own rule
+                # prepares them so: MiniMax-H3-Image's keep the size of an
+                # image at the size of its vision copy, as ComfyUI's node
+                # gives its encoder.
+                refs = api.references(pipe, images)
+            else:
+                refs = api.references(pipe, [
+                    api.references(pipe, [im],
+                                   area=im.shape[0] * im.shape[1])[0]
+                    for im in images])
         except ValueError as e:
             raise StepError(400, str(e)) from None
     cond, other = _encode(served, text, typed, refs, borrow)
@@ -1459,6 +1581,10 @@ def encode(served, text: str, images: list, borrow=None,
     mx.eval(feats, *lats, *extra)
     got = {"cond": _host(feats), "refs": [_host(z) for z in lats],
            "image_slots": slots}
+    if refs and pipe.family.name in SPAN_FAMILIES:
+        from gmlx.image.h3.pictures import slot_spans
+
+        got["spans"] = [list(sp) for sp in slot_spans(slots)]
     if extra:
         got["typed"] = _host(extra[0])
     return got
@@ -1499,10 +1625,12 @@ def vae_decode(served, raw: WireTensor, alpha: bool):
     return np.concatenate(out, axis=0)
 
 
-def vae_encode(served, image: WireTensor):
+def vae_encode(served, image: WireTensor, noise: WireTensor | None = None):
     """An image (B, H, W, C) f32 in [0, 1] to latents (B, C, h, w) f32 in
     the VAE's space, or the model's for a family whose VAE facts say so,
-    as numpy."""
+    as numpy: the mean, or with ``noise``, (B, C, h, w) in the layout of
+    the latents, a sample from it, as ComfyUI's MiniMax-H3-Image VAE
+    samples with the noise of its seed."""
     import mlx.core as mx
 
     from gmlx.image import api
@@ -1517,9 +1645,25 @@ def vae_encode(served, image: WireTensor):
     if pipe.vae.config.in_channels == 3:
         img = img[..., :3]
     keep = _model_space(pipe.family.name)
+    eps = None
+    if noise is not None:
+        s = pipe.vae.config.scale
+        want = (img.shape[0], pipe.vae.config.latent_channels,
+                img.shape[1] // s, img.shape[2] // s)
+        if not keep:
+            raise StepError(400, "vae/encode takes noise on a model whose "
+                            "VAE route carries the model's latents, and "
+                            f"{pipe.family.title}'s carries the VAE's")
+        if tuple(noise.shape) != want:
+            raise StepError(400, f"vae/encode takes noise {want}, the shape "
+                            "of the latents of its image, not "
+                            f"{tuple(noise.shape)}")
+        eps = _f32(noise)
     out = []
     for i in range(img.shape[0]):
-        model = api.vae_encode(pipe, img[i:i + 1])
+        how = {} if eps is None else {"mode": "sample",
+                                      "noise": eps[i:i + 1]}
+        model = api.vae_encode(pipe, img[i:i + 1], **how)
         raw = model if keep else pipe.vae.to_vae_space(model).transpose(
             0, 3, 1, 2)
         mx.eval(raw)

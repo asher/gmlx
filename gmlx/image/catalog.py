@@ -56,12 +56,17 @@ class Recipe:
                                       # own
     # The upsampler's system prompt of a family that ships none, which the
     # pull fetches when it can and the entry names as upsample_prompt.
+    # prompt_more holds (file, sha256) of the files it reads beside it,
+    # which the pull fetches with it, into the repository's folder.
     prompt_repo: str = ""
     prompt_revision: str = ""
     prompt_file: str = ""
     prompt_sha256: str = ""
+    prompt_more: tuple = ()
     prompt_license: str = ""
     prompt_license_url: str = ""
+    # The smallest memory class whose Mac makes an image with it.
+    least_class: int = MEMORY_CLASSES[0]
 
     def dit_name(self, quant: str) -> str:
         return self.dit_file.format(quant=quant)
@@ -170,6 +175,57 @@ _MOSS = dict(
     license="apache-2.0", encoder_license="apache-2.0",
     encoder_bytes=9_527_502_048, vae_bytes=249_514_688)
 
+# MiniMax-H3-Image: unsloth's GGUFs of MiniMax's pruned checkpoint,
+# conditioned on MiniMax-H3's encoder, Qwen3-VL-32B-Instruct, read after
+# its layer 50. Its VAE is ComfyUI's float16 file, without a config.json.
+# Its license is the H3 video license's text for this model, with
+# authorization from $1M in yearly revenue or to host it for others.
+_H3_IMAGE_LICENSE = "minimax-h3-image-community-license-agreement"
+_H3_IMAGE = dict(
+    family="h3_image", dit_repo="unsloth/MiniMax-H3-Image-GGUF",
+    dit_file="minimax_h3_image_pruned-{quant}.gguf",
+    dit_quants=("Q3_K_M", "Q4_K_M", "UD-Q4_K_XL", "Q5_K_M", "Q6_K", "Q8_0"),
+    encoder_repo="unsloth/Qwen3-VL-32B-Instruct-GGUF",
+    encoder_file="Qwen3-VL-32B-Instruct-{quant}.gguf",
+    encoder_quants=("Q4_K_M",), mmproj_file="mmproj-BF16.gguf",
+    vae_repo="Comfy-Org/MiniMax-H3-Image",
+    vae_revision="0bb149f51e3156ed4b90dd45d5620346bfe1df8f",
+    vae_file="vae/minimax_h3_image_vae_fp16.safetensors", vae_config="",
+    vae_sha256="d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af",
+    vae_pack="minimax-h3-image-vae-F16.gguf",
+    license=_H3_IMAGE_LICENSE,
+    license_url="https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/"
+                "LICENSE",
+    # LICENSE section I definition 5, IV.1, IV.2, V.5 and Exhibit A item 12.
+    license_note=("no grant in the US, EU, UK or South Korea without "
+                  "MiniMax's separate license; written authorization above "
+                  "$1M yearly revenue, affiliates counted, or to host it for "
+                  "others; a commercial UI must show MiniMax-H3-Image; a "
+                  "service for others needs safeguards; outputs posted "
+                  "publicly must be marked machine-generated"),
+    encoder_license="apache-2.0", vae_license=_H3_IMAGE_LICENSE,
+    encoder_bytes=19_762_151_200 + 1_200_334_496, vae_bytes=1_168_494_144,
+    least_class=32,
+    # MiniMax's prompt expander prompts, which gmlx does not ship: the
+    # manifest the entry names and the files it lists, at the sha256 the
+    # manifest gives each.
+    prompt_repo="MiniMaxAI/MiniMax-H3-Image-PE",
+    prompt_revision="35603d4b63949afa12cb098227fffefedf081afa",
+    prompt_file="prompt/manifest.json",
+    prompt_sha256="6b0969322669d9713e33148d36c401f73b18939337ea2384d90dc457430b6a5b",
+    prompt_more=(
+        ("prompt/t2i/system_prompt.txt",
+         "818ab3f652ec36b3b489b55c29f072f87e14af703cd11a4f3bff75f423d0beac"),
+        ("prompt/t2i/task_prompt.txt",
+         "890213ad61e143bbd5b7906a802430296e82ca5c61ba16df717dcef5477bbcf4"),
+        ("prompt/t2i/request_params.json",
+         "dfc608bf0c02dd6ce7463be636aa8b148aef200513fa4c46e653ee2e5affbe3e"),
+        ("prompt/edit/task_prompt.txt",
+         "c5695dbfc07a9e65555cef67d92467c613371cc2039b96f057022246a30a57b2")),
+    prompt_license=_H3_IMAGE_LICENSE,
+    prompt_license_url="https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/"
+                       "blob/main/LICENSE")
+
 # What gmlx pull says about each recipe: the GOOD FOR cell, one sentence
 # on what it makes and one on how quick it is.
 _WORDS = {
@@ -212,6 +268,10 @@ _WORDS = {
     "flux-3-klein-base": ("images with guidance, edits",
                           "FLUX.3 klein before distillation, with a guidance setting.",
                           "Slow: 50 steps per image."),
+    "minimax-h3-image": ("large detailed images, edits",
+                         "Makes images from text up to 20 MP, or edits up "
+                         "to 16 pictures.",
+                         "Fast: 6 steps per image, at a large size."),
 }
 
 
@@ -340,6 +400,8 @@ RECIPES = {r.name: _worded(r) for r in (
     Recipe(
         name="flux-3-klein-base", title="FLUX.3 klein Base", variant="base",
         dit_file="BASE/flux3_image_klein-{quant}.gguf", **_FLUX3),
+    Recipe(name="minimax-h3-image", title="MiniMax-H3-Image",
+           variant="pruned", **_H3_IMAGE),
 )}
 
 # The DiT and encoder quants a recipe pulls on each memory class.
@@ -406,6 +468,13 @@ DEFAULT_QUANTS = {
                      32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
     "flux-3-klein-base": {16: ("Q4_K_M", "Q8_0"), 24: ("Q8_0", "Q8_0"),
                           32: ("Q8_0", "Q8_0"), 64: ("Q8_0", "Q8_0")},
+    # The Q4_K_M encoder peaks at 19.5 GiB, so no image fits under 32 GB,
+    # where the classes name the 32 GB class's quants. UD-Q4_K_XL fits
+    # every size there; Q5_K_M fits 2048x2048 and not 4096x4096.
+    "minimax-h3-image": {16: ("UD-Q4_K_XL", "Q4_K_M"),
+                         24: ("UD-Q4_K_XL", "Q4_K_M"),
+                         32: ("UD-Q4_K_XL", "Q4_K_M"),
+                         64: ("Q8_0", "Q4_K_M")},
 }
 
 
@@ -419,6 +488,7 @@ ENCODER_OUTPUT_BYTES = {
     "Qwen3-VL-8B-Instruct-Q4_K_M.gguf": 510_504_960,
     "Qwen3.5-9B-Q8_0.gguf": 1_080_688_640,
     "Qwen3.5-9B-Q4_K_M.gguf": 834_355_200,
+    "Qwen3-VL-32B-Instruct-Q4_K_M.gguf": 638_131_200,
 }
 
 
@@ -440,13 +510,22 @@ def companion_bytes(r: Recipe, ram_bytes: int | None) -> int:
 # The image size an entry pulled with the class default DiT gets in its
 # defaults, where that DiT makes images smaller than the family's size.
 DEFAULT_SIZES = {"krea-2-turbo": {16: "512x512"}}
-# Every family's image size when a request names none.
+# The image size when a request names none, for a variant whose sampling
+# row names no other.
 IMAGE_SIZE = "1024x1024"
 
 
 def image_size(r: Recipe, ram_bytes: int | None) -> str:
-    """The image size a pull of ``r`` at its class default makes here."""
-    return DEFAULT_SIZES.get(r.name, {}).get(memory_class(ram_bytes), IMAGE_SIZE)
+    """The image size a pull of ``r`` at its class default makes here: the
+    class's size where the recipe sets one, else the size of its variant's
+    sampling row."""
+    size = DEFAULT_SIZES.get(r.name, {}).get(memory_class(ram_bytes))
+    if size:
+        return size
+    from .registry import get_family
+
+    row = get_family(r.family).sampling_row(r.variant)
+    return IMAGE_SIZE if row is None else f"{row.size[0]}x{row.size[1]}"
 
 
 def dit_bytes(r: Recipe, quant: str) -> int:
@@ -494,10 +573,12 @@ def memory_class(ram_bytes: int | None) -> int:
     return fit[-1] if fit else MEMORY_CLASSES[0]
 
 
-def makes_no_image(ram_bytes: int | None) -> bool:
+def makes_no_image(ram_bytes: int | None, r: Recipe | None = None) -> bool:
     """Whether a Mac with ``ram_bytes`` of RAM is under the smallest memory
-    class, where no image model makes an image. Unknown RAM is not."""
-    return bool(ram_bytes) and ram_bytes / (1 << 30) + 0.5 < MEMORY_CLASSES[0]
+    class that makes an image with ``r``, or with any recipe when ``r`` is
+    None. Unknown RAM is not."""
+    least = MEMORY_CLASSES[0] if r is None else r.least_class
+    return bool(ram_bytes) and ram_bytes / (1 << 30) + 0.5 < least
 
 
 def default_quants(r: Recipe, ram_bytes: int | None) -> tuple[str, str]:

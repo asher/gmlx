@@ -4,6 +4,10 @@ Module attribute names equal the GGUF tensor names after the family's one
 prefix strip, so no remap table exists. Quantized matrices become
 ``KQuantLinear`` leaves over zero-copy wire bytes. The shared text loader
 installs them and casts float tensors, with its text-model patches off.
+A load at an int8 setting other than off sets the DiT's attention and
+converts its family's block linears to ``Int8Linear`` leaves once the
+weights are in, after a refusal where this install or Mac does not run
+it.
 """
 
 from __future__ import annotations
@@ -172,15 +176,17 @@ def load_dit(path: str, *, family: str | None = None,
              variant: str | None = None, act_dtype: mx.Dtype | None = None,
              identified: Identified | None = None,
              log=print, kind: str = "image", gate_extra: int = 0,
-             gate_hint: str = "Try a smaller DiT quant"
+             gate_hint: str = "Try a smaller DiT quant", int8: str = "off"
              ) -> tuple[nn.Module, DitInfo]:
     """Load a DiT GGUF. Raises ``ImageModelError`` for a file gmlx image
-    refuses and ``UnsupportedCodecError`` for a codec it cannot run.
-    ``identified`` is what ``identify_dit`` gave for this file, which then
-    is not identified again. ``kind`` names the command in the log and in
-    refusals. The load gate counts ``gate_extra`` bytes past the file's,
-    which the caller adds once the load returns, and refuses with
-    ``gate_hint``."""
+    refuses, or an int8 setting ``int8`` (``int8.INT8``) this install,
+    Mac or family does not run, and ``UnsupportedCodecError`` for a codec
+    it cannot run. ``identified`` is what ``identify_dit`` gave for this
+    file, which then is not identified again. ``kind`` names the command
+    in the log and in refusals. The load gate counts ``gate_extra`` bytes
+    past the file's, which the caller adds once the load returns, and
+    with int8 linears the int8 weights over the file and the largest
+    conversion, and refuses with ``gate_hint``."""
     from mlx_kquant.nn import KQuantLinear
 
     from gmlx.load.loader import (
@@ -234,6 +240,20 @@ def load_dit(path: str, *, family: str | None = None,
     why = fam.variant_needed(ident.variant)
     if why:
         raise ImageModelError(why)
+    from . import int8 as neutral
+    from .registry import int8_fallback, int8_refusal
+
+    attention, linears = neutral.int8_parts(int8)
+    why = int8_refusal(fam, ident.variant, int8)
+    if why:
+        raise ImageModelError(why)
+    if linears == "int8":
+        gate_extra += (
+            neutral.int8_delta(view, fam.strip_prefixes, fam.int8_linears)
+            + neutral.int8_transient(view, fam.strip_prefixes,
+                                     fam.int8_linears))
+        gate_hint = (f"Run with int8 {int8_fallback(fam)}, or try a smaller "
+                     "DiT quant")
     log(f"[{kind}] {fam.title} ({_shown(fam, ident.variant)}), layout "
         f"{ident.layout}, {len(view.tensors)} tensors")
     # The tensors cast to the activation dtype are held twice until the
@@ -276,8 +296,20 @@ def load_dit(path: str, *, family: str | None = None,
                if isinstance(m, KQuantLinear))
     # A model loaded on one thread may run on another.
     materialize_module_arrays(model)
+    n_owned = len(no_alias)
+    # The model alone holds the leaves, so each K-quant leaf frees as its
+    # int8 copy lands.
+    del weights, no_alias
     collect_after_load()
+    if attention != "dense":
+        model.attention = attention
+    if linears == "int8":
+        try:
+            n = model.convert_linears(fam.int8_linears)
+        except ValueError as e:
+            raise ImageModelError(str(e)) from e
+        log(f"[{kind}] {fam.title}: {n} linears converted to int8")
     info = DitInfo(identified=ident, shards=tuple(shards), act_dtype=act,
-                   n_kquant=n_kq, n_owned_casts=len(no_alias),
+                   n_kquant=n_kq, n_owned_casts=n_owned,
                    file_bytes=sum(s.size for s in scans))
     return model, info

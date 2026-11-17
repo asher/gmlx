@@ -33,15 +33,15 @@ import json
 import math
 import struct
 from dataclasses import dataclass, replace
-from typing import Callable
 
 import mlx.core as mx
 from mlx.utils import tree_flatten
 
 from ..fingerprint import ImageModelError
-from . import (flux1_ae, flux2_ae, moss_image_ae, qwen_image21_vae,
+from . import (flux1_ae, flux2_ae, h3_image, moss_image_ae, qwen_image21_vae,
                qwen_image_vae)
 from .conv import conv_path, set_conv_path
+from .row import VaeRow
 
 STRIP_PREFIXES = ("vae.", "first_stage_model.")
 FLOAT_CODECS = ("F32", "F16", "BF16")
@@ -52,38 +52,6 @@ ORIG_SHAPE_KEY = "comfy.gguf.orig_shape."
 
 class VAEError(ImageModelError):
     """A VAE file or request that gmlx refuses, with the reason."""
-
-
-@dataclass(frozen=True)
-class VaeRow:
-    """The VAE an image family decodes with."""
-    title: str
-    config_from_shapes: Callable    # torch shapes -> config, or None
-    build: Callable                 # config -> nn.Module
-    latent_channels: int
-    latent_space: Callable | None = None    # family constants -> config
-                                    # fields; None for a VAE outside the
-                                    # image registry
-    expected_unused: Callable | None = None     # config -> the tensors a
-                                                # file may hold that stay
-                                                # unread, name -> torch shape
-    image_channels: int | None = None   # in and out, when the family fixes
-                                        # them
-    relative: Callable | None = None    # torch shapes -> what a file with
-                                        # this tree holds instead, or None
-    config_disagreements: Callable | None = None    # vae/config.json dict
-                                        # -> fields that differ from the
-                                        # VAE's constants
-    fp32_keep: tuple = ()               # parameters kept in float32
-    layout: Callable | None = None      # (name, torch shape) -> (axes or
-                                        # None, module shape), for tensors
-                                        # outside the image layout
-    dtypes: tuple = ()                  # decode dtypes, the default first;
-                                        # () for bfloat16 or float32
-    own_names: bool = False             # read under the file's names, with
-                                        # no rename to diffusers names
-    refusal: Callable | None = None     # VaeHeader -> why gmlx does not run
-                                        # the file, or None
 
 
 def _flux1_space(c: dict) -> dict:
@@ -136,6 +104,7 @@ VAES = {
         relative=moss_image_ae.relative,
         config_disagreements=moss_image_ae.config_disagreements,
         fp32_keep=flux2_ae.BN_STATS),
+    "h3_image": h3_image.ROW,
 }
 
 

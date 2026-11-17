@@ -96,10 +96,30 @@ with sides a multiple of 32, and an image outside that area gets 400. An
 encode with `refs: false` leaves out the VAE latents of its reference
 images, for a client that encodes them with a VAE of its own.
 
+MiniMax-H3-Image takes up to 16 reference images. Its encode takes each
+image at the size of its vision copy, as ComfyUI's
+`MiniMaxH3ImageConditioning` gives its encoder, and answers `spans`, the
+[start, stop) rows of each picture's vision block with its markers,
+beside `image_slots`, the block's rows without them. A step row on it
+names those rows in `image_slots`, and names in `ref_noise` one tensor
+for each of its reference latents: the noise its DiT mixes into that
+reference's rows, (h / 2 x w / 2, 96) float32 for latents (24, h, w),
+which ComfyUI's forward draws from a CPU generator restarted at the
+run's seed for each reference. A row with reference latents and no
+`ref_noise`, noise of another shape, or an image slot whose end marker
+is past the cond gets 400. Its status names under `vae.encode_seed` the
+seed ComfyUI's VAE samples an encode with, 42, and a `vae/encode` with
+`noise` in the shape of the latents samples with that noise instead of
+taking the mean. A server whose features list `ref_noise` takes both.
+
 An encode that upsamples the prompt returns the caption as
 `revised_prompt` and its conditioning as `cond`, and the prompt as typed
 as `cond_typed`. A client that adds reference images after the encode,
-as ComfyUI does, samples an edit and a negative on `cond_typed`.
+as ComfyUI does, samples an edit and a negative on `cond_typed`. The
+encode cannot tell a negative from a positive prompt, so it answers
+`cond_typed` beside every caption. An upsampler that samples, as
+MiniMax-H3-Image's does, writes the caption at a fixed seed, so a graph
+reruns its caption.
 
 On a server whose features list `keyframe_upsampling`, the encode of a
 video model takes the clip's `frames` and `keyframes`, the role of each
@@ -169,7 +189,11 @@ nothing.
 
 A step, a VAE decode and a VAE encode take the size limits of the OpenAI
 routes: an image over 2048x2048 pixels or with a side over 4096 gets 413,
-as does a VAE pass of more than 16 images. One whose memory plan does not
+as does a VAE pass of more than 16 images. A model with size limits of its
+own takes those instead: MiniMax-H3-Image gets 413 past 20,000,000 pixels
+or a side over 7712, and a denoise step under 655,360 pixels or outside
+1:3 to 3:1 gets 400, while a VAE pass may take any size under its upper
+limits. One whose memory plan does not
 fit beside the models loaded gets 400, and so does the encode of a prompt
 on a video model, priced by its rows. The message of a step names the
 largest term of its plan and, where the plan keeps the keys and values of

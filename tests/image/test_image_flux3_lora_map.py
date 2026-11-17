@@ -199,9 +199,13 @@ def test_every_spelling_of_every_target_resolves(tmp_path, case):
         assert res.warnings == ()
     else:
         # ComfyUI reads only the GGUF names, under lora_unet_ and
-        # diffusion_model.
+        # diffusion_model., named so the sentence's period follows the
+        # underscore.
         assert len(res.warnings) == 1
         assert "ComfyUI drops them" in res.warnings[0]
+        assert "Stock ComfyUI reads the GGUF names under diffusion_model. " \
+            "or lora_unet_. gmlx applies them" in res.warnings[0], \
+            res.warnings[0]
         assert f": {len(dims)} keys " in res.warnings[0]
     assert len(res.dit) == len(dims)
     for t in res.dit:

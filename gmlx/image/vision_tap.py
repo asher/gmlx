@@ -165,14 +165,7 @@ def tap(handle, ids, blocks, *, pad: int, deepstack: int | None = None):
         raise ValueError(f"the tokenizer's image pad token {pad} is not "
                          f"the encoder's image token {int(own)}")
     act = getattr(mx, spec.activation or "float32")
-    feats, deep, grids = [], [], []
-    with float32_products(tower):
-        for pixels, grid in blocks:
-            f, d = tower(pixels.astype(mx.float32), mx.array([grid]))
-            mx.eval(f, *d)
-            feats.append(f.astype(act))
-            deep.append([x.astype(act) for x in d])
-            grids.append(grid)
+    feats, deep, grids = _tower_rows(tower, blocks, act)
     rows = np.flatnonzero(np.asarray(ids) == pad)
     image = feats[0] if len(feats) == 1 else mx.concatenate(feats, axis=0)
     if image.shape[0] != rows.size:
@@ -191,6 +184,26 @@ def tap(handle, ids, blocks, *, pad: int, deepstack: int | None = None):
                    visual_pos_masks=x == pad,
                    deepstack_visual_embeds=stack or None,
                    stop_after_layer=layer, apply_final_norm=False)
+    # Only the pass's graph holds the tower's rows now, so the pass frees
+    # each picture's outputs once joined, the image rows once placed and
+    # each deepstack block once added. Held to the end they were eight
+    # rows of features for each vision row: 7.5 GiB at 16 references of
+    # MiniMax-H3-Image at 3:1.
+    del feats, deep, image, stack, h
     features = out[0, spec.drop:]
     mx.eval(features)
     return features, rows
+
+
+def _tower_rows(tower, blocks, act) -> tuple:
+    """(features, deepstack, grids) of each image of ``blocks`` through
+    the tower alone, evaluated, in dtype ``act``."""
+    feats, deep, grids = [], [], []
+    with float32_products(tower):
+        for pixels, grid in blocks:
+            f, d = tower(pixels.astype(mx.float32), mx.array([grid]))
+            mx.eval(f, *d)
+            feats.append(f.astype(act))
+            deep.append([x.astype(act) for x in d])
+            grids.append(grid)
+    return feats, deep, grids

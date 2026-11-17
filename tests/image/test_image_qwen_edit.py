@@ -364,6 +364,57 @@ def test_the_tap_with_images_is_the_forward_of_the_class(handle, refs):
         assert text.features.dtype == mx.float32
 
 
+def test_the_pass_alone_holds_the_towers_rows(handle, refs, monkeypatch):
+    """When the language pass runs, only its graph holds each picture's
+    tower outputs, the joined image rows and the deepstack rows, so the
+    pass frees each once read. Held by the tap to the end, they were eight
+    rows of features beside each vision row of the pass."""
+    import gc
+    import weakref
+
+    real, rows = vision_tap.mx, vision_tap._tower_rows
+    tower, joined, alive = [], [], []
+
+    def ids(refs):
+        return {id(r()) for r in refs if r() is not None}
+
+    def tower_rows(*a):
+        feats, deep, grids = rows(*a)
+        tower.extend(weakref.ref(x) for x in feats + sum(deep, []))
+        return feats, deep, grids
+
+    class Spy:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        @staticmethod
+        def concatenate(arrays, *a, **k):
+            out = real.concatenate(arrays, *a, **k)
+            if {id(x) for x in arrays} & ids(tower):
+                joined.append(weakref.ref(out))
+            return out
+
+        @staticmethod
+        def eval(*arrays):
+            gc.collect()
+            alive.append(len(ids(tower)) + len(ids(joined)))
+            return real.eval(*arrays)
+
+    monkeypatch.setattr(vision_tap, "_tower_rows", tower_rows)
+    monkeypatch.setattr(vision_tap, "mx", Spy())
+    with real.stream(real.cpu):
+        _, feats, _ = edit.encode(handle, "paint it red", refs)
+    # Two pictures, each its features and its deepstack blocks, and the
+    # joins of each kind; the last eval is the pass's.
+    blocks = len(tower) // len(refs) - 1
+    assert blocks >= 1 and len(joined) == 1 + blocks
+    assert alive[-1] == 0, alive
+    monkeypatch.undo()
+    with real.stream(real.cpu):
+        _, want, _ = edit.encode(handle, "paint it red", refs)
+    assert np.array_equal(np.array(feats), np.array(want))
+
+
 def _linears(module) -> dict:
     return {p: id(m) for p, m in module.named_modules()
             if isinstance(m, (nn.Linear, vision_tap.ExactLinear))}
@@ -534,6 +585,9 @@ class _Vae:
     def to_model_space(self, mean):
         return mean.transpose(0, 3, 1, 2)
 
+    def to_vae_layout(self, latents):
+        return latents.transpose(0, 2, 3, 1)
+
 
 @pytest.fixture
 def pipe(handle, monkeypatch):
@@ -696,6 +750,32 @@ def test_reference_latents_come_from_the_vae_once_per_image(pipe):
     with pytest.raises(ValueError, match="1 hashes for 2 reference"):
         Conditioning(pos.features, "k", ref_latents=done[0].ref_latents,
                      ref_hashes=("a",))
+
+
+def test_reference_latents_sample_with_the_family_seed_or_their_own_noise(
+        pipe):
+    """A family with a reference encode seed samples each image with
+    noise_from_seed draws in the shape of its latents, a reference's own
+    noise takes their place, and each draw keeps its own latents."""
+    from gmlx.image.samplers import noise_from_seed
+
+    ref = api.references(pipe, [_picture(300, 260, seed=1)],
+                         area=320 * 320)[0]
+    mode = np.array(api._reference_latents(pipe, ref, None))
+    pipe.family = replace(pipe.family, ref_encode_seed=42)
+    seeded = np.array(api._reference_latents(pipe, ref, None))
+    # The stub's log variance is 0, so a sample is the mean plus the draw.
+    np.testing.assert_array_equal(seeded,
+                                  mode + noise_from_seed(42, (8, 18, 22)))
+    own = noise_from_seed(7, (8, 18, 22))
+    noisy = Reference(ref.pixels, noise=own)
+    np.testing.assert_array_equal(
+        np.array(api._reference_latents(pipe, noisy, None)), mode + own)
+    assert len(pipe.vae.calls) == 3
+    assert noisy.identity[:3] == ref.identity and noisy.identity != \
+        Reference(ref.pixels, noise=own + 1).identity
+    with pytest.raises(ValueError, match="must be .C, h, w. float32"):
+        Reference(ref.pixels, noise=own.astype(np.float64))
 
 
 def test_two_references_of_one_size_keep_their_own_latents_and_order(pipe):

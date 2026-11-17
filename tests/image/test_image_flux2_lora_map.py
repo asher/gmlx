@@ -417,8 +417,11 @@ def test_the_pixel_art_adapter_warns_of_its_modulations_and_its_scale():
     assert {t.pair.alpha / t.pair.rank for t in res.dit} == {16.0}
     dropped = [w for w in res.warnings if "ComfyUI drops them" in w]
     assert len(dropped) == 1
-    assert (f"3 keys have a spelling that ComfyUI does not read for FLUX.2 "
-            f"klein ({', '.join(PIXEL_ART_MODULATIONS)})") in dropped[0]
+    assert (f"3 keys have a spelling that stock ComfyUI does not read for "
+            f"FLUX.2 klein ({', '.join(PIXEL_ART_MODULATIONS)})") in dropped[0]
+    assert dropped[0].endswith("ComfyUI drops them, with or without the "
+                               "gmlx nodes, so the image differs from "
+                               "ComfyUI's")
     scaled = [w for w in res.warnings if "rank-stabilized" in w]
     assert len(scaled) == 1 and len(res.warnings) == 2
     assert "86 pairs take an alpha from the adapter header" in scaled[0]

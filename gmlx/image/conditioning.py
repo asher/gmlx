@@ -28,9 +28,16 @@ import numpy as np
 class Reference:
     """One reference image at the size its family runs it at: ``pixels``
     is (H, W, 4) uint8 with straight alpha, and ``sha256`` names its
-    bytes and size. A ``sha256`` given that is not theirs is refused."""
+    bytes and size. A ``sha256`` given that is not theirs is refused.
+    ``noise``, when given, is the float32 standard normal draw (C, h, w)
+    in the layout of the image's model-space latents that its encode
+    samples with, in place of the family's. ``vision``, on a family whose
+    encoder reads its own copy of the image, is that copy, (H, W, 3)
+    uint8."""
     pixels: np.ndarray
     sha256: str = ""
+    noise: np.ndarray | None = None
+    vision: np.ndarray | None = None
 
     def __post_init__(self):
         px = np.ascontiguousarray(self.pixels)
@@ -45,6 +52,40 @@ class Reference:
             raise ValueError("the sha256 given is not that of the "
                              "reference pixels")
         object.__setattr__(self, "sha256", h.hexdigest())
+        if self.noise is not None:
+            n = np.ascontiguousarray(self.noise)
+            if n.dtype != np.float32 or n.ndim != 3:
+                raise ValueError("reference noise must be (C, h, w) float32, "
+                                 f"not {n.dtype} {n.shape}")
+            n.setflags(write=False)
+            object.__setattr__(self, "noise", n)
+        if self.vision is not None:
+            v = np.ascontiguousarray(self.vision)
+            if v.dtype != np.uint8 or v.ndim != 3 or v.shape[2] != 3:
+                raise ValueError("a reference's vision copy must be (H, W, 3) "
+                                 f"uint8, not {v.dtype} {v.shape}")
+            v.setflags(write=False)
+            object.__setattr__(self, "vision", v)
+
+    @property
+    def vision_sha256(self) -> str:
+        """sha256 of the vision copy, its size and bytes, or ""."""
+        if self.vision is None:
+            return ""
+        h = hashlib.sha256(f"{self.vision.shape[0]}x{self.vision.shape[1]}:"
+                           .encode())
+        h.update(self.vision.tobytes())
+        return h.hexdigest()
+
+    @property
+    def noise_sha256(self) -> str:
+        """sha256 of the noise, its shape and float32 bits, or ""."""
+        if self.noise is None:
+            return ""
+        h = hashlib.sha256(("x".join(map(str, self.noise.shape))
+                            + ":").encode())
+        h.update(self.noise.tobytes())
+        return h.hexdigest()
 
     @property
     def height(self) -> int:
@@ -56,8 +97,14 @@ class Reference:
 
     @property
     def identity(self) -> tuple:
-        """What a conditioning key holds of the image."""
-        return (self.sha256, self.height, self.width)
+        """What a conditioning key holds of the image, of its noise, which
+        the conditioning carries to the encode, and of its vision copy."""
+        out = (self.sha256, self.height, self.width)
+        if self.noise is not None:
+            out += (self.noise_sha256,)
+        if self.vision is not None:
+            out += (f"vision {self.vision_sha256}",)
+        return out
 
 
 def latents_hash(latents: mx.array) -> str:
@@ -80,13 +127,18 @@ class Conditioning:
     each reference in model space, which the VAE adds after the encoder
     ran, and ``ref_hashes`` name their content: the state a DiT derives
     from the conditioning depends on them, and the key does not hold
-    them."""
+    them. A DiT that mixes noise into its reference rows (``seeded_refs``)
+    draws it from ``ref_seed``, the request's seed, which ``sample`` sets,
+    or takes ``ref_noise``, one array per reference in the shape of its
+    rows, as a client sends the draws of its own generator."""
     features: mx.array
     key: str = ""
     ref_latents: tuple = ()
     image_slots: tuple = ()
     refs: tuple = ()
     ref_hashes: tuple = ()
+    ref_noise: tuple = ()
+    ref_seed: int | None = None
 
     def __post_init__(self):
         if self.ref_latents and not self.ref_hashes:
@@ -95,6 +147,10 @@ class Conditioning:
         if len(self.ref_hashes) != len(self.ref_latents):
             raise ValueError(f"{len(self.ref_hashes)} hashes for "
                              f"{len(self.ref_latents)} reference latents")
+        n = len(self.ref_latents) or len(self.refs)
+        if self.ref_noise and len(self.ref_noise) != n:
+            raise ValueError(f"{len(self.ref_noise)} noise arrays for {n} "
+                             "references")
 
     @property
     def pending(self) -> bool:

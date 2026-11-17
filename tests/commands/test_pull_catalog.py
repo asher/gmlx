@@ -908,12 +908,16 @@ def test_image_entries_follow_the_image_catalog():
             assert [n for _q, n in e.quants] == sorted(n for _q, n in e.quants)
             assert e.download == ic.download_bytes(r, b.ram) and e.size == ic.image_size(r, b.ram)
             assert e.license and e.use == r.use and e.license_detail == r.license_note
-            if cls < 16:
-                assert e.needs_class == 16 and e in big
+            if cls < r.least_class:
+                assert e.needs_class == r.least_class and e in big
             else:
                 assert e.needs_class is None and e in runs
-    assert catalog.image_entries(box(16))[1] == []
+    assert catalog.image_entries(box(32))[1] == []
     assert catalog.image_entries(box(8))[0] == []
+    # MiniMax-H3-Image makes no image under 32 GB, where the others run.
+    for cls in (16, 24):
+        assert [e.name for e in catalog.image_entries(box(cls))[1]] == [
+            "minimax-h3-image"]
 
 
 def test_image_entry_text_and_commands():
@@ -934,7 +938,12 @@ def test_image_entry_text_and_commands():
     ntext = catalog.image_entry_text(nine)
     assert ntext.endswith('Needs a 16 GB Mac.') and 'gmlx pull' not in ntext
     assert '\nNon-commercial use only' in ntext
-    assert _banned(text) == [] and _banned(ntext) == []
+    h3 = next(e for e in catalog.image_entries(box(24))[1] if e.name == 'minimax-h3-image')
+    htext = catalog.image_entry_text(h3)
+    assert htext.startswith('MiniMax-H3-Image  2048x2048  MiniMax-H3-Image Community License\n')
+    assert htext.endswith('Needs a 32 GB Mac.') and 'gmlx pull' not in htext
+    assert '\nNo grant in the US, EU, UK or South Korea' in htext
+    assert _banned(text) == [] and _banned(ntext) == [] and _banned(htext) == []
 
 
 def test_recommendation_text_lists_the_image_models_after_the_chat_models():
@@ -956,7 +965,7 @@ def test_recommendation_text_lists_the_image_models_after_the_chat_models():
     eight = catalog.recommendation_text(catalog.groups_for(box(8)), box(8),
                                         images=catalog.image_entries(box(8)))
     assert 'Image models' not in eight
-    assert len(re.findall(r'^  \S+ +16 GB Mac +', eight, re.M)) >= len(images[0]) + len(images[1])
+    assert len(re.findall(r'^  \S+ +(16|32) GB Mac +', eight, re.M)) >= len(images[0]) + len(images[1])
 
 
 def test_seed_figures_on_real_boxes():

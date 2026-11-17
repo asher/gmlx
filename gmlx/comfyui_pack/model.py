@@ -31,9 +31,9 @@ import comfy.patcher_extension
 import comfy.supported_models
 import comfy.utils
 
-from . import compat, discovery
-from .client import (INT8_FEATURE, GmlxError, GmlxInterrupted, GmlxMissing, GmlxRefusal,
-                     StepClient,
+from . import compat, discovery, patches
+from .client import (HEADS_FEATURE, HEADS_OPTION, INT8_FEATURE, GmlxError,
+                     GmlxInterrupted, GmlxMissing, GmlxRefusal, StepClient,
                      set_interrupt_check, tensor_hash)
 from .clip import TYPED, TypedPrompt
 from .compat import comfyui_version
@@ -69,14 +69,15 @@ H3_COND_AUG = {"video": ("visual_cond_noise_aug", "VISUAL_COND_TIMESTEP", 0.999)
 PROBE_SEED = 7
 # transformer_options keys and how the forward treats them.
 FORWARDED = {"sample_sigmas", "sigmas", "cond_or_uncond", "uuids", "qwen_image21_cache",
-             *H3_SHIFTS.values()}
+             HEADS_OPTION, *H3_SHIFTS.values()}
 REFUSED = {"patches", "patches_replace", "rope_options"}
 # Keys ComfyUI sets on every call that carry no behavior inside the forward.
 BENIGN = {"prefetch_dynamic_vbars", "wrappers", "callbacks", "hooks", "transformer_index",
           "block_index", "model_dtype", "sampler_calc_cond_batch_function", "total_blocks",
           "block_type", "activations_shape_list", "patches_point", "optimized_attention_override"}
 # DiT inputs the step contract carries. Any other input with a value is refused.
-INPUTS = {"num_tokens", "attention_mask", "ref_latents", "image_slots", "ref_latents_method"}
+INPUTS = {"num_tokens", "attention_mask", "ref_latents", "image_slots", "ref_latents_method",
+          "ref_noise"}
 # Stock nodes whose effect shows only inside the forward, named by the walk-back.
 IN_FORWARD_CLASSES = {"PerturbedAttentionGuidance", "SkipLayerGuidanceDiT", "SkipLayerGuidanceSD3",
                       "SkipLayerGuidanceDiTSimple", "ControlNetApply", "ControlNetApplyAdvanced",
@@ -87,6 +88,16 @@ IN_FORWARD_CLASSES = {"PerturbedAttentionGuidance", "SkipLayerGuidanceDiT", "Ski
 STRICT_KEYS = False
 # ComfyUI's class of the model a step with a video and an audio stream runs.
 H3_CLASS = "MiniMaxH3"
+# ComfyUI's MiniMax-H3-Image, the H3 DiT on one latent frame, and the
+# internals each H3 class reads, by title.
+H3_IMAGE_CLASS = "MiniMaxH3Image"
+H3_CLASSES = {H3_CLASS: ("MiniMax-H3", "H3_NAMES"),
+              H3_IMAGE_CLASS: ("MiniMax-H3-Image", "H3_IMAGE_NAMES")}
+# The minimax_payload keys of MiniMaxH3Image.extra_conds the forward
+# reads: what each carries and the extra_conds input it is written from.
+H3_IMAGE_PAYLOAD = {"cond_video_latents": ("the latents of the reference images", "minimax_refs"),
+                    "text_token_tags": ("the vision tokens of the prompt", "minimax_token_tags"),
+                    "seed": ("the seed of the references' noise", "seed")}
 # The node whose skips of single blocks on the negative pass a step takes
 # as its skip set, on the families whose DiT skips blocks.
 SLG_NODE = "SkipLayerGuidanceDiTSimple"
@@ -121,16 +132,21 @@ def build_weightless(manifest: dict, model_class: str):
     if not hasattr(comfy.supported_models, model_class):
         raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} has no {model_class} model, which "
                         f"the server serves {manifest.get('model')!r} as; update ComfyUI")
-    missing = compat.first_missing(compat.H3_NAMES) if model_class == H3_CLASS else None
+    title, names = H3_CLASSES.get(model_class, (None, None))
+    missing = compat.first_missing(getattr(compat, names)) if names else None
     if missing is not None:
-        raise GmlxError(f"gmlx: the gmlx nodes run MiniMax-H3 through {missing}, which ComfyUI "
+        raise GmlxError(f"gmlx: the gmlx nodes run {title} through {missing}, which ComfyUI "
                         f"{comfyui_version()} does not have; update ComfyUI")
     sd = manifest_state_dict(manifest)
     prefix = comfy.model_detection.unet_prefix_from_state_dict(sd)
     stripped = comfy.utils.state_dict_prefix_replace(sd, {prefix: ""}, filter_keys=True)
     if stripped:
         sd = stripped
-    cfg = comfy.model_detection.model_config_from_unet(sd, "")
+    # The file metadata the detection reads, such as MiniMax-H3-Image's
+    # config, which names its PDD heads and their sigmas.
+    metadata = manifest.get("metadata")
+    cfg = comfy.model_detection.model_config_from_unet(
+        sd, "", **({"metadata": metadata} if metadata else {}))
     if cfg is None:
         raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} detects no model in the server's "
                         f"manifest, where the server serves {model_class}; this ComfyUI may "
@@ -154,10 +170,15 @@ def _built(cfg, sd):
     model.device = CPU
     if hasattr(model.diffusion_model, "preprocess_conds"):
         _conditioning_on_server(model)
-    if type(cfg).__name__ == H3_CLASS:
+    if type(cfg).__name__ in H3_CLASSES:
         # MiniMax-H3's extra_conds runs the refiner on the encoder features
         # once a sample; the server runs it in each step, on those features.
         model.diffusion_model.preprocess_text_embeds = lambda text_states: text_states
+    if type(cfg).__name__ == H3_IMAGE_CLASS:
+        # A LoRA in diffusers' module names applies, which stock ComfyUI's
+        # key map drops.
+        patches.install_key_map()
+        setattr(model, patches.H3_NAMES_FLAG, True)
     _typed_for_edits_and_negatives(model)
     return model, cfg
 
@@ -283,8 +304,10 @@ class RemoteForward:
         self.base_model = base_model
         self.b = binding
         # A flow map DiT, FLUX.3's distilled one, reads the schedule the
-        # sampler runs on, which each step carries.
+        # sampler runs on, which each step carries, and so do the PDD heads
+        # of MiniMax-H3-Image's DiT, to find the sigma a step goes to.
         self.flow_map = bool(getattr(base_model.diffusion_model, "flow_map", False))
+        self.reads_target = getattr(base_model.diffusion_model, "pdd_sigmas", None) is not None
         params = getattr(base_model.diffusion_model, "params", None)
         # ComfyUI's Flux DiT reads the guidance input only through a guidance
         # embedder, which FLUX.2 klein has none of, and Flux.extra_conds
@@ -415,6 +438,7 @@ class RemoteForward:
         uuids = list(to.get("uuids") or [None] * len(coru))
         per = B // len(coru) if B % len(coru) == 0 else B
         refs = list(kwargs.get("ref_latents") or [])
+        noise = list(kwargs.get("ref_noise") or [])
         slots = kwargs.get("image_slots")
         held: dict = {}
         rows = []
@@ -436,6 +460,11 @@ class RemoteForward:
                     key = None if base is None else base + ("ref", j, tuple(rr.shape))
                     hs.append(self._hash(key, rr, held))
                 row["ref_latents"] = hs
+            if noise:
+                # The same noise for every row: it follows the payload's seed.
+                row["ref_noise"] = [
+                    self._hash(None if base is None else base + ("noise", j, tuple(n.shape)),
+                               n, held) for j, n in enumerate(noise)]
             if slots:
                 row["image_slots"] = [int(s) for s in slots]
             if not prefix_cache:
@@ -479,15 +508,66 @@ class RemoteForward:
                 sync = sync or fields["patch_table"] in missing
 
     def _schedule(self, to: dict):
-        """The sampler's schedule a flow map step carries, else None."""
-        if not self.flow_map:
+        """The sampler's schedule a step carries on a DiT that reads the
+        sigma its step goes to, else None."""
+        if not (self.flow_map or self.reads_target):
             return None
         s = to.get("sample_sigmas")
         if s is None:
-            raise GmlxError(f"gmlx: {self.b.model_id!r} is a flow map DiT, which reads the "
-                            "schedule the sampler runs on, and this call carries no "
-                            "transformer_options['sample_sigmas']")
+            what = ("is a flow map DiT, which reads" if self.flow_map
+                    else "runs PDD heads, which read")
+            raise GmlxError(f"gmlx: {self.b.model_id!r} {what} the schedule the sampler runs "
+                            "on, and this call carries no transformer_options['sample_sigmas']")
         return torch.as_tensor(s).detach().float().reshape(-1).cpu()
+
+    def _h3_image_payload(self, kwargs: dict, context) -> None:
+        """Take MiniMax-H3-Image's minimax_payload off the DiT inputs as the
+        step reads it: the reference latents of one frame each, the noise
+        ComfyUI's forward mixes into their rows (a CPU torch generator
+        restarted at the payload's seed for each one, drawn in the rows'
+        shape), and the image slots of the vision rows the prompt's tags
+        name, each picture's block less its markers. Keyframes and a noise
+        mix other than ComfyUI's default are refused."""
+        payload = kwargs.pop("minimax_payload", None) or {}
+        if payload.get("keyframes"):
+            raise GmlxRefusal(f"gmlx: keyframes reached the DiT forward of {self.b.model_id!r}, "
+                              "an image model, which takes none")
+        key, _name, value = H3_COND_AUG["video"]
+        if key in payload and float(payload[key]) != value:
+            raise GmlxRefusal(f"gmlx: a reference noise mix of {float(payload[key]):g} "
+                              f"(minimax_payload[{key!r}], which no stock node sets) reached the "
+                              f"DiT forward; a gmlx model mixes at ComfyUI's {value:g}")
+        tags = payload.get("text_token_tags")
+        if tags is not None:
+            n = torch.as_tensor(tags).numel()
+            if context is not None and n != context.shape[1]:
+                raise GmlxError(f"gmlx: the prompt's minimax_token_tags hold {n} tags for its "
+                                f"{context.shape[1]} rows; encode the prompt and its pictures "
+                                "with one text encode node")
+            slots = [r for a, b in tag_spans(tags) for r in range(a + 1, b - 1)]
+            if slots:
+                kwargs["image_slots"] = slots
+        lats = list(payload.get("cond_video_latents") or [])
+        if not lats:
+            return
+        caps = getattr(self.b.client, "capabilities", None) or {}
+        if "ref_noise" not in (caps.get("features") or ()):
+            raise GmlxRefusal("gmlx: this gmlx server runs no MiniMax-H3-Image reference images; "
+                              "update it")
+        pt, ph, pw = (int(p) for p in self.base_model.diffusion_model.patch_size)
+        seed = int(payload.get("seed", 0))
+        refs, noise = [], []
+        for z in lats:
+            z = z.detach().float().cpu()
+            if z.ndim != 5 or z.shape[0] != 1 or z.shape[2] != 1:
+                raise GmlxError(f"gmlx: a MiniMax-H3-Image reference latent is "
+                                f"{tuple(z.shape)}, not (1, C, 1, h, w)")
+            _, ch, t, h, w = z.shape
+            gen = torch.Generator("cpu").manual_seed(seed)
+            noise.append(torch.randn((t // pt * (h // ph) * (w // pw), ch * pt * ph * pw),
+                                     generator=gen, dtype=torch.float32))
+            refs.append(z[:, :, 0])
+        kwargs["ref_latents"], kwargs["ref_noise"] = refs, noise
 
     def _h3_conditions(self, payload: dict, kwargs: dict) -> None:
         """Refuse what MiniMax-H3 conditions on that a gmlx model does not
@@ -598,8 +678,9 @@ class RemoteForward:
         return anchors, spans
 
     def _int8(self, fields: dict) -> None:
-        """The model loader's int8 setting on each AV step, which the server
-        runs over its entry's; ``entry`` sends nothing. A server from before
+        """The model loader's int8 setting on each step of a model whose
+        status names one, which the server runs over its entry's;
+        ``entry`` sends nothing. A server from before
         the int8 setting runs the entry's, with one warning a model when the
         loader asks for a value other than off."""
         value = self.b.int8
@@ -612,6 +693,18 @@ class RemoteForward:
             self.warned.add("int8")
             log.warning("gmlx: this gmlx server has no int8 setting, so %r runs as its "
                         "entry says; update it", self.b.model_id)
+
+    def _heads(self, to: dict, fields: dict) -> None:
+        """Heads in order on the step, which gmlx PDD Heads sets on a
+        MiniMax-H3-Image model; a server without them is refused."""
+        rule = to.get(HEADS_OPTION)
+        if rule in (None, "span"):
+            return
+        caps = getattr(self.b.client, "capabilities", None) or {}
+        if HEADS_FEATURE not in (caps.get("features") or ()):
+            raise GmlxRefusal("gmlx: this gmlx server reads no PDD heads in order, which "
+                              "gmlx PDD Heads asks for; update it")
+        fields["heads"] = rule
 
     def _av_call(self, t0, x, timesteps, context, control, to: dict, kwargs: dict):
         """One AV step: the video and audio latents as the sampler carries
@@ -694,11 +787,14 @@ class RemoteForward:
         kv = getattr(patcher, "gmlx_ref_cache", frozenset())
         if kv and kv != KV_PATCHES:
             _refuse("part of the Flux KV Cache node's patches")
+        if self.reads_target:
+            self._h3_image_payload(kwargs, context)
         skip = self._skip(to)
         checked = {k: v for k, v in to.items() if k != "patches_replace"} if skip else to
         prefix_cache = self._check(control, checked, kwargs, bool(kv))
         sigmas = self._schedule(to)
-        # A latent format with a frame axis, such as Krea 2's, gives one frame.
+        # A latent format with a frame axis, such as Krea 2's or
+        # MiniMax-H3-Image's, gives one frame, restored on the output.
         framed = x.ndim == 5 and x.shape[2] == 1
         if framed:
             x = x[:, :, 0]
@@ -714,11 +810,14 @@ class RemoteForward:
             client.ensure_tensor(t, h)
         fields = {"model": self.b.model_id, "run": run, "convention": "comfy",
                   "patch_table": table, "rows": rows}
+        if "int8" in self.b.status:
+            self._int8(fields)
         if kv and kwargs.get("ref_latents"):
             # The server keeps the references' K and V of the run's first step.
             fields["ref_cache"] = True
         if skip:
             fields["skip"] = list(skip)
+        self._heads(to, fields)
         xs = x.float()
         ts = timesteps.float().reshape(-1)
         t1 = time.perf_counter()
@@ -743,16 +842,16 @@ class RemoteForward:
 
 def load_model(client: StepClient, model_id: str, int8: str = "entry") -> GmlxModelPatcher:
     """The gmlx MODEL of ``model_id`` on ``client``'s server, whose MiniMax-H3
-    steps run at the int8 setting ``int8``, or the entry's. A value whose
+    or MiniMax-H3-Image steps run at the int8 setting ``int8``, or the entry's. A value whose
     linears differ from the entry's is refused here when the status names the
     entry's setting, else at the first step."""
     status = client.status(model_id)
     facts = status.get("comfy") or {}
     if not facts.get("model_class"):
         raise GmlxError(f"gmlx: the server gives no ComfyUI model class for {model_id!r}")
-    if int8 not in ("entry", "off") and not status.get("audio"):
-        raise GmlxRefusal(f"gmlx: int8 {int8} runs on MiniMax-H3, and {model_id!r} is an "
-                          "image model; set int8 to entry")
+    if int8 not in ("entry", "off") and not status.get("audio") and "int8" not in status:
+        raise GmlxRefusal(f"gmlx: int8 {int8} runs on MiniMax-H3 and MiniMax-H3-Image, and "
+                          f"{model_id!r} takes no int8 setting; set int8 to entry")
     why = discovery.int8_refusal(status.get("int8") or "entry", int8)
     if why:
         raise GmlxRefusal(f"gmlx: {why}")
@@ -765,7 +864,47 @@ def load_model(client: StepClient, model_id: str, int8: str = "entry") -> GmlxMo
     patcher.gmlx = binding
     if facts["model_class"] == H3_CLASS:
         _h3_keys(patcher)
+    elif facts["model_class"] == H3_IMAGE_CLASS:
+        _h3_image_keys(patcher)
     return patcher
+
+
+def _h3_image_keys(patcher) -> None:
+    """Refuse a ComfyUI whose MiniMaxH3Image no longer writes a
+    minimax_payload key the forward reads, so renamed references, vision
+    tokens or a renamed seed cannot run as text to image or on other
+    noise."""
+    from .version import COMFYUI_FLOOR, COMFYUI_TESTED
+
+    tested = f"the gmlx nodes are tested on ComfyUI {COMFYUI_FLOOR} to {COMFYUI_TESTED}"
+    latent = torch.zeros(1, 24, 1, 2, 2)
+    ref = {"kind": "image", "latent_h": 2, "latent_w": 2, "latent": latent}
+    try:
+        conds = patcher.model.extra_conds(minimax_token_tags=torch.ones(1, dtype=torch.long),
+                                          minimax_refs=[ref], seed=PROBE_SEED,
+                                          device=torch.device("cpu"))
+    except Exception as e:  # noqa: BLE001: a changed model is named
+        raise GmlxError(f"gmlx: ComfyUI {comfyui_version()}'s MiniMaxH3Image model fails on the "
+                        f"extra_conds of a prompt with one picture, which the gmlx nodes check "
+                        f"it with ({type(e).__name__}: {e}); {tested}") from e
+    held = getattr(conds.get("minimax_payload"), "cond", None)
+    for key, (what, given) in H3_IMAGE_PAYLOAD.items():
+        # The seed is written with a default and the latents from each
+        # reference, so the probe's own must come back.
+        if not isinstance(held, dict) or key not in held or (
+                key == "seed" and held[key] != PROBE_SEED) or (
+                key == "cond_video_latents"
+                and [getattr(z, "shape", None) for z in held[key]] != [latent.shape]):
+            raise GmlxError(f"gmlx: ComfyUI {comfyui_version()}'s MiniMaxH3Image model does not "
+                            f"write minimax_payload[{key!r}] from {given}, which the gmlx nodes "
+                            f"read {what} from; {tested}")
+    import comfy.ldm.minimax.model as h3_model
+
+    _key, name, value = H3_COND_AUG["video"]
+    if getattr(h3_model, name, None) != value:
+        raise GmlxError(f"gmlx: ComfyUI {comfyui_version()} mixes the reference rows at "
+                        f"{getattr(h3_model, name, None)} ({name}), and a gmlx model at "
+                        f"{value:g}; {tested}")
 
 
 # The keys of a MiniMax-H3 keyframe the AV step reads.

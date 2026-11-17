@@ -387,23 +387,33 @@ def _image_only(served, what: str) -> None:
 
 
 def _check_size(hold, width: int, height: int, *, what: str,
-                cfg: float = 1.0, init: bool = False, phase: str):
-    """Refuse a step or a VAE pass over the size limits of the image
-    routes with 413, and one whose memory plan does not fit beside the
-    models loaded with 400. ``phase`` is the phase of the plan the call
-    runs, which alone counts the held conditioning states. Returns the
-    budget it planned against."""
-    from ..image_service import MAX_PIXELS, MAX_SIDE, size_fits
+                cfg: float = 1.0, init: bool = False, phase: str,
+                int8: str | None = None):
+    """Refuse a step or a VAE pass over the size limits of the entry's
+    family (the image routes' where it sets none) with 413, a step at a
+    size the family refuses otherwise with 400, and one whose memory plan
+    does not fit beside the models loaded with 400. ``phase`` is the phase
+    of the plan the call runs, which alone counts the held conditioning
+    states. ``int8`` is a step's int8 setting, else the entry's. Returns
+    the budget it planned against."""
+    from gmlx.image.registry import limits_text, size_limits, size_refusal
+
+    from ..image_service import size_fits
     from ..image_steps import StepError
 
-    if width * height > MAX_PIXELS or max(width, height) > MAX_SIDE:
-        raise StepError(413, f"{what} of {width}x{height} pixels is over the "
-                        f"limit of {MAX_PIXELS} pixels (2048x2048) and a "
-                        f"side of {MAX_SIDE}")
+    fam = _served(hold).pipe.family
+    pixels, side = size_limits(fam)
+    if (pixels and width * height > pixels) or (side and
+                                                max(width, height) > side):
+        raise StepError(413, f"{what} of {width}x{height} pixels is over "
+                        f"{limits_text(fam)}")
+    why = size_refusal(fam, width, height) if phase == "denoise" else None
+    if why:
+        raise StepError(400, f"{what}: {why}")
     budget_fn = getattr(SETTINGS.host, "budget", None)
     budget = budget_fn(hold) if budget_fn is not None else None
     if not size_fits(_served(hold), width, height, budget, cfg=cfg,
-                     init=init, held_in=(phase,)):
+                     init=init, held_in=(phase,), int8=int8):
         raise StepError(400, f"{what} of {width}x{height} pixels does not "
                         "fit in memory beside the models now loaded")
     return budget
@@ -924,7 +934,8 @@ def _skip(served, raw) -> tuple:
 
 async def step(request: Request):
     from ..image_steps import (CONVENTIONS, MAX_ROWS, STATE, Missing,
-                               StepError, flow_targets, row_hashes, run_step)
+                               StepError, flow_targets, ordered_heads,
+                               row_hashes, run_step)
 
     t0 = time.perf_counter()
     tensors, fields = await _wire(request, MAX_BODY_BYTES)
@@ -944,6 +955,12 @@ async def step(request: Request):
         raise StepError(413, f"a step takes at most {MAX_ROWS} rows")
     if tuple(t_w.shape) not in ((len(rows),), (1,), ()):
         raise StepError(400, "timestep holds one value or one per row")
+    from ..image_service import parse_int8, request_int8
+
+    try:
+        sent = parse_int8(fields.get("int8"))
+    except ValueError as e:
+        raise StepError(400, str(e), param="int8") from None
     missing = [h for r in rows for h in row_hashes(r)
                if h not in STATE.tensors]
     model = fields.get("model") or (run.model if run else None)
@@ -952,10 +969,14 @@ async def step(request: Request):
     try:
         served = _served(hold)
         _image_only(served, "a step on x")
+        try:
+            int8 = request_int8(served, sent)
+        except ValueError as e:
+            raise StepError(400, str(e), param="int8") from None
         w_px, h_px = _px(served, "latent", *x_w.shape[2:])
         guided = 2.0 if len(rows) > 1 else 1.0
         budget = _check_size(hold, w_px, h_px, what="a step", cfg=guided,
-                             phase="denoise")
+                             phase="denoise", int8=int8)
         _check_refs(served, rows)
         fam = served.pipe.family.name
         conv = CONVENTIONS.get(fields.get("convention", "comfy"), {}).get(fam)
@@ -1000,16 +1021,28 @@ async def step(request: Request):
         # In float64, so a scaled timestep gives back its time in float32.
         sig = [conv.scale * float(t) + conv.shift for t in ts]
         targets = None
-        if served.facts.flow_map:
-            # The schedule is in the client's timestep convention.
+        if served.facts.flow_map or served.facts.reads_target:
+            # The schedule is in sigmas, as the client's sampler holds it.
             s_w = tensors.get("sample_sigmas")
             if s_w is None:
-                raise StepError(400, f"the {served.pipe.family.title} DiT is "
-                                "a flow map: a step body holds "
-                                "sample_sigmas, the schedule the client "
-                                "samples on")
-            targets = [conv.scale * float(t) + conv.shift
-                       for t in flow_targets(s_w.numpy(), ts)]
+                what = ("is a flow map" if served.facts.flow_map
+                        else "reads the sigma its step goes to")
+                raise StepError(400, f"the {served.pipe.family.title} DiT "
+                                f"{what}: a step body holds sample_sigmas, "
+                                "the schedule the client samples on")
+            targets = flow_targets(s_w.numpy(), sig)
+        heads = None
+        rule = fields.get("heads")
+        if rule not in (None, "span", "in_order"):
+            raise StepError(400, "heads is span or in_order",
+                            param="heads")
+        if rule == "in_order":
+            bank = served.facts.head_bank
+            if not bank:
+                raise StepError(400, f"the {title} DiT has no bank of step "
+                                "heads to read in order", param="heads")
+            heads = ordered_heads(tensors["sample_sigmas"].numpy(), sig,
+                                  bank, title)
         gen = run.gen if run is not None else 0
         pool = _lora_pool()
         if pool is not None:
@@ -1036,11 +1069,12 @@ async def step(request: Request):
 
             from gmlx.image import api, memfit
 
-            from ..image_service import ensure_dit, size_fits
+            from ..image_service import ensure_dit, set_int8, size_fits
             from ..image_steps import FACTORS, _host, conditioning
 
             # A staged entry's encode let the DiT and the VAE go.
             ensure_dit(served)
+            set_int8(served, int8)
             tid = fields.get("patch_table")
             if pool is not None and table is not None \
                     and not _held(served.pipe, table):
@@ -1071,7 +1105,7 @@ async def step(request: Request):
                           joined=parts and conv.time != "reference",
                           ref_cache=run.ref_cache if ref_cache else None,
                           building=sum(building.values()),
-                          held_in=("denoise",), hint=True)
+                          held_in=("denoise",), hint=True, int8=int8)
             except memfit.ImageMemoryError as e:
                 raise StepError(400, f"a step of {w_px}x{h_px} pixels with "
                                 "the references of its rows does not fit in "
@@ -1092,7 +1126,7 @@ async def step(request: Request):
             with api.state_scope(served.pipe, scope):
                 v, fwd_s, cache = run_step(served, x, sig, conds, core, run,
                                            gen, targets, conv.time,
-                                           ref_cache, skip)
+                                           ref_cache, skip, heads)
             return _host(v), fwd_s, cache
 
         v, fwd_s, cache = await _on_worker(work, on=served)
@@ -1426,6 +1460,12 @@ async def _av_step(t0, tensors, fields, run):
         hold.release()
 
 
+# The step encode has no image seed. An upsampler that samples writes the
+# caption at this seed, so a graph reruns its caption and the caption table
+# keeps it; a greedy upsampler reads no seed.
+ENCODE_SEED = 0
+
+
 async def encode(request: Request):
     from ..image_service import ImageRequestError, JobStopped, decode_image
     from ..image_steps import STATE, StepError
@@ -1473,9 +1513,12 @@ async def encode(request: Request):
         try:
             # Without the clip's frames, a prompt with images runs as
             # typed: a video entry's keyframe task names the clip's length.
+            # An image family whose upsampler sees the references gets
+            # them as its pictures.
+            seen = {"pictures": images} if images else {}
             revised = await asyncio.to_thread(
                 revise, fields.get("model"), text, requested, bool(images),
-                **clip)
+                seed=ENCODE_SEED, **clip, **seen)
         except JobStopped:
             raise StepError(409, "the encode was interrupted",
                             code="interrupted") from None
@@ -1527,6 +1570,10 @@ async def encode(request: Request):
         else:
             chat_hold = None
         try:
+            # The prompt as typed is encoded beside the caption: the encode
+            # cannot tell a negative prompt from a positive one, and the
+            # pack samples a negative on the typed prompt, as it does an
+            # edit whose references come after the encode.
             typed = (text,) if revised else ()
             got = await _on_worker(_settled(hold, do_encode), served,
                                    revised or text,
@@ -1634,13 +1681,14 @@ async def vae_encode(request: Request):
                         "[0, 1]")
     if img.shape[0] > MAX_ROWS:
         raise StepError(413, f"a VAE pass takes at most {MAX_ROWS} images")
+    noise = tensors.get("noise")
     hold = await _acquire(fields.get("model"))
     try:
         served = _served(hold)
         _image_only(served, "vae/encode")
         _check_size(hold, int(img.shape[2]), int(img.shape[1]),
                     what="a VAE encode", init=True, phase="init")
-        lat = await _on_worker(do_encode, served, img, on=served)
+        lat = await _on_worker(do_encode, served, img, noise, on=served)
     finally:
         hold.release()
     return _container({"latents": lat})

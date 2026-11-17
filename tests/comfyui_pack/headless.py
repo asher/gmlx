@@ -42,7 +42,8 @@ LORA = "z-image-turbo-style.safetensors"
 
 
 def comfy_version(comfy_dir: str) -> tuple:
-    """The release of a ComfyUI checkout. FLUX.3 came in 0.41.0."""
+    """The release of a ComfyUI checkout. FLUX.3 came in 0.41.0 and
+    MiniMax-H3-Image in 0.45.0."""
     try:
         with open(os.path.join(comfy_dir, "comfyui_version.py")) as f:
             m = re.search(r'__version__\s*=\s*"([0-9.]+)"', f.read())
@@ -759,6 +760,86 @@ class Cases:
         self.check("video saved",
                    any(f.startswith("fasth3_") and f.endswith(".mp4") for f in saved), saved)
 
+    async def h3_image_t2i(self):
+        """The MiniMax-H3-Image example workflow: the prompt through the stock
+        MiniMaxH3ImageConditioning on the gmlx CLIP, 6 image steps of one
+        latent frame with the timestep as sigma times 1000 and the sampler's
+        schedule, each going to the next sigma of it, and the frame decoded
+        by the gmlx VAE into a saved image."""
+        wf = workflow("minimax-h3-image-t2i.json")
+        wf["4"]["inputs"].update(width=64, height=96)
+        wf["8"]["inputs"]["filename_prefix"] = "h3-image"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        self.check("the prompt encoded once", [e["text"] for e in enc] == [wf["4"]["inputs"]["prompt"]],
+                   [e["text"][:20] for e in enc])
+        steps = kinds(log, "step")
+        self.check("6 steps of one row at cfg 1", len(steps) == 6 and {e["rows"] for e in steps} == {1},
+                   [e["rows"] for e in steps])
+        self.check("one latent frame, its axis taken off", {tuple(e["x_shape"]) for e in steps}
+                   == {(1, 24, 6, 4)}, [e["x_shape"] for e in steps][:1])
+        sched = steps[0]["sample_sigmas"] if steps else []
+        self.check("each step goes to the next sigma of the schedule",
+                   [e["targets"] for e in steps] == [[s] for s in sched[1:]],
+                   [e["targets"] for e in steps])
+        got = [e["timestep"][0] for e in steps]
+        self.check("timesteps are the sigmas times 1000",
+                   np.allclose(got, [s * 1000 for s in sched[:-1]], atol=1e-3), got)
+        self.check("each step at the loader's default, the entry's int8 setting",
+                   [e["int8"] for e in steps] == [None] * 6, [e["int8"] for e in steps])
+        dec = kinds(log, "vae_decode")
+        self.check("decoded once, without the frame axis", [e["shape"] for e in dec] == [[1, 24, 6, 4]],
+                   [e["shape"] for e in dec])
+        d = os.path.join(self.work, "output")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("image saved", any(f.startswith("h3-image_") and f.endswith(".png") for f in saved),
+                   saved)
+
+    async def h3_image_edit(self):
+        """The MiniMax-H3-Image edit example workflow: the stock
+        MiniMaxH3ImageConditioning shows the gmlx CLIP each picture's vision
+        copy, and the gmlx VAE encodes each VAE copy with the noise of seed
+        42. Each step carries both references with the noise of their rows
+        and the vision rows of the prompt, on the latent of Picture 1's VAE
+        copy, which the decode gives back."""
+        wf = workflow("minimax-h3-image-edit-two-references.json")
+        wf["8"]["inputs"]["steps"] = 2
+        wf["10"]["inputs"]["filename_prefix"] = "h3-image-edit"
+        r = await self.s.run(wf)
+        log = self.stub.log()
+        self.check("success", r["status"] == "success", r.get("error"))
+        enc = kinds(log, "encode")
+        # reference-1.png is 512 wide and 768 high, reference-2.png square:
+        # vision copies of 1024x1536 and 1024x1024.
+        self.check("the prompt encoded once with both vision copies in order",
+                   [(e["text"], e["image_shapes"], e["refs"]) for e in enc]
+                   == [(wf["6"]["inputs"]["prompt"], [[1536, 1024, 3], [1024, 1024, 3]], False)],
+                   [(e["text"][:20], e["image_shapes"]) for e in enc])
+        vae = kinds(log, "vae_encode")
+        self.check("each VAE copy encoded once with its noise",
+                   sorted(e["noise"] for e in vae) == [[1, 24, 64, 64], [1, 24, 96, 64]],
+                   [(e["shape"], e["noise"]) for e in vae])
+        steps = kinds(log, "step")
+        spans = enc[0]["spans"] if enc else []
+        slots = [r for a, b in spans for r in range(a + 1, b - 1)]
+        self.check("2 steps of one row on Picture 1's latent",
+                   len(steps) == 2 and {tuple(e["x_shape"]) for e in steps} == {(1, 24, 96, 64)},
+                   [e["x_shape"] for e in steps])
+        self.check("each step carries both references, their noise and the vision rows",
+                   all(e["ref_shapes"] == [[[1, 24, 96, 64], [1, 24, 64, 64]]]
+                       and e["ref_noise"] == [[[48 * 32, 96], [32 * 32, 96]]]
+                       and e["image_slots"] == [slots] for e in steps),
+                   [(e["ref_shapes"], e["ref_noise"]) for e in steps][:1])
+        dec = kinds(log, "vae_decode")
+        self.check("decoded once", [e["shape"] for e in dec] == [[1, 24, 96, 64]],
+                   [e["shape"] for e in dec])
+        d = os.path.join(self.work, "output")
+        saved = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        self.check("image saved",
+                   any(f.startswith("h3-image-edit_") and f.endswith(".png") for f in saved), saved)
+
     async def turbo_sigmas(self):
         wf = {
             "1": {"class_type": "GmlxModelLoader", "inputs": {"model_name": "qwen-image-2.1-turbo",
@@ -859,6 +940,12 @@ async def amain(a) -> dict:
                              lambda: c.flux3_edit(True))
             else:
                 out["skipped"] = ["flux-3-klein t2i", "flux-3-klein edit with two references"]
+            if comfy_version(a.comfy) >= (0, 45, 0):
+                await c.case("minimax-h3-image t2i with the gmlx VAE", c.h3_image_t2i)
+                await c.case("minimax-h3-image edit with two pictures", c.h3_image_edit)
+            else:
+                out.setdefault("skipped", []).extend(["minimax-h3-image t2i",
+                                                      "minimax-h3-image edit with two pictures"])
             out["cases"] = c.results
     except Exception:  # noqa: BLE001
         out["fatal"] = traceback.format_exc()
@@ -889,7 +976,8 @@ def main():
             if not k["ok"]:
                 print(f"     {k['check']}: {str(k['detail'])[:600]}")
     for name in out.get("skipped", []):
-        print(f"skip {name}: this ComfyUI has no FLUX.3")
+        print(f"skip {name}: this ComfyUI has no "
+              f"{'MiniMax-H3-Image' if 'minimax' in name else 'FLUX.3'}")
     if out.get("fatal"):
         print(out["fatal"])
     sys.exit(0 if not out["failed"] and not out.get("fatal") else 1)

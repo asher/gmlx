@@ -53,13 +53,15 @@ def test_pack_versions_are_dotted_numbers():
 
 def test_the_tested_comfyui_runs_every_family_the_pack_serves():
     """The pack serves FLUX.3 klein, whose model ComfyUI has from 0.41, and
-    the docs' launch line shows the tested release."""
+    MiniMax-H3-Image, from 0.45, and the docs' launch line shows the
+    tested release."""
     meta = _literals(_PACK / "version.py")
     tested = tuple(int(p) for p in meta["COMFYUI_TESTED"].split("."))
-    assert tested >= (0, 41, 1)
+    assert tested >= (0, 45, 0)
     page = (_ROOT / "docs" / "comfyui.md").read_text()
     assert f"(a ComfyUI folder, ComfyUI {meta['COMFYUI_TESTED']})" in page
     assert "FLUX.3 klein needs ComfyUI 0.41 or newer" in page
+    assert "MiniMax-H3-Image needs ComfyUI 0.45 or newer" in " ".join(page.split())
 
 
 # The README title of each family the step contract serves.
@@ -67,7 +69,8 @@ TITLES = {"z_image": "Z-Image", "qwen_image21": "Qwen-Image 2.1",
           "krea2": "Krea 2", "flux2_klein": "FLUX.2 klein",
           "flux2_klein_9b": "FLUX.2 klein 9B",
           "flux2_klein_9b_kv": "FLUX.2 klein 9B KV",
-          "flux3_klein": "FLUX.3 klein", "moss_image": "MOSS-Image", "h3": "MiniMax-H3"}
+          "flux3_klein": "FLUX.3 klein", "moss_image": "MOSS-Image", "h3": "MiniMax-H3",
+          "h3_image": "MiniMax-H3-Image"}
 
 
 def _served_families() -> set:
@@ -95,12 +98,12 @@ def test_the_readme_lists_every_family_the_pack_serves_with_its_parity_rows():
 
 
 
-@pytest.mark.parametrize("title", ["MOSS-Image", "MiniMax-H3"])
+@pytest.mark.parametrize("title", ["MOSS-Image", "MiniMax-H3", "MiniMax-H3-Image"])
 def test_the_cpu_device_step_rows_sit_under_headers_that_name_their_cells(
         title):
-    """MOSS-Image and MiniMax-H3 read their step distances from stock fp32
-    against the larger of the stock bf16 and in-process gmlx ones, so their
-    rows sit in tables whose headers name both."""
+    """MOSS-Image, MiniMax-H3 and MiniMax-H3-Image read their step distances
+    from stock fp32 against the larger of the stock bf16 and in-process gmlx
+    ones, so their rows sit in tables whose headers name both."""
     parity = (_PACK / "README.md").read_text().split(
         "### Parity with the stock loaders", 1)[1]
     step = parity.split("The final image check", 1)[0]
@@ -147,7 +150,7 @@ def test_the_wheel_ships_every_pack_file():
     for want in ("gmlx/comfyui_pack/LICENSE", "gmlx/comfyui_pack/__init__.py",
                  "gmlx/comfyui_pack/version.py"):
         assert want in files
-    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 14
+    assert len([f for f in files if f.startswith("gmlx/comfyui_pack/example_workflows/")]) == 18
 
 
 def test_the_pack_keeps_its_apache_license():
@@ -205,6 +208,7 @@ _WIDGETS = {
     "GmlxCLIPLoader": ["model_name", "server_url", "start_server"],
     "GmlxVAELoader": ["model_name", "server_url", "start_server"],
     "LoraLoader": ["lora_name", "strength_model", "strength_clip"],
+    "LoraLoaderModelOnly": ["lora_name", "strength_model"],
     "CLIPTextEncode": ["text"],
     "EmptySD3LatentImage": ["width", "height", "batch_size"],
     "KSampler": ["seed", "control_after_generate", "steps", "cfg", "sampler_name",
@@ -235,6 +239,9 @@ _WIDGETS = {
     "MiniMaxH3SigmaShift": ["shift_video", "shift_audio"],
     "GmlxSigmas": ["steps", "denoise", "width", "height"],
     "GmlxH3ImageToVideo": ["prompt", "width", "height", "length"],
+    "MiniMaxH3ImageConditioning": ["prompt", "width", "height"],
+    "GmlxPDDHeads": ["heads_in_order"],
+    "ManualSigmas": ["sigmas"],
     "BasicGuider": [],
     "VAEDecodeAudio": [],
     "CreateVideo": ["fps", "bit_depth", "color_space"],

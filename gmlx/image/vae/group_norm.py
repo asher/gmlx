@@ -6,9 +6,11 @@ torch and diffusers put channels ``[i * C / G, (i + 1) * C / G)`` in group
 i. Stock ``nn.GroupNorm`` defaults to ``pytorch_compatible=False``, which
 interleaves channels across groups, so it gives wrong numbers and no error
 on torch weights. Statistics here are computed in fp32 by
-``mx.fast.layer_norm``. The normalized value is returned in the input
-dtype, and the affine weights are cast to that dtype first, since fp32
-weights would promote the output.
+``mx.fast.layer_norm`` on the GPU, and in float64 on the CPU, whose stock
+reductions lose digits over a long group (``gmlx.mlx_guards``). The
+normalized value is returned in the input dtype, and the affine weights
+are cast to that dtype first, since fp32 weights would promote the
+output.
 
 A tiled pass normalizes each tile with statistics of the whole image.
 ``group_moments`` gives one region's count, mean and squared deviations
@@ -23,6 +25,8 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
+from gmlx import mlx_guards
+
 
 def group_norm(x: mx.array, weight: mx.array | None, bias: mx.array | None,
                groups: int, eps: float) -> mx.array:
@@ -34,7 +38,7 @@ def group_norm(x: mx.array, weight: mx.array | None, bias: mx.array | None,
         raise ValueError(f"{c} channels do not split into {groups} groups")
     g = c // groups
     y = x.reshape(b, -1, groups, g).transpose(0, 2, 1, 3)
-    y = mx.fast.layer_norm(y.reshape(b, groups, -1), None, None, eps)
+    y = mlx_guards.layer_norm(y.reshape(b, groups, -1), eps)
     y = y.reshape(b, groups, -1, g).transpose(0, 2, 1, 3).reshape(shape)
     dt = x.dtype
     if weight is not None:

@@ -148,14 +148,15 @@ def _past_count(name: str, view: HeaderView) -> bool:
 
 
 def _other_family(view: HeaderView) -> Refusal | None:
-    """The refusal of a file that another family takes or refuses, by
-    that family's name, for a file given as MOSS-Image."""
+    """The refusal of a file that a family identify meets before this one
+    takes or refuses, by that family's name, for a file given as
+    MOSS-Image. A family met after this one reads its files itself."""
     from gmlx.image.fingerprint import strip_prefix
     from gmlx.image.registry import families
 
     for fam in families():
         if fam.name == FAMILY.name:
-            continue
+            break
         got = fam.fingerprint(strip_prefix(view, fam.strip_prefixes))
         if isinstance(got, Refusal):
             return got

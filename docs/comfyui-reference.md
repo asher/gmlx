@@ -106,21 +106,24 @@ when it finds one.
 
 ## The model loader's int8
 
-`gmlx Model Loader` has an `int8` input for MiniMax-H3: `entry`, the
-default, `off`, `attention`, `linears` or `all`. `entry` runs each step at
-the entry's [`defaults.int8`](config.md#video_modelsdefaults) and sends
-nothing. Any other value goes with each step, and the server runs that
-step at it, as [Faster clips with int8](video.md#faster-clips-with-int8)
-describes: it is lossy, needs an M5 or newer, and `fasth3` runs at
-`off` and `linears` only.
+`gmlx Model Loader` has an `int8` input for MiniMax-H3 and
+MiniMax-H3-Image: `entry`, the default, `off`, `attention`, `linears` or
+`all`. `entry` runs each step at the entry's `defaults.int8`, of a
+[video](config.md#video_modelsdefaults) or an
+[image](config.md#image_modelsdefaults) entry, and sends nothing. Any
+other value goes with each step, and the server runs that step at it, as
+[Faster clips with int8](video.md#faster-clips-with-int8) and
+[Faster images with int8](images.md#faster-images-with-int8) describe:
+it is lossy, needs an M5 or newer, and `fasth3` runs at `off` and
+`linears` only.
 
 The loader refuses a value that changes the entry's linear layers, as
 [In serve and ComfyUI](video.md#in-serve-and-comfyui) explains. A server
 that cannot run a value refuses the first step with an error that names
 `int8`, and the error shows on the sampler. A value other than `entry` or
-`off` is refused on an image model, and a gmlx server from before the
-setting runs the entry's in its place, with one warning in ComfyUI's log
-for each model.
+`off` is refused on another image model, and a gmlx server from before
+the setting runs the entry's in its place, with one warning in ComfyUI's
+log for each model.
 
 ## What the gmlx nodes refuse
 

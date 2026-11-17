@@ -32,6 +32,10 @@ _APP = importlib.import_module("gmlx._vendor.mlx_vlm.server.app")
 _DOC = {"image_models": {"zit": {"path": "/abs/zit.gguf",
                                  "encoder": "/abs/enc.gguf",
                                  "vae": "/abs/vae.gguf"}}}
+# Beside it, a MiniMax-H3-Image entry by its configured family.
+_H3_DOC = {"image_models": {**_DOC["image_models"], "h3": {
+    "path": "/abs/h3.gguf", "encoder": "/abs/h3-enc.gguf",
+    "vae": "/abs/h3-vae.gguf", "family": "minimax-h3-image"}}}
 
 
 def _png(w=32, h=32, alpha=False) -> bytes:
@@ -64,14 +68,18 @@ _REAL_CHECK_FAMILY = svc.check_family
 @pytest.fixture
 def served(monkeypatch, tmp_path, request):
     """Image routes over a registered image model whose acquire and job
-    are stubs. Returns a namespace with the recorded jobs and releases."""
-    cfg = build_config(_DOC)
+    are stubs, the config of _DOC or of the test's parameter. Returns a
+    namespace with the recorded jobs and releases."""
+    doc = getattr(request, "param", _DOC)
+    cfg = build_config(doc)
     serving.register_resolved_models(cfg)
     request.addfinalizer(serving.clear_resolved_models)
     rec = SimpleNamespace(jobs=[], released=[], job=None)
 
-    def acquire(model):
-        if model not in ("", "zit"):
+    def acquire(model, **kw):
+        # The route holds the wired limit from the build to the release.
+        assert kw == {"hold_wired": True}
+        if model not in ("", *doc["image_models"]):
             from fastapi import HTTPException
             raise HTTPException(status_code=404, detail={"error": {
                 "type": "model_not_found", "message": "unknown"}})
@@ -95,6 +103,7 @@ def served(monkeypatch, tmp_path, request):
     monkeypatch.setattr(svc, "run_job", run_job)
     monkeypatch.setattr(svc, "check_family", lambda req, s: None)
     monkeypatch.setattr(svc, "target_size", lambda req, s: (64, 32))
+    monkeypatch.setattr(svc, "request_schedule", lambda req, s, dirs: None)
     monkeypatch.setattr(svc, "fit_check", lambda req, s, size, budget: None)
     monkeypatch.setattr(svc, "default_store_root", lambda port=None: str(tmp_path / "files"))
     monkeypatch.setattr(images, "_hopeless",
@@ -188,6 +197,37 @@ def test_generations_answer_b64_by_default(served):
     req, kw = served.jobs[0]
     assert req.model == "" and req.seed == 7 and kw["emit"] is None
     assert served.released == [1]
+
+
+@pytest.mark.parametrize("served", [_H3_DOC], indirect=True)
+def test_a_size_the_entry_family_refuses_is_a_400_before_admission(
+        served, monkeypatch):
+    """A MiniMax-H3-Image entry refuses 512x512 at parse time, naming the
+    smallest size of its shape, before the queue and the model acquire,
+    and takes 4096x4096, past the image limits, which the Z-Image entry
+    beside it refuses. A reload clears the families read."""
+    acquired = []
+    real = residency.acquire_image_model
+    monkeypatch.setattr(residency, "acquire_image_model", lambda model, **k: (
+        acquired.append(model) or real(model, **k)))
+    r = _client().post("/v1/images/generations", json={
+        "prompt": "a cat", "size": "512x512", "model": "h3"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["param"] == "size"
+    assert "832x832" in r.json()["error"]["message"]
+    assert acquired == [] and served.jobs == []
+    r = _client().post("/v1/images/generations", json={
+        "prompt": "a cat", "size": "4096x4096", "model": "h3"})
+    assert r.status_code == 200, r.text
+    assert served.jobs[0][0].size == (4096, 4096) and acquired == ["h3"]
+    r = _client().post("/v1/images/generations", json={
+        "prompt": "a cat", "size": "4096x4096", "model": "zit"})
+    assert r.status_code == 400, r.text
+    assert "over the limit" in r.json()["error"]["message"]
+    assert len(served.jobs) == 1 and acquired == ["h3"]
+    svc._FAMILIES[("zit", ())] = None
+    images.install_image_routes(build_config(_DOC))
+    assert svc._FAMILIES == {}
 
 
 def test_url_answers_read_back_without_the_key_and_expire(served, monkeypatch):
@@ -338,7 +378,7 @@ def test_a_flux3_flow_map_with_guidance_is_a_400_before_any_stream(
                            flow_map=True, ref_cache=False, blocks=None))
     hold = _Hold(served.released)
     hold._entry = SimpleNamespace(footprint=0, pipeline=flux3)
-    monkeypatch.setattr(residency, "acquire_image_model", lambda m: hold)
+    monkeypatch.setattr(residency, "acquire_image_model", lambda m, **_k: hold)
     monkeypatch.setattr(svc, "check_family", _REAL_CHECK_FAMILY)
     images.install_image_routes(build_config(_DOC))
     r = _client().post("/v1/images/generations", json={
@@ -602,7 +642,8 @@ def test_each_request_logs_one_line_and_warns_on_ignored_fields(served, capsys, 
     with caplog.at_level(logging.WARNING):
         r = _client().post("/v1/images/generations",
                            json={"prompt": "x", "user": "u", "style": "vivid",
-                                 "frobnicate": 1})
+                                 "frobnicate": 1, "int8": "off",
+                                 "sigmas": [1, 0.5, 0]})
     assert r.status_code == 200
     lines = [ln for ln in capsys.readouterr().out.splitlines()
              if ln.startswith("[req]")]
@@ -610,6 +651,7 @@ def test_each_request_logs_one_line_and_warns_on_ignored_fields(served, capsys, 
     warned = [m for m in caplog.messages if "ignoring unsupported" in m]
     assert len(warned) == 1
     assert "frobnicate" in warned[0] and "style" in warned[0] and "user" in warned[0]
+    assert "int8" not in warned[0] and "sigmas" not in warned[0]
 
 
 def test_the_access_log_drops_the_image_routes_and_file_tokens():
@@ -1849,3 +1891,42 @@ def test_an_edit_forms_text_part_past_a_mib_is_read(served, monkeypatch):
     assert r.status_code == 200, r.text
     (req, _), = served.jobs
     assert req.prompt == prompt
+
+
+@pytest.mark.parametrize("family, warned", [("flux3_klein", True),
+                                            ("h3_image", False)])
+def test_an_edit_gives_its_images_seed_and_size_to_the_rewrite(
+        served, monkeypatch, caplog, family, warned):
+    """The rewrite gets the edit's images, the size it asks for and the
+    seed the image samples at, drawn first when the request sends none.
+    prompt_upsampling is ignored with a warning on a family whose
+    upsampler does not see the images."""
+    from gmlx.image.registry import get_family
+    from gmlx.serve import image_upsample
+
+    seen = []
+    monkeypatch.setattr(image_upsample, "revise", lambda *a, **kw: (
+        seen.append((a, kw)) or None))
+    monkeypatch.setattr(_SERVED, "pipe",
+                        SimpleNamespace(family=get_family(family)))
+    with caplog.at_level(logging.WARNING):
+        r = _client().post("/v1/images/edits", files=[
+            ("image[]", ("a.png", _png(), "image/png")),
+            ("image[]", ("b.png", _png(48, 16), "image/png"))],
+            data={"prompt": "swap them", "size": "64x32",
+                  "prompt_upsampling": "true"})
+    assert r.status_code == 200, r.text
+    ((args, kw),) = seen
+    req, _ = served.jobs[0]
+    assert args == ("", "swap them", True, True)
+    assert [i.shape for i in kw["pictures"]] == [(32, 32, 3), (16, 48, 3)]
+    assert kw["canvas"] == (64, 32)
+    assert kw["seed"] == req.seed and req.seed is not None
+    ignored = [m for m in caplog.messages if "ignoring unsupported" in m]
+    assert bool(ignored) == warned
+    if warned:
+        assert "prompt_upsampling" in ignored[0]
+    # A generation gives the rewrite no pictures, and keeps its seed.
+    _client().post("/v1/images/generations",
+                   json={"prompt": "x", "seed": 9})
+    assert "pictures" not in seen[-1][1] and seen[-1][1]["seed"] == 9

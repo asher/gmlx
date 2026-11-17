@@ -32,6 +32,16 @@ _ANNOUNCE = False
 # it: each puts back the limit it saw on entry, and a lock would not
 # order those swaps against a throttle that arms and disarms between.
 LIMIT_LOCK = threading.RLock()
+# The one hold that every wired_limit_held block in force shares: how many
+# blocks hold it, the limit asked for last while they do, and the function
+# the last block out puts back. _HOLD_LOCK orders every edit of
+# mx.set_wired_limit (a hold's start and end, the cap's install, the pin)
+# and the recorder's read of the count. No writer takes LIMIT_LOCK under
+# it, and no holder of LIMIT_LOCK sets the wired limit.
+_HOLD_LOCK = threading.RLock()
+_HOLDS = 0
+_WANT = 0
+_REAL = None
 
 
 def _say(msg: str) -> None:
@@ -57,6 +67,54 @@ def cpu_wired_limit(streams=None):
             mx.synchronize()
 
 
+def _recorder(limit, *_a, **_k):
+    """``mx.set_wired_limit`` while a hold is in force: record the ask and
+    return the limit asked for before it. A reference taken during a hold
+    and called after the last one ends goes to the function in place."""
+    global _WANT
+    with _HOLD_LOCK:
+        if _HOLDS:
+            prev, _WANT = _WANT, int(limit)
+            return prev
+        fn = mx.set_wired_limit
+    return fn(limit, *_a, **_k)
+
+
+def _hold_start() -> bool:
+    """Count one more hold. The first one in reads the limit, sets 0 and
+    installs the recorder. False when no hold starts: the sweep is
+    neutralized, or the limit cannot be read."""
+    global _HOLDS, _WANT, _REAL
+    with _HOLD_LOCK:
+        if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
+            return False
+        if _HOLDS:
+            _HOLDS += 1
+            return True
+        real = mx.set_wired_limit
+        try:
+            want = int(real(0) or 0)
+        except Exception:
+            return False
+        _REAL, _WANT, _HOLDS = real, want, 1
+        mx.set_wired_limit = link(_recorder, real)
+        return True
+
+
+def _hold_end() -> None:
+    """Count one hold less. The last one out puts back the function under
+    the recorder and applies the limit asked for last. After a pin inside
+    the hold (``_neutralize_wired_limit_sweep``) the pin stands."""
+    global _HOLDS
+    with _HOLD_LOCK:
+        _HOLDS -= 1
+        if _HOLDS or mx.set_wired_limit is not _recorder:
+            return
+        mx.set_wired_limit = _REAL
+        if _WANT:
+            _REAL(_WANT)
+
+
 @contextlib.contextmanager
 def wired_limit_held():
     """Hold the MLX wired limit at 0 for the block, then apply the limit
@@ -67,32 +125,18 @@ def wired_limit_held():
     ``mx.set_wired_limit`` (a generation starting or ending) are recorded
     and return the limit last asked for. A sweep neutralized inside the
     block (``_neutralize_wired_limit_sweep``, a load that streams) keeps
-    the limit at 0. A no-op once the sweep is neutralized."""
-    if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
+    the limit at 0. A no-op once the sweep is neutralized. Blocks on
+    several threads share one hold, which starts and ends under one lock:
+    the first block in reads the limit and sets 0, and the last one out,
+    whichever started it, puts back the function and the limit last asked
+    for."""
+    if not _hold_start():
         yield
         return
-    # The function the block puts back, in a cell: the wired cap installed
-    # inside the block goes under the hold (install_wired_cap).
-    real = [mx.set_wired_limit]
-    try:
-        want = [int(real[0](0) or 0)]
-    except Exception:
-        yield
-        return
-
-    def _held(limit, *_a, **_k):
-        prev, want[0] = want[0], int(limit)
-        return prev
-
-    _held._kq_wired_real = real
-    mx.set_wired_limit = link(_held, real[0])
     try:
         yield
     finally:
-        if mx.set_wired_limit is _held:
-            mx.set_wired_limit = real[0]
-            if want[0]:
-                real[0](want[0])
+        _hold_end()
 
 
 def install_wired_cap(announce: bool = False) -> None:
@@ -114,21 +158,32 @@ def install_wired_cap(announce: bool = False) -> None:
     ``announce`` prints the cap and the first request the clamp lowers;
     else they show under --verbose. A process not under the cap never
     calls this, and keeps MLX's limits. A no-op without Metal."""
-    global _ANNOUNCE
+    global _ANNOUNCE, _REAL
     if announce:
         _ANNOUNCE = True
     from gmlx.serve import capacity
 
-    if (wrapped_with(mx.set_wired_limit, "_kq_wired_cap")
-            or wrapped_with(mx.set_wired_limit, "_kq_no_sweep")):
-        return
-    cap = capacity.wired_cap_bytes()
-    if cap is None:
-        return
-    # Inside a hold, the clamp goes under it, on what the hold puts back.
-    held, real = None, mx.set_wired_limit
-    while hasattr(real, "_kq_wired_real"):
-        held, real = real, real._kq_wired_real[0]
+    with _HOLD_LOCK:
+        if (wrapped_with(mx.set_wired_limit, "_kq_wired_cap")
+                or wrapped_with(mx.set_wired_limit, "_kq_no_sweep")):
+            return
+        cap = capacity.wired_cap_bytes()
+        if cap is None:
+            return
+        # Inside a hold, the clamp goes under it, on what the hold puts
+        # back.
+        held = mx.set_wired_limit is _recorder
+        capped = _clamp(_REAL if held else mx.set_wired_limit, capacity)
+        if held:
+            _REAL = capped
+            link(_recorder, capped)
+        else:
+            mx.set_wired_limit = capped
+    _limit_memory_to_cap(cap)
+
+
+def _clamp(real, capacity):
+    """``real`` clamped to the live wired cap."""
 
     def _capped(limit, *a, **k):
         global _CLAMP_LOGGED
@@ -141,13 +196,7 @@ def install_wired_cap(announce: bool = False) -> None:
             limit = int(cap)
         return real(limit, *a, **k)
 
-    capped = link(_capped, real, "_kq_wired_cap")
-    if held is None:
-        mx.set_wired_limit = capped
-    else:
-        held._kq_wired_real[0] = capped
-        link(held, capped)
-    _limit_memory_to_cap(cap)
+    return link(_capped, real, "_kq_wired_cap")
 
 
 def _limit_memory_to_cap(cap: float) -> None:
@@ -250,17 +299,23 @@ def _neutralize_wired_limit_sweep():
     ``import mlx_lm.generate`` binds the function mlx_lm re-exports in
     ``__init__``, not the submodule.
     """
-    if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
-        return
-    # A generator that started before this call left the limit raised, and
-    # its exit restore is a no-op from here on. Lower it now: with it up,
-    # the next streaming load's walk wires the file's resident pages as it
-    # creates the views, and every command buffer in the process fails
-    # with a Metal out-of-memory error.
-    try:
-        prev = mx.set_wired_limit(0)
-    except Exception:
-        prev = 0
+    def _no_sweep(*_a, **_k):
+        return 0
+
+    _no_sweep._kq_no_sweep = True
+    with _HOLD_LOCK:
+        if wrapped_with(mx.set_wired_limit, "_kq_no_sweep"):
+            return
+        # A generator that started before this call left the limit raised,
+        # and its exit restore is a no-op from here on. Lower it now: with
+        # it up, the next streaming load's walk wires the file's resident
+        # pages as it creates the views, and every command buffer in the
+        # process fails with a Metal out-of-memory error.
+        try:
+            prev = mx.set_wired_limit(0)
+        except Exception:
+            prev = 0
+        mx.set_wired_limit = _no_sweep
     if prev:
         print(f"[stream] wired limit lowered from {prev / 1e9:.1f} GB to 0: "
               "a raised limit wires every live buffer, zero-copy views included")
@@ -268,12 +323,6 @@ def _neutralize_wired_limit_sweep():
     # load tracks count as active bytes: under a memory limit at the wired
     # cap each eval would wait for the GPU work in flight.
     _restore_mlx_memory_limit()
-
-    def _no_sweep(*_a, **_k):
-        return 0
-
-    _no_sweep._kq_no_sweep = True
-    mx.set_wired_limit = _no_sweep
 
     import importlib
 

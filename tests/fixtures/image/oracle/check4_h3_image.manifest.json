@@ -1,0 +1,169 @@
+{
+ "schema": 1,
+ "name": "check4_h3_image",
+ "check": 4,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check4_h3_image.py",
+ "argv": ["check4_h3_image.py", "--comfy-dir", "ComfyUI-h3-image", "--dit", "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf", "--pdd-config", "pdd_config.json"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "pdd_config": {
+   "name": "pdd_config.json",
+   "size": 174,
+   "sha256": "cbc0cf1fbb7a7f9525987db453c1bf8218b95ebc686c9c5b74cbb5bbc4852e0b"
+  },
+  "oracle_dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf",
+   "size": 13607429024,
+   "sha256": "99df1f83bdccc8c1823c2fdfad8500be4a1333d0a4df5dac9beb2983935cc273"
+  }
+ },
+ "inputs": {
+  "steps": 6,
+  "pdd_sigmas": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0],
+  "scheduler": "simple",
+  "off_grid_steps": 3,
+  "comfy": "2aa4d535a76e4b6acf6a94f263bc482430c396dd",
+  "comfy_gguf": "373048b8403a7820620065210a691263d4da0a61",
+  "model_sampling": "MiniMaxH3ImageModelSampling",
+  "config_key": "{\"transformer\": {\"pdd_steps\": 6, \"pdd_sigmas\": [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724, 0.23200887441635132, 0.0]}}",
+  "head_bank": {
+   "seed": 0,
+   "inputs": 16,
+   "outputs": 4,
+   "rows": 5
+  }
+ },
+ "results": {
+  "simple_off_grid": 0.0008689165115356445,
+  "head_weights": {
+   "simple_6": [
+    [],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0]
+   ],
+   "grid": [
+    [],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0],
+    [1.0]
+   ],
+   "simple_3": [
+    [0.7111971974372864],
+    [0.3877067565917969, 0.6122932434082031],
+    [0.5645265579223633, 0.43547341227531433]
+   ]
+  }
+ },
+ "tolerances": {
+  "grid": "bitwise",
+  "heads": "exact",
+  "head_out_rel": 1e-06,
+  "rule": "the sampling row's sigmas and final zero equal ComfyUI's PDD grid bit for bit; each step reads the heads ComfyUI's PDD rule picks, its start and stop grid points and the float32 weights of the heads past head 0, on the simple schedule at the step count, on the grid, and on the simple schedule at 3 steps; on that last schedule the head's output on the seeded bank is within float32 rounding (relative L2) of the real _pdd_head's"
+ },
+ "notes": ["oracle: ComfyUI 2aa4d535a76e4b6acf6a94f263bc482430c396dd, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61; the model config from the GGUF's config key"],
+ "created": "2026-11-16T01:37:18Z",
+ "npz": "check4_h3_image.npz",
+ "tensors": {
+  "grid": {
+   "shape": [7],
+   "dtype": "float32",
+   "sha256": "a974c89ae39ca1cfc6d6bb8236dbc6ce3c339b229809cb075c5c4f5a859b09cd"
+  },
+  "head_bank_bias": {
+   "shape": [24],
+   "dtype": "float32",
+   "sha256": "9f0a33e75175fd34cfc439fbdd0bd4ded8f07ed7bfa367ac602bcffef2dfd3df"
+  },
+  "head_bank_weight": {
+   "shape": [24, 16],
+   "dtype": "float32",
+   "sha256": "0f4e4c6d0ce24c5c48999d754f264a62eb32ee342e101fbb02fbf0204360a992"
+  },
+  "head_in_simple_3": {
+   "shape": [3, 5, 16],
+   "dtype": "float32",
+   "sha256": "62e095412bca76be2a13d606413ec2d71a09e5e93e13f5db85a4a587b0e3d90b"
+  },
+  "head_out_simple_3": {
+   "shape": [3, 5, 4],
+   "dtype": "float32",
+   "sha256": "0f65c4fec8c2168ac9aa48d8d6318484902929071b74c03b0edaec33fee383e4"
+  },
+  "heads_grid": {
+   "shape": [6, 2],
+   "dtype": "int64",
+   "sha256": "fcd96ad0a85098e3e7de021b201afab23c72deca8d90c181d67fd6cc48222c5b"
+  },
+  "heads_simple_3": {
+   "shape": [3, 2],
+   "dtype": "int64",
+   "sha256": "062bb22c1a9d417638c86da29ccce85f302cf1c49be1c35b8054d87261e82391"
+  },
+  "heads_simple_6": {
+   "shape": [6, 2],
+   "dtype": "int64",
+   "sha256": "fcd96ad0a85098e3e7de021b201afab23c72deca8d90c181d67fd6cc48222c5b"
+  },
+  "simple_3": {
+   "shape": [4],
+   "dtype": "float32",
+   "sha256": "1ce36ce9f101394410d8fc84cfa90a5e3a86c6ec44d5cba6df92a2c4f3991419"
+  },
+  "simple_6": {
+   "shape": [7],
+   "dtype": "float32",
+   "sha256": "58169f7a68f29c0b2d7cc93b661e208041228000229d7d18cd47279ea1c991a4"
+  },
+  "timesteps_grid": {
+   "shape": [6],
+   "dtype": "float32",
+   "sha256": "0c82805eb8220e38462c1804bcf0d26732278e69dfe6eaa4dc088e45c986d777"
+  },
+  "timesteps_simple_3": {
+   "shape": [3],
+   "dtype": "float32",
+   "sha256": "258467e7fffdc250414ca6e82f5ab35eea4d72927086e43600218f81eee30913"
+  },
+  "timesteps_simple_6": {
+   "shape": [6],
+   "dtype": "float32",
+   "sha256": "68c791ee4f03bec3e8f9084101e21d61908c4f151b9e848a6bdb12f0f01ba58c"
+  }
+ }
+}

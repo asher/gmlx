@@ -165,6 +165,222 @@ def test_qwen_image_reads_a_rewritten_prompt_with_unescaped_quotes():
         'a sign that reads "OPEN" on a door')
 
 
+# MiniMax-H3-Image: MiniMax's prompts, which gmlx neither ships nor
+# copies into a test, laid out as its PE repository lays them out, here
+# with stand-in text.
+H3_SYSTEM = "You expand image prompts.\n\n"
+H3_TASK = "Expand the prompt below.\n\nPrompt: {}\n"
+H3_EDIT = "Write the edited image's caption.\n"
+
+
+@pytest.fixture
+def h3_prompts(tmp_path):
+    """MiniMax's prompt/manifest.json and the files it lists, with
+    stand-in text."""
+    root = tmp_path / "pe"
+    files = {"prompt/t2i/system_prompt.txt": H3_SYSTEM,
+             "prompt/t2i/task_prompt.txt": H3_TASK,
+             "prompt/t2i/request_params.json": "{}",
+             "prompt/edit/task_prompt.txt": H3_EDIT}
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    listed = {task: {"files": {rel: {"sha256": "0" * 64} for rel in files
+                               if rel.startswith(f"prompt/{task}/")}}
+              for task in ("t2i", "edit")}
+    (root / "prompt" / "manifest.json").write_text(json.dumps(listed))
+    return root / "prompt" / "manifest.json"
+
+
+def _picture(w, h, fill=0, channels=3):
+    import numpy as np
+
+    return upsample.Picture.of(np.full((h, w, channels), fill, np.uint8))
+
+
+def test_minimax_h3_image_takes_minimaxs_t2i_turn_and_sampling(h3_prompts):
+    """The system prompt without its trailing newlines, the task prompt
+    with the typed prompt in its slot, and MiniMax's sampling:
+    temperature 1, top-p 0.95, top-k 20, thinking on. The thinking closes
+    at its budget of 3072 tokens, in 5120 with the reply. The image's
+    seed seeds the turn."""
+    fam = get_family("h3_image")
+    system = upsample.system_prompt(fam, str(h3_prompts))
+    req = upsample.chat_request(fam, "a red bicycle", system, seed=7)
+    assert req.messages == (
+        {"role": "system", "content": "You expand image prompts."},
+        {"role": "user", "content": "Expand the prompt below.\n\nPrompt: "
+                                    "a red bicycle\n"})
+    assert (req.temperature, req.top_p, req.top_k, req.min_p,
+            req.presence_penalty, req.max_tokens, req.thinking,
+            req.thinking_budget) == (1.0, 0.95, 20, 0.0, 0.0, 5120, "on",
+                                     3072)
+    assert (req.seed, req.pictures) == (7, ())
+    assert upsample.upsample(
+        fam, "a red bicycle", lambda r: '</think>\n{"expanded_caption": '
+        '"A red bicycle.", "aspect_ratio": "3:2"}', system=system) == (
+        "A red bicycle.")
+
+
+def test_minimax_h3_image_with_references_takes_minimaxs_edit_turn(
+        h3_prompts):
+    """One user turn of parts: the editing task prompt, the picture count,
+    each picture's label and shape before it, then the instruction as a
+    JSON string and the aspect ratio the request selects."""
+    fam = get_family("h3_image")
+    system = upsample.system_prompt(fam, str(h3_prompts))
+    pics = (_picture(768, 1024), _picture(512, 512, channels=4))
+    req = upsample.chat_request(fam, 'paint the "door" blue', system,
+                                seed=3, pictures=pics)
+    tail = ("\nUser Editing Instruction (JSON string):\n"
+            '"paint the \\"door\\" blue"\n\n'
+            "User Aspect Ratio Selection:\nadaptive\n\n"
+            "Apply the instructions above to the supplied inputs and "
+            "reference images. Output only the required two-field JSON "
+            "object.")
+    assert req.messages == ({"role": "user", "content": [
+        {"type": "text", "text": H3_EDIT},
+        {"type": "text", "text": "Reference Image Count:\n2 input image(s), "
+                                 "labeled <Picture 1> through <Picture 2>."},
+        {"type": "text", "text": "Reference Media:\n- <Picture 1> "
+                                 "[aspect_ratio 3:4]"},
+        {"type": "image"},
+        {"type": "text", "text": "Reference Media:\n- <Picture 2> "
+                                 "[aspect_ratio 1:1]"},
+        {"type": "image"},
+        {"type": "text", "text": tail}]},)
+    assert req.pictures == pics and req.system is None
+    # A request that names its size selects its shape.
+    sized = upsample.chat_request(fam, "x", system, pictures=pics,
+                                  canvas=(1344, 768))
+    assert sized.messages[0]["content"][-1]["text"].endswith(
+        "Selection:\n7:4\n\nApply the instructions above to the supplied "
+        "inputs and reference images. Output only the required two-field "
+        "JSON object.")
+    # Without references the turn is the t2i one.
+    assert upsample.chat_request(fam, "x", system).messages[0]["role"] == \
+        "system"
+
+
+def test_minimax_h3_image_refuses_a_prompt_file_that_is_not_minimaxs(
+        h3_prompts, tmp_path):
+    fam = get_family("h3_image")
+    with pytest.raises(upsample.UpsampleError, match="no such file. "
+                       "MiniMax-H3-Image ships no upsampler prompt"):
+        upsample.system_prompt(fam, str(tmp_path / "missing.json"))
+    with pytest.raises(upsample.UpsampleError, match="`gmlx pull "
+                       "minimax-h3-image` fetches them"):
+        upsample.system_prompt(fam)
+    other = tmp_path / "own.txt"
+    other.write_text("Rewrite the prompt.\n")
+    with pytest.raises(upsample.UpsampleError, match="is not MiniMax's "
+                       "prompt/manifest.json, which lists t2i's "
+                       "system_prompt.txt"):
+        upsample.system_prompt(fam, str(other))
+    listed = json.loads(h3_prompts.read_text())
+    del listed["edit"]
+    h3_prompts.write_text(json.dumps(listed))
+    with pytest.raises(upsample.UpsampleError, match="lists edit's "
+                       "task_prompt.txt"):
+        upsample.system_prompt(fam, str(h3_prompts))
+
+
+def test_minimax_h3_image_captions_are_keyed_by_seed_pictures_and_canvas(
+        h3_prompts):
+    """A sampled caption depends on its seed, and one that saw pictures
+    on their pixels and the requested size; a sampled turn without a seed
+    is never kept."""
+    fam = get_family("h3_image")
+    system = upsample.system_prompt(fam, str(h3_prompts))
+    a, b = _picture(64, 32), _picture(64, 32, fill=1)
+
+    def key(**kw):
+        return upsample.cache_key("up", fam, "x", system, **kw)
+
+    assert key() is None
+    assert key(seed=1) != key(seed=2)
+    assert key(seed=1, pictures=(a,)) != key(seed=1, pictures=(b,))
+    assert key(seed=1, pictures=(a,)) == key(seed=1,
+                                             pictures=(_picture(64, 32),))
+    assert key(seed=1, pictures=(a,)) != key(seed=1, pictures=(_picture(
+        32, 64),))
+    assert key(seed=1, pictures=(a,)) != key(seed=1, pictures=(a,),
+                                             canvas=(64, 32))
+
+
+def test_every_other_familys_upsampler_sees_no_pictures_and_keeps_its_turn():
+    """Only MiniMax-H3-Image's upsampler takes pictures. Every other
+    family's turn is greedy, unseeded, text alone and without a thinking
+    budget, and its caption key leaves out the seed, as before."""
+    from gmlx.image.registry import families
+
+    others = [f for f in families()
+              if f.upsample is not None and f.name != "h3_image"]
+    assert len(others) >= 6
+    for fam in others:
+        assert not upsample.takes_pictures(fam)
+        system = "Rewrite the prompt."
+        req = upsample.chat_request(fam, "a red bicycle", system, seed=5)
+        assert (req.seed, req.pictures, req.temperature,
+                req.thinking_budget) == (None, (), 0.0, None)
+        assert (req.top_p, req.top_k, req.min_p) == (1.0, 0, 0.0)
+        assert all(isinstance(m["content"], str) for m in req.messages)
+        assert upsample.cache_key("up", fam, "x", system, seed=1) == \
+            upsample.cache_key("up", fam, "x", system, seed=2) == (
+                "up", fam.upsample, hashlib.sha256(
+                    system.encode()).hexdigest(), "x")
+        with pytest.raises(ValueError, match="sees no reference images"):
+            upsample.chat_request(fam, "x", system,
+                                  pictures=(_picture(32, 32),))
+    assert upsample.takes_pictures(get_family("h3_image"))
+
+
+def test_the_minimax_h3_image_recipe_pins_the_revision_the_row_names():
+    from gmlx.image import catalog
+    from gmlx.image.families.h3_image import upsample as h3
+
+    r = catalog.recipe("minimax-h3-image")
+    assert (r.prompt_repo, r.prompt_revision, r.prompt_file) == (
+        h3.PE_REPO, h3.PE_REVISION, h3.MANIFEST)
+    assert get_family("h3_image").upsample.revision == h3.PE_REVISION
+    assert sorted(f for f, _ in r.prompt_more) == [
+        "prompt/edit/task_prompt.txt", "prompt/t2i/request_params.json",
+        "prompt/t2i/system_prompt.txt", "prompt/t2i/task_prompt.txt"]
+
+
+def test_minimax_h3_image_prompt_files_on_disk_are_the_pinned_ones(gguf_dir):
+    """MiniMax's files where pull lays them, under KQUANT_TEST_GGUF_DIR:
+    each is at the recipe's pin and the manifest's sha256, and the turn
+    built from them has the system prompt without its trailing newlines
+    and the typed prompt in the task's slot."""
+    from pathlib import Path
+
+    from gmlx.image import catalog
+
+    r = catalog.recipe("minimax-h3-image")
+    found = [m for m in sorted(Path(gguf_dir).rglob("manifest.json"))
+             if m.parent.name == "prompt"
+             and catalog.sha256_file(str(m)) == r.prompt_sha256]
+    if not found:
+        pytest.skip("MiniMax's prompt/manifest.json is not under "
+                    "KQUANT_TEST_GGUF_DIR")
+    manifest = found[0]
+    root = manifest.parent.parent
+    listed = {rel: v["sha256"] for task in json.loads(manifest.read_text())
+              .values() for rel, v in task["files"].items()}
+    assert listed == dict(r.prompt_more)
+    for rel, sha in r.prompt_more:
+        assert catalog.sha256_file(str(root / rel)) == sha
+    fam = get_family("h3_image")
+    req = upsample.chat_request(
+        fam, "a red bicycle", upsample.system_prompt(fam, str(manifest)))
+    system = (root / "prompt/t2i/system_prompt.txt").read_text()
+    task = (root / "prompt/t2i/task_prompt.txt").read_text()
+    assert req.messages == ({"role": "system", "content": system.rstrip("\n")},
+                            {"role": "user",
+                             "content": task.format("a red bicycle")})
+
+
 def test_a_thinking_block_in_another_spelling_is_skipped():
     fam = get_family("flux3_klein")
     reply = f"<mm:think>\nThe user wants a bike.\n</mm:think>\n{CAPTION}\n"
@@ -244,7 +460,7 @@ def cli(tmp_path, monkeypatch):
         p.write_bytes(b"x")
         files[name] = str(p)
     # ``fam`` is the family the DiT identifies as, and ``reply`` what the
-    # upsampler writes.
+    # upsampler writes, or a function of the turn's settings that writes it.
     rec = SimpleNamespace(events=[], turns=[], model=None,
                           fam=get_family("flux3_klein"), reply=f" {CAPTION}\n",
                           rendered=None)
@@ -265,7 +481,7 @@ def cli(tmp_path, monkeypatch):
     def generate(model, tok, prompt, **kw):
         rec.events.append("chat")
         rec.turns.append({"prompt": prompt, **kw})
-        return rec.reply
+        return rec.reply(kw) if callable(rec.reply) else rec.reply
 
     class Enc:
         owned, released = True, False
@@ -434,3 +650,179 @@ def test_qwen_image_runs_the_users_prompt_file_and_encodes_its_rewrite(
         1.5, {"enable_thinking": False})
     assert ("encode", "A red bicycle with a wicker basket leans against a "
             "weathered brick wall in soft afternoon light.") in cli.events
+
+
+H3_TEMPLATE = (
+    "{% if enable_thinking is defined %}{% endif %}"
+    "{%- for m in messages -%}<|im_start|>{{ m.role }}\n"
+    "{% if m.content is string %}{{ m.content }}{% else %}"
+    "{%- for c in m.content %}{% if c.type == 'image' %}"
+    "<|vision_start|><|image_pad|><|vision_end|>"
+    "{%- else %}{{ c.text }}{% endif %}{% endfor %}{% endif %}"
+    "<|im_end|>\n{% endfor %}"
+    "{%- if add_generation_prompt %}<|im_start|>assistant\n<think>\n"
+    "{% endif %}")
+
+
+@pytest.fixture
+def h3_cli(cli, tmp_path, monkeypatch, h3_prompts):
+    """The cli fixture on MiniMax-H3-Image with two references and a
+    vision upsampler: ``vlm`` records the tower's load, the rendered
+    prompt and the pictures the turn sends, and ``priced`` the files the
+    cache limit priced and the context the preflight checked."""
+    import jinja2
+    from PIL import Image
+
+    import gmlx._vendor.mlx_vlm as mlx_vlm
+    import gmlx.load.vlm as vlm
+    import gmlx.serve.memory as memory
+    from gmlx.commands import cli as cli_mod
+    from gmlx.commands import tool_preflight
+
+    cli.fam = get_family("h3_image")
+    cli.reply = ('</think>\n{"expanded_caption": "' + CAPTION
+                 + '", "target_aspect_ratio": "1:1"}')
+    template = jinja2.Environment().from_string(H3_TEMPLATE)
+    rec = SimpleNamespace(loads=[], turns=[], priced=[], ctx=[])
+
+    def apply_chat_template(messages, tokenize=False, **kw):
+        return template.render(messages=messages, **kw)
+
+    processor = SimpleNamespace(
+        chat_template=H3_TEMPLATE, apply_chat_template=apply_chat_template,
+        tokenizer=SimpleNamespace(chat_template=H3_TEMPLATE))
+
+    def load_vlm_model(path, mmproj, **kw):
+        rec.loads.append((path, mmproj))
+        cli.events.append("upsampler+tower")
+        return object(), None, processor
+
+    def vlm_generate(model, proc, prompt, image=(), **kw):
+        cli.events.append("chat")
+        rec.turns.append({"prompt": prompt, "image": image, **kw})
+        return SimpleNamespace(
+            text=cli.reply(kw) if callable(cli.reply) else cli.reply)
+
+    monkeypatch.setattr(vlm, "load_vlm_model", load_vlm_model)
+    monkeypatch.setattr(mlx_vlm, "generate", vlm_generate)
+    monkeypatch.setattr(cli_mod, "unfit_request", lambda *a: None)
+    from gmlx.image import api
+
+    monkeypatch.setattr(api, "encode_references", lambda pipe, c, plan=None: c)
+    monkeypatch.setattr(memory, "resolve_cache_limit",
+                        lambda r, files, ws: (rec.priced.append(files)
+                                              or (None, "test")))
+    monkeypatch.setattr(tool_preflight, "check_or_exit",
+                        lambda p, ctx_tokens=None: rec.ctx.append(ctx_tokens))
+    refs = []
+    for i, (w, h) in enumerate([(768, 1024), (512, 512)]):
+        refs.append(tmp_path / f"ref{i}.png")
+        Image.new("RGB", (w, h), (40 * i, 90, 200)).save(refs[-1])
+    tower = tmp_path / "mmproj.gguf"
+    tower.write_bytes(b"x")
+    rec.tower = str(tower)
+    # The base runs its distilled 6 steps; with no --size, the image takes
+    # its size from the references.
+    rec.base = [a for a in cli.base if a not in ("--size", "32x32")]
+    rec.base[rec.base.index("--steps") + 1] = "6"
+    rec.args = ["--prompt", "paint the door blue", "--ref", str(refs[0]),
+                "--ref", str(refs[1]), "--encoder-mmproj", str(tower),
+                "--upsampler", cli.files["writer.gguf"],
+                "--upsample-prompt", str(h3_prompts),
+                "--output", str(tmp_path / "a.png")]
+    cli.h3 = rec
+    return cli
+
+
+def test_minimax_h3_image_cli_shows_its_upsampler_the_references(h3_cli):
+    """The upsampler loads with its vision tower, which the cache limit
+    prices beside it, and its turn renders each picture in place, sends
+    the pictures in order, samples at MiniMax's settings, and is seeded by
+    the image's seed. The caption is encoded."""
+    from gmlx.commands.cli import umbrella_main
+
+    rec = h3_cli.h3
+    assert umbrella_main(rec.base + rec.args + [
+        "--upsampler-mmproj", rec.tower]) == 0
+    assert rec.loads == [(h3_cli.files["writer.gguf"], rec.tower)]
+    assert rec.priced[0] == [h3_cli.files["writer.gguf"], rec.tower]
+    (turn,) = rec.turns
+    prompt = turn["prompt"]
+    assert prompt.startswith("<|im_start|>user\n" + H3_EDIT
+                             + "Reference Image Count:\n2 input image(s)")
+    assert prompt.index("<Picture 1> [aspect_ratio 3:4]<|vision_start|>") < \
+        prompt.index("<Picture 2> [aspect_ratio 1:1]<|vision_start|>")
+    assert "User Aspect Ratio Selection:\nadaptive" in prompt
+    assert [im.size for im in turn["image"]] == [(768, 1024), (512, 512)]
+    assert (turn["temperature"], turn["top_p"], turn["top_k"], turn["min_p"],
+            turn["max_tokens"]) == (1.0, 0.95, 20, 0.0, 5120)
+    # About the turn's text over 3, the vision tokens of a 768x1024 and a
+    # 512x512 picture, and the thinking and the reply.
+    assert rec.ctx[0] > 5120 + 24 * 32 + 16 * 16
+    assert ("encode", CAPTION) in h3_cli.events
+    assert "upsampler" not in h3_cli.events
+
+
+def test_minimax_h3_image_cli_without_the_upsamplers_tower_refuses(
+        h3_cli, capsys):
+    from gmlx.commands.cli import umbrella_main
+
+    assert umbrella_main(h3_cli.h3.base + h3_cli.h3.args) == 2
+    assert ("--ref: the MiniMax-H3-Image upsampler sees the references "
+            "through its vision tower: pass --upsampler-mmproj"
+            ) in capsys.readouterr().err
+    assert h3_cli.h3.loads == [] and "chat" not in h3_cli.events
+    # Without references its upsampler runs on the text model alone.
+    assert umbrella_main(h3_cli.h3.base + [
+        "--prompt", "a red bicycle", "--upsampler", h3_cli.files[
+            "writer.gguf"], "--upsample-prompt", h3_cli.h3.args[
+            h3_cli.h3.args.index("--upsample-prompt") + 1],
+        "--output", "b.png"]) == 0
+    (turn,) = h3_cli.turns
+    assert turn["system_prompt"] == "You expand image prompts."
+    assert (turn["temp"], turn["top_p"], turn["top_k"],
+            turn["template_kwargs"]) == (1.0, 0.95, 20,
+                                         {"enable_thinking": True})
+    assert h3_cli.h3.loads == []
+
+
+def _thinks_until_stopped(kw):
+    """The reply of a chat model whose thinking loops: the engine's budget
+    closes it with a newline and the end marker, as mlx-vlm's criteria
+    does, and the model writes its JSON; without a budget it loops to the
+    cap and writes none."""
+    thought = "Picture 1 holds a bicycle, so the lighthouse goes behind.\n"
+    if kw.get("thinking_budget") is None:
+        return thought * 40
+    return thought * 3 + "\n</think>\n\n" + json.dumps(
+        {"expanded_caption": CAPTION, "target_aspect_ratio": "1:1"})
+
+
+def test_a_minimax_h3_image_turn_that_thinks_past_its_budget_gives_its_caption(
+        h3_cli, capsys):
+    """The turn closes the thinking at its budget and leaves the reply its
+    room after it, with the tower and on the text model alone: a chat
+    model that would think to the cap still writes its caption. The
+    tower's turn arms mlx-vlm's criteria on the template's markers."""
+    from gmlx.commands.cli import umbrella_main
+
+    rec = h3_cli.h3
+    h3_cli.reply = _thinks_until_stopped
+    assert umbrella_main(rec.base + rec.args + [
+        "--upsampler-mmproj", rec.tower]) == 0
+    (turn,) = rec.turns
+    assert (turn["thinking_budget"], turn["max_tokens"],
+            turn["enable_thinking"], turn["thinking_start_token"],
+            turn["thinking_end_token"]) == (3072, 5120, True, "<think>",
+                                            "</think>")
+    assert ("encode", CAPTION) in h3_cli.events
+    del h3_cli.events[:]
+    prompts = rec.args[rec.args.index("--upsample-prompt") + 1]
+    assert umbrella_main(rec.base + [
+        "--prompt", "a red bicycle", "--upsampler",
+        h3_cli.files["writer.gguf"], "--upsample-prompt", prompts,
+        "--output", "b.png"]) == 0
+    (text_turn,) = h3_cli.turns
+    assert (text_turn["thinking_budget"], text_turn["max_tokens"]) == (
+        3072, 5120)
+    assert ("encode", CAPTION) in h3_cli.events

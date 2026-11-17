@@ -6,6 +6,7 @@ a guided edit takes the references. The sampler and the VAE are stubs,
 so nothing heavy runs."""
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from types import SimpleNamespace
@@ -89,7 +90,8 @@ def test_the_job_makes_room_for_the_texts_it_encodes(monkeypatch, fields,
     class Room(Exception):
         pass
 
-    def make_room(served, cfg, size, refs, init, budget, prompts=()):
+    def make_room(served, cfg, size, refs, init, budget, prompts=(),
+                  int8=None):
         seen.append(list(prompts))
         raise Room
 
@@ -109,6 +111,38 @@ def test_each_image_of_a_request_takes_the_next_seed(stubs):
                       stop=threading.Event())
     assert stubs.seeds == [5, 6] and out.seeds == [5, 6]
     assert len(out.images) == 2 and out.images[0] != out.images[1]
+
+
+def test_each_request_runs_its_own_int8_attention(stubs, monkeypatch):
+    """A request that names int8 attention runs its steps with it and
+    records it in the PNG, and the next request, naming none, runs the
+    entry's dense attention again."""
+    import io
+
+    import mlx_kquant as kq
+    from PIL import Image
+
+    for name in ("sdpa_qk8_inputs", "sdpa_qk8"):
+        monkeypatch.setattr(kq, name, getattr(kq, name, lambda *a, **k: None),
+                            raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: True)
+    served = _served()
+    served.pipe.family, served.pipe.variant = get_family("h3_image"), "pruned"
+    served.pipe.dit.attention = "dense"
+    served.plan.int8 = "off"
+    seen, real = [], api.sample
+    monkeypatch.setattr(api, "sample", lambda pipe, cond, **kw: (
+        seen.append(pipe.dit.attention), real(pipe, cond, **kw))[1])
+    metas = []
+    for fields in ({"int8": "attention"}, {}):
+        req = svc.parse_request("generations", {"prompt": "x", **fields})
+        svc.check_family(req, served)
+        out = svc.run_job(served, req, size=(64, 64), budget=None,
+                          stop=threading.Event(), embed_metadata=True)
+        with Image.open(io.BytesIO(out.images[0])) as im:
+            metas.append(json.loads(im.text["gmlx"]))
+    assert seen == ["int8", "dense"]
+    assert metas[0]["int8"] == "attention" and "int8" not in metas[1]
 
 
 def _flux3_served():
@@ -372,3 +406,161 @@ def test_a_request_after_a_kv_edit_encodes_with_its_states_priced(
     pipe.captions.clear()
     (a, k), = calls
     assert plan.levers == real_plan(*a, **k).levers == levers
+
+
+def _h3_served(tmp_path, monkeypatch, entry=None):
+    """An H3-Image entry whose one adapter is a file gmlx's table knows as
+    pDMD-2steps, with the entry's schedule fields ``entry``."""
+    from gmlx.image.lora import schedule as sc
+
+    path = tmp_path / "pdmd.safetensors"
+    path.write_bytes(b"pdmd")
+    monkeypatch.setattr(sc, "KNOWN", {sc.file_sha256(str(path)): sc.Known(
+        "pDMD-2steps", "linoyts/MiniMax-H3-Image-pDMD-2steps",
+        sc.AdapterSchedule(sigmas=(1.0, 12 / 13, 0.0), heads="in_order",
+                           size=(1024, 1024)))})
+    served = _served()
+    served.pipe.family, served.pipe.variant = get_family("h3_image"), "pruned"
+    served.adapters = [(SimpleNamespace(path=str(path)), 1.0)]
+    served.spec.adapter_schedules = (
+        () if entry is None else ((str(path), entry),))
+    served.plan.size = (2048, 2048)
+    served.facts = dataclasses.replace(served.facts, head_bank=6,
+                                       size_multiple=32)
+    return served
+
+
+def test_an_adapters_schedule_runs_on_serve_and_the_request_wins(
+        stubs, monkeypatch, tmp_path):
+    """The entry's pDMD runs its two steps with heads in order at its
+    1024x1024, and says so in the PNG; a request's sigmas, steps or size
+    win, and at strength 0 the adapter sets nothing."""
+    import io
+
+    from PIL import Image
+
+    served = _h3_served(tmp_path, monkeypatch)
+    # The table of a request that names an adapter reads no file here.
+    monkeypatch.setattr(svc, "_adapter_table", lambda *a, **k: (None, []))
+    seen = []
+    monkeypatch.setattr(api, "sample", lambda pipe, cond, **kw: (
+        seen.append(kw), mx.zeros((1, 16, 8, 8)))[1])
+    runs = [({}, (1024, 1024), ((1.0, 12 / 13, 0.0), "in_order", 2)),
+            ({"sigmas": [1, 0.5, 0]}, (1024, 1024),
+             ((1.0, 0.5, 0.0), "in_order", 2)),
+            ({"sigmas": "1, 0.5, 0", "size": "2048x2048"}, (2048, 2048),
+             ((1.0, 0.5, 0.0), "in_order", 2)),
+            ({"steps": 6}, (1024, 1024), (None, None, 6)),
+            ({"adapters": [{"id": "pdmd.safetensors", "strength": 0}]},
+             (2048, 2048), (None, None, 4))]
+    for fields, size, want in runs:
+        req = svc.parse_request("generations", {"prompt": "x", **fields})
+        svc.check_family(req, served)
+        svc.request_schedule(req, served, [])
+        assert svc.target_size(req, served) == size, fields
+        out = svc.run_job(served, req, size=size, budget=None,
+                          stop=threading.Event(), embed_metadata=True)
+        kw = seen[-1]
+        assert (kw["sigmas"], kw["heads"], kw["steps"]) == want, fields
+        with Image.open(io.BytesIO(out.images[0])) as im:
+            meta = json.loads(im.text["gmlx"])
+        assert (meta.get("sigmas"), meta.get("heads")) == (
+            None if want[0] is None else list(want[0]), want[1])
+
+
+def test_an_entrys_fields_win_and_a_bad_schedule_is_refused(
+        stubs, monkeypatch, tmp_path):
+    """Each field the entry sets wins over the table's, and the table
+    gives the others: an entry that sets the size alone keeps pDMD's two
+    steps. A request whose steps disagree with its sigmas, more than 200
+    steps of sigmas, and heads in order past the bank get 400."""
+    table = ("gmlx's table of known adapters, "
+             "linoyts/MiniMax-H3-Image-pDMD-2steps")
+    served = _h3_served(tmp_path, monkeypatch,
+                        entry={"sigmas": [1.0, 0.75, 0.5, 0.0]})
+    req = svc.parse_request("generations", {"prompt": "x"})
+    svc.request_schedule(req, served, [])
+    assert (req.schedule.sigmas, req.schedule.heads, req.schedule.size) == (
+        (1.0, 0.75, 0.5, 0.0), "in_order", (1024, 1024))
+    assert f"(its entry in the config and {table})" in req.schedule.line
+    served = _h3_served(tmp_path, monkeypatch, entry={"size": "1536x1536"})
+    req = svc.parse_request("generations", {"prompt": "x"})
+    svc.request_schedule(req, served, [])
+    assert (req.schedule.sigmas, req.schedule.heads, req.schedule.size) == (
+        (1.0, 12 / 13, 0.0), "in_order", (1536, 1536))
+    assert svc.target_size(req, served) == (1536, 1536)
+    req = svc.parse_request("generations", {"prompt": "x",
+                                            "sigmas": [1.0] * 200 + [0.0]})
+    assert len(req.sigmas) == 201
+    with pytest.raises(svc.ImageRequestError, match="sigmas holds 202 "
+                       "values, 201 steps, and a request runs at most 200"):
+        svc.parse_request("generations", {"prompt": "x",
+                                          "sigmas": [1.0] * 201 + [0.0]})
+    with pytest.raises(svc.ImageRequestError, match="steps 2 disagrees "
+                       "with the 3 steps of sigmas"):
+        svc.parse_request("generations", {"prompt": "x", "steps": 2,
+                                          "sigmas": [1, 0.6, 0.3, 0]})
+    with pytest.raises(svc.ImageRequestError, match="sigmas must not "
+                       "increase"):
+        svc.parse_request("generations", {"prompt": "x", "sigmas": [0, 1]})
+    req = svc.parse_request("generations", {
+        "prompt": "x", "sigmas": [1, .9, .8, .7, .6, .5, .4, 0]})
+    svc.check_family(req, served)
+    with pytest.raises(svc.ImageRequestError, match="bank holds 6 heads, "
+                       "not the 7 steps"):
+        svc.request_schedule(req, served, [])
+
+
+@pytest.mark.parametrize("size, why", [
+    ("1000x1000", "width and height must be multiples of 32"),
+    ("4096x512", "outside the shapes MiniMax-H3-Image takes, 1:3 to 3:1"),
+    ("512x512", "under the 655,360 that MiniMax-H3-Image takes")])
+def test_a_schedules_size_is_held_to_what_a_request_could_give(
+        stubs, monkeypatch, tmp_path, size, why):
+    """A size from the entry's schedule or the adapter's sidecar that the
+    model does not take gets 400 naming the adapter and where the size
+    comes from, before the job; a request's own size wins over it."""
+    from gmlx.image.lora import schedule as sc
+
+    served = _h3_served(tmp_path, monkeypatch, entry={"size": size})
+    req = svc.parse_request("generations", {"prompt": "x"})
+    with pytest.raises(svc.ImageRequestError) as e:
+        svc.request_schedule(req, served, [])
+    assert f"the size {size} that the adapter schedule of pDMD-2steps (its " \
+           f"entry in the config) sets: " in str(e.value)
+    assert why in str(e.value) and e.value.param == "adapters"
+    req = svc.parse_request("generations", {"prompt": "x",
+                                            "size": "1024x1024"})
+    svc.request_schedule(req, served, [])
+    assert svc.target_size(req, served) == (1024, 1024)
+    served = _h3_served(tmp_path, monkeypatch)
+    (ad, _), = served.adapters
+    w, h = (int(v) for v in size.split("x"))
+    side = sc.write_sidecar(ad.path, sc.AdapterSchedule(size=(w, h)))
+    req = svc.parse_request("generations", {"prompt": "x"})
+    with pytest.raises(svc.ImageRequestError) as e:
+        svc.request_schedule(req, served, [])
+    assert f"adapter schedule of pDMD-2steps (its sidecar {side}) sets: " \
+        in str(e.value) and why in str(e.value)
+
+
+def test_a_step_count_from_quality_is_named_as_quality(
+        stubs, monkeypatch, tmp_path):
+    """A request that gives quality alone runs its steps over an adapter's
+    sigmas, and the schedule line names quality, not steps."""
+    from gmlx.image.lora import schedule as sc
+
+    path = tmp_path / "style.safetensors"
+    path.write_bytes(b"style")
+    sc.write_sidecar(str(path), sc.AdapterSchedule(sigmas=(1.0, 0.5, 0.0)))
+    served = _served()
+    served.adapters = [(SimpleNamespace(path=str(path)), 1.0)]
+    served.spec.adapter_schedules = ()
+    req = svc.parse_request("generations", {"prompt": "x",
+                                            "quality": "high"})
+    svc.request_schedule(req, served, [])
+    assert req.schedule.sigmas is None
+    assert req.schedule.line.endswith("; quality given, which wins")
+    req = svc.parse_request("generations", {"prompt": "x", "steps": 8})
+    svc.request_schedule(req, served, [])
+    assert req.schedule.line.endswith("; steps given, which wins")

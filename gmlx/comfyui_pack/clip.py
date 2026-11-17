@@ -19,7 +19,7 @@ import comfy.model_patcher
 import comfy.sd
 
 from .client import KEYFRAME_UPSAMPLING, GmlxError, GmlxRefusal, StepClient
-from .patcher import CPU, H3_FAMILY, H3_NO_REFS, token_tags
+from .patcher import CPU, H3_FAMILY, H3_IMAGE_FAMILY, H3_IMAGE_LABEL, H3_NO_REFS, token_tags
 
 log = logging.getLogger("gmlx")
 
@@ -157,6 +157,7 @@ class GmlxCLIP(comfy.sd.CLIP):
             img = kwargs["image"]
             images = [img[i:i + 1] for i in range(img.shape[0])]
         return {"gmlx": {"text": str(text), "images": images, "clip": self.gmlx_clip,
+                         "picture_label": kwargs.get("picture_label"),
                          "llama_template": kwargs.get("llama_template"),
                          "keep_vision": bool(kwargs.get("keep_vision", False)),
                          "prevent_empty_text": bool(kwargs.get("prevent_empty_text", False))}}
@@ -171,6 +172,11 @@ class GmlxCLIP(comfy.sd.CLIP):
         if p["images"] and p.get("keep_vision"):
             raise GmlxRefusal("gmlx: reference images seen by the text encoder alone are not "
                               "supported on a gmlx CLIP; connect a VAE to the text encode node")
+        label = p.get("picture_label")
+        if p["images"] and self.gmlx_family == H3_IMAGE_FAMILY and label != H3_IMAGE_LABEL:
+            raise GmlxRefusal(f"gmlx: the server reads MiniMax-H3-Image pictures after the "
+                              f"label {H3_IMAGE_LABEL!r}, as MiniMaxH3ImageConditioning puts "
+                              f"them, and this encode names them {label!r}")
         if "weighted" not in self.warned and _WEIGHTED.search(p["text"]):
             self.warned.add("weighted")
             log.warning("gmlx: weighted prompt syntax is passed to the server as plain text")
@@ -220,10 +226,12 @@ class GmlxCLIP(comfy.sd.CLIP):
         cond = _batched(out["cond"])
         if return_dict:
             d = {"cond": cond, "pooled_output": None}
-            if images and fields.get("image_slots"):
+            h3 = self.gmlx_family in (H3_FAMILY, H3_IMAGE_FAMILY)
+            if images and fields.get("image_slots") and not h3:
                 d["image_slots"] = [int(s) for s in fields["image_slots"]]
-            if images and self.gmlx_family == H3_FAMILY:
-                # The vision rows of the keyframes, as ComfyUI's encoder tags them.
+            if images and h3:
+                # The vision rows of the keyframes or pictures, as ComfyUI's
+                # encoder tags them.
                 d["minimax_token_tags"] = token_tags(cond.shape[1], fields.get("spans") or ())
             if "cond_typed" in out:
                 d[TYPED] = TypedPrompt(cond, _batched(out["cond_typed"]))

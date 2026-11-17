@@ -547,7 +547,9 @@ def _run_clip_stubs(monkeypatch, outcomes):
         def release(self):
             calls.append("release")
 
-    def acquire(model):
+    def acquire(model, **kw):
+        # The job holds the wired limit from the build to the release.
+        assert kw == {"hold_wired": True}
         calls.append("acquire")
         return Hold()
 

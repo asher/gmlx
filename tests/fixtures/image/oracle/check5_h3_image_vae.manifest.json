@@ -1,0 +1,402 @@
+{
+ "schema": 1,
+ "name": "check5_h3_image_vae",
+ "check": 5,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check5_h3_image_vae.py",
+ "argv": ["check5_h3_image_vae.py", "--comfy-dir", "ComfyUI-h3-image", "--vae", "minimax_h3_image_vae_fp16.safetensors"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "vae": {
+   "name": "minimax_h3_image_vae_fp16.safetensors",
+   "size": 1168505312,
+   "sha256": "d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af"
+  }
+ },
+ "inputs": {
+  "cases": {
+   "images": {
+    "256x256": [256, 256],
+    "512x320": [320, 512],
+    "1024x1024": [1024, 1024]
+   },
+   "latents": {}
+  },
+  "seed": 5,
+  "encode_seed": 42,
+  "plans": {
+   "256x256": {
+    "tiles_y": {
+     "starts": [0],
+     "lengths": [256],
+     "overlaps": []
+    },
+    "tiles_x": {
+     "starts": [0],
+     "lengths": [256],
+     "overlaps": []
+    }
+   },
+   "512x320": {
+    "tiles_y": {
+     "starts": [0, 64],
+     "lengths": [256, 256],
+     "overlaps": [192]
+    },
+    "tiles_x": {
+     "starts": [0, 128, 256],
+     "lengths": [256, 256, 256],
+     "overlaps": [128, 128]
+    }
+   },
+   "1024x1024": {
+    "tiles_y": {
+     "starts": [0, 192, 384, 576, 768],
+     "lengths": [256, 256, 256, 256, 256],
+     "overlaps": [64, 64, 64, 64]
+    },
+    "tiles_x": {
+     "starts": [0, 192, 384, 576, 768],
+     "lengths": [256, 256, 256, 256, 256],
+     "overlaps": [64, 64, 64, 64]
+    }
+   }
+  },
+  "latent_stats": {
+   "latents_mean": [0.858090341091156, -0.9606591463088989, 1.0661640167236328, -0.5090325474739075, -0.2727581858634949, -1.3675414323806763, -0.2553254961967468, -0.26907554268836975, -0.5376840829849243, -0.0464097298681736, 0.6657370328903198, 0.19690127670764923, -0.5460608005523682, -0.4035342037677765, -0.23683024942874908, 0.25928452610969543, -0.30133944749832153, 0.211341992020607, -1.1206848621368408, 0.3581933379173279, -0.04225143790245056, 0.2604829967021942, 0.22864092886447906, 0.7056031823158264],
+   "latents_std": [1.2223774194717407, 1.2767263650894165, 1.6831774711608887, 1.7549455165863037, 1.5636216402053833, 2.194143533706665, 0.9653137922286987, 1.0569885969161987, 0.841948926448822, 0.7729952931404114, 1.8955937623977661, 0.946841835975647, 0.7996809482574463, 0.44988900423049927, 0.7197399735450745, 0.6936293244361877, 2.961095094680786, 2.7694199085235596, 3.0496184825897217, 2.1088054180145264, 3.276226282119751, 3.1627357006073, 2.2816812992095947, 2.6127843856811523]
+  },
+  "image": "h3_vae_tiny.clip(1, height, width, seed): (1, 3, 1, H, W) in [-1, 1]",
+  "seeded_latents": "numpy default_rng(seed).standard_normal((1, 24, 1, h, w)) in float32, drawn in the order of cases['latents']",
+  "latents": "the class's encode: the posterior sample mean + exp(0.5 logvar) noise, normalized, (1, 24, 1, h, w)",
+  "mean": "the mean of the class's moments, (1, 24, 1, h, w)",
+  "logvar": "the log variance of its moments clamped to [-30, 20]",
+  "noise": "torch.randn(mean shape, generator=torch.Generator().manual_seed(42)), the class's draws",
+  "decoded": "the class's decode: (1, 3, 1, H, W) float32 in [0, 1]"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "comfyui": "2aa4d535a76e4b6acf6a94f263bc482430c396dd",
+   "f16_math": "each linear, convolution, norm and attention in float32 over float16 operands, one float16 rounding"
+  },
+  "gaps": {
+   "encode 256x256": {
+    "fp32_vs_f64": {
+     "rel_l2": 2.771115846835082e-06,
+     "cosine": 0.9999999999961614,
+     "max_abs": 4.076957702636719e-05
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.001494007715509452,
+     "cosine": 0.9999988950049685,
+     "max_abs": 0.04525117576122284
+    }
+   },
+   "mean 256x256": {
+    "fp32_vs_f64": {
+     "rel_l2": 2.1623162834228227e-06,
+     "cosine": 0.9999999999976624,
+     "max_abs": 6.383208661109308e-05
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.001061433722897176,
+     "cosine": 0.9999994369091542,
+     "max_abs": 0.03518647190469615
+    }
+   },
+   "encode 512x320": {
+    "fp32_vs_f64": {
+     "rel_l2": 3.0548007976253032e-06,
+     "cosine": 0.9999999999953358,
+     "max_abs": 5.9723854064941406e-05
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.002309951250188767,
+     "cosine": 0.9999973332425605,
+     "max_abs": 0.027809500694274902
+    }
+   },
+   "mean 512x320": {
+    "fp32_vs_f64": {
+     "rel_l2": 2.653422809915723e-06,
+     "cosine": 0.9999999999964806,
+     "max_abs": 9.310481054836117e-05
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.002123536572764738,
+     "cosine": 0.9999977459754484,
+     "max_abs": 0.050902505121703356
+    }
+   },
+   "encode 1024x1024": {
+    "fp32_vs_f64": {
+     "rel_l2": 5.926015652583312e-06,
+     "cosine": 0.999999999982442,
+     "max_abs": 0.00025138258934020996
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0037250098852167814,
+     "cosine": 0.9999930623453549,
+     "max_abs": 0.09669986367225647
+    }
+   },
+   "mean 1024x1024": {
+    "fp32_vs_f64": {
+     "rel_l2": 5.561627607004274e-06,
+     "cosine": 0.9999999999845348,
+     "max_abs": 0.0003929110925525725
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.003753499719360129,
+     "cosine": 0.9999929556577772,
+     "max_abs": 0.21076176482640552
+    }
+   },
+   "decode 256x256": {
+    "fp32_vs_f64": {
+     "rel_l2": 3.937470937467326e-07,
+     "cosine": 0.9999999999999244,
+     "max_abs": 2.4352957677109544e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.000500748205010719,
+     "cosine": 0.999999881125911,
+     "max_abs": 0.005145324658739958,
+     "psnr_db": 70.52583177918744
+    }
+   },
+   "decode 512x320": {
+    "fp32_vs_f64": {
+     "rel_l2": 3.2051404849621606e-07,
+     "cosine": 0.9999999999999499,
+     "max_abs": 2.0462271421717304e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0005067229131241055,
+     "cosine": 0.9999998793975207,
+     "max_abs": 0.004872626685967829,
+     "psnr_db": 70.45136994319762
+    }
+   },
+   "decode 1024x1024": {
+    "fp32_vs_f64": {
+     "rel_l2": 3.316279701337612e-07,
+     "cosine": 0.9999999999999364,
+     "max_abs": 2.3553121517028153e-06
+    },
+    "f16_vs_f64": {
+     "rel_l2": 0.0004514794729832075,
+     "cosine": 0.99999990792976,
+     "max_abs": 0.006888528606610711,
+     "psnr_db": 71.45333298187326
+    }
+   }
+  },
+  "times": {
+   "fp32 encode 256x256": 0.3,
+   "fp32 encode 512x320": 1.3,
+   "fp32 encode 1024x1024": 5.6,
+   "fp32 decode 256x256": 0.2,
+   "fp32 decode 512x320": 1.0,
+   "fp32 decode 1024x1024": 4.4,
+   "fp32 peak rss gib": 3.63,
+   "f16 encode 256x256": 0.3,
+   "f16 encode 512x320": 1.8,
+   "f16 encode 1024x1024": 7.3,
+   "f16 decode 256x256": 0.3,
+   "f16 decode 512x320": 1.1,
+   "f16 decode 1024x1024": 4.9,
+   "f16 peak rss gib": 5.33,
+   "f64 encode 256x256": 0.8,
+   "f64 encode 512x320": 4.4,
+   "f64 encode 1024x1024": 18.2,
+   "f64 decode 256x256": 0.7,
+   "f64 decode 512x320": 3.3,
+   "f64 decode 1024x1024": 14.0,
+   "f64 peak rss gib": 7.16
+  }
+ },
+ "tolerances": {
+  "rule": "against the float64 result: fp32 relative L2 at twice the oracle's own fp32 relative L2; float16 decode PSNR at the oracle's own float16 PSNR less 20 log10(2) dB; float16 encode relative L2 at twice the oracle's own float16 relative L2",
+  "items": {
+   "encode 256x256": {
+    "fp32_rel_l2": 5.542231693670164e-06,
+    "f16_rel_l2": 0.002988015431018904
+   },
+   "mean 256x256": {
+    "fp32_rel_l2": 4.324632566845645e-06,
+    "f16_rel_l2": 0.002122867445794352
+   },
+   "encode 512x320": {
+    "fp32_rel_l2": 6.1096015952506064e-06,
+    "f16_rel_l2": 0.004619902500377534
+   },
+   "mean 512x320": {
+    "fp32_rel_l2": 5.306845619831446e-06,
+    "f16_rel_l2": 0.004247073145529476
+   },
+   "encode 1024x1024": {
+    "fp32_rel_l2": 1.1852031305166624e-05,
+    "f16_rel_l2": 0.007450019770433563
+   },
+   "mean 1024x1024": {
+    "fp32_rel_l2": 1.1123255214008549e-05,
+    "f16_rel_l2": 0.007506999438720258
+   },
+   "decode 256x256": {
+    "fp32_rel_l2": 7.874941874934652e-07,
+    "f16_psnr_db": 64.50523186590782
+   },
+   "decode 512x320": {
+    "fp32_rel_l2": 6.410280969924321e-07,
+    "f16_psnr_db": 64.430770029918
+   },
+   "decode 1024x1024": {
+    "fp32_rel_l2": 6.632559402675223e-07,
+    "f16_psnr_db": 65.43273306859363
+   }
+  }
+ },
+ "notes": ["The file is float16; each mode's model takes its values in its own dtype."],
+ "created": "2026-11-16T00:24:44Z",
+ "npz": "check5_h3_image_vae.npz",
+ "tensors": {
+  "decoded_f64_1024x1024": {
+   "shape": [1, 3, 1, 1024, 1024],
+   "dtype": "float64",
+   "sha256": "bed891816c9a732c3eff86240eaf91d2ed4f0a6e27e349b249da85f0b4128973"
+  },
+  "decoded_f64_256x256": {
+   "shape": [1, 3, 1, 256, 256],
+   "dtype": "float64",
+   "sha256": "cbc651829c832b3420f5f66732886909c73fb80c570cc81bdb137d1b331e4342"
+  },
+  "decoded_f64_512x320": {
+   "shape": [1, 3, 1, 320, 512],
+   "dtype": "float64",
+   "sha256": "7f5f27f71ac80c3137e100ce10270392765f6ba4bd245bd340820e3d27be40a9"
+  },
+  "input_1024x1024": {
+   "shape": [1, 3, 1, 1024, 1024],
+   "dtype": "float32",
+   "sha256": "8a12639124ef48e3e7b3d7c7fe3eb4777b63ddf0e8979dd09aa624bd60cfb4e5"
+  },
+  "input_256x256": {
+   "shape": [1, 3, 1, 256, 256],
+   "dtype": "float32",
+   "sha256": "3293bb27d863bebc32f46fa17b72d5a124f269ca0bd4ec7ef7940b58a0306374"
+  },
+  "input_512x320": {
+   "shape": [1, 3, 1, 320, 512],
+   "dtype": "float32",
+   "sha256": "a10da9a5e3b406f303a8e2408efc4d0c3b7cce35b232b9841af9e42d88ace7b5"
+  },
+  "latents_f64_1024x1024": {
+   "shape": [1, 24, 1, 64, 64],
+   "dtype": "float64",
+   "sha256": "e1991a5a4310ac84f7d2f92dd3c7d93c4bcf6ad6d535e57371a0cae492f7676c"
+  },
+  "latents_f64_256x256": {
+   "shape": [1, 24, 1, 16, 16],
+   "dtype": "float64",
+   "sha256": "c7e4b431c50870de3b8bb60826ef6683065c6cac55817141a82506b1f8bd3cd3"
+  },
+  "latents_f64_512x320": {
+   "shape": [1, 24, 1, 20, 32],
+   "dtype": "float64",
+   "sha256": "15d48d2cb9312725374b26573dc6f8d543660273d2345416789ff4e1a5df9225"
+  },
+  "latents_fp32_1024x1024": {
+   "shape": [1, 24, 1, 64, 64],
+   "dtype": "float32",
+   "sha256": "ef0efb2b5f43449a2cd9fb3f7a42492259764dc1f66b4f3571984c19f8d56af2"
+  },
+  "latents_fp32_256x256": {
+   "shape": [1, 24, 1, 16, 16],
+   "dtype": "float32",
+   "sha256": "4d7595c338f16c7d5eafd091e71aa98838842f080a620dba24ceb7655b3bb39f"
+  },
+  "latents_fp32_512x320": {
+   "shape": [1, 24, 1, 20, 32],
+   "dtype": "float32",
+   "sha256": "11a5ede238afe9914312a7811fc5eedc7165002c6f05d7e5a847693c414be04f"
+  },
+  "logvar_f64_1024x1024": {
+   "shape": [1, 24, 1, 64, 64],
+   "dtype": "float64",
+   "sha256": "c840fe031ba1c44d6f9ce01c107c4d512f85d7847ca2f128ca4a247469212d11"
+  },
+  "logvar_f64_256x256": {
+   "shape": [1, 24, 1, 16, 16],
+   "dtype": "float64",
+   "sha256": "4f582425cada8d66fbc06d133f7e8e2bf30751f9ee9ebbcaa730caaa95275b30"
+  },
+  "logvar_f64_512x320": {
+   "shape": [1, 24, 1, 20, 32],
+   "dtype": "float64",
+   "sha256": "25d9934fca67f500e7831ec68a2736966f67dc9e2425babe6958321b926296b4"
+  },
+  "mean_f64_1024x1024": {
+   "shape": [1, 24, 1, 64, 64],
+   "dtype": "float64",
+   "sha256": "77068e52b52893e8e21cca346dfb7de3620cabcf0f4b4b0d26603d084d7c41a6"
+  },
+  "mean_f64_256x256": {
+   "shape": [1, 24, 1, 16, 16],
+   "dtype": "float64",
+   "sha256": "8cfb1457fac99709e0d4579bfd330db732aa0019d985ad0c1741f2fbd062534e"
+  },
+  "mean_f64_512x320": {
+   "shape": [1, 24, 1, 20, 32],
+   "dtype": "float64",
+   "sha256": "ba7ff0d3f7c1bc9308496d73fc2693002c12047e804ee8f32e00190238f61a63"
+  },
+  "noise_1024x1024": {
+   "shape": [1, 24, 1, 64, 64],
+   "dtype": "float32",
+   "sha256": "14ba925cf9d55e3bd00dc0c458153089dc731c457799f97405b5b92663a78311"
+  },
+  "noise_256x256": {
+   "shape": [1, 24, 1, 16, 16],
+   "dtype": "float32",
+   "sha256": "22d3c1a150e49beccd84c02de718e7a243eba7dabfd4d2f57421ebabd04f4531"
+  },
+  "noise_512x320": {
+   "shape": [1, 24, 1, 20, 32],
+   "dtype": "float32",
+   "sha256": "b916b04df28602cb0e1847ee858487854e9e2a0fb802e4e9a4c9dde59f53df0d"
+  }
+ }
+}

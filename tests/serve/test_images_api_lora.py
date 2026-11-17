@@ -129,7 +129,7 @@ def _entry(request, monkeypatch, tmp_path, *, budget: int = 4 * GB,
     # the test, so no later test counts its weights in a peak.
     request.addfinalizer(rec.__dict__.clear)
 
-    def acquire(model):
+    def acquire(model, **_k):
         with pool._lock:
             e.busy += 1
         return _BusyHold(pool, e)

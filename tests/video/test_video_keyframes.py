@@ -61,9 +61,20 @@ def test_the_block_sizes_of_the_shipped_canvases():
     ids, spans = kf.keyframe_ids(SPEC, _Pieces({"<Picture 1>: ": [1] * 6}),
                                  "", [(768, 768)])
     assert ids.count(hf.IMAGE_PAD) == 576 and len(ids) == 584
-    with pytest.raises(ValueError, match="1350x768 pixels is not on the "
-                                         "vision tower's 32-pixel grid"):
+    with pytest.raises(ValueError, match="^a keyframe of 1350x768 pixels "
+                                         "is not on the vision tower's "
+                                         "32-pixel grid$"):
         kf.keyframe_ids(SPEC, _Pieces({}), "", [(1350, 768)])
+
+
+def test_a_keyframe_the_tower_cannot_read_is_named_a_keyframe():
+    """Video's errors say keyframe, where the image's references say
+    picture, though both run the shared picture functions."""
+    handle = SimpleNamespace(model=SimpleNamespace(vision_tower=None),
+                             spec=SPEC)
+    with pytest.raises(ValueError, match="^keyframes need the encoder's "
+                                         "vision tower"):
+        kf.encode(handle, "", [np.zeros((64, 64, 3), np.uint8)])
 
 
 def test_tags_that_are_not_zero_and_one_are_refused():

@@ -66,6 +66,7 @@ import h3_gates as hg
 import qwen_gates as qg
 
 from gmlx.image import ops
+from gmlx.image.h3 import blocks
 from gmlx.image.ops import kq_routes
 from gmlx.video import loader as video_loader
 from gmlx.video.families.h3 import model as hm
@@ -341,7 +342,7 @@ def _glu_halves_swapped(mp):
 
 
 def _rope_pairs_adjacent(mp):
-    mp.setattr(hm.rope, "pair_halves", lambda x, rot: x)
+    mp.setattr(blocks.rope, "pair_halves", lambda x, rot: x)
 
 
 def _audio_frame_major(mp):

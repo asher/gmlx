@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import errno
-import hashlib
 import json
 import math
 import os
@@ -68,6 +67,34 @@ def _size(text: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError(
             f"a size such as 1024x1024 is required, got {text!r}")
     return size
+
+
+def _check_limits(fam, width: int, height: int, flag: str | None,
+                  option: str = "--size") -> None:
+    """Refuse a size the family's own limits refuse, naming ``flag`` when
+    the size came from it, else ``option``, which gives one."""
+    from gmlx.image.registry import size_refusal
+
+    why = size_refusal(fam, width, height)
+    if why:
+        raise _Usage(f"{flag} {why}" if flag else
+                     f"the image size {why}; give one with {option}")
+
+
+def _sigmas(text: str) -> tuple:
+    """A comma-separated schedule of sigmas, each a number or a fraction
+    such as 12/13, two or more that do not increase."""
+    from fractions import Fraction
+
+    from gmlx.image.lora.schedule import ScheduleError, check_sigmas
+
+    try:
+        vals = [float(Fraction(t.strip())) for t in text.split(",")]
+        return check_sigmas(vals, "--sigmas")
+    except (ValueError, ZeroDivisionError, ScheduleError) as e:
+        why = str(e) if isinstance(e, ScheduleError) else (
+            f"a list such as 1,12/13,0 is required, got {text!r}")
+        raise argparse.ArgumentTypeError(why) from None
 
 
 def _positive(text: str) -> int:
@@ -157,6 +184,30 @@ def _add_adapter_flag(p: argparse.ArgumentParser) -> None:
                              "adapters.")
 
 
+def _int8_flag(p: argparse.ArgumentParser) -> None:
+    from gmlx.image.int8 import INT8
+
+    p.add_argument("--int8", choices=INT8, default=None,
+                   help="Run the DiT's attention, its linears or all of "
+                        "them in int8, on an M5 or newer, for a family "
+                        "that takes it (MiniMax-H3-Image). Lossy; linears "
+                        "and all hold more memory (default: the entry's, "
+                        "else off).")
+
+
+def _int8(a, ident) -> str:
+    """The int8 setting, the flag, then the entry's, then off, refused
+    before any weight loads where the family, this install or Mac does
+    not run it."""
+    from gmlx.image.registry import int8_refusal
+
+    int8 = a.int8 or getattr(a, "entry_int8", None) or "off"
+    why = int8_refusal(ident.family, ident.variant, int8)
+    if why:
+        raise RuntimeError(why)
+    return int8
+
+
 def _generate_parser(prog: str) -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=prog,
@@ -174,6 +225,7 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                    help="The DiT's variant, such as turbo, for a file whose "
                         "weights match no known variant (default: from the "
                         "weights, or the entry's variant).")
+    _int8_flag(p)
     src = p.add_mutually_exclusive_group()
     src.add_argument("--prompt", default=None, help="The prompt.")
     src.add_argument("--prompt-file", default=None, metavar="FILE",
@@ -186,24 +238,43 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                     help="The chat model that rewrites the prompt before it "
                          "is encoded: a GGUF, or a models: id of the config "
                          "(default: the entry's upsampler). A prompt with "
-                         "--ref or --init-image runs as typed.")
+                         "--init-image runs as typed, and one with --ref "
+                         "too, except on MiniMax-H3-Image, whose upsampler "
+                         "sees the references.")
     up.add_argument("--no-upsample", action="store_true",
                     help="Run the prompt as typed, without the upsampler.")
+    p.add_argument("--upsampler-mmproj", default=None, metavar="GGUF",
+                   help="The vision tower of --upsampler, for an upsampler "
+                        "that sees the --ref images (default: the mmproj of "
+                        "the upsampler's models: entry).")
     p.add_argument("--upsample-prompt", default=None, metavar="FILE",
                    help="A text file whose system prompt the upsampler takes "
                         "in place of the family's (default: the entry's "
                         "upsample_prompt). Qwen-Image 2.1 ships none and "
-                        "needs one.")
+                        "needs one; MiniMax-H3-Image ships none and takes "
+                        "MiniMax's prompt/manifest.json.")
     p.add_argument("--size", type=_size, default=None, metavar="WxH",
                    help="Image width and height, multiples of 16, or of 32 "
-                        "on Qwen-Image 2.1 (default: the init image's, else "
-                        "on FLUX.2 klein and FLUX.3 klein the first "
-                        "reference's, else the entry's defaults.size, else "
-                        "the variant's). On FLUX.3 klein without it, the "
+                        "on Qwen-Image 2.1 and MiniMax-H3-Image (default: "
+                        "the init image's, else on FLUX.2 klein, FLUX.3 "
+                        "klein and MiniMax-H3-Image the first reference's, "
+                        "else the entry's defaults.size, else an adapter's "
+                        "schedule, else the variant's). On FLUX.3 klein "
+                        "without it, the "
                         "image of one reference is cropped to that "
                         "reference's own aspect.")
     p.add_argument("--steps", type=_positive, default=None, metavar="N",
                    help="Sampling steps (default: the variant's).")
+    p.add_argument("--sigmas", type=_sigmas, default=None, metavar="LIST",
+                   help="Sample on this schedule of sigmas, such as "
+                        "1,12/13,0, one step between each two, in place of "
+                        "the variant's (default: an adapter's schedule, "
+                        "else the variant's). On MiniMax-H3-Image step i "
+                        "reads PDD head i, as diffusers does.")
+    p.add_argument("--save-adapter-schedule", action="store_true",
+                   help="Write the --adapter file's --sigmas and --size to "
+                        "its sidecar, <file>.gmlx.json, which gmlx reads "
+                        "whenever that adapter runs, then generate.")
     p.add_argument("--seed", type=_seed, default=None, metavar="N",
                    help="Seed of the first image (default random, and "
                         "printed).")
@@ -228,9 +299,10 @@ def _generate_parser(prog: str) -> argparse.ArgumentParser:
                         "klein, whose encoders read the prompt alone.")
     p.add_argument("--ref-size", type=_positive, default=None, metavar="N",
                    help="Resize each reference to about N x N pixels at its "
-                        "own aspect ratio (default 1024). FLUX.2 klein and "
-                        "FLUX.3 klein size their references by their own "
-                        "rules and take no --ref-size.")
+                        "own aspect ratio (default 1024). FLUX.2 klein, "
+                        "FLUX.3 klein and MiniMax-H3-Image size their "
+                        "references by their own rules and take no "
+                        "--ref-size.")
     p.add_argument("--count", type=_positive, default=1, metavar="N",
                    help="Generate N images (default 1).")
     p.add_argument("--output", default=None, metavar="PATH",
@@ -478,8 +550,11 @@ def _from_config(a) -> None:
     a.variant = a.variant or rm.variant
     if rm.defaults.get("size"):
         a.entry_size = _size(rm.defaults["size"])
+    a.entry_int8 = rm.defaults.get("int8")
     if getattr(a, "ref", None) and a.encoder_mmproj is None:
         a.encoder_mmproj = rm.encoder_mmproj
+    a.flag_adapters = list(a.adapter or ())
+    a.entry_schedules = dict(rm.adapter_schedules)
     if rm.adapters:
         a.adapter = list(rm.adapters) + list(a.adapter or ())
     if hasattr(a, "upsampler") and a.upsampler is None:
@@ -491,13 +566,21 @@ def _from_config(a) -> None:
         a.upsample_prompt = rm.upsample_prompt
 
 
-def _upsampler_path(a) -> str:
+def _upsampler_path(a, mmproj: bool = False):
     """The GGUF of --upsampler: the file, or the models: entry of that id
-    in the config."""
+    in the config. With ``mmproj``, (the GGUF, its vision tower): the
+    --upsampler-mmproj file, else the entry's mmproj, else None."""
     import gmlx.config as cfgmod
 
+    tower = getattr(a, "upsampler_mmproj", None)
+    if tower is not None:
+        tower = os.path.expanduser(tower)
+        if not os.path.isfile(tower):
+            raise FileNotFoundError(f"--upsampler-mmproj {tower}: no such "
+                                    "file")
     if os.path.isfile(os.path.expanduser(a.upsampler)):
-        return os.path.expanduser(a.upsampler)
+        found = os.path.expanduser(a.upsampler)
+        return (found, tower) if mmproj else found
     path = (os.path.expanduser(a.config) if getattr(a, "config", None)
             else next((str(c) for c in cfgmod.default_config_paths()
                        if os.path.exists(c)), None))
@@ -506,17 +589,27 @@ def _upsampler_path(a) -> str:
         try:
             cfg = cfgmod.load_config(path)
             if a.upsampler in cfg.models:
-                return cfgmod.resolve_path(cfg.models[a.upsampler].path,
-                                           cfg.model_dirs)
+                m = cfg.models[a.upsampler]
+                found = cfgmod.resolve_path(m.path, cfg.model_dirs)
+                if not mmproj:
+                    return found
+                if tower is None and m.mmproj:
+                    tower = cfgmod.resolve_path(m.mmproj, cfg.model_dirs)
+                return found, tower
         except cfgmod.ConfigError as e:
             raise FileNotFoundError(f"--upsampler {a.upsampler}: {e}") from None
     raise FileNotFoundError(f"--upsampler {a.upsampler}: no such file, and "
                             f"no models: id of that name {where}")
 
 
-def _upsample(a, family, prompt: str, refs, log) -> str | None:
+def _upsample(a, family, prompt: str, refs, log, seed: int | None = None
+              ) -> str | None:
     """The caption the upsampler writes for ``prompt``, or None when it
-    runs as typed, as a prompt with an image input does."""
+    runs as typed, as a prompt with an image input does, except a prompt
+    with references on a family whose upsampler sees them. ``seed`` seeds
+    an upsampler that samples."""
+    from gmlx.image.upsample import takes_pictures
+
     if family.upsample is None:
         if a.upsampler is not None:
             log(f"note: the upsampler is unused, since {family.title} "
@@ -524,7 +617,8 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
         return None
     if a.no_upsample or not prompt.strip():
         return None
-    if refs or a.init_image is not None:
+    sees = bool(refs) and a.init_image is None and takes_pictures(family)
+    if (refs or a.init_image is not None) and not sees:
         if a.upsampler is not None:
             flag = "--ref" if refs else "--init-image"
             log(f"note: a prompt with {flag} runs as typed, and the "
@@ -537,31 +631,56 @@ def _upsample(a, family, prompt: str, refs, log) -> str | None:
                 "models: id, or upsampler on the image_models entry, or pass "
                 "--no-upsample")
         return None
-    from gmlx.image.upsample import UpsampleError, system_prompt
+    from gmlx.image.upsample import Picture, UpsampleError, system_prompt
 
     try:
         system = system_prompt(family, a.upsample_prompt)
     except UpsampleError as e:
         raise _Usage(str(e)) from None
-    a.upsampler = _upsampler_path(a)
+    if not sees:
+        a.upsampler = _upsampler_path(a)
+        return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json,
+                             system=system, seed=seed)
+    a.upsampler, tower = _upsampler_path(a, mmproj=True)
+    if tower is None:
+        raise _Usage(f"--ref: the {family.title} upsampler sees the "
+                     "references through its vision tower: pass "
+                     "--upsampler-mmproj, or set mmproj on the upsampler's "
+                     "models: entry, or pass --no-upsample")
+    pictures = tuple(Picture.of(open_image("--ref", r)) for r in a.ref)
     return run_upsampler(a.upsampler, family, prompt, log, quiet=a.json,
-                         system=system)
+                         system=system, seed=seed, pictures=pictures,
+                         mmproj=tower, canvas=a.size)
+
+
+def _picture_tokens(pictures) -> int:
+    """About the vision tokens of ``pictures``: one a 32 pixel square,
+    a Qwen vision tower's 16 pixel patches merged two by two, up to
+    16384 a picture."""
+    return sum(min(16384, -(-p.size[0] // 32) * -(-p.size[1] // 32))
+               for p in pictures)
 
 
 def run_upsampler(path: str, family, prompt: str, log,
                   quiet: bool = False, system: str | None = None,
-                  tag: str = "image") -> str:
+                  tag: str = "image", *, seed: int | None = None,
+                  pictures=(), mmproj: str | None = None,
+                  canvas: tuple | None = None) -> str:
     """Load the chat model at ``path``, write the caption of ``prompt``,
     and release the model before returning, under ``system``, by default
     the family's shipped system prompt. ``quiet`` keeps the load's lines
-    off stdout; ``tag`` heads the line that reports the rewrite."""
+    off stdout; ``tag`` heads the line that reports the rewrite. ``seed``
+    seeds a turn that samples. ``pictures`` go to a family whose
+    upsampler sees them, through the vision tower ``mmproj``: the model
+    then loads with its tower, and the turn takes the pictures in its
+    order; ``canvas`` is the size the request asks for, if it asks."""
     import gc
 
     import mlx.core as mx
 
     import gmlx.load.loadlog as loadlog
     from gmlx.gen.generation import generate
-    from gmlx.image.upsample import (UpsampleError, reply_lead,
+    from gmlx.image.upsample import (UpsampleError, chat_request, reply_lead,
                                      system_prompt, upsample)
     from gmlx.load.loader import load_model
     from gmlx.serve.capacity import working_set_bytes
@@ -572,23 +691,43 @@ def run_upsampler(path: str, family, prompt: str, log,
 
     if system is None:
         system = system_prompt(family)
-    # About 3 characters a token, which overcounts English.
-    ctx = (len(system) + len(prompt)) // 3 + (
-        family.upsample.max_tokens)
+    pictures = tuple(pictures)
+    if family.upsample.turn is None:
+        chars = len(system) + len(prompt)
+    else:
+        req = chat_request(family, prompt, system, pictures=pictures,
+                           canvas=canvas)
+        chars = sum(len(m["content"]) if isinstance(m["content"], str)
+                    else sum(len(c.get("text", "")) for c in m["content"])
+                    for m in req.messages)
+    # About 3 characters a token, which overcounts English, the pictures'
+    # vision tokens, and the reply.
+    ctx = chars // 3 + _picture_tokens(pictures) + family.upsample.max_tokens
     def stdout():
         return (contextlib.redirect_stdout(sys.stderr) if quiet
                 else contextlib.nullcontext())
 
     with stdout():
         check_or_exit(path, ctx_tokens=ctx)
-    limit, _ = resolve_cache_limit(None, [path], working_set_bytes() or 0.0)
+    # The vision tower joins the cache limit's files, as gmlx run --mmproj
+    # prices it.
+    files = [path] + ([mmproj] if pictures else [])
+    limit, _ = resolve_cache_limit(None, files, working_set_bytes() or 0.0)
     prev = None if limit is None else mx.set_cache_limit(limit)
     name = os.path.basename(path)
     t0 = time.perf_counter()
+    model = tok = None
     try:
         with stdout(), loadlog.load_ui(False, path):
-            model, _config, tok = load_model(path)
-        template = getattr(tok, "chat_template", None)
+            if pictures:
+                from gmlx.load.vlm import load_vlm_model
+
+                model, _config, tok, *_ = load_vlm_model(path, mmproj)
+            else:
+                model, _config, tok = load_model(path)
+        text_tok = getattr(tok, "tokenizer", tok) if pictures else tok
+        template = (getattr(tok, "chat_template", None)
+                    or getattr(text_tok, "chat_template", None))
         if template is None:
             raise _Usage(f"--upsampler {name}: the model has no chat "
                          "template, so it cannot take the upsampler's "
@@ -598,9 +737,16 @@ def run_upsampler(path: str, family, prompt: str, log,
             kwargs = map_thinking_controls(
                 {}, req.thinking, None, template,
                 warn=lambda msg: log(f"[upsample] {msg}"))
+            if req.seed is not None:
+                mx.random.seed(req.seed)
+            if req.pictures:
+                return _chat_pictures(model, tok, req, kwargs)
             reply = generate(model, tok, req.user, system_prompt=req.system,
                              max_tokens=req.max_tokens, temp=req.temperature,
+                             top_p=req.top_p, top_k=req.top_k,
+                             min_p=req.min_p,
                              presence_penalty=req.presence_penalty,
+                             thinking_budget=req.thinking_budget,
                              template_kwargs=kwargs, verbose=False)
             # A template that opens the thinking block or the message
             # header in the prompt leaves its marker out of the reply, which
@@ -612,7 +758,8 @@ def run_upsampler(path: str, family, prompt: str, log,
 
         try:
             caption = upsample(family, prompt, chat, name=f"--upsampler {name}",
-                               system=system)
+                               system=system, seed=seed, pictures=pictures,
+                               canvas=canvas)
         except UpsampleError as e:
             raise _Usage(str(e)) from None
     finally:
@@ -624,6 +771,47 @@ def run_upsampler(path: str, family, prompt: str, log,
     log(f"[{tag}] prompt upsampled by {name} in "
         f"{time.perf_counter() - t0:.1f} s, {len(caption.split())} words")
     return caption
+
+
+def _chat_pictures(model, processor, req, kwargs) -> str:
+    """The reply of the vision chat model to the turn ``req``, whose user
+    turn holds its pictures in place, as gmlx run --mmproj generates: the
+    template renders each image part where it stands, and the processor
+    takes the pictures in that order."""
+    import importlib
+
+    from gmlx.image.upsample import reply_lead
+
+    from .cli import unfit_request
+
+    # Through importlib, as the served turn reaches them
+    # (serve/image_upsample.py).
+    prompt_utils = importlib.import_module(
+        "gmlx._vendor.mlx_vlm.prompt_utils")
+    vlm_generate = importlib.import_module(
+        "gmlx._vendor.mlx_vlm").generate
+    rendered = prompt_utils.get_chat_template(
+        processor, [dict(m) for m in req.messages], True, **kwargs)
+    text_tok = getattr(processor, "tokenizer", processor)
+    why = unfit_request(model, text_tok, rendered, 0, req.max_tokens, None)
+    if why:
+        raise _Usage(f"the upsampler: {why}")
+    budget = {}
+    if req.thinking_budget is not None:
+        # mlx-vlm's criteria closes the thinking, on the template's
+        # markers, as gmlx run --mmproj --thinking-budget does.
+        from gmlx.gen.thinking_budget import vlm_budget_kwargs
+
+        budget = {"thinking_budget": req.thinking_budget,
+                  **vlm_budget_kwargs(req.thinking_budget, None, None,
+                                      processor, rendered)}
+    result = vlm_generate(
+        model, processor, rendered, image=[p.image() for p in req.pictures],
+        max_tokens=req.max_tokens, temperature=req.temperature,
+        top_p=req.top_p, top_k=req.top_k, min_p=req.min_p,
+        presence_penalty=req.presence_penalty or None, verbose=False,
+        **budget)
+    return reply_lead(rendered, tokenizer=text_tok) + (result.text or "")
 
 
 def _check_files(a) -> None:
@@ -693,8 +881,8 @@ def _references(a, family) -> tuple:
 def _vet_adapters(a, ident=None) -> None:
     """Refuse an ``--adapter`` file gmlx does not apply from its header,
     before any model loads. With the identified DiT, also refuse a file
-    whose keys name no module of its family or a module the DiT file does
-    not hold."""
+    its family refuses by name (``lora_refusal``) or whose keys name no
+    module of its family or a module the DiT file does not hold."""
     if not a.adapter:
         return
     from gmlx.image import lora
@@ -708,15 +896,103 @@ def _vet_adapters(a, ident=None) -> None:
         modules = {n[:-len(".weight")] for n in ident.view.tensors
                    if n.endswith(".weight")}
     for path, _ in a.adapter:
+        if ident is not None:
+            lora.refuse(ident.family, dict(ident.config),
+                        os.path.expanduser(path))
         lora.vet_header(path, keymap=keymap, modules=modules)
 
 
 def _file_sha256(path: str) -> str:
-    h = hashlib.sha256()
-    with open(os.path.expanduser(path), "rb") as f:
-        while chunk := f.read(16 << 20):
-            h.update(chunk)
-    return h.hexdigest()
+    from gmlx.image.lora.schedule import file_sha256
+
+    return file_sha256(path)
+
+
+def _schedule(a, ident, log, size=None):
+    """The request's schedule (``schedule.resolve``) from the flags, the
+    request's own ``size``, and the declared schedules of the adapters it
+    runs at a strength other than 0, with the line that names them
+    logged. A schedule that heads
+    in order cannot run on the DiT's bank is refused before any file
+    loads."""
+    from gmlx.image.lora import schedule
+
+    entry = getattr(a, "entry_schedules", None) or {}
+    # The sidecar that --save-adapter-schedule replaces is not read, so a
+    # stale or broken one does not stop its own rewrite.
+    saved = _save_target(a)
+    saved = None if saved is None else \
+        os.path.abspath(schedule.sidecar_path(saved))
+    try:
+        decls = [schedule.declared(
+            path, entry.get(path), sidecar=saved is None
+            or os.path.abspath(schedule.sidecar_path(path)) != saved)
+            for path, strength in a.adapter or () if strength != 0]
+        sched = schedule.resolve(
+            decls, sigmas=a.sigmas, steps=a.steps, size=size,
+            names={"sigmas": "--sigmas", "steps": "--steps",
+                   "size": "--size"},
+            size_from=None if a.size else "the request's size")
+    except schedule.ScheduleError as e:
+        raise _Usage(str(e)) from None
+    if sched.line:
+        log(f"[image] {sched.line}")
+    bank = _head_bank(ident)
+    if sched.heads == "in_order" and bank and sched.sigmas is not None \
+            and len(sched.sigmas) - 1 > bank:
+        raise _Usage(f"heads in order read head i at step i, and the "
+                     f"{ident.family.title} bank holds {bank} heads, not "
+                     f"the {len(sched.sigmas) - 1} steps of the schedule")
+    return sched
+
+
+def _check_schedule_size(fam, stride: int, sched) -> None:
+    """Refuse the size an adapter's schedule sets when the family does not
+    take it, naming the adapter and where the size comes from."""
+    from gmlx.image.registry import schedule_size_refusal
+
+    why = schedule_size_refusal(fam, stride, sched)
+    if why:
+        raise _Usage(f"{why}; give --size to choose another")
+
+
+def _head_bank(ident) -> int:
+    """The step heads of the identified DiT's bank, 0 for a DiT with
+    none."""
+    return int(ident.config.get("pdd_steps") or 0)
+
+
+def _save_target(a) -> str | None:
+    """The path of the one --adapter file whose sidecar
+    ``--save-adapter-schedule`` writes, None without the flag. A command
+    that gives no such file, or neither --sigmas nor --size, is
+    refused."""
+    if not getattr(a, "save_adapter_schedule", False):
+        return None
+    flags = getattr(a, "flag_adapters", None)
+    flags = list(a.adapter or ()) if flags is None else flags
+    if len(flags) != 1:
+        raise _Usage("--save-adapter-schedule writes the schedule of one "
+                     f"--adapter file, and the command gives {len(flags)}")
+    if a.sigmas is None and a.size is None:
+        raise _Usage("--save-adapter-schedule writes --sigmas and --size; "
+                     "give one or both")
+    return os.path.expanduser(flags[0][0])
+
+
+def _save_schedule(a, sched, log) -> None:
+    """``--save-adapter-schedule``: the --adapter file's sidecar, from
+    --sigmas, heads in order with them, and --size."""
+    from gmlx.image.lora import schedule
+
+    path = _save_target(a)
+    try:
+        side = schedule.write_sidecar(path, schedule.AdapterSchedule(
+            sigmas=a.sigmas, heads="in_order" if a.sigmas else None,
+            size=a.size))
+    except schedule.ScheduleError as e:
+        raise _Usage(str(e)) from None
+    log(f"[image] wrote the adapter schedule {side}")
 
 
 def _adapter_bytes(a) -> list:
@@ -770,19 +1046,28 @@ def _load_adapters(a, pipe, log) -> tuple:
     return _adapter_table(pipe, _read_adapters(a, pipe, log), log)
 
 
-def _settings(a, ident, defaults):
-    """Steps, cfg and strength from the flags and the variant's defaults."""
+def _settings(a, ident, defaults, sigmas=None):
+    """Steps, cfg and strength from the flags and the variant's defaults.
+    A schedule of ``sigmas`` sets the steps, which --steps must agree
+    with, and takes any count."""
     why = ident.family.variant_needed(ident.variant)
     if why:
         raise ValueError(why)
-    if defaults is None and (a.steps is None or a.guidance is None):
+    if defaults is None and ((a.steps is None and sigmas is None)
+                             or a.guidance is None):
         raise ValueError(
             f"{a.model} matches no known {ident.family.title} variant; pass "
-            f"--steps and --guidance")
-    steps = a.steps if a.steps is not None else defaults.steps
+            f"--steps or --sigmas, and --guidance")
     from gmlx.image.api import check_sampling, check_steps
 
-    check_steps(ident.family, ident.variant, steps)
+    if sigmas is not None:
+        steps = len(sigmas) - 1
+        if a.steps is not None and a.steps != steps:
+            raise _Usage(f"--steps {a.steps} disagrees with the {steps} "
+                         f"steps of --sigmas")
+    else:
+        steps = a.steps if a.steps is not None else defaults.steps
+        check_steps(ident.family, ident.variant, steps)
     cfg = a.guidance if a.guidance is not None else defaults.cfg
     # Before any file loads.
     check_sampling(ident.family, ident.variant,
@@ -827,12 +1112,12 @@ def _generate(a) -> int:
     _vet_adapters(a, ident)
     fam = ident.family
     defaults = api.sampler_defaults(fam.name, ident.variant)
-    steps, cfg, strength = _settings(a, ident, defaults)
+    int8 = _int8(a, ident)
     stride = _stride(fam)
     refs = _references(a, fam)
     edit = fam.edit
     # A family that sizes a request by its references names that size,
-    # scaled into the image limits.
+    # scaled into its family's limits.
     ref_size = None
     if a.size is None and a.init_image is None:
         from gmlx.image.registry import edit_size
@@ -841,20 +1126,37 @@ def _generate(a) -> int:
     init = crop = None
     if a.init_image is not None:
         init = read_image(a.init_image, a.size, stride)
+    # An adapter's default size applies where the request sets none.
+    sched = _schedule(a, ident, log, size=(
+        a.size or getattr(a, "entry_size", None) or ref_size
+        or (None if init is None else (init.shape[1], init.shape[0]))))
+    steps, cfg, strength = _settings(a, ident, defaults, sched.sigmas)
+    if init is not None:
         width, height = init.shape[1], init.shape[0]
     elif a.size is None and ref_size is not None:
         width, height = ref_size
         # The output of a padded reference is cropped back to its box.
         crop = getattr(refs, "crop", None)
     else:
-        width, height = a.size or getattr(a, "entry_size", None) or (
-            defaults.size if defaults else (1024, 1024))
+        width, height = a.size or getattr(a, "entry_size", None) or \
+            sched.size or (defaults.size if defaults else (1024, 1024))
+    if sched.size_from is not None:
+        _check_schedule_size(fam, stride, sched)
     if width % stride or height % stride:
         raise _Usage(f"--size {width}x{height}: width and height must be "
                      f"multiples of {stride}")
+    _check_limits(fam, width, height, "--size" if a.size else None)
+    if a.save_adapter_schedule:
+        _save_schedule(a, sched, log)
     mask = read_mask(a.mask, (width, height)) if a.mask else None
     text_only = edit is not None and edit.text_only
-    revised = _upsample(a, fam, prompt, refs, log)
+    # The seed is drawn before the upsampler runs, which it seeds when it
+    # samples, so the seed reruns the caption with the image.
+    seed = a.seed
+    if seed is None:
+        seed = secrets.randbelow(1 << 32)
+        log(f"[image] seed {seed}")
+    revised = _upsample(a, fam, prompt, refs, log, seed=seed)
     text = revised or prompt
     mmproj = a.encoder_mmproj if refs and not text_only else None
     if a.encoder_mmproj is not None and not refs:
@@ -867,10 +1169,6 @@ def _generate(a) -> int:
         log("warning: --negative-prompt is unused, since --guidance 1 turns "
             "guidance off")
 
-    seed = a.seed
-    if seed is None:
-        seed = secrets.randbelow(1 << 32)
-        log(f"[image] seed {seed}")
     seeds = [seed + i for i in range(a.count)]
     fmt = _format(a)
     alpha = _check_background(a, fam, fmt)
@@ -892,7 +1190,7 @@ def _generate(a) -> int:
         a.model, a.encoder, a.vae, height=height, width=width, cfg=cfg,
         adapters=_adapter_bytes(a), init_image=init is not None,
         mmproj=mmproj, refs=[(r.height, r.width) for r in refs],
-        variant=a.variant,
+        variant=a.variant, int8=int8,
         prompts=[text] + ([] if cfg == 1.0 else [a.negative_prompt or ""]))
     _check_release(a, before)
     staged = bool(getattr(before, "staged_load", False))
@@ -911,12 +1209,13 @@ def _generate(a) -> int:
             "released before the DiT loads")
         pipe, (rows, (cond, neg, encode_s)) = api.load_staged(
             a.model, text_encoder=a.encoder, vae=a.vae, mmproj=mmproj,
-            variant=a.variant, log=log,
+            variant=a.variant, int8=int8, log=log,
             encode=lambda pipe: (_read_adapters(a, pipe, log), encode(pipe)))
         table, adapters = _adapter_table(pipe, rows, log)
     else:
         pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
-                        mmproj=mmproj, variant=a.variant, log=log)
+                        mmproj=mmproj, variant=a.variant, int8=int8,
+                        log=log)
         table, adapters = _load_adapters(a, pipe, log)
         cond, neg, encode_s = encode(pipe)
     plan = api.plan_request(pipe, height=height, width=width, cfg=cfg,
@@ -947,8 +1246,16 @@ def _generate(a) -> int:
                 "size": f"{width}x{height}", "sampler": a.sampler,
                 "scheduler": None, "guidance": cfg, "count": a.count,
                 "adapters": adapters}
+    # Heads in order on a DiT with a bank of step heads, else its own rule.
+    heads = sched.heads if _head_bank(ident) else None
+    if sched.sigmas is not None:
+        settings["sigmas"] = list(sched.sigmas)
+    if heads is not None:
+        settings["heads"] = heads
     if revised is not None:
         settings["revised_prompt"] = revised
+    if int8 != "off":
+        settings["int8"] = int8
     if cfg != 1.0:
         settings["negative_prompt"] = a.negative_prompt or ""
     if alpha:
@@ -974,6 +1281,7 @@ def _generate(a) -> int:
         t0 = time.perf_counter()
         x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
                        width=width, steps=steps, seed=s, sampler=a.sampler,
+                       sigmas=sched.sigmas, heads=heads,
                        init_latents=init_latents,
                        denoise=1.0 if strength is None else strength,
                        mask=mask, patch_table=table, plan=plan)
@@ -1032,6 +1340,7 @@ def _bench_parser(prog: str) -> argparse.ArgumentParser:
                    help="The DiT's variant, such as turbo, for a file whose "
                         "weights match no known variant (default: from the "
                         "weights, or the entry's variant).")
+    _int8_flag(p)
     p.add_argument("--encoder", default=None, metavar="GGUF",
                    help="The text encoder GGUF.")
     p.add_argument("--vae", default=None, metavar="PATH",
@@ -1315,6 +1624,7 @@ def _bench(a) -> int:
     defaults = api.sampler_defaults(fam.name, ident.variant)
     a.strength = None
     steps, cfg, _ = _settings(a, ident, defaults)
+    int8 = _int8(a, ident)
     stride = _stride(fam)
     if a.ref and fam.edit is not None and not fam.edit.text_only:
         raise _Usage(f"--ref: the {fam.title} encoder reads the references "
@@ -1330,11 +1640,13 @@ def _bench(a) -> int:
         if w % stride or h % stride:
             raise _Usage(f"--sizes {w}x{h}: width and height must be "
                          f"multiples of {stride}")
+        _check_limits(fam, w, h, "--sizes" if a.sizes else None, "--sizes")
     big = max(sizes, key=lambda s: s[0] * s[1])
     image_preflight.check(a.model, a.encoder, a.vae, height=big[1],
                           width=big[0], cfg=cfg, adapters=_adapter_bytes(a),
                           keep_encoder=True, variant=a.variant,
                           refs=[(r.height, r.width) for r in refs],
+                          int8=int8,
                           prompts=[a.prompt] + ([] if cfg == 1.0 else [""]))
     if a.via_steps:
         from gmlx.serve.image_steps_loopback import work
@@ -1342,14 +1654,15 @@ def _bench(a) -> int:
         # The step routes run the pipeline on the image worker, so it
         # loads there.
         pipe = work(lambda: api.load(a.model, text_encoder=a.encoder,
-                                     vae=a.vae, variant=a.variant, log=log))
+                                     vae=a.vae, variant=a.variant,
+                                     int8=int8, log=log))
         table, adapters = None, []
         with _steps_client(a, pipe) as (client, mid):
             records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg,
                                    table, adapters, log, client, mid)
     else:
         pipe = api.load(a.model, text_encoder=a.encoder, vae=a.vae,
-                        variant=a.variant, log=log)
+                        variant=a.variant, int8=int8, log=log)
         table, adapters = _load_adapters(a, pipe, log)
         records = _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table,
                                adapters, log, refs=refs)
@@ -1384,6 +1697,7 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
     import numpy as np
 
     from gmlx import __version__
+    from gmlx.image.int8 import int8_of
 
     model = {
         "id": os.path.basename(a.model), "family": fam.name,
@@ -1427,7 +1741,7 @@ def _bench_sizes(a, pipe, ident, fam, sizes, steps, cfg, table, adapters,
                "settings": {"width": w, "height": h, "steps": steps,
                             "sampler": a.sampler, "scheduler": None,
                             "guidance": cfg, "batch": 1,
-                            "adapters": adapters,
+                            "adapters": adapters, "int8": int8_of(pipe.dit),
                             "seed": a.seed, "prompt": a.prompt,
                             **({"refs": [
                                 {"file": os.path.basename(p),

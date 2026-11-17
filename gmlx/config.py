@@ -154,8 +154,11 @@ _IMAGE_MODEL_KEYS = frozenset({"path", "family", "variant", "encoder",
                                "ttl_s", "upsampler", "upsample",
                                "upsample_prompt"})
 _IMAGE_DEFAULTS_KEYS = frozenset({"size", "steps", "guidance", "sampler",
-                                  "negative_prompt"})
+                                  "negative_prompt", "int8"})
 _IMAGE_ADAPTER_KEYS = frozenset({"path", "strength"})
+# An image_models adapter entry also declares the adapter's schedule
+# (gmlx.image.lora.schedule).
+_IMAGE_SCHEDULE_KEYS = frozenset({"sigmas", "heads", "size"})
 _SERVER_IMAGE_KEYS = frozenset({"url_ttl_s", "url_max_bytes", "max_queue",
                                 "embed_metadata", "tensor_cache_mb",
                                 "adapter_cache_mb", "steps_api",
@@ -659,6 +662,9 @@ class ImageModelCfg:
     upsampler: str | None = None
     upsample: bool = True
     upsample_prompt: str | None = None
+    # ((path, {sigmas, heads, size}), ...): the schedule fields an adapter
+    # entry declares, as written.
+    adapter_schedules: tuple = ()
 
 
 @dataclass
@@ -1334,17 +1340,20 @@ class ResolvedImageModel:
     upsampler: str | None = None
     upsample: bool = True
     upsample_prompt: str | None = None
+    # ((abspath, {sigmas, heads, size}), ...): the schedule an adapter
+    # entry declares, which changes no loaded weight.
+    adapter_schedules: tuple = ()
 
     def load_signature(self) -> tuple:
         """What makes two loads of the entry the same: every file, the
-        adapter list, and the defaults its booked memory is priced at,
-        the size and the guidance. The other request defaults change no
-        loaded weight and no price."""
+        adapter list, the int8 setting, and the defaults its booked
+        memory is priced at, the size and the guidance. The other request
+        defaults change no loaded weight and no price."""
         d = self.defaults or {}
         return (self.path, self.family, self.variant, self.encoder,
                 self.encoder_model, self.encoder_mmproj, self.vae,
                 tuple(self.adapters), self.encoder_release, d.get("size"),
-                d.get("guidance"))
+                d.get("guidance"), d.get("int8") or "off")
 
 
 @dataclass
@@ -2243,7 +2252,9 @@ def resolve_image_model(image_id: str, cfg: ServerCfg) -> ResolvedImageModel:
         defaults=dict(m.defaults), encoder_release=m.encoder_release,
         pin=bool(m.pin), ttl_s=ttl_s, variant=m.variant,
         upsampler=m.upsampler, upsample=m.upsample,
-        upsample_prompt=_prompt_path(m.upsample_prompt, dirs))
+        upsample_prompt=_prompt_path(m.upsample_prompt, dirs),
+        adapter_schedules=tuple((resolve_path(a, dirs), dict(f))
+                                for a, f in m.adapter_schedules))
 
 
 def resolve_video_model(video_id: str, cfg) -> ResolvedVideoModel:
@@ -2970,13 +2981,26 @@ def _parse_image_defaults(where: str, raw) -> dict:
         out["sampler"] = sampler
     if raw.get("negative_prompt") is not None:
         out["negative_prompt"] = str(raw["negative_prompt"])
+    int8 = raw.get("int8")
+    if int8 is not None:
+        from gmlx.image.int8 import INT8
+
+        # YAML reads a bare off as false.
+        if int8 is False:
+            int8 = "off"
+        if int8 not in INT8:
+            raise ConfigError(f"{where}.int8: expected one of "
+                              f"{', '.join(INT8)}, got {int8!r}")
+        out["int8"] = int8
     return out
 
 
-def _parse_adapter_list(where: str, raw, unique: bool = False) -> tuple:
+def _parse_adapter_list(where: str, raw, unique: bool = False,
+                        keys=_IMAGE_ADAPTER_KEYS) -> tuple:
     """``adapters:`` as ``(path, strength)`` pairs. An entry is a path, or
-    a mapping of ``path`` and an optional ``strength`` (default 1). With
-    ``unique`` a path written twice is an error."""
+    a mapping of ``path`` and an optional ``strength`` (default 1), and of
+    any other of ``keys``. With ``unique`` a path written twice is an
+    error."""
     out = []
     seen: set = set()
     for i, entry in enumerate(_section_list(where, raw)):
@@ -2987,7 +3011,7 @@ def _parse_adapter_list(where: str, raw, unique: bool = False) -> tuple:
                                                          str):
             raise ConfigError(f"{here}: expected a path or a mapping with "
                               f"`path`, got {entry!r}")
-        _warn_unknown_keys(here, entry, _IMAGE_ADAPTER_KEYS, strict=True)
+        _warn_unknown_keys(here, entry, keys, strict=True)
         strength = _coerce_num("strength", entry.get("strength", 1.0), float,
                                where=here)
         if strength is None or not math.isfinite(strength):
@@ -2999,6 +3023,26 @@ def _parse_adapter_list(where: str, raw, unique: bool = False) -> tuple:
                 raise ConfigError(f"{here}: path {entry['path']!r} is listed twice")
             seen.add(norm)
         out.append((entry["path"], strength))
+    return tuple(out)
+
+
+def _parse_adapter_schedules(where: str, raw) -> tuple:
+    """((path, fields), ...) of the ``adapters:`` entries that declare a
+    schedule, each checked as gmlx.image.lora.schedule reads it."""
+    from gmlx.image.lora.schedule import ScheduleError, parse
+
+    out = []
+    for i, entry in enumerate(_section_list(where, raw)):
+        if not isinstance(entry, dict):
+            continue
+        fields = {k: entry[k] for k in _IMAGE_SCHEDULE_KEYS if k in entry}
+        if not fields:
+            continue
+        try:
+            parse(fields, f"{where}[{i}]")
+        except ScheduleError as e:
+            raise ConfigError(str(e)) from None
+        out.append((entry["path"], fields))
     return tuple(out)
 
 
@@ -3032,8 +3076,11 @@ def _parse_image_model(image_id: str, raw) -> ImageModelCfg:
         vae=raw["vae"], family=raw.get("family"),
         variant=raw.get("variant"),
         encoder_mmproj=raw.get("encoder_mmproj"),
-        adapters=_parse_adapter_list(f"{where}.adapters",
-                                     raw.get("adapters")),
+        adapters=_parse_adapter_list(
+            f"{where}.adapters", raw.get("adapters"),
+            keys=_IMAGE_ADAPTER_KEYS | _IMAGE_SCHEDULE_KEYS),
+        adapter_schedules=_parse_adapter_schedules(f"{where}.adapters",
+                                                   raw.get("adapters")),
         defaults=_parse_image_defaults(f"{where}.defaults",
                                        raw.get("defaults")),
         encoder_release=release, pin=bool(raw.get("pin", False)),

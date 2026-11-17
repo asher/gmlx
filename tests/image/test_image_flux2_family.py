@@ -672,7 +672,7 @@ def test_the_9b_rows_leave_every_other_family_as_it_was():
     assert family_prices(
         skip=("flux2_klein_9b", "flux2_klein_9b_kv", "moss_image")) == before
     assert {"flux2_klein", "flux3_klein", "krea2", "qwen_image21",
-            "z_image"} <= set(before)
+            "z_image", "h3_image"} <= set(before)
     # The 9B and KV join the pairings of the FLUX.2 autoencoder and no
     # other.
     for label, fams in before["vae_families"].items():

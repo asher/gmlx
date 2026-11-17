@@ -34,11 +34,13 @@ from typing import Any
 # The largest image a request makes: its pixels and its longer side.
 from gmlx.image.registry import MAX_PIXELS, MAX_SIDE
 
-from .subservice import SingleWorker
+from .subservice import SingleWorker, media_job
 
 _log = logging.getLogger(__name__)
 
-WORKER = SingleWorker("image-worker")
+# Each job runs on the fine caps with the wired limit at 0, whatever a chat
+# turn left (subservice.media_job).
+WORKER = SingleWorker("image-worker", scope=media_job)
 
 # encoder_release auto keeps the encoder while the whole entry fits in
 # this share of the working budget.
@@ -64,6 +66,53 @@ class EntryPlan:
     mmproj_bytes: int = 0
     load_parts: tuple | None = None   # see memfit.plan_memory, no tower
     tower_parts: tuple | None = None  # the same with the vision tower
+    int8: str = "off"               # the entry's defaults.int8
+
+
+def entry_int8(spec) -> str:
+    """An entry's int8 setting: its ``defaults.int8``, else off."""
+    return (spec.defaults or {}).get("int8") or "off"
+
+
+def parse_int8(value) -> str | None:
+    """A request's ``int8`` field: None when it is not sent, else one of
+    ``int8.INT8``. Raises ValueError for any other value."""
+    from gmlx.image.int8 import int8_parts
+
+    if value is not None:
+        int8_parts(value)
+    return value
+
+
+def request_int8(served, sent: str | None) -> str:
+    """The int8 setting a request or a step on ``served`` runs: ``sent``,
+    else the entry's. Raises ValueError for a value whose linears differ
+    from the entry's, or that the family, this install or Mac does not
+    run."""
+    from gmlx.image.int8 import int8_request_refusal
+    from gmlx.image.registry import int8_refusal
+
+    entry = getattr(getattr(served, "plan", None), "int8", "off")
+    if sent is None:
+        return entry
+    pipe = served.pipe
+    why = (int8_request_refusal(entry, sent)
+           or int8_refusal(pipe.family, pipe.variant, sent))
+    if why:
+        raise ValueError(why)
+    return sent
+
+
+def set_int8(served, int8: str | None) -> None:
+    """Set the loaded DiT's attention for one request or step from
+    ``int8``, else the entry's setting, on a family with int8 attention.
+    Each request and step sets it, so none runs at the attention the last
+    one left."""
+    from gmlx.image.int8 import int8_parts
+
+    if getattr(served.pipe.family, "int8_attention", False):
+        served.pipe.dit.attention = int8_parts(
+            int8 or getattr(served.plan, "int8", "off"))[0]
 
 
 @dataclass(frozen=True)
@@ -78,6 +127,8 @@ class DitFacts:
     flow_map: bool                  # the DiT is a flow map
     ref_cache: bool                 # the DiT keeps a cache of reference K and V
     blocks: int | None              # the blocks a step may skip, None for none
+    reads_target: bool = False      # the DiT reads the sigma a step goes to
+    head_bank: int = 0              # the step heads a step may name, 0 for none
 
 
 def dit_facts(pipe) -> DitFacts:
@@ -89,7 +140,9 @@ def dit_facts(pipe) -> DitFacts:
                     flow_map=bool(getattr(dit.cfg, "flow_map", False)),
                     ref_cache=hasattr(dit, "extract"),
                     blocks=(len(dit.layers)
-                            if getattr(dit, "skips_blocks", False) else None))
+                            if getattr(dit, "skips_blocks", False) else None),
+                    reads_target=bool(getattr(dit, "reads_target", False)),
+                    head_bank=int(getattr(dit, "head_bank", 0) or 0))
 
 
 @dataclass(eq=False)
@@ -280,13 +333,16 @@ def fit_floored(price, budget):
 def _load_figures(spec, act) -> dict:
     """What the loads of an entry's parts hold over what stays resident,
     from their headers, as the image command counts them: the 16-bit
-    cast of the DiT, and each part loaded with the others or alone."""
-    from gmlx.commands.image_preflight import dit_transient, load_transient
+    cast of the DiT or its int8 conversion at the entry's int8 setting,
+    and each part loaded with the others or alone."""
+    from gmlx.commands.image_preflight import (dit_transient, int8_transient,
+                                               load_transient)
 
     enc, vae, tower = spec.encoder, spec.vae, None
     if enc is not None:
         tower = spec.encoder_mmproj
-    cast = dit_transient(str(spec.path), act.dit)
+    cast = max(dit_transient(str(spec.path), act.dit),
+               int8_transient(str(spec.path), entry_int8(spec)))
     later = max(load_transient(None, vae, None), cast)
     return {"peak": max(load_transient(enc, vae, tower), cast),
             "text_peak": max(load_transient(enc, vae, None), cast),
@@ -300,8 +356,8 @@ def entry_plan(spec) -> EntryPlan:
     model, a family the config does not name, and an entry that cannot
     hold one image of its default size in the working budget."""
     from gmlx.image import memfit
-    from gmlx.image.api import (_header_bytes, check_sampling, check_steps,
-                                sampler_defaults)
+    from gmlx.image.api import (_header_bytes, _int8_bytes, check_sampling,
+                                check_steps, sampler_defaults)
     from gmlx.image.dtypes import image_activation
     from gmlx.image.loader import identify_dit
     from gmlx.video.memfit import gib
@@ -322,6 +378,15 @@ def entry_plan(spec) -> EntryPlan:
     why = fam.variant_needed(ident.variant)
     if why:
         raise ImageModelError(f"image model {spec.id!r}: {why}")
+    from gmlx.image.int8 import int8_parts
+    from gmlx.image.registry import int8_fallback, int8_refusal
+
+    int8 = entry_int8(spec)
+    why = int8_refusal(fam, ident.variant, int8)
+    if why:
+        raise ImageModelError(f"image model {spec.id!r}: defaults.int8: "
+                              f"{why}")
+    attention, linears = int8_parts(int8)
     check_parts(spec, fam)
     steps = (spec.defaults or {}).get("steps")
     if steps is not None:
@@ -332,6 +397,11 @@ def entry_plan(spec) -> EntryPlan:
                 f"image model {spec.id!r}: defaults.steps: {e}") from None
     defaults = sampler_defaults(fam.name, ident.variant)
     width, height = default_size(spec, defaults)
+    from gmlx.image.registry import size_refusal
+
+    why = size_refusal(fam, width, height)
+    if why:
+        raise ImageModelError(f"image model {spec.id!r}: defaults.size {why}")
     cfg = (spec.defaults or {}).get("guidance")
     if cfg is None:
         cfg = defaults.cfg if defaults is not None else 1.0
@@ -348,7 +418,7 @@ def entry_plan(spec) -> EntryPlan:
     tensor_cache, _cap = cache_bytes()
     own = [2 * os.path.getsize(p) for p, _ in spec.adapters]
     caches = 2 * tensor_cache + _CACHE_BYTES["steps"]
-    dit = _header_bytes(spec.path, "dit")
+    dit = _header_bytes(spec.path, "dit") + _int8_bytes(spec.path, int8)
     vae = _header_bytes(spec.vae, "vae")
     enc = mmproj = 0
     if spec.encoder is not None:
@@ -362,7 +432,7 @@ def entry_plan(spec) -> EntryPlan:
              if _CACHE_BYTES["steps"] else 0)
 
     def common(share: float, cond: int) -> dict:
-        return dict(adapters=own,
+        return dict(adapters=own, attention=attention, linears=linears,
                     family=fam.name, height=height, width=width, cfg=cfg,
                     dtype=act.dit, vae_dtype=act.vae, overcommit=True,
                     cache_bytes=int(caches * share)
@@ -418,6 +488,8 @@ def entry_plan(spec) -> EntryPlan:
         assert budget is not None
         need = price(mode, 0.0)
         hint = "use a smaller quant of the DiT or of the text encoder"
+        if linears == "int8":
+            hint += f", or defaults.int8 {int8_fallback(fam)}"
         if spec.encoder_release == "never" and enc and fitted(
                 mode_of("auto")) is not None:
             hint = "set encoder_release: auto"
@@ -434,7 +506,7 @@ def entry_plan(spec) -> EntryPlan:
                      tensor_floor=floor,
                      encoder_bytes=int(enc), mmproj_bytes=int(mmproj),
                      load_parts=load["parts"],
-                     tower_parts=load["tower_parts"])
+                     tower_parts=load["tower_parts"], int8=int8)
 
 
 def check_parts(spec, fam) -> None:
@@ -450,7 +522,9 @@ def check_parts(spec, fam) -> None:
     )
     from gmlx.image.vae import reader
 
-    reader.identify(reader.read_header(str(spec.vae)), fam.name)
+    own = reader.vae_row(fam.name).own_names
+    reader.identify(reader.read_header(str(spec.vae), own_names=own),
+                    fam.name)
     if spec.encoder is not None:
         enc = encoder_spec(fam)
         check_encoder_file(_header_view(str(spec.encoder)), enc)
@@ -478,7 +552,8 @@ def _load(spec) -> ServedImage:
     owned = spec.encoder if not plan.staged else None
     pipe = api.load(spec.path, text_encoder=owned, vae=spec.vae,
                     mmproj=spec.encoder_mmproj if owned else None,
-                    memory="off", variant=spec.variant, log=_log_line)
+                    memory="off", variant=spec.variant, int8=plan.int8,
+                    log=_log_line)
     served = ServedImage(pipe=pipe, spec=spec, plan=plan,
                          facts=dit_facts(pipe))
     try:
@@ -577,6 +652,8 @@ RESPONSE_FORMATS = ("b64_json", "url")
 MAX_N = 10
 MAX_PARTIALS = 3
 MAX_REFS = 16
+# The most steps a request runs, by steps or by sigmas.
+MAX_STEPS = 200
 # Model names an OpenAI client sends that mean the default image model.
 _ALIAS_PREFIXES = ("gpt-image-", "dall-e-", "chatgpt-image")
 # Accepted and ignored, with one warning line.
@@ -640,6 +717,13 @@ class ImageRequest:
     # typed.
     prompt_upsampling: bool | None = None
     revised_prompt: str | None = None
+    # The request's int8 setting, None for the entry's.
+    int8: str | None = None
+    # The request's sigmas, None when it gives none, and the schedule the
+    # job runs (gmlx.image.lora.schedule.Resolved), set by
+    # request_schedule.
+    sigmas: tuple | None = None
+    schedule: Any = None
 
 
 def default_model_field(model) -> str:
@@ -711,8 +795,10 @@ def _choice(fields: dict, name: str, allowed, default: str) -> str:
     return text
 
 
-def parse_size(value) -> tuple | None:
-    """``WxH`` as (width, height), or None for ``auto`` and no value."""
+def parse_size(value, family=None) -> tuple | None:
+    """``WxH`` as (width, height), or None for ``auto`` and no value. A
+    size is held to the limits of ``family``, the entry's, where it sets
+    its own, else to the image limits."""
     if value is None or value == "" or str(value).strip().lower() == "auto":
         return None
     w, sep, h = str(value).strip().lower().partition("x")
@@ -724,15 +810,60 @@ def parse_size(value) -> tuple | None:
         raise _bad(f"size must be WxH or auto, not {value!r}", "size") from None
     if min(size) <= 0:
         raise _bad(f"size {value!r} is not a positive width and height", "size")
-    if not _in_limits(size):
-        raise _bad(f"size {size[0]}x{size[1]} is over the limit of "
-                   f"{MAX_PIXELS} pixels (2048x2048) and a side of "
-                   f"{MAX_SIDE}", "size")
+    from gmlx.image.registry import limited, limits_text, size_refusal
+
+    if limited(family):
+        why = size_refusal(family, *size)
+        if why:
+            raise _bad(f"size {why}", "size")
+    elif not _in_limits(size):
+        raise _bad(f"size {size[0]}x{size[1]} is over {limits_text(None)}",
+                   "size")
     return size
 
 
 def _in_limits(size) -> bool:
     return size[0] * size[1] <= MAX_PIXELS and max(size) <= MAX_SIDE
+
+
+# The family of each configured entry a request names, by (id, load
+# signature), for its size limits at parse time; a reload clears it.
+_FAMILIES: dict = {}
+_FAMILIES_LOCK = threading.Lock()
+
+
+def clear_request_families() -> None:
+    with _FAMILIES_LOCK:
+        _FAMILIES.clear()
+
+
+def request_family(model_field):
+    """The family of the entry a request's ``model`` field names: its
+    configured ``family``, else its DiT header's. None with no config, or
+    when the entry does not resolve or its DiT does not identify, which
+    acquire then refuses as it does."""
+    from gmlx.image.loader import identify_dit
+    from gmlx.image.registry import family_named
+
+    from . import bridge_vlm
+
+    try:
+        _path, spec = bridge_vlm.resolve_image_request(model_field)
+        key = (spec.id, spec.load_signature())
+    except Exception:  # noqa: BLE001 - acquire answers every resolve failure
+        return None
+    with _FAMILIES_LOCK:
+        if key in _FAMILIES:
+            return _FAMILIES[key]
+    try:
+        fam = family_named(spec.family) if spec.family else None
+        if fam is None:
+            fam = identify_dit(spec.path, variant=spec.variant).family
+    except Exception:  # noqa: BLE001 - acquire answers every identify failure
+        return None
+    with _FAMILIES_LOCK:
+        _FAMILIES[key] = fam
+    return fam
 
 
 def _adapters(value) -> list:
@@ -763,6 +894,32 @@ def _adapters(value) -> list:
         st = _float(item, "strength", -100.0, 100.0)
         rows.append((item["id"].strip(), 1.0 if st is None else st))
     return rows
+
+
+def _sigmas(value) -> tuple | None:
+    """A request's ``sigmas``: a list of numbers, or in a form its JSON
+    text or the numbers separated by commas."""
+    from gmlx.image.lora.schedule import ScheduleError, check_sigmas
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        import json
+
+        try:
+            value = json.loads(value if value.lstrip().startswith("[")
+                               else f"[{value}]")
+        except ValueError:
+            raise _bad("sigmas must be a list of numbers", "sigmas") from None
+    try:
+        sigmas = check_sigmas(value, "sigmas")
+    except ScheduleError as e:
+        raise _bad(str(e), "sigmas") from None
+    if len(sigmas) > MAX_STEPS + 1:
+        raise _bad(f"sigmas holds {len(sigmas)} values, {len(sigmas) - 1} "
+                   f"steps, and a request runs at most {MAX_STEPS} steps",
+                   "sigmas")
+    return sigmas
 
 
 def parse_request(route: str, fields: dict) -> ImageRequest:
@@ -804,16 +961,23 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
     field = body_surrogate(fields)
     if field is not None:
         raise _bad(surrogate_message(field), field)
+    try:
+        int8 = parse_int8(fields.get("int8"))
+    except ValueError as e:
+        raise _bad(str(e), "int8") from None
     q = fields.get("quality")
     q = _QUALITY_ALIASES.get(str(q).strip().lower(), q) if q else q
+    model = default_model_field(fields.get("model"))
+    size = fields.get("size")
+    family = None if size in (None, "") else request_family(model)
     req = ImageRequest(
         route=route,
-        model=default_model_field(fields.get("model")),
+        model=model,
         prompt=prompt,
         n=_int(fields, "n", 1, MAX_N) or 1,
-        size=parse_size(fields.get("size")),
+        size=parse_size(size, family),
         quality=_choice({"quality": q}, "quality", QUALITIES, "auto"),
-        steps=_int(fields, "steps", 1, 200),
+        steps=_int(fields, "steps", 1, MAX_STEPS),
         seed=_int(fields, "seed", 0, (1 << 63) - 1),
         guidance=_float(fields, "guidance", 1.0, 30.0),
         sampler=sampler,
@@ -828,10 +992,13 @@ def parse_request(route: str, fields: dict) -> ImageRequest:
         partial_images=_int(fields, "partial_images", 0, MAX_PARTIALS) or 0,
         adapters=_adapters(fields.get("adapters")),
         prompt_upsampling=_opt_bool(fields, "prompt_upsampling"),
+        int8=int8,
+        sigmas=_sigmas(fields.get("sigmas")),
     )
-    if route != "generations" and req.prompt_upsampling:
-        # A prompt with reference images runs as typed.
-        req.ignored.add("prompt_upsampling")
+    if req.sigmas is not None and req.steps is not None \
+            and req.steps != len(req.sigmas) - 1:
+        raise _bad(f"steps {req.steps} disagrees with the "
+                   f"{len(req.sigmas) - 1} steps of sigmas", "steps")
     if req.stream and req.n > 1:
         raise _bad("stream with n above 1 is not supported; the stream "
                    "events carry no image index", "n")
@@ -1115,8 +1282,9 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     """(width, height) of the request: its size, else the size the family
     gives its prepared references, else the first image's for an edit or
     a variation, else the entry's default. A size the request does not
-    give is scaled into the image limits."""
-    from gmlx.image.registry import edit_size
+    give is scaled into the family's limits, and one a limited family
+    refuses is refused; the request's own size was held at parse time."""
+    from gmlx.image.registry import edit_size, fit_size, size_refusal
 
     pipe = served.pipe
     unit = _stride(served)
@@ -1136,11 +1304,17 @@ def target_size(req: ImageRequest, served: ServedImage) -> tuple:
     if req.images:
         h, w = req.images[0].shape[:2]
         # A large image gives the largest size of its shape in the limits.
-        scale = min(1.0, (MAX_PIXELS / (w * h)) ** 0.5, MAX_SIDE / max(w, h))
-        w, h = int(w * scale) // unit * unit, int(h * scale) // unit * unit
+        w, h = fit_size(w, h, unit, pipe.family)
         if min(w, h) <= 0:
             raise _bad(f"image is smaller than {unit} pixels", "image")
+        why = size_refusal(pipe.family, w, h)
+        if why:
+            raise _bad(f"the first image sizes the result: {why}; give "
+                       "the request a size", "size")
         return w, h
+    sched = req.schedule
+    if sched is not None and sched.size is not None:
+        return tuple(sched.size)
     return tuple(served.plan.size)
 
 
@@ -1166,6 +1340,59 @@ def _texts(req: ImageRequest, served: ServedImage) -> tuple:
         if neg is None:
             neg = (served.spec.defaults or {}).get("negative_prompt") or ""
     return prompt, req.revised_prompt or prompt, neg
+
+
+def request_schedule(req: ImageRequest, served: ServedImage,
+                     model_dirs) -> None:
+    """Set ``req.schedule``: the request's sigmas, steps and size over the
+    schedules its adapters declare, each run at a strength other than 0
+    (``schedule.resolve``). Each field of an adapter's schedule is its
+    config entry's, else its sidecar's, else gmlx's table's. The
+    request's images and the entry's defaults.size are a size of the
+    request's own. Logs the line that names the adapters, and refuses
+    with 400 adapters that disagree, a bad sidecar, a size from an
+    adapter that a request could not give, and heads in order past the
+    DiT's bank."""
+    from gmlx.image.lora import schedule
+
+    table_rows, extra, _ = _request_rows(served, req.adapters, model_dirs)
+    rows = [(ad.path, st) for ad, st in table_rows] + [
+        (path, st) for _aid, path, st in extra]
+    entries = dict(getattr(served.spec, "adapter_schedules", ()) or ())
+    steps = req.steps or quality_steps(served.pipe.family,
+                                       served.pipe.variant, req.quality)
+    # A step count from quality is named as the request gave it.
+    names = {"steps": "quality"} if req.steps is None else None
+    own = req.size is not None or bool(req.images) or bool(
+        (served.spec.defaults or {}).get("size"))
+    try:
+        decls = [schedule.declared(path, entries.get(path))
+                 for path, st in rows if st != 0]
+        sched = schedule.resolve(
+            decls, sigmas=req.sigmas, steps=steps, names=names,
+            size=target_size(req, served) if own else None,
+            size_from=None if req.size is not None else
+            "the request's images or the entry's defaults.size")
+    except schedule.ScheduleError as e:
+        raise _bad(str(e), "adapters" if req.sigmas is None else "sigmas"
+                   ) from None
+    if sched.size_from is not None:
+        from gmlx.image.registry import schedule_size_refusal
+
+        why = schedule_size_refusal(served.pipe.family, _stride(served),
+                                    sched, image_limits=True)
+        if why:
+            raise _bad(f"{why}; give the request a size", "adapters")
+    bank = served.facts.head_bank
+    if sched.heads == "in_order" and bank and sched.sigmas is not None \
+            and len(sched.sigmas) - 1 > bank:
+        raise _bad(f"heads in order read head i at step i, and the "
+                   f"{served.pipe.family.title} bank holds {bank} heads, "
+                   f"not the {len(sched.sigmas) - 1} steps of the schedule",
+                   "sigmas")
+    if sched.line:
+        _log.info("image model %s: %s", served.spec.id, sched.line)
+    req.schedule = sched
 
 
 def serves_edits(fam, tower: bool) -> bool:
@@ -1195,9 +1422,14 @@ def check_family(req: ImageRequest, served: ServedImage) -> None:
     pipe = served.pipe
     fam = pipe.family
     n = fixed_steps(fam, pipe.variant)
-    if n is not None and req.steps is not None and req.steps != n:
+    if n is not None and req.steps is not None and req.steps != n \
+            and req.sigmas is None:
         raise _bad(f"steps: {fam.title} {pipe.variant} runs {n} steps, the "
                    f"schedule it was distilled to, not {req.steps}", "steps")
+    try:
+        request_int8(served, req.int8)
+    except ValueError as e:
+        raise _bad(f"int8: {e}", "int8") from None
     flow_map = served.facts.flow_map
     if flow_map or pipe.variant in fam.unguided:
         try:
@@ -1276,12 +1508,16 @@ def _prepare_refs(req: ImageRequest, served: ServedImage) -> tuple:
 
 
 def _fit_args(pipe, served: ServedImage, budget, cfg: float,
-              tower: bool = False) -> dict:
+              tower: bool = False, int8: str | None = None) -> dict:
     """The plan_memory arguments of a request on ``served``. A staged
     entry's request loads its encoder alone, with the vision tower when
     ``tower`` says it has reference images. The conditioning states the
     pipeline holds are other conditionings' until the request names its
-    own."""
+    own. ``int8`` is the request's int8 setting, else the entry's."""
+    from gmlx.image.int8 import int8_parts
+
+    attention, linears = int8_parts(
+        int8 or getattr(served.plan, "int8", "off"))
     enc = pipe.encoder
     resident = enc is not None and not enc.released
     act = served.facts.act_dtype
@@ -1306,11 +1542,13 @@ def _fit_args(pipe, served: ServedImage, budget, cfg: float,
         vae_dtype=served.facts.vae_dtype,
         encoder_owned=bool(resident and enc.owned
                            and not served.plan.keep_encoder),
+        attention=attention, linears=linears,
         cache_bytes=caches, budget=budget, overcommit=False) | staged | states
 
 
 def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
-               init: bool, budget, prompts=()) -> None:
+               init: bool, budget, prompts=(), int8: str | None = None
+               ) -> None:
     """Shed the conditioning states a request does not fit beside before
     its encode, as few as its plan names: those of finished work first,
     then those of the step routes' runs, and those of its own
@@ -1330,7 +1568,8 @@ def _make_room(served: ServedImage, cfg: float, size: tuple, refs,
         # a borrowed one's last handle keep.
         own = {api._cond_key(pipe, p, refs, enc) for p in prompts}
     sizes = [(r.height, r.width) for r in refs]
-    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes))
+    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, sizes),
+                     int8=int8)
     args.update(prompt_terms(pipe.family, prompts, sizes))
     args["prefix_other"] -= sum(pipe.captions.nbytes(k) for k in
                                 pipe.captions.keys(lambda k: k[0] in own))
@@ -1358,11 +1597,14 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     Otherwise, when a smaller size fits at the prompt's rows or no size
     fits even at the default rows, an edit gets the plan's message, which
     names the references that fit, and any other request the largest size
-    of its shape that fits at those rows, or that none does. An edit's
-    references are priced at the size the job runs them, by
+    of its shape that fits at those rows, or that none does. A family
+    with a least size of its own takes its sizes alone: under its least
+    pixels none fits, and the 400 names its smallest size of the shape.
+    An edit's references are priced at the size the job runs them, by
     ``_prepare_refs``."""
     from gmlx.commands.image_preflight import prompt_rows, prompt_terms
     from gmlx.image import memfit
+    from gmlx.image.registry import shape_sizes, smallest_size, takes
 
     pipe = served.pipe
     cfg = _guided(req, served)
@@ -1371,7 +1613,8 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
         # At the size the job runs them, which may be far from the raw
         # image's.
         refs = [(r.height, r.width) for r in _prepare_refs(req, served)]
-    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, refs))
+    args = _fit_args(pipe, served, budget, cfg, tower=_tower(pipe, refs),
+                     int8=req.int8)
     plan_memory = memfit.plan_memory
     init = bool(req.images) and (pipe.family.edit is None
                                  or req.mask is not None)
@@ -1400,21 +1643,27 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     if budget is None or fits(w, h, refs):
         return
     unit = _stride(served)
-
-    def scaled(k: int) -> tuple:
-        scale = k * unit / max(w, h)
-        return (max(unit, int(w * scale) // unit * unit),
-                max(unit, int(h * scale) // unit * unit))
-
-    # A smaller size of the shape never needs more memory, so a bisection
-    # over the longer side finds the largest that fits in a few plans.
+    fam = pipe.family
+    # The smaller sizes of the shape (shape_sizes) that the family takes,
+    # fewest pixels first and, of as many pixels, the nearest the shape
+    # last. A size with more pixels never needs less memory, so a
+    # bisection over them finds the largest that fits in a few plans. A
+    # family with a least size of its own names its smallest size of the
+    # shape when none fits.
+    sizes = sorted({s for s in shape_sizes(w, h, unit, max(w, h))
+                    if s[0] <= w and s[1] <= h and s != (w, h)
+                    and takes(fam, *s)},
+                   key=lambda s: (s[0] * s[1],
+                                  -abs(s[0] * h - s[1] * w) / s[1], s))
+    least = (smallest_size(fam, w, h) if getattr(fam, "min_pixels", None)
+             else None)
     best = None
     if not refs or caption is not None:
-        lo, hi = 1, max(w, h) // unit - 1
+        lo, hi = 0, len(sizes) - 1
         while lo <= hi:
             k = (lo + hi) // 2
-            if fits(*scaled(k), refs):
-                best, lo = scaled(k), k + 1
+            if fits(*sizes[k], refs):
+                best, lo = sizes[k], k + 1
             else:
                 hi = k - 1
     # The prompt is the cause when no size of the shape fits at its rows
@@ -1422,7 +1671,7 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
     # size needs the least memory, so it stands for every size.
     if caption is not None and best is None:
         base = {k: v for k, v in args.items() if k not in terms}
-        if fits(*scaled(1), refs, base):
+        if fits(*(least or (sizes[0] if sizes else size)), refs, base):
             what, fix = "the prompt", "shorten the prompt"
             if cause == "negative_prompt":
                 what, fix = "the negative prompt", "shorten it"
@@ -1443,6 +1692,11 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
                         **args)
         except memfit.ImageMemoryError as e:
             raise _bad(str(e), "image") from None
+    if best is None and least is not None:
+        raise _bad(f"size {w}x{h} does not fit in memory beside the models "
+                   f"now loaded, and no size of its shape that {fam.title} "
+                   f"takes does; the smallest it takes is "
+                   f"{least[0]}x{least[1]}", "size")
     if best is None:
         raise _bad(f"size {w}x{h} does not fit in memory beside the models "
                    "now loaded, and no smaller size of its shape does",
@@ -1455,7 +1709,8 @@ def fit_check(req: ImageRequest, served: ServedImage, size: tuple,
 def size_fits(served: ServedImage, width: int, height: int, budget, *,
               cfg: float = 1.0, init: bool = False, conds=None,
               patch_table=None, joined: bool = False, ref_cache=None,
-              building: int = 0, held_in=None, hint: bool = False) -> bool:
+              building: int = 0, held_in=None, hint: bool = False,
+              int8: str | None = None) -> bool:
     """Whether the memory plan of an image of ``width`` x ``height`` on
     ``served`` fits ``budget``, as the image routes plan a request. The
     step routes ask it before a step, a VAE decode and a VAE encode, and
@@ -1467,12 +1722,13 @@ def size_fits(served: ServedImage, width: int, height: int, budget, *,
     the step keeps, on a family whose row does not count them itself. A
     plan that does not fit with the held states sheds the bytes it names,
     the states of the step's own conditionings last. With ``hint`` a plan
-    that does not fit raises its ImageMemoryError, which names what fits."""
+    that does not fit raises its ImageMemoryError, which names what fits.
+    ``int8`` is the step's int8 setting, else the entry's."""
     from gmlx.image import api, memfit
 
     if budget is None:
         return True
-    args = _fit_args(served.pipe, served, budget, cfg)
+    args = _fit_args(served.pipe, served, budget, cfg, int8=int8)
     if conds:
         args.update(api.plan_terms(served.pipe, conds, height=int(height),
                                    width=int(width), patch_table=patch_table,
@@ -1556,7 +1812,8 @@ def ensure_dit(served: ServedImage) -> None:
 
         act = image_activation(pipe.family.name)
         pipe.dit, _ = load_dit(str(served.spec.path), act_dtype=act.dit,
-                               variant=served.spec.variant, log=_log_line)
+                               variant=served.spec.variant, log=_log_line,
+                               int8=getattr(served.plan, "int8", "off"))
         install.rewrap(pipe)
     ensure_vae(served)
 
@@ -2099,11 +2356,13 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
         served, req.adapters, model_dirs,
         turn=book.pairs if book.pool is not None else None)
     _make_room(served, cfg, size, refs, init is not None, budget,
-               [text] + ([] if neg_text is None else [neg_text]))
+               [text] + ([] if neg_text is None else [neg_text]),
+               int8=req.int8)
     t0 = time.perf_counter()
     cond, neg = _encode(served, text, neg_text, refs, borrow)
     # A staged entry's encode let the DiT and the VAE go.
     ensure_dit(served)
+    set_int8(served, req.int8)
     # The factors the forward builds, after the encode's drop.
     book.table(table)
     plan = api.plan_request(
@@ -2131,7 +2390,15 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
             timeout_s and time.monotonic() - last[0] > timeout_s)
 
     denoise = 1.0 if strength is None else float(strength)
-    sigmas = api.image_sigmas(pipe, steps, height, width)
+    sched = req.schedule
+    given = None if sched is None else sched.sigmas
+    heads = (sched.heads if sched is not None and served.facts.head_bank
+             else None)
+    if given is not None:
+        steps = len(given) - 1
+        sigmas = api.check_sigmas(given)
+    else:
+        sigmas = api.image_sigmas(pipe, steps, height, width)
     if init_latents is not None:
         sigmas = sigmas[img2img_start(len(sigmas) - 1, denoise):]
     run_steps = len(sigmas) - 1
@@ -2153,6 +2420,13 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
                 "adapters": adapters}
         if req.revised_prompt:
             meta["revised_prompt"] = req.revised_prompt
+        if given is not None:
+            meta["sigmas"] = list(given)
+        if heads is not None:
+            meta["heads"] = heads
+        int8 = req.int8 or getattr(served.plan, "int8", "off")
+        if int8 != "off":
+            meta["int8"] = int8
 
     def finish(x) -> np.ndarray:
         from gmlx.commands.image import to_uint8
@@ -2189,6 +2463,7 @@ def _run_job(served: ServedImage, req: ImageRequest, book: _JobTurns, *,
         try:
             x = api.sample(pipe, cond, neg=neg, cfg=cfg, height=height,
                            width=width, steps=steps, seed=s,
+                           sigmas=given, heads=heads,
                            sampler=sampler, init_latents=init_latents,
                            denoise=denoise, mask=mask, patch_table=table,
                            plan=plan, on_step=on_step,

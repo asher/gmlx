@@ -736,7 +736,7 @@ def run_clip(job: Job, store: VideoJobs) -> None:
         try:
             from .residency import acquire_video_model
 
-            hold = acquire_video_model(p["model"])
+            hold = acquire_video_model(p["model"], hold_wired=True)
         except Exception as e:  # noqa: BLE001
             f = failure(e)
             if not f.transient:

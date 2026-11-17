@@ -30,8 +30,8 @@ import mlx.core as mx
 
 from . import plan
 from .install import linear_dims, linear_leaves, pair_hash, register_pair
-from .reader import (AdapterError, UnsupportedAdapterError, read_lora,
-                     resolve)
+from .reader import (AdapterError, UnsupportedAdapterError, _header_names,
+                     read_lora, resolve)
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,16 @@ class LoadedAdapter:
         return os.path.basename(self.path)
 
 
+def _config(pipe) -> dict:
+    """The config a LoRA rule of the family reads: the DiT's config, or
+    before the DiT of a staged load the config of its header."""
+    if pipe.dit is None:
+        return dict(pipe.identified.config)
+    cfg = pipe.dit.cfg
+    return dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) \
+        and not isinstance(cfg, type) else dict(cfg)
+
+
 def key_map(pipe):
     """The family's LoRA key map for this pipeline's DiT."""
     hit = getattr(pipe, "_lora_key_map", None)
@@ -62,14 +72,29 @@ def key_map(pipe):
         raise AdapterError(f"{pipe.family.title} has no LoRA key map in "
                            "gmlx")
     if pipe.dit is None:
-        # A staged load before its DiT: the config of the DiT's header,
-        # and the map is made again from the DiT once that is loaded.
-        return make(dict(pipe.identified.config))
-    cfg = pipe.dit.cfg
-    cfg = dataclasses.asdict(cfg) if dataclasses.is_dataclass(cfg) \
-        and not isinstance(cfg, type) else dict(cfg)
-    pipe._lora_key_map = hit = make(cfg)
+        # A staged load before its DiT: the map is made again from the DiT
+        # once that is loaded.
+        return make(_config(pipe))
+    pipe._lora_key_map = hit = make(_config(pipe))
     return hit
+
+
+def refuse(family, config: dict, path: str) -> None:
+    """Raise ``UnsupportedAdapterError`` for a LoRA file at ``path`` that
+    the family's ``lora_refusal`` names from its header and ``config``."""
+    rule = getattr(family, "lora_refusal", None)
+    if rule is None:
+        return
+    from gmlx.image.vae.reader import safetensors_header
+
+    # Raises AdapterError for a file that is not a safetensors LoRA.
+    _header_names(path)
+    header, _ = safetensors_header(path)
+    why = rule(header, config)
+    if why is not None:
+        raise UnsupportedAdapterError(
+            f"{path}: gmlx does not run this LoRA on {family.title}: "
+            f"{why[0]}", why[1])
 
 
 def _linear_shapes(pipe) -> dict:
@@ -131,6 +156,7 @@ def load_adapter(pipe, path: str, *, allow_unmatched: bool = False,
         if hit is not None and all(pipe.adapters.get(row[-1]) is not None
                                    for row in hit.dit + hit.text):
             return hit
+    refuse(pipe.family, _config(pipe), path)
     raw = read_lora(path, allow_unmatched=allow_unmatched)
     res = resolve(raw, key_map(pipe), allow_unmatched=allow_unmatched)
     shapes = _linear_shapes(pipe)

@@ -87,6 +87,13 @@ class GmlxVAE(_ServerVAE):
         self.output_channels = int(vae.get("channels_out", 3))
         self.pad_channel_value = 1.0 if self.output_channels == 4 else None
         self.latent_dim = 2
+        # A latent with a frame axis, MiniMax-H3-Image's, holds one frame:
+        # an encode gives it and a decode takes it off.
+        self.frames = bool((status.get("latent") or {}).get("frames"))
+        # A VAE that ComfyUI samples an encode with, MiniMax-H3-Image's,
+        # draws the noise of a CPU generator at this seed.
+        seed = vae.get("encode_seed")
+        self.encode_seed = None if seed is None else int(seed)
 
     def decode(self, samples_in, vae_options={}):
         if samples_in.ndim == 5:
@@ -97,7 +104,18 @@ class GmlxVAE(_ServerVAE):
 
     def encode(self, pixel_samples):
         pixels = self.vae_encode_crop_pixels(pixel_samples.detach().float().cpu())
-        return self.gmlx_client.vae_encode(self.gmlx_model, pixels).float()
+        noise = None
+        if self.encode_seed is not None:
+            # As ComfyUI's H3ImageVAE.encode draws it: a generator started
+            # at the seed for each encode, in the shape of its latents.
+            b, h, w = pixels.shape[0], pixels.shape[1], pixels.shape[2]
+            shape = (b, self.latent_channels) + ((1,) if self.frames else ()) + (
+                h // self.downscale_ratio, w // self.downscale_ratio)
+            noise = torch.randn(shape, generator=torch.Generator().manual_seed(self.encode_seed))
+            if self.frames:
+                noise = noise[:, :, 0]
+        z = self.gmlx_client.vae_encode(self.gmlx_model, pixels, noise).float()
+        return z.unsqueeze(2) if self.frames else z
 
 
 # MiniMax-H3's video VAE works on a grid in time: 5 k + 2 latent frames

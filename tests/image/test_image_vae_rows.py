@@ -8,6 +8,7 @@ to what the FLUX.1 fits gave before the rows. Arithmetic only: no array at
 an official width is allocated. CPU."""
 from __future__ import annotations
 
+import itertools
 import math
 from types import SimpleNamespace
 
@@ -102,7 +103,7 @@ def test_every_family_has_a_vae_row():
         with pytest.raises(ValueError, match="no VAE memory row for image "
                            "family 'flux'; known: flux2_klein, "
                            "flux2_klein_9b, flux2_klein_9b_kv, flux3_klein, "
-                           "krea2, moss_image, qwen_image21, "
+                           "h3_image, krea2, moss_image, qwen_image21, "
                            "z_image"):
             price("decode", 512, 512, family="flux", itemsize=2)
 
@@ -130,7 +131,7 @@ def test_the_qwen_row_is_the_official_file():
 
 def _official_vaes() -> dict:
     """The config of each family's official VAE."""
-    from gmlx.image.vae import flux1_ae, flux2_ae
+    from gmlx.image.vae import flux1_ae, flux2_ae, h3_image
     from gmlx.image.vae import qwen_image_memory as qm
 
     flux = dict(in_channels=3, out_channels=3,
@@ -146,6 +147,7 @@ def _official_vaes() -> dict:
     out["moss_image"] = flux2_ae.Flux2AEConfig(
         latent_channels=32, decoder_block_out_channels=(96, 192, 384, 384),
         **flux)
+    out["h3_image"] = h3_image.H3ImageVAEConfig()
     assert set(out) == set(reader.VAES)
     return out
 
@@ -153,7 +155,14 @@ def _official_vaes() -> dict:
 def _run_layout(family: str, cfg, op: str, size: int, tile: int,
                 overlap: int) -> tuple[int, int]:
     """Tiles along one axis of ``size`` pixels as tiling cuts them for a
-    VAE of ``cfg``: their count and length in pixels."""
+    VAE of ``cfg``, or as the VAE cuts them where it owns its tiles: their
+    count and length in pixels."""
+    if memfit.vae_row(family).owns_tiles:
+        from gmlx.image.h3 import tiles
+
+        starts, lengths, _ = tiles.split_tiles(size, tiles.TILE,
+                                               tiles.MIN_OVERLAP, cfg.spatial)
+        return len(starts), lengths[0]
     vae = SimpleNamespace(config=cfg, family=family)
     t, lap, _ = tiling.crop_layout(vae, op, tile, overlap)
     lat = size // cfg.scale
@@ -164,9 +173,10 @@ def _run_layout(family: str, cfg, op: str, size: int, tile: int,
 @pytest.mark.parametrize("op", ["decode", "encode"])
 def test_the_priced_tiles_are_the_tiles_a_pass_cuts(op):
     """For every family, at every size to 4096 pixels by 16, the tiles a
-    tiled pass is priced on are those tiling cuts, for the official VAE,
-    which the plan prices, and for the VAE at hand. The FLUX.2 VAE cuts
-    at 8 pixels per latent pixel, where its family's factor is 16."""
+    tiled pass is priced on are those tiling cuts, or those the VAE cuts
+    where it owns its tiles, for the official VAE, which the plan prices,
+    and for the VAE at hand. The FLUX.2 VAE cuts at 8 pixels per latent
+    pixel, where its family's factor is 16."""
     seen = 0
     for family, cfg in _official_vaes().items():
         for tile, overlap in ((memfit.TILE_PX, memfit.OVERLAP_PX),
@@ -187,6 +197,121 @@ def test_the_priced_tiles_are_the_tiles_a_pass_cuts(op):
     assert memfit.tile_grid("flux3_klein", op, 720, 720) == (
         (2, 424), (2, 424))
     assert memfit.tile_layout(720, 512, 128, 16) == (2, 432)
+
+
+def test_the_h3_image_row_prices_the_tiles_its_vae_owns():
+    """The MiniMax-H3-Image VAE tiles every pass past one tile of 256
+    pixels itself, as ComfyUI's class does. Its row prices one such tile
+    and the image past one tile, and chooses tiles there, whatever tile,
+    overlap and ``tiled`` the caller passes; one tile is priced whole.
+    The plan prices and chooses the same."""
+    from gmlx.image.h3 import tiles
+    from gmlx.image.vae import h3_image
+
+    cfg = h3_image.H3ImageVAEConfig()
+    row = memfit.VAE_ROWS["h3_image"]
+    assert (row.tile, row.overlap) == (tiles.TILE, tiles.MIN_OVERLAP)
+    assert row.owns_tiles and row.one_tile and row.auto_tiles
+    assert row.channels == {"decode": cfg.dim, "encode": cfg.ch}
+    one = tiles.TILE * tiles.TILE
+    for op, size in itertools.product(("decode", "encode"), (2, 4)):
+        kw = dict(family="h3_image", itemsize=size, free=64 * GiB)
+        ch = row.channels[op]
+        whole = row.whole[op]["exact"][size].bytes(one, ch, size)
+        for tiled in (None, False, True):
+            assert memfit.vae_tiling(op, 256, 256, tiled=tiled, **kw) is False
+            assert memfit.vae_peak(op, 256, 256, family="h3_image",
+                                   itemsize=size, tiled=bool(tiled)) == whole
+        for px, tiled, (tile, lap) in itertools.product(
+                (384, 1024, 4096), (None, False, True),
+                ((memfit.TILE_PX, memfit.OVERLAP_PX), (768, 192))):
+            want = row.tiled[op][size].bytes(one, px * px, ch, size)
+            assert memfit.vae_tiling(op, px, px, tiled=tiled, tile=tile,
+                                     overlap=lap, **kw) is True
+            assert memfit.vae_peak(op, px, px, family="h3_image",
+                                   itemsize=size, tiled=bool(tiled),
+                                   tile=tile, overlap=lap) == want
+    for px, tiled in ((256, False), (384, True), (1024, True)):
+        plan = plan_memory(4 * GiB, 4 * GiB, GiB // 4, family="h3_image",
+                           height=px, width=px, budget=48 * GiB,
+                           overcommit=False)
+        assert plan.tiled_decode is tiled
+        assert plan.terms["decode_peak"] == memfit.vae_peak(
+            "decode", px, px, family="h3_image", itemsize=2)
+
+
+def test_an_h3_image_batch_decode_adds_each_image_after_the_first():
+    """The VAE decodes a batch one image at a time, so a batch decode is
+    one image's price plus 48 bytes a pixel for each image after the
+    first. An encode runs the batch together, all of its terms by the
+    batch."""
+    from gmlx.image.h3 import tiles
+
+    row = memfit.VAE_ROWS["h3_image"]
+    assert row.per_image == {"decode": 48}
+    one = tiles.TILE * tiles.TILE
+    for size, px in itertools.product((2, 4), (1024, 4096)):
+        kw = dict(family="h3_image", itemsize=size)
+        alone = memfit.vae_peak("decode", px, px, **kw)
+        for b in (2, 3):
+            assert memfit.vae_peak("decode", px, px, batch=b, **kw) == \
+                alone + int((b - 1) * 48 * px * px)
+            assert memfit.vae_peak("encode", px, px, batch=b, **kw) == \
+                row.tiled["encode"][size].bytes(b * one, b * px * px,
+                                                row.channels["encode"], size)
+
+
+# The passes measured on the published MiniMax-H3-Image VAE, on an M5 Max,
+# one process a cell and three runs each: what a pass added over the
+# settled process with the weights loaded, in GiB rounded up, as (growth
+# of the process footprint, MLX peak over the active bytes at the start),
+# each the largest of its runs. (op, side of a square image, itemsize,
+# batch). A pass past one tile of 256 pixels runs in tiles. The decodes
+# from 1024 pixels ran on 17532fe9, whose canvas writes are all in place;
+# the rest on 36170bf1, whose one tile decode and encode are the same.
+H3_CELLS = {
+    ("decode", 128, 2, 1): (0.01, 0.01),
+    ("decode", 256, 2, 1): (0.04, 0.03),
+    ("decode", 1024, 2, 1): (0.15, 0.13),
+    ("decode", 2048, 2, 1): (0.25, 0.16),
+    ("decode", 4096, 2, 1): (0.35, 0.30),
+    ("decode", 128, 4, 1): (0.01, 0.01),
+    ("decode", 256, 4, 1): (0.03, 0.04),
+    ("decode", 1024, 4, 1): (0.16, 0.14),
+    ("decode", 2048, 4, 1): (0.27, 0.17),
+    ("decode", 4096, 4, 1): (0.36, 0.33),
+    ("decode", 2048, 2, 2): (0.39, 0.20),
+    ("decode", 4096, 2, 2): (1.03, 0.75),
+    ("decode", 2048, 4, 2): (0.40, 0.22),
+    ("decode", 4096, 4, 2): (1.07, 0.75),
+    ("encode", 128, 2, 1): (0.42, 0.42),
+    ("encode", 256, 2, 1): (1.00, 0.88),
+    ("encode", 1024, 2, 1): (1.04, 0.93),
+    ("encode", 2048, 2, 1): (1.11, 0.91),
+    ("encode", 4096, 2, 1): (1.49, 1.08),
+    ("encode", 128, 4, 1): (0.84, 0.84),
+    ("encode", 256, 4, 1): (1.99, 1.75),
+    ("encode", 1024, 4, 1): (2.08, 1.76),
+    ("encode", 2048, 4, 1): (2.14, 1.81),
+    ("encode", 4096, 4, 1): (2.39, 1.99),
+}
+# What every cell keeps under its price: the fit keeps 0.25 GiB over the
+# growth reading of each cell (batch 2's rule), and the MLX peak of a one
+# tile float32 decode stands 0.249 under, so 0.24 holds both readings at
+# the table's rounding. No price stands more than H3_SLACK over its cell.
+H3_MARGIN = 0.24
+H3_SLACK = 0.5
+
+
+@pytest.mark.parametrize("cell", list(H3_CELLS), ids=lambda c: "-".join(
+    map(str, c)))
+def test_the_h3_image_row_covers_every_measured_pass(cell):
+    op, px, item, batch = cell
+    added = max(H3_CELLS[cell])
+    price = memfit.vae_peak(op, px, px, family="h3_image", itemsize=item,
+                            batch=batch, tiled=px > 256) / GiB
+    assert added - 0.01 + H3_MARGIN <= price <= added + H3_SLACK, (cell,
+                                                                    price)
 
 
 def test_the_tile_layout_follows_the_scale_of_the_vae():

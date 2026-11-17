@@ -126,6 +126,18 @@ def test_another_family_given_as_moss_image_is_refused_by_name(name):
         f"this is a {OTHERS[name]} GGUF, not a MOSS-Image one")
 
 
+def test_a_family_met_after_moss_image_reads_its_own_files():
+    """MOSS-Image names only the families identify meets before it, so a
+    file of a family after it reaches that family's rule."""
+    from gmlx.image.families.moss_image import family as moss
+
+    view = fixture_view("h3_image_pruned_ud_q4_k_xl.header.json")
+    assert moss.fingerprint(view) is None
+    assert fp.identify(view).family.name == "h3_image"
+    assert _refused(view, family="moss_image").startswith(
+        "not a MOSS-Image file. ")
+
+
 def test_no_other_family_takes_a_moss_image_file():
     view = fixture_view(SFT)
     for fam in (f for f in fp._families(None) if f.name != "moss_image"):

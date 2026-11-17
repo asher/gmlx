@@ -2,8 +2,10 @@
 the VAE pack and its checks, and the image_models entry."""
 from __future__ import annotations
 
+import functools
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -764,6 +766,7 @@ F2B = catalog.RECIPES["flux-2-klein-base"]
 K = catalog.RECIPES["krea-2-turbo"]
 M = catalog.RECIPES["moss-image"]
 MB = catalog.RECIPES["moss-image-base"]
+H = catalog.RECIPES["minimax-h3-image"]
 # The family each pack of the FLUX.2 autoencoder names: the pull's.
 _PACKED_FOR: dict = {}
 
@@ -831,6 +834,14 @@ def _shared_scan(roots, *, recursive=True, families=None):
                 elif f == F32_PACK:
                     out += [catalog.ImageFile(p, "vae", fam, sha256=F32_SHA)
                             for fam in catalog.vae_families("flux3_klein")]
+                elif f.startswith("minimax_h3_image_pruned-"):
+                    out.append(catalog.ImageFile(p, "dit", "h3_image",
+                                                 "pruned"))
+                elif f.startswith("Qwen3-VL-32B-Instruct-"):
+                    out.append(catalog.ImageFile(p, "encoder", "h3_image"))
+                elif f == H.vae_pack:
+                    out.append(catalog.ImageFile(p, "vae", "h3_image",
+                                                 sha256=H.vae_sha256))
     return [f for f in out if families is None or f.family in families]
 
 
@@ -841,14 +852,15 @@ F32_PACK = "flux2-vae-F32.gguf"
 F32_SHA = "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
 
 
-def _shared_pull(lib, monkeypatch, name, ram_gb=32, args=()):
+def _shared_pull(lib, monkeypatch, name, ram_gb=32, args=(), sha=None):
     root, cfg = lib
     r = catalog.recipe(name)
     monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
                         lambda: ram_gb << 30)
     monkeypatch.setattr(catalog, "scan", _shared_scan)
     got = _downloads(monkeypatch)
-    monkeypatch.setattr(catalog, "sha256_file", lambda p: r.vae_sha256)
+    monkeypatch.setattr(catalog, "sha256_file",
+                        sha or (lambda p: r.vae_sha256))
     monkeypatch.setattr(catalog, "vae_identity", lambda p: (
         ("flux3_klein", F32_SHA) if os.path.basename(p) == F32_PACK
         else (r.family, r.vae_sha256)))
@@ -1152,6 +1164,116 @@ def test_a_held_encoder_serves_a_moss_image_pull_where_it_fits(
     note = ("Qwen3.5-9B-Q8_0.gguf on disk does not fit an image on a 16 GB "
             "Mac; the pull takes Q4_K_M")
     assert (note in out) == (held != takes)
+
+
+@pytest.mark.parametrize("ram_gb, quant", [(32, "UD-Q4_K_XL"),
+                                           (64, "Q8_0")])
+def test_a_minimax_h3_image_pull_takes_its_class_quant_and_packs_comfys_vae(
+        lib, monkeypatch, capsys, ram_gb, quant):
+    """The DiT from unsloth's repo at the class's quant, video H3's Q4_K_M
+    Qwen3-VL-32B file and its mmproj, which edits read, and ComfyUI's
+    float16 VAE at the pinned revision,
+    packed without a config.json. The entry gets no defaults.size, since
+    the family's row gives 2048x2048, and the license line states and
+    links the license as the H3 video pull does."""
+    got, packed, m = _shared_pull(lib, monkeypatch, H.name, ram_gb)
+    assert got == [
+        ("unsloth/MiniMax-H3-Image-GGUF",
+         f"minimax_h3_image_pruned-{quant}.gguf", "main"),
+        ("unsloth/Qwen3-VL-32B-Instruct-GGUF",
+         "Qwen3-VL-32B-Instruct-Q4_K_M.gguf", "main"),
+        ("unsloth/Qwen3-VL-32B-Instruct-GGUF", "mmproj-BF16.gguf", "main"),
+        ("Comfy-Org/MiniMax-H3-Image",
+         "vae/minimax_h3_image_vae_fp16.safetensors", H.vae_revision),
+        # MiniMax's prompts, whose manifest reads as another digest here.
+        (H.prompt_repo, H.prompt_file, H.prompt_revision)]
+    ((_src, kw),) = packed
+    assert kw["family"] == "h3_image" and kw["config_json"] == "{}"
+    assert m.path == ("unsloth__MiniMax-H3-Image-GGUF/"
+                      f"minimax_h3_image_pruned-{quant}.gguf")
+    assert m.encoder == ("unsloth__Qwen3-VL-32B-Instruct-GGUF/"
+                         "Qwen3-VL-32B-Instruct-Q4_K_M.gguf")
+    assert m.vae == "Comfy-Org__MiniMax-H3-Image/minimax-h3-image-vae-F16.gguf"
+    assert m.encoder_mmproj == ("unsloth__Qwen3-VL-32B-Instruct-GGUF/"
+                                "mmproj-BF16.gguf")
+    assert not m.defaults.get("size")
+    out = capsys.readouterr().out
+    assert (f"license: MiniMax-H3-Image "
+            f"minimax-h3-image-community-license-agreement, {H.license_note} "
+            "(https://huggingface.co/MiniMaxAI/MiniMax-H3-Image/blob/main/"
+            "LICENSE); encoder apache-2.0; VAE "
+            "minimax-h3-image-community-license-agreement") in out
+
+
+def test_a_minimax_h3_image_pull_fetches_minimaxs_prompts_for_the_entry(
+        lib, monkeypatch, capsys):
+    """The manifest and the four files it lists land in the PE repo's
+    folder, each at the sha256 the recipe pins, the manifest last, and the
+    entry names the manifest. The plan's license line says the prompt
+    files are under the model's license."""
+    root, cfg = lib
+    pins = {H.prompt_file: H.prompt_sha256, **dict(H.prompt_more)}
+    folder = root / "MiniMaxAI__MiniMax-H3-Image-PE"
+
+    def sha(p):
+        # Each fetched prompt file reads as its pin, the rest as the VAE.
+        hit = [f for f in pins if str(p).endswith(os.sep + f)]
+        return pins[hit[0]] if hit else H.vae_sha256
+
+    landed, real = [], os.replace
+
+    def replace(src, dst, **kw):
+        if str(dst).startswith(str(folder) + os.sep):
+            landed.append(os.path.relpath(dst, folder))
+        return real(src, dst, **kw)
+
+    monkeypatch.setattr(os, "replace", replace)
+    got, _packed, m = _shared_pull(lib, monkeypatch, H.name, sha=sha)
+    out = capsys.readouterr().out
+    assert [(r, f) for r, f, _rev in got if r == H.prompt_repo] == [
+        (H.prompt_repo, f) for f in pins]
+    assert sorted(landed[:-1]) == sorted(f for f, _ in H.prompt_more)
+    assert landed[-1] == H.prompt_file
+    for f in pins:
+        assert (folder / f).is_file()
+    assert m.upsample_prompt == ("MiniMaxAI__MiniMax-H3-Image-PE/"
+                                 "prompt/manifest.json")
+    assert ("the upsampler prompt prompt/manifest.json and the files it "
+            "reads of MiniMaxAI/MiniMax-H3-Image-PE") in out
+
+
+@pytest.mark.parametrize("ram_gb", [16, 24])
+def test_a_minimax_h3_image_pull_under_32_gb_refuses_and_names_32_gb(
+        lib, monkeypatch, capsys, ram_gb):
+    """Its encoder alone peaks over a 24 GB Mac's budget, so a bare pull
+    there downloads nothing and names 32 GB. With --quant the plan goes
+    on, calling no quant the default."""
+    _, cfg = lib
+    monkeypatch.setattr("gmlx.load.memfit.total_ram_bytes",
+                        lambda: ram_gb << 30)
+    monkeypatch.setattr(catalog, "scan", _shared_scan)
+    got = _downloads(monkeypatch)
+    msg = (f"no MiniMax-H3-Image DiT that gmlx pulls makes an image in this "
+           f"Mac's {ram_gb} GB RAM; the smallest Mac that runs one has 32 "
+           "GB. Pass --quant to pull one anyway")
+    assert manage.cmd_pull([H.name, "--config", str(cfg)]) == 1
+    assert f"error: {msg}" in capsys.readouterr().err
+    assert manage.cmd_pull([H.name, "--config", str(cfg), "--json"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "recipe": H.name, "error": msg, "needs_gb": 32}
+    assert got == []
+    listing = {H.dit_name("Q3_K_M"): 10 << 30,
+               H.encoder_name("Q4_K_M"): 18 << 30, H.mmproj_file: 1 << 30,
+               H.vae_file: 1 << 30}
+    monkeypatch.setattr(remote, "hf_list_dir", lambda repo, path, rev="main",
+                        **k: [(n, "file", s) for n, s in listing.items()])
+    monkeypatch.setattr(manage, "_disk_free", lambda p: 1 << 20)
+    assert manage.cmd_pull([H.name, "--quant", "Q3_K_M", "--config",
+                            str(cfg)]) == 1
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == (f"pull {H.name} (MiniMax-H3-Image): DiT "
+                                   "Q3_K_M, encoder Q4_K_M")
+    assert got == []
 
 
 def test_a_flux3_pull_takes_no_encoder_quant_but_q8_0(lib, capsys):
@@ -2005,3 +2127,32 @@ def test_the_float16_opt_in_lets_only_z_image_pull_on_an_m1(
     err = capsys.readouterr().err
     assert ("needs an M3 or newer" not in err) == goes
     assert bool(got) == goes
+
+
+@functools.lru_cache(maxsize=None)
+def _on_disk(root: str) -> dict:
+    return {p.name: str(p) for p in Path(root).rglob("*.gguf")}
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("name", sorted({
+    r.encoder_name(q) for r in catalog.RECIPES.values()
+    for q in r.encoder_quants}))
+def test_a_pull_prices_an_encoder_as_the_file_on_disk(gguf_dir, name):
+    """Each encoder file a recipe pulls, where the lab holds it: the price
+    of the file while it downloads is the price of its header on disk,
+    but for the GGUF header's own bytes, so a fresh pull plans what the
+    file holds once it is there."""
+    from gmlx.commands.image_preflight import load_transient
+    from gmlx.commands.image_pull import encoder_download_price
+    from gmlx.image.api import _header_bytes
+    from gmlx.image.text_encoder import _header_view
+
+    path = _on_disk(str(gguf_dir)).get(name)
+    if path is None:
+        pytest.skip(f"{name} is not under KQUANT_TEST_GGUF_DIR")
+    tensors = sum(t.nbytes for t in _header_view(path).tensors.values())
+    pull = encoder_download_price(name, os.path.getsize(path))
+    assert pull == (_header_bytes(path, "encoder")
+                    + os.path.getsize(path) - tensors,
+                    load_transient(path, None, None))

@@ -3984,6 +3984,124 @@
             "speedup_image": 1.93
           }
         ]
+      },
+      "base-h3-image-1024": {
+        "model": "MiniMax-H3-Image pruned",
+        "steps": 6,
+        "size": 1024,
+        "rows": [
+          {
+            "engine": "ComfyUI with ComfyUI-GGUF",
+            "weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "step_s": 5.06,
+            "image_s": 31.07,
+            "gmlx_weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "gmlx_step_s": 1.15,
+            "gmlx_image_s": 7.29,
+            "speedup_step": 4.4,
+            "speedup_image": 4.26
+          },
+          {
+            "engine": "stable-diffusion.cpp",
+            "weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "step_s": 2.12,
+            "image_s": 13.97,
+            "gmlx_weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "gmlx_step_s": 1.191,
+            "gmlx_image_s": 7.54,
+            "speedup_step": 1.78,
+            "speedup_image": 1.85
+          }
+        ],
+        "gmlx_int8": [
+          {
+            "int8": "off",
+            "step_s": 1.191,
+            "image_s": 7.54,
+            "speedup_step": 1.0,
+            "speedup_image": 1.0
+          },
+          {
+            "int8": "attention",
+            "step_s": 1.189,
+            "image_s": 7.52,
+            "speedup_step": 1.0,
+            "speedup_image": 1.0
+          },
+          {
+            "int8": "linears",
+            "step_s": 0.679,
+            "image_s": 4.51,
+            "speedup_step": 1.75,
+            "speedup_image": 1.67
+          },
+          {
+            "int8": "all",
+            "step_s": 0.684,
+            "image_s": 4.55,
+            "speedup_step": 1.74,
+            "speedup_image": 1.66
+          }
+        ]
+      },
+      "base-h3-image-4096": {
+        "model": "MiniMax-H3-Image pruned",
+        "steps": 6,
+        "size": 4096,
+        "rows": [
+          {
+            "engine": "ComfyUI with ComfyUI-GGUF",
+            "weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "step_s": 39.213,
+            "image_s": 239.16,
+            "gmlx_weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "gmlx_step_s": 30.557,
+            "gmlx_image_s": 187.97,
+            "speedup_step": 1.28,
+            "speedup_image": 1.27
+          },
+          {
+            "engine": "stable-diffusion.cpp",
+            "weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "step_s": 91.045,
+            "image_s": 570.67,
+            "gmlx_weights": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+            "gmlx_step_s": 30.598,
+            "gmlx_image_s": 187.97,
+            "speedup_step": 2.98,
+            "speedup_image": 3.04
+          }
+        ],
+        "gmlx_int8": [
+          {
+            "int8": "off",
+            "step_s": 30.598,
+            "image_s": 187.97,
+            "speedup_step": 1.0,
+            "speedup_image": 1.0
+          },
+          {
+            "int8": "attention",
+            "step_s": 28.393,
+            "image_s": 174.99,
+            "speedup_step": 1.08,
+            "speedup_image": 1.07
+          },
+          {
+            "int8": "linears",
+            "step_s": 24.705,
+            "image_s": 152.87,
+            "speedup_step": 1.24,
+            "speedup_image": 1.23
+          },
+          {
+            "int8": "all",
+            "step_s": 22.51,
+            "image_s": 139.75,
+            "speedup_step": 1.36,
+            "speedup_image": 1.35
+          }
+        ]
       }
     }
   }

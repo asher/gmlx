@@ -37,7 +37,7 @@ def server(monkeypatch):
 
     fam = get_family("flux3_klein")
     rec = SimpleNamespace(events=[], requests=[], messages=[], seeds=[],
-                          too_long=False)
+                          too_long=False, media=[])
     cached: set = set()
     spec = SimpleNamespace(
         id="flux3", path="/flux3.gguf", family=None, variant=None,
@@ -62,7 +62,9 @@ def server(monkeypatch):
 
     def build_gen_args(request, processor, tenant_id=None):
         rec.requests.append(request)
+        # The engine's budget is the request's, as the server builds it.
         return SimpleNamespace(logprobs=True,
+                               thinking_budget=request.thinking_budget,
                                to_template_kwargs=lambda: {})
 
     def apply_chat_template(processor, config, messages, **kw):
@@ -70,8 +72,9 @@ def server(monkeypatch):
         return "PROMPT"
 
     class Engine:
-        def generate(self, prompt, args):
+        def generate(self, prompt, args, **media):
             rec.events.append("chat")
+            rec.media.append(media)
             if rec.too_long:
                 gen = importlib.import_module(
                     "gmlx._vendor.mlx_vlm.server.generation")
@@ -144,6 +147,7 @@ def server(monkeypatch):
         facts=svc.dit_facts(pipe))
     rec.served = served
     rec.spec = spec
+    rec.writer = writer
     return rec
 
 
@@ -240,3 +244,149 @@ def test_an_edit_ignores_prompt_upsampling_on_every_family():
     assert image_upsample.upsampler_for(spec, fam, True, True) is None
     with pytest.raises(svc.ImageRequestError, match="takes no prompt"):
         image_upsample.upsampler_for(spec, fam, True, False)
+
+
+H3_CAPTION = "A blue door in a whitewashed wall."
+
+
+@pytest.fixture
+def h3(server, monkeypatch, tmp_path):
+    """The server's entry as MiniMax-H3-Image, with MiniMax's prompt files
+    in stand-in text and an upsampler entry with its vision tower."""
+    from gmlx.serve import image_steps
+
+    root = tmp_path / "pe" / "prompt"
+    for rel, text in {"t2i/system_prompt.txt": "Expand prompts.\n",
+                      "t2i/task_prompt.txt": "Prompt: {}",
+                      "edit/task_prompt.txt": "Edit task."}.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    (root / "manifest.json").write_text(json.dumps({
+        "t2i": {"files": {"prompt/t2i/system_prompt.txt": {},
+                          "prompt/t2i/task_prompt.txt": {}}},
+        "edit": {"files": {"prompt/edit/task_prompt.txt": {}}}}))
+    fam = get_family("h3_image")
+    monkeypatch.setattr(image_steps, "family_of", lambda s: (fam, "base"))
+    server.spec.upsample_prompt = str(root / "manifest.json")
+    server.writer.mmproj = "/writer-mmproj.gguf"
+    prompt_utils = __import__("gmlx._vendor.mlx_vlm.prompt_utils",
+                              fromlist=["get_chat_template"])
+
+    def get_chat_template(processor, messages, add_generation_prompt, **kw):
+        server.messages.append(messages)
+        return "PICTURES PROMPT"
+
+    monkeypatch.setattr(prompt_utils, "get_chat_template", get_chat_template)
+
+    class Engine:
+        """A chat model whose thinking loops: the engine's budget closes it
+        with a newline and the end marker, as the server's criteria does,
+        and the model writes its JSON; without a budget it loops to the
+        cap and writes none."""
+
+        def generate(self, prompt, args, **media):
+            server.events.append("chat")
+            server.media.append((prompt, media))
+            thought = SimpleNamespace(text="The door is the second subject. ",
+                                      finish_reason=None)
+            if args.thinking_budget is None:
+                toks = [thought] * 40 + [SimpleNamespace(
+                    text="", finish_reason="length")]
+            else:
+                toks = [thought, SimpleNamespace(
+                    text='\n</think>\n\n{"expanded_caption": "'
+                    + H3_CAPTION + '"}', finish_reason="stop")]
+            return SimpleNamespace(prompt_tokens=9), iter(toks)
+
+    runtime = __import__("gmlx._vendor.mlx_vlm.server.runtime",
+                         fromlist=["runtime"])
+    monkeypatch.setattr(runtime, "runtime",
+                        SimpleNamespace(response_generator=Engine()))
+    return server
+
+
+def _pictures():
+    return [np.full((32, 64, 3), 7, np.uint8),
+            np.full((48, 48, 4), 9, np.uint8)]
+
+
+def test_minimax_h3_image_edit_sends_its_pictures_to_the_upsamplers_tower(h3):
+    """The edit's rewrite renders MiniMax's edit turn with each picture in
+    place, sends the pictures in order to the chat engine, samples at
+    MiniMax's settings, and is seeded by the image's seed. Its thinking
+    closes at its budget, with room for the reply after it, so a chat
+    model that would think to the cap still writes the caption."""
+    caption = image_upsample.revise("h3", "paint the door blue", True, True,
+                                    pictures=_pictures(), seed=5,
+                                    canvas=(1024, 768))
+    assert caption == H3_CAPTION
+    (sent,) = h3.requests
+    assert (sent.temperature, sent.top_p, sent.top_k, sent.min_p,
+            sent.max_tokens, sent.thinking, sent.seed,
+            sent.thinking_budget) == (1.0, 0.95, 20, 0.0, 5120, "on", 5,
+                                      3072)
+    ((msg,),) = h3.messages
+    assert msg["role"] == "user" and msg["content"][0]["text"] == "Edit task."
+    assert [c["text"] for c in msg["content"] if "Media" in c.get("text", "")
+            ] == ["Reference Media:\n- <Picture 1> [aspect_ratio 2:1]",
+                  "Reference Media:\n- <Picture 2> [aspect_ratio 1:1]"]
+    assert msg["content"][-1]["text"].count("Selection:\n4:3\n") == 1
+    ((prompt, media),) = h3.media
+    assert prompt == "PICTURES PROMPT"
+    assert [im.size for im in media["images"]] == [(64, 32), (48, 48)]
+    assert [im.mode for im in media["images"]] == ["RGB", "RGB"]
+
+
+def test_minimax_h3_image_captions_rerun_only_for_their_seed_and_pictures(h3):
+    """A sampled caption is kept by its seed and pictures: the same seed
+    and pictures reuse it, another seed or picture writes a new one, and
+    a rewrite without a seed is drawn afresh and not kept."""
+    def run(seed, pictures=None):
+        image_upsample.revise("h3", "paint the door blue", True, True,
+                              pictures=pictures or _pictures(), seed=seed)
+
+    run(5)
+    run(5)
+    assert h3.events.count("chat") == 1
+    run(6)
+    other = _pictures()
+    other[0][0, 0] = 8
+    run(6, other)
+    assert h3.events.count("chat") == 3
+    run(None)
+    run(None)
+    assert h3.events.count("chat") == 5
+    assert h3.requests[-1].seed is not None
+
+
+def test_minimax_h3_image_without_its_upsamplers_tower_is_a_server_error(h3):
+    h3.writer.mmproj = None
+    with pytest.raises(svc.ImageRequestError) as e:
+        image_upsample.revise("h3", "paint the door blue", True, True,
+                              pictures=_pictures(), seed=5)
+    assert e.value.status == 500
+    assert ("the MiniMax-H3-Image upsampler sees the reference images through "
+            "its vision tower, and the models: entry 'writer' has no mmproj"
+            ) in str(e.value)
+    assert "chat" not in h3.events
+    # A prompt without pictures runs the text turn without the tower.
+    assert image_upsample.revise("h3", "a red bicycle", True, False,
+                                 seed=5) == H3_CAPTION
+    assert h3.messages[-1] == [
+        {"role": "system", "content": "Expand prompts."},
+        {"role": "user", "content": "Prompt: a red bicycle"}]
+    assert h3.media[-1][1] == {}
+
+
+def test_an_edit_on_a_family_whose_upsampler_sees_no_pictures_runs_as_typed(
+        server):
+    """FLUX.3 klein's rewrite of an edit is skipped, pictures given or
+    not, and its chat turn is unchanged."""
+    assert image_upsample.revise("flux3", "swap them", True, True,
+                                 pictures=_pictures(), seed=5) is None
+    assert server.events == [] and server.requests == []
+    image_upsample.revise("flux3", "a red bicycle", True, False, seed=5)
+    (sent,) = server.requests
+    assert (sent.top_p, sent.top_k, sent.min_p) == (1.0, 0, 0.0)
+    assert "seed" not in sent.model_fields_set
+    assert server.media == [{}]

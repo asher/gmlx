@@ -53,6 +53,10 @@ log = logging.getLogger("gmlx")
 KEYFRAME_UPSAMPLING = "keyframe_upsampling"
 # The server feature that runs an AV step at the int8 setting it names.
 INT8_FEATURE = "int8"
+# The server feature that reads a step's PDD head by its place in the
+# sampler's schedule, and the transformer_options key that asks for it.
+HEADS_FEATURE = "heads_in_order"
+HEADS_OPTION = "gmlx_heads"
 
 
 class GmlxError(RuntimeError):
@@ -669,9 +673,15 @@ class StepClient:
                                       what="the VAE decode")
         return out["image"]
 
-    def vae_encode(self, model: str, image: torch.Tensor) -> torch.Tensor:
-        out, _, _ = self.call_tensors("/vae/encode", {"image": image.float()},
-                                      {"model": model}, what="the VAE encode")
+    def vae_encode(self, model: str, image: torch.Tensor,
+                   noise: torch.Tensor | None = None) -> torch.Tensor:
+        """Latents of ``image``: the mean, or a sample with ``noise`` in the
+        shape of the latents."""
+        tensors = {"image": image.float()}
+        if noise is not None:
+            tensors["noise"] = noise.float()
+        out, _, _ = self.call_tensors("/vae/encode", tensors, {"model": model},
+                                      what="the VAE encode")
         return out["latents"]
 
     def run_begin(self, model: str) -> str:

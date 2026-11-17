@@ -1290,10 +1290,11 @@ def _launch_served(a) -> tuple[str | None, dict] | None:
 def _image_size(a, image: str | None) -> str:
     """The ``defaults.size`` of the image model ``image`` in the config of
     the server the launch uses, else in the first default config, else
-    1024x1024."""
+    the size of its sampling row (``_row_size``)."""
     import gmlx.config as config
 
-    size = None
+    size = entry = None
+    dirs: list = []
     if image:
         served = _launch_served(a)
         if served is not None and served[0] is not None:
@@ -1301,14 +1302,47 @@ def _image_size(a, image: str | None) -> str:
             if isinstance(entry, dict) and isinstance(entry.get("defaults"),
                                                       dict):
                 size = entry["defaults"].get("size")
+            srv = served[1].get("server")
+            dirs = (srv.get("model_dirs") if isinstance(srv, dict) else None) or []
         else:
             cfg, _ = _discover_config()
             if cfg is not None and image in cfg.image_models:
-                size = cfg.image_models[image].defaults.get("size")
+                spec = cfg.image_models[image]
+                size = spec.defaults.get("size")
+                entry = {k: getattr(spec, k, None)
+                         for k in ("family", "variant", "path")}
+                dirs = list(getattr(cfg, "model_dirs", None) or [])
     try:
-        return config._image_size("size", size) if size else "1024x1024"
+        return (config._image_size("size", size) if size
+                else _row_size(entry, dirs))
     except config.ConfigError:
         return "1024x1024"
+
+
+def _row_size(entry, model_dirs) -> str:
+    """The size of the sampling row of an image entry: by its configured
+    ``family`` and ``variant``, else by its DiT's header, found as the
+    server finds it and read without mlx; 1024x1024 when neither names a
+    row."""
+    if not isinstance(entry, dict):
+        return "1024x1024"
+    try:
+        from gmlx.config import resolve_path
+        from gmlx.image.catalog import dit_identity
+        from gmlx.image.registry import family_named, get_family
+
+        fam = family_named(entry["family"]) if entry.get("family") else None
+        variant = entry.get("variant")
+        if (fam is None or variant is None) and entry.get("path"):
+            path = resolve_path(str(entry["path"]), list(model_dirs),
+                                cwd=False)
+            got = dit_identity(path)
+            if got is not None and (fam is None or got[0] == fam.name):
+                fam, variant = get_family(got[0]), variant or got[1]
+        row = fam.sampling_row(variant or "") if fam is not None else None
+    except Exception:  # noqa: BLE001 - a size hint for the launch only
+        row = None
+    return "1024x1024" if row is None else f"{row.size[0]}x{row.size[1]}"
 
 
 def _launch_claude_code(a, *, exec_fn) -> int:

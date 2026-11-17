@@ -49,8 +49,8 @@ class GmlxBinding:
     model_id: str
     status: dict
     manifest_count: int = 0
-    # The int8 setting of a MiniMax-H3 model's steps, from the model loader:
-    # "entry" follows the server's entry.
+    # The int8 setting of a MiniMax-H3 or MiniMax-H3-Image model's steps,
+    # from the model loader: "entry" follows the server's entry.
     int8: str = "entry"
     events: list = field(default_factory=list)
 
@@ -73,6 +73,11 @@ H3_NO_REFS = ("the gmlx nodes run MiniMax-H3 from the text prompt with keyframes
               "and take no references")
 # The server's family of MiniMax-H3 and FastH3, and FastH3's variant.
 H3_FAMILY = "h3"
+# The server's family of MiniMax-H3-Image, and the label ComfyUI's
+# MiniMaxH3ImageConditioning puts before each picture, the label the
+# server's encode reads it with.
+H3_IMAGE_FAMILY = "h3_image"
+H3_IMAGE_LABEL = "Picture %d: "
 FASTH3 = "fasth3"
 
 

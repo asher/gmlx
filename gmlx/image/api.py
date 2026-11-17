@@ -82,7 +82,7 @@ def sampler_defaults(family: str, variant: str) -> SamplerDefaults | None:
     if row is None:
         return None
     return SamplerDefaults(steps=row.steps, cfg=row.cfg, shift=row.shift,
-                           neg_skip=tuple(row.neg_skip))
+                           size=tuple(row.size), neg_skip=tuple(row.neg_skip))
 
 
 def fixed_steps(family, variant: str) -> int | None:
@@ -254,9 +254,25 @@ def _header_bytes(path, kind: str) -> int:
     return memfit.file_bytes(_header_view(str(path)), skip=skip)
 
 
+def _int8_bytes(dit, int8: str) -> int:
+    """The bytes the DiT at ``dit`` holds over its file at the int8
+    setting ``int8``, from its header: none but with int8 linears."""
+    from . import memfit
+    from .int8 import int8_parts
+
+    if int8_parts(int8)[1] != "int8":
+        return 0
+    from .loader import identify_dit
+    from .text_encoder import _header_view
+
+    return memfit.int8_held(_header_view(str(dit)),
+                            identify_dit(str(dit)).family, int8)
+
+
 def load(dit, *, text_encoder=None, vae=None, mmproj=None,
          encoder_model=None, encoder_gguf=None, variant=None,
-         memory: str = "auto", log=print) -> ImagePipeline:
+         memory: str = "auto", int8: str = "off",
+         log=print) -> ImagePipeline:
     """Load an image pipeline from a DiT GGUF, a text encoder GGUF or a
     resident chat model given as ``encoder_model=(model, tokenizer)``, and
     a VAE. ``encoder_gguf`` is the GGUF ``encoder_model`` was loaded from:
@@ -264,7 +280,8 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     it, and without it runs on the model's own. ``mmproj`` is the mmproj
     GGUF of the text encoder: with it the encoder loads with its vision
     tower, which a request with reference images needs and a text request
-    does not. With ``memory="auto"`` the
+    does not. ``int8`` is the DiT's int8 setting (``int8.INT8``), which
+    its family and this Mac must run. With ``memory="auto"`` the
     weights of all are gated on their header sizes before anything loads;
     ``memory="off"`` skips that gate, and each load still gates its own
     weights."""
@@ -283,7 +300,7 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     if mmproj is not None and text_encoder is None:
         raise ValueError("an mmproj loads with its text encoder GGUF; pass "
                          "text_encoder")
-    weights = {"dit": _header_bytes(dit, "dit"),
+    weights = {"dit": _header_bytes(dit, "dit") + _int8_bytes(dit, int8),
                "encoder": _header_bytes(text_encoder, "encoder"),
                "vae": _header_bytes(vae, "vae")}
     if mmproj is not None:
@@ -303,7 +320,7 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
     if text_encoder is not None or encoder_model is not None:
         spec = encoder_spec(found)
     model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
-                           identified=ident, log=log)
+                           identified=ident, log=log, int8=int8)
     fam = info.identified.family
     seconds["dit"] = time.perf_counter() - t0
     handle = None
@@ -341,7 +358,8 @@ def load(dit, *, text_encoder=None, vae=None, mmproj=None,
 
 
 def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
-                mmproj=None, variant=None, log=print) -> tuple:
+                mmproj=None, variant=None, int8: str = "off",
+                log=print) -> tuple:
     """Load an image pipeline in the staged order, for a request whose
     memory plan says ``staged_load``, and return it with what ``encode``
     returned.
@@ -355,14 +373,15 @@ def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
     and the DiT and the VAE load after that, so the encoder is never
     resident beside them. The conditionings ``encode`` made stay in the
     pipeline's cache. Reference images get their VAE latents after the
-    load, through ``encode_references``. Each load gates its own weights
-    against the working budget."""
+    load, through ``encode_references``. The DiT loads at the int8
+    setting ``int8``. Each load gates its own weights against the working
+    budget."""
     from .dtypes import image_activation
     from .loader import identify_dit, load_dit
     from .text_encoder import encoder_spec, load_encoder
     from .vae import load_vae
 
-    weights = {"dit": _header_bytes(dit, "dit"),
+    weights = {"dit": _header_bytes(dit, "dit") + _int8_bytes(dit, int8),
                "encoder": _header_bytes(text_encoder, "encoder"),
                "vae": _header_bytes(vae, "vae")}
     ident = identify_dit(str(dit), variant=variant)
@@ -387,7 +406,7 @@ def load_staged(dit, *, text_encoder, encode: Callable, vae=None,
         handle.release()
     t0 = time.perf_counter()
     model, info = load_dit(str(dit), variant=variant, act_dtype=act.dit,
-                           identified=ident, log=log)
+                           identified=ident, log=log, int8=int8)
     pipe.dit, pipe.variant = model, info.identified.variant
     seconds["dit"] = time.perf_counter() - t0
     t0 = time.perf_counter()
@@ -408,7 +427,7 @@ def _prefix_rows(pipe: ImagePipeline, cond: Conditioning) -> int:
     rows, where the prefix holds them, and the tokens of its reference
     latents."""
     p = pipe.dit.cfg.patch
-    if cond.pending:
+    if _pending(pipe, cond):
         px = pipe.vae_scale * p
         refs = sum((r.height // px) * (r.width // px) for r in cond.refs)
     else:
@@ -464,8 +483,9 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
     family whose plan prices the prompt, the prefix rows of each
     conditioning and whether the two of a guided request are one, the
     prefix states of other conditionings a cache holds and its bound,
-    every state it holds, the reference images the VAE encodes, and the
-    references each step runs.
+    every state it holds, the reference images the VAE encodes, the
+    references each step runs, and on a family whose caption holds the
+    vision rows of the references, those rows.
     ``conds`` is one Conditioning or several, as ``plan_request`` takes
     them, and a conditioning whose references came as latents alone, as
     those of the step routes do, is priced by their shapes.
@@ -486,6 +506,11 @@ def plan_terms(pipe: ImagePipeline, conds, *, height: int, width: int,
         prefix_other=0, prefix_bound=0,
         ref_sizes=_ref_sizes(states),
         step_refs=_step_refs(states, pipe.vae_scale))
+    row = memfit.PEAKS.get(pipe.family.name)
+    if states and row is not None and row.vision_edge:
+        # The caption holds the vision rows of the references beside the
+        # text rows.
+        terms["vision"] = max(len(c.image_slots) for c in states)
     parts = pipe.family.step
     if ref_cache is not None and memfit.prices_ref_cache(pipe.family.name):
         # No step sheds a state then, so the bound is all the cache holds.
@@ -572,6 +597,8 @@ def plan_request(pipe: ImagePipeline, *, height: int, width: int,
         vae_dtype=vae_dtype,
         encoder_owned=bool(resident and enc.owned and not keep_encoder),
         cache_bytes=caches, init_image=init_image, vae_price=price,
+        attention=getattr(pipe.dit, "attention", "dense"),
+        linears=getattr(pipe.dit, "linears", "file"),
         budget=budget, overcommit=overcommit, **terms)
     if plan.shed_bytes:
         shed_states(pipe, plan.shed_bytes, _states(conds), live)
@@ -687,11 +714,12 @@ def _encode_with_images(pipe: ImagePipeline, prompt: str,
 
 def encode_references(pipe: ImagePipeline, conds, *, plan=None):
     """``conds``, one Conditioning or several, with the VAE latents of
-    their reference images. Each image is encoded once, in mode, and its
-    latents stay in the pipeline's cache of reference latents under the
-    image's hash and the VAE's dtype. ``plan`` is the memory plan of the
-    request: an encode runs whole or in tiles as it says. A conditioning
-    without reference images comes back as it is."""
+    their reference images. Each image is encoded once, sampled with its
+    own noise or the family's ``ref_encode_seed`` draws, else in mode, and
+    its latents stay in the pipeline's cache of reference latents under
+    the image's hash, the VAE's dtype and the draws. ``plan`` is the
+    memory plan of the request: an encode runs whole or in tiles as it
+    says. A conditioning without reference images comes back as it is."""
     import dataclasses
 
     one = isinstance(conds, Conditioning)
@@ -706,7 +734,15 @@ def encode_references(pipe: ImagePipeline, conds, *, plan=None):
 
 def _reference_latents(pipe: ImagePipeline, ref: Reference, plan):
     vae = _need_vae(pipe)
-    key = (ref.sha256, str(getattr(vae, "dtype", "")))
+    noise, seed = ref.noise, pipe.family.ref_encode_seed
+    if noise is None and seed is not None:
+        s = vae.config.scale
+        noise = noise_from_seed(seed, (vae.config.latent_channels,
+                                       ref.height // s, ref.width // s))
+        draws = f"seed {seed}"
+    else:
+        draws = ref.noise_sha256
+    key = (ref.sha256, str(getattr(vae, "dtype", "")), draws)
     hit = pipe.reference_latents.get(key)
     if hit is not None:
         return hit
@@ -726,7 +762,9 @@ def _reference_latents(pipe: ImagePipeline, ref: Reference, plan):
     # The channels the VAE encodes: RGB, or RGBA on a VAE that reads alpha.
     px = ref.pixels[..., :vae.config.in_channels]
     x = mx.array(px.astype(np.float32) / 255.0)[None] * 2 - 1
-    z = tiling.encode(vae, x, tiled=tiled, mode="mode", free=room)[0]
+    how = ({"mode": "mode"} if noise is None
+           else {"mode": "sample", "noise": noise[None]})
+    z = tiling.encode(vae, x, tiled=tiled, free=room, **how)[0]
     mx.eval(z)
     pipe.reference_latents.put(key, z, array_bytes([z]))
     return z
@@ -906,11 +944,12 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
                  patch_table=None, target=None,
                  time: str = "reference",
                  ref_cache: dict | None = None,
-                 skip=()) -> mx.array:
+                 skip=(), head=None) -> mx.array:
     """The velocity of every row of ``latents`` at ``sigma``, a scalar or
     one value per row, under ``conds``, one Conditioning or one per row.
     ``target`` is the sigma the step goes to, likewise, which a flow map
-    DiT takes and every other DiT refuses. ``time`` names how the DiT
+    DiT and a DiT whose ``reads_target`` is set take, and every other DiT
+    refuses. ``time`` names how the DiT
     embeds the time, one of its ``time_rules``: "reference", the rule
     gmlx samples on, which every DiT takes. Outside a ``state_scope`` the
     conditionings of the call are its scope.
@@ -927,7 +966,9 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
     ComfyUI's Flux KV Cache node samples. A family whose step runs in
     parts takes ``ref_cache`` under another time rule than the reference's
     only. ``skip`` holds blocks, zero-based, that every row of the call
-    leaves out, for a DiT that skips blocks."""
+    leaves out, for a DiT that skips blocks. ``head`` is the index of the
+    head each row reads, a scalar or one per row, on a DiT with a bank of
+    step heads (``head_bank``), in place of the heads its target spans."""
     if time not in getattr(pipe.dit, "time_rules", ("reference",)):
         raise ValueError(f"the {pipe.family.title} DiT has no time rule "
                          f"{time!r}")
@@ -960,13 +1001,14 @@ def denoise_step(pipe: ImagePipeline, latents, sigma, conds, *,
 
     sig = per_row(sigma, "sigmas")
     tgt = None if target is None else per_row(target, "targets")
+    heads = _heads(pipe, head, b, time)
     rows = [conds] * b if isinstance(conds, Conditioning) else list(conds)
     if len(rows) != b:
         raise ValueError(f"{len(rows)} conditionings for {b} rows")
     with state_scope(pipe, rows):
         out = [_row(pipe, x[i:i + 1], sig[i], rows[i], table,
                     None if tgt is None else tgt[i], time, ref_cache, i,
-                    skip)
+                    skip, heads[i])
                for i in range(b)]
     return out[0] if b == 1 else mx.concatenate(out, axis=0)
 
@@ -993,8 +1035,19 @@ def _ident(cond: Conditioning) -> tuple:
             tuple(int(s) for s in cond.image_slots))
 
 
+def _pending(pipe: ImagePipeline, cond: Conditioning) -> bool:
+    """Whether ``cond`` waits for the latents of its reference images.
+    The image slots of a DiT whose caption reads them (``caption_slots``)
+    are vision rows of the prompt and no reference's place, so they wait
+    for nothing: ComfyUI's MiniMaxH3ImageConditioning without its VAE
+    conditions on the pictures through them alone."""
+    if getattr(pipe.dit, "caption_slots", False):
+        return bool(cond.refs) and not cond.ref_latents
+    return cond.pending
+
+
 def _need_latents(pipe: ImagePipeline, cond: Conditioning) -> None:
-    if cond.pending:
+    if _pending(pipe, cond):
         raise ValueError(
             "the conditioning has reference images and not their latents "
             "yet: pass it through encode_references first")
@@ -1143,17 +1196,43 @@ def _parts_row(pipe: ImagePipeline, parts, x: mx.array, sigma: np.float32,
                   lambda: parts.forward(dit, x, s, cond, state, mod))
 
 
+def _heads(pipe: ImagePipeline, head, b: int, time: str) -> list:
+    """The head index of each of ``b`` rows, None for each without
+    ``head``, refused on a DiT with no bank of step heads."""
+    if head is None:
+        return [None] * b
+    bank = getattr(pipe.dit, "head_bank", None)
+    if not bank:
+        raise ValueError(f"the {pipe.family.title} DiT has no bank of step "
+                         f"heads to name a head of")
+    if time != "reference":
+        raise ValueError("a step that names its head takes the reference's "
+                         "time rule")
+    a = np.asarray(head).reshape(-1)
+    if a.size not in (1, b):
+        raise ValueError(f"{a.size} heads for {b} rows")
+    out = []
+    for v in np.broadcast_to(a, (b,)):
+        if not np.issubdtype(a.dtype, np.integer) or not 0 <= v < bank:
+            raise ValueError(f"the {pipe.family.title} bank holds heads 0 "
+                             f"to {bank - 1}, not {v.tolist()!r}")
+        out.append(int(v))
+    return out
+
+
 def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
          cond: Conditioning, table, target=None,
          time: str = "reference", ref_cache: dict | None = None,
-         row: int = 0, skip: tuple = ()) -> mx.array:
+         row: int = 0, skip: tuple = (), head: int | None = None
+         ) -> mx.array:
     """One row. A DiT that takes reference images gets the tokens of the
-    conditioning's reference latents from its ``references``, and a flow
-    map the ``target`` its modulation reads. A time rule other than the
+    conditioning's reference latents from its ``references``, and a DiT
+    that reads the sigma its step goes to the ``target``. A time rule other than the
     reference's reaches the DiT through its modulation, and a family whose
     step runs in parts runs it whole then. ``ref_cache`` is that of
     ``denoise_step``, and ``row`` the row's place in its call. ``skip``
-    reaches the DiT only when it holds a block."""
+    reaches the DiT only when it holds a block, and ``head`` its
+    modulation when it names one."""
     dit = pipe.dit
     modulated = hasattr(dit, "modulation") and hasattr(dit, "caption")
     kw = {"skip": skip} if skip else {}
@@ -1173,10 +1252,18 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
         if not hasattr(dit, "references"):
             raise ValueError(f"the {pipe.family.title} DiT takes no "
                              f"reference images")
-        refs = dit.references([mx.array(z)[None] for z in cond.ref_latents])
+        draws = {}
+        if getattr(dit, "seeded_refs", False):
+            draws = {"seed": cond.ref_seed, "noise": (
+                [mx.array(n) for n in cond.ref_noise] if cond.ref_noise
+                else None)}
+        refs = dit.references([mx.array(z)[None] for z in cond.ref_latents],
+                              **draws)
         if ref_cache is not None:
             if skip:
                 raise ValueError("a cached reference row skips no blocks")
+            if head is not None:
+                raise ValueError("a cached reference row names no head")
             return _cached_row(pipe, x, sigma, cond, table, time, refs,
                                ref_cache, _ref_key(cond, row))
         kw["refs"] = refs
@@ -1185,7 +1272,7 @@ def _row(pipe: ImagePipeline, x: mx.array, sigma: np.float32,
             kw["target"] = np.reshape(np.float32(target), (1,))
         return _under(pipe, table, lambda: dit(
             x, np.reshape(sigma, (1,)), cond.features[None], **kw))
-    mod = _modulation(pipe, sigma, table, target, time)
+    mod = _modulation(pipe, sigma, table, target, time, head)
     caption = _caption(pipe, cond, table)
     return _under(pipe, table, lambda: dit(
         x, np.reshape(sigma, (1,)), None, mod=mod, caption=caption, **kw))
@@ -1227,11 +1314,16 @@ def _memo(cache: ByteLRU, key, make):
 
 
 def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None,
-                time: str = "reference"):
-    """The modulation of ``sigma``, and of ``target`` for a flow map, kept
-    under their float32 bits and the patch table, and under the time rule
-    when it is not the reference's."""
+                time: str = "reference", head: int | None = None):
+    """The modulation of ``sigma``, and of ``target`` for a DiT that reads
+    the sigma its step goes to, kept under their float32 bits and the
+    patch table, and under the time rule when it is not the reference's.
+    A ``head`` index takes the place of the target."""
     s = np.float32(sigma)
+    if head is not None:
+        return _memo(pipe.modulations, (s.tobytes(), table, "head", head),
+                     lambda: _under(pipe, table, lambda: pipe.dit.modulation(
+                         np.reshape(s, (1,)), 1, head=head)))
     if time != "reference":
         if target is not None:
             raise ValueError("a flow map takes the reference's time rule")
@@ -1249,11 +1341,18 @@ def _modulation(pipe: ImagePipeline, sigma: np.float32, table, target=None,
 
 
 def _caption(pipe: ImagePipeline, cond: Conditioning, table):
+    """The DiT's caption of ``cond``, kept under its key and the patch
+    table. A DiT whose caption reads the image slots of the prompt's
+    pictures (``caption_slots``) takes them, and they join the key."""
+    kw, key = {}, (cond.key, table)
+    if getattr(pipe.dit, "caption_slots", False):
+        slots = tuple(int(s) for s in cond.image_slots)
+        kw, key = {"slots": slots}, key + (slots,)
     make = lambda: _under(  # noqa: E731
-        pipe, table, lambda: pipe.dit.caption(cond.features[None]))
+        pipe, table, lambda: pipe.dit.caption(cond.features[None], **kw))
     if not cond.key:
         return make()
-    return _memo(pipe.captions, (cond.key, table), make)
+    return _memo(pipe.captions, key, make)
 
 
 def guide(v_pos: mx.array, v_neg: mx.array, cfg: float,
@@ -1298,6 +1397,26 @@ def image_tokens(pipe: ImagePipeline, height: int, width: int) -> int:
     return (height // token_px) * (width // token_px)
 
 
+# The rules a sample reads step heads by: None, the heads each step's span
+# reads, and "in_order", head i at step i.
+HEAD_RULES = (None, "in_order")
+
+
+def check_heads(pipe, steps: int) -> None:
+    """Refuse heads in order on a DiT with no bank of step heads, or for
+    more steps than the bank holds heads. ``pipe`` needs ``dit`` and
+    ``family``."""
+    bank = getattr(pipe.dit, "head_bank", None)
+    if not bank:
+        raise RequestRefusal(f"the {pipe.family.title} DiT has no bank of "
+                             f"step heads to read in order")
+    if steps > bank:
+        raise RequestRefusal(
+            f"heads in order read head i at step i, and the "
+            f"{pipe.family.title} bank holds {bank} heads, not the {steps} "
+            f"steps of this schedule")
+
+
 def image_sigmas(pipe: ImagePipeline, steps: int, height: int,
                  width: int) -> np.ndarray:
     """The schedule of ``steps`` for an image of ``height`` by ``width``.
@@ -1312,7 +1431,7 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
            seed: int | None = None, noise=None, sampler: str = "euler",
            sigmas=None, init_latents=None, denoise: float = 1.0, mask=None,
            patch_table=None, on_step=None, should_stop=None,
-           plan=None, neg_skip=None) -> mx.array:
+           plan=None, neg_skip=None, heads: str | None = None) -> mx.array:
     """Sample latents for ``cond``. With ``init_latents`` the run is
     img2img from strength ``denoise``, and a ``mask`` (1 where the image
     changes) makes it inpainting. ``noise`` is (B, C, H, W) float32, else
@@ -1326,8 +1445,16 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
     positive velocity before it runs the negative row, and the two give
     the latents of a step that evaluates both together. ``neg_skip`` holds
     the blocks the negative pass of a guided step skips, the variant's
-    sampling row's when None."""
+    sampling row's when None. A DiT that mixes noise into its reference
+    rows draws it from the seed of the noise, given or random, unless the
+    conditioning holds that noise or a seed of its own. ``heads``
+    "in_order" has step i of the schedule read head i of a DiT with a
+    bank of step heads, as diffusers samples one, in place of the heads
+    each step's span reads (None)."""
     patch_table = _table_id(pipe, patch_table)
+    if heads not in HEAD_RULES:
+        raise ValueError(f"heads is one of {', '.join(map(str, HEAD_RULES))}"
+                         f", not {heads!r}")
     if cfg is None:
         cfg = pipe.defaults.cfg
     if neg_skip is None:
@@ -1339,12 +1466,18 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             raise ValueError("neg_skip needs guidance: cfg is 1.0")
     flow_map = bool(getattr(pipe.dit.cfg, "flow_map", False))
     check_sampling(pipe.family, pipe.variant, flow_map, cfg, sampler)
+    reads_target = flow_map or bool(getattr(pipe.dit, "reads_target", False))
     if cfg != 1.0 and neg is None:
         raise ValueError(f"cfg {cfg} needs a negative conditioning")
     unit = pipe.size_multiple
     if height <= 0 or width <= 0 or height % unit or width % unit:
         raise ValueError(f"height and width must be positive multiples of "
                          f"{unit}, not {height}x{width}")
+    from .registry import size_refusal
+
+    why = size_refusal(pipe.family, width, height)
+    if why:
+        raise RequestRefusal(why)
     if not 0.0 < denoise <= 1.0:
         raise RequestRefusal(f"denoise must lie in (0, 1], not {denoise}")
     if init_latents is None and (denoise < 1.0 or mask is not None):
@@ -1359,11 +1492,15 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             raise ValueError(f"steps {steps} disagrees with "
                              f"{len(s) - 1} steps of sigmas")
     init = None
+    first = 0
     if init_latents is not None:
         init = mx.array(init_latents).astype(mx.float32)
-        s = s[img2img_start(len(s) - 1, denoise):]
+        first = img2img_start(len(s) - 1, denoise)
+        s = s[first:]
         if len(s) < 2:
             raise RequestRefusal(f"denoise {denoise} leaves no step")
+    if heads == "in_order":
+        check_heads(pipe, len(s) - 1 + first)
 
     if init is not None:
         b = init.shape[0]
@@ -1378,10 +1515,15 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         raise ValueError(f"init_latents {tuple(init.shape)} do not match "
                          f"{shape}")
     if noise is None:
-        noise = noise_from_seed(secrets.randbelow(1 << 63)
-                                if seed is None else seed, shape)
+        if seed is None:
+            seed = secrets.randbelow(1 << 63)
+        noise = noise_from_seed(seed, shape)
     elif seed is not None:
         raise ValueError("pass seed or noise, not both")
+    if getattr(pipe.dit, "seeded_refs", False):
+        cond = _seed_refs(pipe, cond, seed)
+        if neg is not None:
+            neg = _seed_refs(pipe, neg, seed)
     noise = mx.array(noise).astype(mx.float32)
     if tuple(noise.shape) != shape:
         raise ValueError(f"noise {tuple(noise.shape)} does not match {shape}")
@@ -1404,15 +1546,17 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
         for i in range(smp.steps):
             if should_stop is not None and should_stop():
                 raise SampleStopped(i, x)
-            to = s[i + 1] if flow_map else None
+            to = s[i + 1] if reads_target else None
+            head = first + i if heads == "in_order" else None
             v = denoise_step(pipe, x, s[i], cond, patch_table=patch_table,
-                             target=to)
+                             target=to, head=head)
             if cfg != 1.0:
                 if one_row:
                     mx.eval(v)
                 v = guide(v, denoise_step(pipe, x, s[i], neg,
                                           patch_table=patch_table,
-                                          target=to, skip=neg_skip),
+                                          target=to, skip=neg_skip,
+                                          head=head),
                           cfg, act)
             x = smp.step(x, v, i)
             if m is not None:
@@ -1423,6 +1567,23 @@ def sample(pipe: ImagePipeline, cond: Conditioning, *,
             if on_step is not None:
                 on_step(i, x)
     return x
+
+
+def _seed_refs(pipe: ImagePipeline, cond: Conditioning, seed):
+    """``cond`` with the request's ``seed`` for the noise its DiT mixes
+    into the reference rows, unless it holds that noise or a seed already.
+    A request whose noise came without a seed gives none, and its
+    references are refused without their noise."""
+    import dataclasses
+
+    if not (cond.refs or cond.ref_latents) or cond.ref_noise \
+            or cond.ref_seed is not None:
+        return cond
+    if seed is None:
+        raise ValueError(f"{pipe.family.title} references mix noise from "
+                         "the request's seed: pass a seed, or the "
+                         "conditioning's ref_noise with the noise")
+    return dataclasses.replace(cond, ref_seed=int(seed))
 
 
 def _need_vae(pipe: ImagePipeline):

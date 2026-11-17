@@ -21,6 +21,16 @@ def test_native_bf16_chips_run_bf16_everywhere():
         assert dtypes.vae_dtype(gen=gen) == mx.bfloat16
 
 
+def test_every_vae_row_runs_in_its_familys_activation():
+    from gmlx.image.vae import reader
+
+    for fam, row in reader.VAES.items():
+        for gen in (0, 15, 17):
+            vae = image_activation(fam, gen=gen).vae
+            assert reader.resolve_dtype(vae, row.dtypes) == vae, fam
+    assert image_activation("h3_image", gen=17).vae == mx.float16
+
+
 def test_m1_and_m2_need_the_override(monkeypatch):
     monkeypatch.delenv(dtypes.ALLOW_FP16_ENV, raising=False)
     for gen, chip in ((13, "M1"), (14, "M2")):

@@ -31,7 +31,8 @@ curl -s localhost:8080/v1/images/generations \
 Each route also answers without the `/v1` prefix. In `/v1/models` an image
 model has `"image": true`, its `family` and `variant`, and `edit: true` when
 it edits from reference images: FLUX.2 klein and FLUX.3 klein always, and
-Qwen-Image 2.1 when the entry has its encoder's vision tower. It carries
+Qwen-Image 2.1 and MiniMax-H3-Image when the entry has its encoder's vision
+tower. It carries
 `resident`, `pinned` and `default`, where `default` marks the default image
 model, and no context figures.
 
@@ -44,7 +45,9 @@ model, and no context figures.
 | `n` | Images to make, 1 to 10, at seeds `seed`, `seed` plus 1 and so on. |
 | `size` | `WxH`, or `auto` for the entry's default size. Sides are multiples of the model's size step, at most 4096, and an image at most 2048x2048 pixels. |
 | `quality` | `low`, `medium`, `high` or `auto`, each a step count. `standard` reads as `medium`, and `hd` as `high`. |
-| `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. |
+| `steps` | [Steps](glossary.md#steps), 1 to 200, in place of `quality`. `sigmas` hold at most 201 values, for the same 200 steps. |
+| `sigmas` | Noise levels, first to last, as `[1, 0.9230769, 0]`, in place of `quality` and `steps`. Unset, a LoRA's [schedule](images.md#adapter-schedules) or the model's. |
+| `int8` | `off`, `attention`, `linears` or `all`: the MiniMax-H3-Image DiT parts run in int8 on an M5 or newer; others take `off`. Unset, `defaults.int8`, else `off`. |
 | `seed` | The seed of the first image, random without it. |
 | `guidance` | [Guidance](glossary.md#guidance), 1 to 30. 1 turns it off. |
 | `negative_prompt` | What to steer away from, read when `guidance` is above 1. It is never rewritten. |
@@ -61,6 +64,11 @@ model, and no context figures.
 | `partial_images` | 0 to 3 images of the work in progress before the final one, in a stream. |
 | `image`, `image[]`, `images` | The images of an edit or a variation. |
 | `mask` | An image with an alpha channel. An edit changes the pixels whose alpha is below 128. |
+
+A model with size limits of its own takes them in place of the `size`
+limits: MiniMax-H3-Image takes 655,360 to 20,000,000 pixels, a side of at
+most 7712 and shapes from 1:3 to 3:1. A size under its least pixels gets
+400 naming the smallest size of that shape.
 
 The default image model is the one that
 [`server.defaults.image_model`](config.md#serverdefaultsimage_model) names,
@@ -94,10 +102,13 @@ GIF.
 | Qwen-Image 2.1 | Up to 10 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
 | FLUX.2 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
 | FLUX.3 klein | Up to 10 reference images, with no vision tower | The image as a reference, with an instruction to make a variation of it |
+| MiniMax-H3-Image | Up to 16 reference images, when the entry has `encoder_mmproj` | The image as a reference, with an instruction to make a variation of it |
 
 Without `size`, the result takes the size of the first image, cut down to
-the model's size step and the size limits. With a `mask`, the edit starts
-from the first image at `strength` 1 and changes only the masked region.
+the model's size step and the size limits, its model's own where it has
+them. A first image that a model's own limits refuse gets 400 asking for
+a size. With a `mask`, the edit starts from the first
+image at `strength` 1 and changes only the masked region.
 
 FLUX.3 klein scales a single reference down to at most the area of
 2048x2048 pixels, and pads it out to sides that are multiples of 16. Of
@@ -118,6 +129,15 @@ A reference needs sides of at least 64 pixels, and neither side more than
 reference as prepared, scaled into the same limits, and is not cropped
 back. A 500x300 image gives a 496x288 result, and an 8000x1000 image,
 prepared at 5712x704, gives a 4096x496 result.
+
+MiniMax-H3-Image prepares each reference as ComfyUI's
+`MiniMaxH3ImageConditioning` node does. The VAE encodes a copy whose short
+side is scaled into 1024 to 2048 pixels, and the prompt reads a copy
+whose short side is scaled to 1024, each side rounded to a multiple of
+32. The prompt names them as Picture 1, Picture 2 and on, in the order of
+the images. Without `size` the result has the size of the first image's
+VAE copy, so a 640x480 image gives a 1376x1024 result. An image outside
+1:3 to 3:1 gets 400 naming it.
 
 ## URL responses
 
@@ -154,12 +174,15 @@ for event in stream:
 | A chat model id on an image route | 400 `wrong_model_kind` |
 | The model's file is gone | 404 `model_file_missing` |
 | The entry's VAE, encoder or mmproj is of another model | 400 `image_model_mismatch` |
-| A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits |
+| A size that does not fit in memory beside the loaded models | 400 naming the largest size of its shape that fits, or that none its model takes fits and its smallest |
 | More reference images than fit in memory | 400 naming the count and the reference size that fit |
 | An edit image whose decode, priced from its header beside the body and the images before it, needs more than the memory free | 413 naming the image's pixels and both figures, before it decodes |
 | The request's `adapters` need more memory than the budget leaves beside the model, its shared encoder and the pinned models | 413 naming the GB they need and the room |
 | The request's `adapters` need memory that is not free now | 503 `server_overloaded` with `Retry-After` and what to wait for or free ([A LoRA is refused for memory](troubleshooting.md#a-lora-is-refused-for-memory)) |
 | A request LoRA over a set [`image.adapter_cache_mb`](config.md#serverimageadapter_cache_mb) | 400 naming that key |
+| LoRAs whose [schedules](images.md#adapter-schedules) disagree, a sidecar that does not read or is another file's, or a schedule's size a request could not give | 400 naming them |
+| `sigmas` whose step count differs from `steps`, more than 200 steps, or more steps than MiniMax-H3-Image has step heads | 400 naming them |
+| An `int8` off the list, one whose linears differ from the entry's, or one this Mac or install cannot run | 400 naming `int8`, as in [Int8 refusals](troubleshooting.md#int8-refusals) |
 | One of several FLUX.3 klein references is under 16 pixels on a side | 400 naming the image |
 | A FLUX.2 klein reference is under 64 pixels on a side, or one side is more than 8 times the other | 400 naming the image |
 | `prompt_upsampling: true` on an entry without an upsampler | 400 naming the `upsampler` setting |

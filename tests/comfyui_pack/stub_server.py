@@ -76,7 +76,17 @@ COMFY = {
            "edit": False, "context": ("condition_proj.weight", 1),
            "audio": {"channels": 32, "stereo": 2, "sample_rate": 32000,
                      "latents_per_second": 40}},
+    # MiniMax-H3-Image steps on one latent frame, takes the timestep as sigma
+    # times 1000 and reads the sigma its step goes to from the schedule. Its
+    # VAE samples an encode with the noise of seed 42, and its references
+    # come with the noise of their rows.
+    "h3_image": {"model_class": "MiniMaxH3Image", "image_model": "minimax_h3_image",
+                 "latent": {"channels": 24, "stride": 16, "patch": 2, "frames": 1},
+                 "vae": {"channels_out": 3, "stride": 16, "space": "model", "encode_seed": 42},
+                 "edit": True, "context": ("condition_proj.weight", 1), "time_scale": 0.001},
 }
+# The families whose status names their entry's int8 setting.
+INT8 = {"h3", "h3_image"}
 # The families whose DiT leaves out the blocks a step names.
 SKIPS = {"moss_image"}
 TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
@@ -84,6 +94,9 @@ TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0
 # flow shift 10, in float64, each rounded once to float32, then 0.
 FASTH3_SIGMAS = [float(np.float32(10.0 * b / (1.0 + 9.0 * b)))
                  for b in (t / 1000.0 for t in (999, 874, 749, 624, 500, 375, 250, 125))] + [0.0]
+# MiniMax-H3-Image's PDD grid, its six steps.
+H3_IMAGE_SIGMAS = [1.0, 0.9675236940383911, 0.8875485062599182, 0.75, 0.5327739119529724,
+                   0.23200887441635132, 0.0]
 # The schedule rules of the server's status, for the families whose
 # schedule follows the image size.
 QWEN21_RULE = {"rule": "qwen_image21", "base_len": 256, "max_len": 8192, "base_shift": 0.5,
@@ -120,6 +133,9 @@ MODELS = {
                            "sigmas": None, "schedule": None}),
     "fasth3": ("h3", "fasth3", {"steps": 8, "cfg": 1.0, "shift": 10.0, "audio_shift": 3.0,
                                 "sigmas": FASTH3_SIGMAS, "schedule": None}),
+    "minimax-h3-image": ("h3_image", "pruned",
+                         {"steps": 6, "cfg": 1.0, "shift": 1.0, "sigmas": H3_IMAGE_SIGMAS,
+                          "schedule": None}),
 }
 # The manifest of a model whose file is not its family's fixture.
 FIXTURE = {"flux-3-klein-base": "flux3_klein-base"}
@@ -230,6 +246,11 @@ class State:
         """Whether the model is a flow map DiT, which reads the client's schedule."""
         return any(t["name"].startswith("ref_time_in.") for t in self.manifest(mid)["tensors"])
 
+    def reads_target(self, mid) -> bool:
+        """Whether the model's DiT reads the sigma its step goes to from the
+        client's schedule, a flow map or MiniMax-H3-Image's PDD heads."""
+        return self.flow_map(mid) or MODELS[mid][0] == "h3_image"
+
     def context_dim(self, fam):
         name, axis, *times = COMFY[fam]["context"]
         t = next(t for t in self.manifests[fam]["tensors"]
@@ -324,7 +345,7 @@ class Handler(BaseHTTPRequestHandler):
                 "families": sorted(COMFY), "conventions": ["comfy"], "patch_kinds": ["lora"],
                 "features": ["prefix_cache", "noise_mask", "rgba_vae", "tiled_vae", "ref_cache",
                              "skip_blocks", "av_step", "anchors", "keyframe_upsampling",
-                             "int8"],
+                             "int8", "ref_noise", "heads_in_order"],
                 "limits": {"max_tensor_bytes": 1 << 30, "max_adapter_bytes": 1 << 30, "max_rows": 16,
                            "max_body_bytes": st.max_body}})
         if sub == "/models":
@@ -342,7 +363,7 @@ class Handler(BaseHTTPRequestHandler):
             if parts[2] == "status":
                 f = COMFY[fam]
                 extra = {"audio": dict(f["audio"])} if "audio" in f else {}
-                if "audio" in f and st.status_int8:
+                if fam in INT8 and st.status_int8:
                     extra["int8"] = st.entry_int8
                 return self._json(200, {
                     "model": parts[1], "family": fam, "variant": variant, "resident": True,
@@ -526,7 +547,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._err(409, "the encode was interrupted", code="interrupted")
         fam = m[0]
         spans = []
-        if images and fam == "h3":
+        if images and fam == "h3_image":
+            # Pictures: a 4-token label and a block of one pad per 32 x 32
+            # pixels with its two markers each, before the prompt.
+            at = 0
+            for im in images:
+                at += 4
+                spans.append([at, at + (im.shape[0] // 32) * (im.shape[1] // 32) + 2])
+                at = spans[-1][1]
+        elif images and fam == "h3":
             # Keyframes: a 3-token label and a block of one pad per 32 x 32
             # pixels with its two markers each, before the prompt.
             if m[1] == "fasth3":
@@ -575,7 +604,8 @@ class Handler(BaseHTTPRequestHandler):
         if "cond_typed" in hashes:
             fields.update(cond_typed=hashes["cond_typed"])
         if spans:
-            fields.update(spans=spans, image_slots=[])
+            fields.update(spans=spans, image_slots=[] if fam == "h3" else [
+                r for a, b in spans for r in range(a + 1, b - 1)])
         st.event(kind="encode", model=req["model"], text=req["text"], tokens=n, images=len(images), refs=want_refs,
                  frames=clip[0], keyframes=clip[1], revised=revised,
                  cond=hashes["cond"], cond_typed=hashes.get("cond_typed"), spans=spans,
@@ -603,7 +633,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, "x is (B, C, h, w) with one row per entry of rows")
         missing = []
         for r in rows:
-            for h in [r.get("cond")] + list(r.get("ref_latents") or []):
+            for h in [r.get("cond")] + list(r.get("ref_latents") or []) + list(
+                    r.get("ref_noise") or []):
                 if h not in st.tensors:
                     missing.append(h)
         if req.get("patch_table") and req["patch_table"] not in st.tables:
@@ -611,18 +642,23 @@ class Handler(BaseHTTPRequestHandler):
         if missing:
             st.event(kind="step_missing", run=rid, missing=len(set(missing)))
             return self._err(409, "not held", missing=sorted(set(missing)))
+        if self._int8_refused(req):
+            return
         skip = req.get("skip")
         if skip is not None and (MODELS[req["model"]][0] not in SKIPS or not isinstance(skip, list)
                                  or not all(isinstance(i, int) for i in skip)):
             return self._err(400, f"{req['model']!r} skips no blocks")
         sched = tensors.get("sample_sigmas")
         targets = None
-        if st.flow_map(req["model"]):
+        if st.reads_target(req["model"]):
             if sched is None or len(sched[1]) != 1 or sched[1][0] < 2:
-                return self._err(400, "a flow map step holds sample_sigmas, the schedule the "
+                return self._err(400, "a step on this DiT holds sample_sigmas, the schedule the "
                                       "client samples on")
+            # The schedule is in sigmas, and a timestep is a sigma over the family's scale.
+            scale = COMFY[MODELS[req["model"]][0]].get("time_scale", 1.0)
             s = sched[3].astype(np.float32)
-            targets = [float(s[min(int(np.abs(s - np.float32(v)).argmin()) + 1, len(s) - 1)])
+            targets = [float(s[min(int(np.abs(s - np.float32(scale * float(v))).argmin()) + 1,
+                                   len(s) - 1)])
                        for v in ts[3].astype(np.float32).reshape(-1)]
         gen = run.gen if run else 0
         st.event(kind="step_begin", run=rid)
@@ -647,11 +683,16 @@ class Handler(BaseHTTPRequestHandler):
                  ref_shapes=[[list(st.tensors[h][1]) for h in r.get("ref_latents") or []]
                              for r in rows],
                  image_slots=[r.get("image_slots") for r in rows],
+                 ref_noise=[[list(st.tensors[h][1]) for h in r.get("ref_noise") or []]
+                            for r in rows],
+                 ref_noise_sums=[[float(st.tensors[h][2].astype(np.float64).sum())
+                                  for h in r.get("ref_noise") or []] for r in rows],
                  prefix_cache=[r.get("prefix_cache", True) for r in rows],
                  ref_cache=req.get("ref_cache", False), skip=skip,
                  row_keys=sorted({k for r in rows for k in r}), patch_table=req.get("patch_table"),
                  fields=sorted(req), tensors=sorted(tensors), targets=targets,
-                 sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)])
+                 sample_sigmas=None if sched is None else [float(v) for v in sched[3].reshape(-1)],
+                 int8=req.get("int8"), heads=req.get("heads"))
         self._send(200, write_body({"out": out.astype(np.float32)}), ctype=CONTENT_TYPE, headers={
             "X-Gmlx-Forward-Ms": f"{fwd:.3f}",
             "X-Gmlx-Server-Ms": f"{(time.perf_counter() - t0) * 1000:.3f}",
@@ -670,6 +711,31 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.005)
         return True
 
+    def _int8_refused(self, req) -> bool:
+        """The server's refusals of a step's int8 setting, before it runs;
+        True when one was sent."""
+        int8 = req.get("int8")
+        lin = {"off": False, "attention": False, "linears": True, "all": True}
+        if int8 is not None and int8 not in lin:
+            self._err(400, f"int8 is off, attention, linears or all, not {int8!r}", param="int8")
+            return True
+        fam, variant, _s = MODELS[req["model"]]
+        if int8 is not None and fam not in INT8:
+            self._err(400, f"{req['model']!r} takes no int8 setting", param="int8")
+            return True
+        entry = self.st.entry_int8
+        if int8 is not None and lin[int8] != lin[entry]:
+            a, b = [v for v in lin if lin[v] == lin[entry]]
+            self._err(400, f"this model's entry loads its DiT at int8 {entry}, so a request "
+                      f"names int8 {a} or {b}, not {int8}; set the entry's defaults.int8 to "
+                      f"run {int8}", param="int8")
+            return True
+        if int8 in ("attention", "all") and variant == "fasth3":
+            self._err(400, "MiniMax-H3 fasth3 runs video sparse attention, and int8 attention "
+                      "applies to dense attention only", param="int8")
+            return True
+        return False
+
     def _av_step(self, tensors, req, t0, rid, run):
         """A stub AV step: one clip, its video (1, C, T, h, w) and audio
         (1, C, 2, T), one row with its cond alone, and the shifts."""
@@ -684,21 +750,9 @@ class Handler(BaseHTTPRequestHandler):
         shifts = req.get("shifts")
         if not isinstance(shifts, dict) or set(shifts) != {"video", "audio"}:
             return self._err(400, "an AV step names its shifts, video and audio")
-        # The server's refusals of an int8 setting, before the step runs.
         int8 = req.get("int8")
-        lin = {"off": False, "attention": False, "linears": True, "all": True}
-        if int8 is not None and int8 not in lin:
-            return self._err(400, f"int8 is off, attention, linears or all, not {int8!r}",
-                             param="int8")
-        entry = st.entry_int8
-        if int8 is not None and lin[int8] != lin[entry]:
-            a, b = [v for v in lin if lin[v] == lin[entry]]
-            return self._err(400, f"this model's entry loads its DiT at int8 {entry}, so a "
-                             f"request names int8 {a} or {b}, not {int8}; set the entry's "
-                             f"defaults.int8 to run {int8}", param="int8")
-        if int8 in ("attention", "all") and MODELS[req["model"]][1] == "fasth3":
-            return self._err(400, "MiniMax-H3 fasth3 runs video sparse attention, and int8 "
-                             "attention applies to dense attention only", param="int8")
+        if self._int8_refused(req):
+            return
         anchors = req.get("anchors") or []
         named = [a[k] for a in anchors for k in ("video", "noise", "audio") if a.get(k)]
         missing = [h for h in [rows[0]["cond"], *named] if h not in st.tensors]
@@ -846,7 +900,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._err(400, f"the image is not a multiple of {stride}")
         a = im[3].astype(np.float32)[..., 0].reshape(B, H // stride, stride, W // stride, stride)
         z = a.mean(axis=(2, 4))[:, None].repeat(ch, axis=1).astype(np.float32)
-        self.st.event(kind="vae_encode", shape=im[1])
+        noise = tensors.get("noise")
+        if noise is not None:
+            if "encode_seed" not in COMFY[fam]["vae"] or list(noise[1]) != list(z.shape):
+                return self._err(400, f"vae/encode takes noise {list(z.shape)} on a model "
+                                      "whose VAE samples")
+            z = z + np.float32(0.1) * noise[3].astype(np.float32)
+        self.st.event(kind="vae_encode", shape=im[1],
+                      noise=None if noise is None else list(noise[1]),
+                      noise_sum=None if noise is None
+                      else float(noise[3].astype(np.float64).sum()))
         self._send(200, write_body({"latents": z}), ctype=CONTENT_TYPE)
 
 

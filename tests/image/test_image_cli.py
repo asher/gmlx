@@ -358,6 +358,37 @@ def test_an_entry_defaults_size_is_the_size_without_size(env, tmp_path):
         assert (a.size, b.size) == ((48, 32), (32, 32))
 
 
+def test_int8_on_a_family_without_it_is_refused_before_any_load(
+        env, tmp_path, monkeypatch, capsys):
+    """--int8 names the setting, else the entry's defaults.int8, and a
+    family without the part it names is refused before a weight loads.
+    The flag wins over the entry."""
+    loads = []
+    real = api.load
+    monkeypatch.setattr(api, "load", lambda dit, **kw: loads.append(
+        kw.get("int8")) or real(dit, **kw))
+    out = str(tmp_path / "a.png")
+    assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
+                                     "--output", out, "--int8",
+                                     "attention"]) == 1
+    assert "gmlx runs Z-Image with dense attention only" in \
+        capsys.readouterr().err
+    assert env.pipes == [] and loads == []
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(f"server:\n  model_dirs:\n    - {tmp_path}\n"
+                   "image_models:\n  zit:\n    path: dit.gguf\n"
+                   "    encoder: enc.gguf\n    vae: vae.gguf\n"
+                   "    defaults: {int8: linears}\n")
+    base = ["image", "generate", "zit", "--config", str(cfg), "--prompt",
+            "p", "--size", "32x32", "--seed", "1", "--output", out]
+    assert umbrella_main(base) == 1
+    assert "gmlx runs Z-Image with its file's linears only" in \
+        capsys.readouterr().err
+    assert loads == []
+    assert umbrella_main(base + ["--int8", "off"]) == 0
+    assert loads == ["off"]
+
+
 def test_the_png_carries_the_settings_unless_told_not_to(env, tmp_path):
     from PIL import Image
 
@@ -618,7 +649,7 @@ def test_an_unknown_variant_needs_steps_and_guidance(env, tmp_path, capsys):
     out = str(tmp_path / "a.png")
     assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
                                      "--output", out]) == 1
-    assert "pass --steps and --guidance" in capsys.readouterr().err
+    assert "pass --steps or --sigmas, and --guidance" in capsys.readouterr().err
     assert umbrella_main(env.base + ["--prompt", "p", "--size", "32x32",
                                      "--steps", "2", "--guidance", "1",
                                      "--output", out]) == 0
@@ -673,6 +704,186 @@ def test_a_flow_map_refuses_guidance_before_the_preflight_and_the_loads(
     assert umbrella_main(args + flags) == 1
     assert text in capsys.readouterr().err
     assert env.checks == [] and env.pipes == []
+
+
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_a_size_outside_the_family_limits_is_refused_before_the_loads(
+        env, tmp_path, monkeypatch, capsys, command):
+    """MiniMax-H3-Image refuses a size under its least pixels after the
+    identify, naming the smallest size of the shape, before the memory
+    preflight and before any file loads."""
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--size", "512x512", "--output",
+                           str(tmp_path / "a.png")]
+        flag = "--size"
+    else:
+        args = ["image", "bench"] + env.base[2:] + ["--sizes", "512x512"]
+        flag = "--sizes"
+    assert umbrella_main(args) == 2
+    assert (f"{flag} 512x512 is 262,144 pixels, under the 655,360 that "
+            "MiniMax-H3-Image takes; the smallest size of its shape is "
+            "832x832") in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
+
+
+@pytest.mark.parametrize("command, flag", [("generate", "--size"),
+                                           ("bench", "--sizes")])
+def test_a_default_size_outside_the_family_limits_names_the_size_flag(
+        env, tmp_path, monkeypatch, capsys, command, flag):
+    """A default size the family's limits refuse asks for a size by the
+    flag of the command that gives one."""
+    from gmlx.image import api
+
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    monkeypatch.setattr(api, "sampler_defaults", lambda f, v: (
+        api.SamplerDefaults(steps=6, cfg=1.0, shift=1.0, size=(512, 512))))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:]
+    assert umbrella_main(args) == 2
+    err = capsys.readouterr().err
+    assert ("the image size 512x512 is 262,144 pixels, under the 655,360 "
+            "that MiniMax-H3-Image takes; the smallest size of its shape "
+            f"is 832x832; give one with {flag}") in err, err
+    assert env.checks == [] and env.pipes == []
+
+
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_an_h3_image_run_by_path_takes_its_row_size(env, tmp_path,
+                                                    monkeypatch, command):
+    """A MiniMax-H3-Image DiT run by its path with no size, so with no
+    entry's defaults.size, plans 2048x2048, its sampling row's size."""
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+
+    def check(*a, **k):
+        env.checks.append(k)
+        raise RuntimeError("planned")
+
+    monkeypatch.setattr(image_preflight, "check", check)
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:]
+    assert umbrella_main(args) != 0
+    assert [(k["width"], k["height"]) for k in env.checks] == [(2048, 2048)]
+    assert env.pipes == []
+
+
+def _h3_refs(tmp_path, sizes) -> list:
+    from PIL import Image
+
+    out = []
+    for i, (w, h) in enumerate(sizes):
+        p = tmp_path / f"ref{i}.png"
+        Image.fromarray(np.full((h, w, 3), 40 * i, np.uint8)).save(p)
+        out += ["--ref", str(p)]
+    return out
+
+
+def test_an_h3_image_edit_plans_at_its_first_references_vae_size(
+        env, tmp_path, monkeypatch):
+    """--ref on MiniMax-H3-Image with no size plans image_1's VAE copy's
+    size, and prices each reference at its VAE copy beside the mmproj."""
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+
+    def check(*a, **k):
+        env.checks.append(k)
+        raise RuntimeError("planned")
+
+    monkeypatch.setattr(image_preflight, "check", check)
+    mm = tmp_path / "mmproj.gguf"
+    mm.write_bytes(b"x")
+    args = env.base + ["--prompt", "p", "--encoder-mmproj", str(mm),
+                       "--output", str(tmp_path / "a.png")]
+    assert umbrella_main(args + _h3_refs(tmp_path, [(640, 480),
+                                                    (1000, 2000)])) != 0
+    (k,) = env.checks
+    assert (k["width"], k["height"]) == (1376, 1024)
+    assert k["refs"] == [(1024, 1376), (2048, 1024)]
+    assert k["mmproj"] == str(mm)
+
+
+@pytest.mark.parametrize("flags, sizes, text", [
+    (["--ref-size", "512"], [(640, 480)], "--ref-size: MiniMax-H3-Image "
+     "sizes its references by its own rule"),
+    ([], [(4000, 1000)], "a reference of 4000x1000 pixels is outside the "
+     "shapes MiniMax-H3-Image takes, 1:3 to 3:1"),
+    (None, [(640, 480)], "--ref needs --encoder-mmproj with a DiT path")],
+    ids=["ref-size", "shape", "mmproj"])
+def test_an_h3_image_edit_refuses_before_the_loads(
+        env, tmp_path, monkeypatch, capsys, flags, sizes, text):
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    mm = tmp_path / "mmproj.gguf"
+    mm.write_bytes(b"x")
+    args = env.base + ["--prompt", "p", "--output", str(tmp_path / "a.png")]
+    if flags is not None:
+        args += ["--encoder-mmproj", str(mm), *flags]
+    assert umbrella_main(args + _h3_refs(tmp_path, sizes)) == 2
+    assert text in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
+
+
+@pytest.mark.parametrize("flags, text", [
+    (["--steps", "4"], "MiniMax-H3-Image pruned runs 6 steps, the schedule "
+     "it was distilled to, not 4"),
+    (["--guidance", "2"], "the MiniMax-H3-Image pruned DiT samples without "
+     "guidance: drop guidance 2")], ids=["steps", "guidance"])
+@pytest.mark.parametrize("command", ["generate", "bench"])
+def test_an_h3_image_run_refuses_other_steps_or_guidance_before_the_loads(
+        env, tmp_path, monkeypatch, capsys, flags, text, command):
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    if command == "generate":
+        args = env.base + ["--prompt", "p", "--output",
+                           str(tmp_path / "a.png")]
+    else:
+        args = ["image", "bench"] + env.base[2:]
+    assert umbrella_main(args + flags) == 1
+    assert text in capsys.readouterr().err
+    assert env.checks == [] and env.pipes == []
+
+
+def test_an_h3_image_run_with_a_negative_prompt_goes_on_and_says_it_is_unused(
+        env, tmp_path, monkeypatch, capsys):
+    h3 = get_family("h3_image")
+    monkeypatch.setattr(image_preflight, "identify_dit",
+                        lambda p, **k: SimpleNamespace(
+                            family=h3, view=SimpleNamespace(tensors={}),
+                            variant="pruned", config={}))
+    args = env.base + ["--prompt", "p", "--negative-prompt", "blur",
+                       "--size", "1024x1024", "--output",
+                       str(tmp_path / "a.png")]
+    assert umbrella_main(args) == 0
+    assert ("--negative-prompt is unused, since --guidance 1 turns guidance "
+            "off") in capsys.readouterr().out
+    assert len(env.pipes) == 1
 
 
 @pytest.mark.parametrize("flags, code, text", [
@@ -985,6 +1196,29 @@ def test_bench_via_steps_refuses_adapters(env, capsys):
         "--via-steps", "--adapter", "a.safetensors"]) == 2
     assert "drop --adapter" in capsys.readouterr().err
     assert env.pipes == []
+
+
+@pytest.mark.parametrize("int8", ["attention", "linears", "all"])
+def test_bench_via_steps_runs_and_prices_the_int8_its_dit_loaded_at(int8):
+    """The bench's loopback entry carries the int8 setting its DiT loaded
+    at, so a step, which names no int8, keeps the DiT's attention and its
+    fit prices the int8 rows."""
+    from gmlx.image.int8 import int8_parts
+    from gmlx.serve import image_service
+    from gmlx.serve import image_steps_loopback as loop
+
+    attention, linears = int8_parts(int8)
+    dit = SimpleNamespace(attention=attention, linears=linears,
+                          act_dtype=mx.bfloat16, cfg=SimpleNamespace(patch=2))
+    pipe = api.ImagePipeline(dit=dit, family=get_family("h3_image"),
+                             variant="pruned", weights={"dit": 1})
+    served = loop.OneModelHost("h3", pipe, {"dit": "/d.gguf"}).served
+    # What the step route runs for a step with no int8 field.
+    sent = image_service.request_int8(served, None)
+    image_service.set_int8(served, sent)
+    assert (dit.attention, dit.linears) == (attention, linears)
+    args = image_service._fit_args(pipe, served, 1 << 40, 1.0, int8=sent)
+    assert (args["attention"], args["linears"]) == (attention, linears)
 
 
 def test_bench_refuses_sizes_off_the_stride(env, capsys):

@@ -47,6 +47,19 @@ def test_default_size_takes_the_entry_then_the_family(size, want):
     assert image_service.default_size(spec, fam) == want
 
 
+@pytest.mark.parametrize("family, want", [("h3_image", (2048, 2048)),
+                                          ("z_image", (1024, 1024))])
+def test_an_entry_without_a_size_takes_its_sampling_row_size(family, want):
+    from gmlx.image.api import sampler_defaults
+    from gmlx.image.registry import get_family
+
+    fam = get_family(family)
+    variant = next(iter(fam.sampling))
+    spec = SimpleNamespace(defaults={})
+    assert image_service.default_size(
+        spec, sampler_defaults(family, variant)) == want
+
+
 def test_request_fields_map_and_aliases_reach_the_default():
     req = image_service.parse_request("generations", {
         "prompt": " a cat ", "model": "gpt-image-1", "n": "3", "size": "768x512",
@@ -359,6 +372,128 @@ def test_a_refusal_names_a_change_that_makes_the_entry_fit(
     assert "encoder_release: always" not in str(e.value)
 
 
+def test_a_limited_family_holds_the_default_size_to_its_limits(
+        plan_stubs, monkeypatch):
+    """An entry of MiniMax-H3-Image whose default size its limits refuse
+    does not load; a Z-Image entry at 4096x4096 still does."""
+    from gmlx.image import loader
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    assert image_service.entry_plan(_spec(defaults={"size": "4096x4096"}))
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        get_family("h3_image"), "pruned"))
+    assert image_service.entry_plan(_spec(id="h3", defaults={
+        "size": "4096x4096"}))
+    with pytest.raises(ImageModelError, match="image model 'h3': "
+                       "defaults.size 512x512 is 262,144 pixels, under the "
+                       "655,360 that MiniMax-H3-Image takes; the smallest "
+                       "size of its shape is 832x832"):
+        image_service.entry_plan(_spec(id="h3", defaults={"size": "512x512"}))
+
+
+def _int8_kernels(monkeypatch) -> None:
+    """An mlx-kquant with the int8 ops on a GPU with NAX units, so a test
+    does not depend on the machine's kq."""
+    import mlx_kquant as kq
+
+    for name in ("sdpa_qk8_inputs", "sdpa_qk8", "int8_quantize_rows",
+                 "int8_matmul"):
+        monkeypatch.setattr(kq, name, getattr(kq, name, lambda *a, **k: None),
+                            raising=False)
+    monkeypatch.setattr(kq, "nax_available", lambda: True)
+
+
+def test_an_entry_prices_and_loads_at_its_int8_setting(plan_stubs,
+                                                       monkeypatch):
+    """An H3-Image entry's defaults.int8 prices the int8 DiT and each
+    step's int8 rows, and the plan carries the setting the load takes. A
+    family without int8 refuses it by the key."""
+    from gmlx.image import api, loader, memfit
+    from gmlx.image.fingerprint import ImageModelError
+    from gmlx.image.registry import get_family
+
+    _int8_kernels(monkeypatch)
+    monkeypatch.setattr(api, "_int8_bytes", lambda path, int8: (
+        7 if int8 in ("linears", "all") else 0))
+    seen, real = [], memfit.plan_memory
+    monkeypatch.setattr(memfit, "plan_memory", lambda dit, *a, **kw: (
+        seen.append((dit, kw["attention"], kw["linears"])),
+        real(dit, *a, **kw))[1])
+    with pytest.raises(ImageModelError) as e:
+        image_service.entry_plan(_spec(defaults={"int8": "attention"}))
+    assert str(e.value) == ("image model 'zit': defaults.int8: gmlx runs "
+                            "Z-Image with dense attention only")
+    monkeypatch.setattr(loader, "identify_dit", lambda path, **k: _ident(
+        get_family("h3_image"), "pruned"))
+    for int8, want in (("all", (8, "int8", "int8")),
+                       ("attention", (1, "int8", "file")),
+                       (None, (1, "dense", "file"))):
+        seen.clear()
+        defaults = {} if int8 is None else {"int8": int8}
+        plan = image_service.entry_plan(_spec(id="h3", defaults=defaults))
+        assert plan.int8 == (int8 or "off")
+        assert set(seen) == {want}, int8
+
+
+def test_a_request_changes_the_attention_alone(monkeypatch):
+    """A request or a step may name the int8 settings whose linears match
+    the entry's loaded DiT, on a family that runs them, and each sets the
+    DiT's attention for itself: one that names none runs the entry's."""
+    from gmlx.image.registry import get_family
+
+    _int8_kernels(monkeypatch)
+    h3, z = get_family("h3_image"), get_family("z_image")
+    dit = SimpleNamespace(attention="dense")
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(family=h3, variant="pruned", dit=dit),
+        plan=SimpleNamespace(int8="off"))
+    pick = image_service.request_int8
+    assert pick(served, None) == "off"
+    assert pick(served, "attention") == "attention"
+    with pytest.raises(ValueError) as e:
+        pick(served, "linears")
+    assert str(e.value) == (
+        "this model's entry loads its DiT at int8 off, so a request names "
+        "int8 off or attention, not linears; set the entry's defaults.int8 "
+        "to run linears")
+    served.plan.int8 = "linears"
+    assert pick(served, None) == "linears" and pick(served, "all") == "all"
+    with pytest.raises(ValueError, match="not off;"):
+        pick(served, "off")
+    zdit = SimpleNamespace()
+    zserved = SimpleNamespace(
+        pipe=SimpleNamespace(family=z, variant="turbo", dit=zdit),
+        plan=SimpleNamespace(int8="off"))
+    with pytest.raises(ValueError) as e:
+        pick(zserved, "attention")
+    assert str(e.value) == "gmlx runs Z-Image with dense attention only"
+    for plan_int8, sent, want in (("off", "attention", "int8"),
+                                  ("off", None, "dense"),
+                                  ("all", None, "int8"),
+                                  ("all", "linears", "dense")):
+        served.plan.int8 = plan_int8
+        image_service.set_int8(served, sent)
+        assert dit.attention == want, (plan_int8, sent)
+    image_service.set_int8(zserved, None)
+    assert vars(zdit) == {}
+
+
+def test_a_request_int8_is_one_of_the_four_settings():
+    req = image_service.parse_request("generations", {"prompt": "x",
+                                                      "int8": "attention"})
+    assert req.int8 == "attention"
+    assert image_service.parse_request("generations",
+                                       {"prompt": "x"}).int8 is None
+    for bad in ("fast", ["off"], 8):
+        with pytest.raises(image_service.ImageRequestError) as e:
+            image_service.parse_request("generations", {"prompt": "x",
+                                                        "int8": bad})
+        assert (e.value.status, e.value.param) == (400, "int8")
+        assert str(e.value) == (f"int8 is off, attention, linears or all, "
+                                f"not {bad!r}")
+
+
 def test_a_turbo_entry_takes_only_its_own_step_count(plan_stubs, monkeypatch):
     from gmlx.image import loader
     from gmlx.image.fingerprint import ImageModelError
@@ -422,6 +557,34 @@ def test_a_distilled_flux2_request_refuses_guidance(variant, guidance,
         "guidance: the FLUX.2 klein distilled DiT samples without guidance: "
         f"drop guidance {guidance or default:g}, or run the FLUX.2 klein "
         "base checkpoint, which takes guidance")
+
+
+@pytest.mark.parametrize("variant", ["pruned", "unknown"])
+@pytest.mark.parametrize("fields, param, text", [
+    ({}, None, None), ({"steps": 6, "guidance": 1.0}, None, None),
+    ({"negative_prompt": "blur"}, None, None),
+    ({"steps": 4}, "steps", "steps: MiniMax-H3-Image {v} runs 6 steps, the "
+     "schedule it was distilled to, not 4"),
+    ({"guidance": 2.0}, "guidance", "guidance: the MiniMax-H3-Image {v} DiT "
+     "samples without guidance: drop guidance 2")])
+def test_an_h3_image_request_takes_only_six_steps_at_guidance_1(
+        variant, fields, param, text):
+    """A negative prompt is no refusal: without guidance it goes unused."""
+    from gmlx.image.registry import get_family
+
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(family=get_family("h3_image"), variant=variant),
+        spec=SimpleNamespace(id="h3"), plan=SimpleNamespace(cfg=1.0),
+        facts=_facts())
+    req = image_service.parse_request("generations", {"prompt": "p",
+                                                      **fields})
+    if param is None:
+        image_service.check_family(req, served)
+        return
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.check_family(req, served)
+    assert e.value.param == param and e.value.status == 400
+    assert str(e.value) == text.format(v=variant)
 
 
 def _flux3_served(flow_map: bool, cfg: float = 1.0, defaults=None):
@@ -584,7 +747,8 @@ def test_a_vae_or_encoder_of_another_family_is_refused_from_its_header(monkeypat
     from gmlx.image.vae import VAEError, reader
 
     fam = get_family("z_image")
-    monkeypatch.setattr(reader, "read_header", lambda path: path)
+    monkeypatch.setattr(reader, "read_header",
+                        lambda path, own_names=False: path)
 
     def identify(header, family):
         if header == "/qwen-vae.gguf":
@@ -1021,6 +1185,113 @@ def test_a_size_inside_the_limits_is_taken(size):
     assert image_service.parse_size(size) == (w, h)
 
 
+def test_a_limited_family_holds_a_size_to_its_own_limits():
+    """MiniMax-H3-Image's limits stand in for the image limits: 4096x4096
+    is taken, and a size under its least pixels or outside its shapes is
+    refused by name."""
+    from gmlx.image.registry import get_family
+
+    h3 = get_family("h3_image")
+    assert image_service.parse_size("4096x4096", h3) == (4096, 4096)
+    assert image_service.parse_size("7712x2592", h3) == (7712, 2592)
+    for size, why in (("512x512", "the smallest size of its shape is "
+                                  "832x832"),
+                      ("1024x320", "1:3 to 3:1"),
+                      ("4480x4480", "over the 20,000,000")):
+        with pytest.raises(image_service.ImageRequestError,
+                           match=why) as e:
+            image_service.parse_size(size, h3)
+        assert e.value.param == "size"
+    # Another family keeps the image limits.
+    with pytest.raises(image_service.ImageRequestError,
+                       match="limit of 4194304 pixels"):
+        image_service.parse_size("4096x4096", get_family("z_image"))
+
+
+def _entry(monkeypatch, family=None, signature=("a",), resolves=True):
+    """A configured entry that ``request_family`` resolves, and the calls
+    its DiT header identify gets."""
+    from gmlx.image import loader
+    from gmlx.image.registry import get_family
+    from gmlx.serve import bridge_vlm
+
+    spec = SimpleNamespace(id="h3", path="/h3.gguf", family=family,
+                           variant=None, load_signature=lambda: signature)
+
+    def resolve(model):
+        if not resolves:
+            raise bridge_vlm.ModelNotFound(model, {})
+        return spec.path, spec
+
+    calls = []
+    monkeypatch.setattr(bridge_vlm, "resolve_image_request", resolve)
+    monkeypatch.setattr(loader, "identify_dit", lambda path, variant=None: (
+        calls.append(path) or SimpleNamespace(family=get_family("h3_image"))))
+    image_service.clear_request_families()
+    return spec, calls
+
+
+def test_a_request_size_is_held_to_its_entry_family_at_parse_time(
+        monkeypatch):
+    """The entry's family, by its configured name or else its header,
+    once per entry and load signature until a reload clears it."""
+    spec, calls = _entry(monkeypatch)
+    fields = {"prompt": "x", "model": "h3"}
+    req = image_service.parse_request("generations",
+                                      fields | {"size": "4096x4096"})
+    assert req.size == (4096, 4096)
+    with pytest.raises(image_service.ImageRequestError,
+                       match="832x832") as e:
+        image_service.parse_request("generations", fields | {"size": "512x512"})
+    assert e.value.param == "size" and calls == ["/h3.gguf"]
+    # No size asks for no family.
+    image_service.parse_request("generations", fields)
+    assert calls == ["/h3.gguf"]
+    spec.load_signature = lambda: ("b",)
+    image_service.parse_request("generations", fields | {"size": "4096x4096"})
+    image_service.clear_request_families()
+    image_service.parse_request("generations", fields | {"size": "4096x4096"})
+    assert calls == ["/h3.gguf"] * 3
+    # A configured family name is read without the header.
+    _spec, calls = _entry(monkeypatch, family="h3_image")
+    image_service.parse_request("generations", fields | {"size": "4096x4096"})
+    assert calls == []
+
+
+def test_a_request_whose_entry_does_not_resolve_keeps_the_image_limits(
+        monkeypatch):
+    _spec, calls = _entry(monkeypatch, resolves=False)
+    with pytest.raises(image_service.ImageRequestError,
+                       match="limit of 4194304 pixels"):
+        image_service.parse_request("generations", {
+            "prompt": "x", "model": "h3", "size": "4096x4096"})
+    assert calls == []
+
+
+def test_a_derived_size_is_held_to_a_limited_family():
+    """A size from the first image scales into MiniMax-H3-Image's limits
+    at its shape, and one under its least pixels is refused."""
+    import numpy as np
+
+    from gmlx.image.registry import get_family
+
+    served = SimpleNamespace(
+        pipe=SimpleNamespace(family=get_family("h3_image")),
+        facts=_facts(size_multiple=32), plan=SimpleNamespace(size=(2048,
+                                                                   2048)))
+    req = image_service.parse_request("variations", {})
+    req.images = [np.zeros((3000, 9000, 3), np.uint8)]
+    assert image_service.target_size(req, served) == (7680, 2560)
+    req.images = [np.zeros((512, 512, 3), np.uint8)]
+    with pytest.raises(image_service.ImageRequestError,
+                       match="the first image sizes the result: 512x512 is "
+                             "262,144 pixels, under the 655,360") as e:
+        image_service.target_size(req, served)
+    assert e.value.param == "size"
+    req.images = []
+    assert image_service.target_size(req, served) == (2048, 2048)
+
+
 def _fit_served(monkeypatch, fits_px: int):
     """A served entry whose plan fits sizes of at most ``fits_px`` pixels,
     counting the plans it makes."""
@@ -1056,14 +1327,143 @@ def test_the_fit_check_names_the_largest_fitting_size_in_few_plans(
         "prompt": "x", "size": "4096x1024"})
     with pytest.raises(image_service.ImageRequestError,
                        match="largest size of its shape that fits is "
-                             "1456x352") as e:
+                             "1424x368") as e:
         image_service.fit_check(req, served, req.size, 1)
     assert e.value.param == "size"
-    # A bisection over the longer side, not a plan per stride.
+    # 1424x368, its short side rounded up, holds more pixels than 1456x352,
+    # both under 1024 x 512. A bisection over the sizes of the shape, not a
+    # plan per size.
     assert len(calls) <= 12, len(calls)
     calls.clear()
     image_service.fit_check(req, served, (512, 512), 1)
     assert len(calls) == 1
+
+
+def _h3_fit_served(monkeypatch, budget: dict):
+    """A served MiniMax-H3-Image entry whose plan fits sizes of at most
+    ``budget["px"]`` pixels."""
+    from gmlx.image import memfit
+    from gmlx.image.registry import get_family
+
+    def plan_memory(*, height, width, _hint=True, **k):
+        ok = width * height <= budget["px"]
+        if not ok and _hint:
+            raise memfit.ImageMemoryError("no room")
+        return SimpleNamespace(fits=ok)
+
+    monkeypatch.setattr(memfit, "plan_memory", plan_memory)
+    nb = SimpleNamespace(bytes=0)
+    pipe = SimpleNamespace(
+        encoder=None, dit=SimpleNamespace(act_dtype="bfloat16"),
+        weights={"dit": 1, "vae": 1}, adapters=nb, tables=nb,
+        family=get_family("h3_image"), vae=None, conditionings=nb,
+        modulations=nb, size_multiple=32, variant="pruned")
+    return SimpleNamespace(pipe=pipe, plan=SimpleNamespace(
+        keep_encoder=True, cfg=1.0), spec=SimpleNamespace(
+            id="h3", defaults={}, upsampler=None, upsample=True,
+            upsample_prompt=None, encoder_model=None),
+        facts=_facts(act_dtype="bfloat16", size_multiple=32))
+
+
+def _h3_fit_refusal(served, size) -> str:
+    # The fit check reads the size it is given, which the family's limits
+    # bound, not the image limits a request's own size is parsed under.
+    req = image_service.parse_request("generations", {"prompt": "x"})
+    with pytest.raises(image_service.ImageRequestError) as e:
+        image_service.fit_check(req, served, size, 1)
+    assert e.value.param == "size"
+    return str(e.value)
+
+
+@pytest.mark.parametrize("size, fits_px, fits, named", [
+    # No size MiniMax-H3-Image takes fits: the largest that fits, 800x800
+    # and 1120x544, is under its least pixels, and the answer names the
+    # smallest size of the shape it takes. At 608x1184 that is 576x1152,
+    # and at 512x1376 it is 512x1312, whose short side rounds up.
+    ((1024, 1024), 680_000, False, (832, 832)),
+    ((2048, 1024), 650_000, False, (1152, 576)),
+    ((608, 1184), 660_000, False, (576, 1152)),
+    ((512, 1376), 670_000, False, (512, 1312)),
+    ((512, 1376), 680_000, True, (512, 1312)),
+    ((1024, 1024), 800_000, True, (864, 864)),
+])
+def test_the_fit_check_names_only_a_size_the_family_takes(
+        monkeypatch, size, fits_px, fits, named):
+    from gmlx.image.registry import get_family, size_refusal
+
+    h3 = get_family("h3_image")
+    msg = _h3_fit_refusal(_h3_fit_served(monkeypatch, {"px": fits_px}), size)
+    w, h = named
+    if not fits:
+        assert msg.endswith(f"no size of its shape that MiniMax-H3-Image "
+                            f"takes does; the smallest it takes is "
+                            f"{w}x{h}"), msg
+    else:
+        assert msg.endswith(f"the largest size of its shape that fits is "
+                            f"{w}x{h}"), msg
+    assert size_refusal(h3, w, h) is None, msg
+
+
+def test_the_fit_check_names_the_largest_size_of_the_shape_over_a_sweep(
+        monkeypatch):
+    """Over a sweep of shapes and budgets, the refusal names the largest
+    smaller size of the shape MiniMax-H3-Image takes that fits, and where
+    none fits the smallest size of the shape it takes. A size of the shape
+    has one side a multiple of 32 and the other that side's share of the
+    shape rounded down or up to 32. The budgets are the least size's
+    pixels and one under, and the pixels of a third, two thirds and all of
+    the way up the taken sizes under the request, each with one under and
+    one over, and a few round counts."""
+    import re
+
+    from gmlx.image.registry import get_family, size_refusal
+
+    h3 = get_family("h3_image")
+    budget = {"px": 0}
+    served = _h3_fit_served(monkeypatch, budget)
+    shapes = [(w, h) for w in range(32, 7713, 224)
+              for h in range(32, 7713, 224)]
+    shapes += [(512, 1376), (608, 1184), (480, 1440), (7712, 2592),
+               (672, 1152), (672, 1632)]
+    shapes = [s for s in shapes if size_refusal(h3, *s) is None]
+    assert len(shapes) > 300
+    named = re.compile(r"(?:that fits is|the smallest it takes is) "
+                       r"(\d+)x(\d+)$")
+    larger = 0
+    for w, h in shapes:
+        sizes = set()
+        for a in range(32, 7713, 32):
+            for num, den, flip in ((h * a, w * 32, False),
+                                   (w * a, h * 32, True)):
+                for b in (num // den * 32, -(-num // den) * 32):
+                    if 32 <= b <= 7712:
+                        sizes.add((b, a) if flip else (a, b))
+        taken = {(x, y) for x, y in sizes if x * y >= h3.min_pixels
+                 and size_refusal(h3, x, y) is None}
+        least = min(x * y for x, y in taken)
+        under = sorted(x * y for x, y in taken
+                       if x <= w and y <= h and (x, y) != (w, h))
+        budgets = {least - 1, least, 700_000, 1_000_000, 4_000_000}
+        for i in (len(under) // 3, 2 * len(under) // 3, len(under) - 1):
+            if under:
+                budgets |= {under[i] - 1, under[i], under[i] + 1}
+        for px in sorted(budgets):
+            if w * h <= px:
+                continue
+            budget["px"] = px
+            msg = _h3_fit_refusal(served, (w, h))
+            W, H = map(int, named.search(msg).groups())
+            assert (W, H) in taken, (w, h, px, msg)
+            top = max((n for n in under if n <= px), default=None)
+            if top is None:
+                assert "the smallest it takes is" in msg, (w, h, px, msg)
+                assert W * H == least, (w, h, px, msg)
+            else:
+                assert "that fits is" in msg, (w, h, px, msg)
+                assert W * H == top and W <= w and H <= h, (w, h, px, msg)
+                larger += top > least
+    # The sweep reaches answers above the least size.
+    assert larger > 1000, larger
 
 
 def test_the_fit_check_passes_without_a_budget(monkeypatch):
@@ -1147,6 +1547,84 @@ def test_qwen_image_edits_on_a_shared_chat_model_need_its_mmproj():
         image_service.check_family(_edit_req(1), _edit_served(
             "qwen_image21", mmproj=False, encoder_model="vl"))
     assert e.value.param == "image"
+
+
+def test_h3_image_edits_take_comfyuis_copies_and_the_first_sizes_them():
+    """A MiniMax-H3-Image edit takes up to 16 images on an entry with the
+    encoder's mmproj, each with its VAE copy and its vision copy by
+    ComfyUI's rules, alpha dropped. Without a size the result takes the
+    first image's VAE copy. An image outside 1:3 to 3:1 gets a 400 that
+    names it, and so does an edit on an entry without the tower."""
+    import numpy as np
+
+    served = _edit_served("h3_image")
+    req = _edit_req(1)
+    req.images = [np.zeros((480, 640, 3), np.uint8),
+                  np.zeros((3000, 1500, 4), np.uint8)]
+    image_service.check_family(req, served)
+    assert [(r.width, r.height) for r in req.refs] == [(1376, 1024),
+                                                       (1504, 3008)]
+    assert [r.vision.shape for r in req.refs] == [(1024, 1376, 3),
+                                                  (2048, 1024, 3)]
+    # The example of image-api.md.
+    assert image_service.target_size(req, served) == (1376, 1024)
+    sized = _edit_req(1, size="1024x1024")
+    sized.images = req.images
+    image_service.check_family(sized, served)
+    assert image_service.target_size(sized, served) == (1024, 1024)
+    image_service.check_family(_edit_req(16), served)
+    for req, match in (
+            (_edit_req(17), "MiniMax-H3-Image takes at most 16 images, and "
+                            "the request has 17"),
+            (_edit_req(2, (1000, 3100)), "image 1: a reference of 3100x1000 "
+                                         "pixels is outside the shapes "
+                                         "MiniMax-H3-Image takes, 1:3 to 3:1")):
+        with pytest.raises(image_service.ImageRequestError, match=match) as e:
+            image_service.check_family(req, served)
+        assert e.value.param == "image"
+    with pytest.raises(image_service.ImageRequestError,
+                       match="need the encoder's vision tower"):
+        image_service.check_family(_edit_req(1), _edit_served(
+            "h3_image", mmproj=False))
+
+
+def test_an_h3_image_edit_is_priced_with_its_copies_and_its_prompt():
+    """The fit check prices a MiniMax-H3-Image edit at the VAE copies the
+    job runs and the rows of the prompt with each label and vision block,
+    and the plan adds the vision rows of the copies and the tower."""
+    import numpy as np
+
+    from gmlx.commands.image_preflight import prompt_rows
+    from gmlx.image import memfit
+    from gmlx.image.registry import get_family
+
+    served = _qwen_served()
+    served.pipe.family = get_family("h3_image")
+    req = _edit_req(1, prompt="swap the hats")
+    req.images = [np.zeros((1024, 1024, 3), np.uint8),
+                  np.zeros((1000, 2000, 3), np.uint8)]
+    image_service.check_family(req, served)
+    seen = []
+    real = memfit.plan_memory
+
+    def record(*a, **k):
+        seen.append(k)
+        return real(*a, **k)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(memfit, "plan_memory", record)
+        image_service.fit_check(req, served, (1024, 1024), 1 << 40)
+    sizes = [(1024, 1024), (1024, 2048)]
+    assert seen[-1]["ref_sizes"] == sizes
+    rows = prompt_rows(served.pipe.family, "swap the hats", 2)
+    assert seen[-1]["caption_tokens"] == rows
+    # The plan prices the vision rows of those sizes beside the caption.
+    assert "vision" not in seen[-1]
+    row = memfit.PEAKS["h3_image"]
+    vision = memfit.vision_rows(row, sizes)
+    assert vision > 3 * 1024
+    peak = real(**seen[-1]).terms["step_peak"]
+    assert peak == real(**seen[-1], vision=vision).terms["step_peak"] > (
+        real(**seen[-1], vision=0).terms["step_peak"])
 
 
 @pytest.mark.parametrize("route", ["edits", "variations"])
@@ -1505,7 +1983,10 @@ def test_a_size_off_the_family_stride_is_refused():
 def test_a_large_edit_image_gives_the_largest_size_of_its_shape():
     import numpy as np
 
-    served = SimpleNamespace(pipe=SimpleNamespace(size_multiple=16),
+    from gmlx.image.registry import get_family
+
+    served = SimpleNamespace(pipe=SimpleNamespace(
+        size_multiple=16, family=get_family("z_image")),
                              plan=SimpleNamespace(size=(1024, 1024)),
                              facts=_facts())
     req = image_service.parse_request("edits", {"prompt": "x"})

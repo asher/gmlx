@@ -1,7 +1,8 @@
 """Guards in owned code against defects of stock mlx.
 
 Each function here stands in for one stock op where a supported mlx
-version computes it wrong, and is that op everywhere else.
+version computes it wrong, or loses digits, and is that op everywhere
+else.
 docs/upstream-defects.md has the defect, its repro and the test of each.
 """
 
@@ -100,3 +101,20 @@ def pad(x: mx.array, pad_width, constant_values=0) -> mx.array:
         return mx.pad(x, pad_width, constant_values=constant_values)
     index = tuple(slice(lo, lo + n) for n, (lo, _) in zip(x.shape, pairs))
     return _written(shape, constant_values, x.dtype, [(index, x)])
+
+
+def layer_norm(x: mx.array, eps: float) -> mx.array:
+    """``mx.fast.layer_norm(x, None, None, eps)``: ``x`` normalized over
+    its last axis, in its dtype.
+
+    On the CPU stream of mlx 0.32.3 the op, like every CPU reduction,
+    adds a row in float32 one element after another, so its error grows
+    with the row: 4e-6 relative at 524,288 elements against 5e-8 on the
+    GPU. There the statistics are taken in float64, which the CPU
+    reduces exactly enough. On a GPU stream it is the stock op."""
+    if mx.default_device() != mx.cpu:
+        return mx.fast.layer_norm(x, None, None, eps)
+    f = x.astype(mx.float64)
+    mean = f.mean(axis=-1, keepdims=True)
+    var = mx.square(f - mean).mean(axis=-1, keepdims=True)
+    return ((f - mean) * mx.rsqrt(var + eps)).astype(x.dtype)

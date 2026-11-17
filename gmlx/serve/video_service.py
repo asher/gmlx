@@ -56,11 +56,12 @@ from typing import Any
 
 import numpy as np
 
-from .subservice import SingleWorker
+from .subservice import SingleWorker, media_job
 
 _log = logging.getLogger(__name__)
 
-WORKER = SingleWorker("video-worker")
+# Each job runs as the image worker's do (subservice.media_job).
+WORKER = SingleWorker("video-worker", scope=media_job)
 
 _F32 = np.float32
 # The text rows an entry's encode phase is priced at.

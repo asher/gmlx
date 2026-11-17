@@ -18,7 +18,7 @@ import torch
 import comfy.samplers
 
 from . import discovery, schedules
-from .client import GmlxError, GmlxRefusal, get_client
+from .client import HEADS_OPTION, GmlxError, GmlxRefusal, get_client
 from .clip import GMLX_NODE, GmlxCLIP
 from .model import load_model
 from .vae import GmlxAudioVAE, GmlxVAE, GmlxVideoVAE
@@ -204,6 +204,36 @@ class GmlxSigmas:
         return (variant_sigmas(model, steps, denoise, width, height), cfg)
 
 
+class GmlxPDDHeads:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "heads_in_order": ("BOOLEAN", {
+                "default": True,
+                "tooltip": "On: step i of the sampler's schedule reads PDD head i, as "
+                           "diffusers samples. Off: each step reads the heads its span "
+                           "covers, as ComfyUI does."})}}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = CATEGORY
+    DESCRIPTION = ("How a gmlx MiniMax-H3-Image model reads its PDD heads. A schedule "
+                   "distilled with head i at step i, such as pDMD-2steps' 1, 12/13, 0, "
+                   "samples with heads in order on.")
+
+    def patch(self, model, heads_in_order=True):
+        b = getattr(model, "gmlx", None)
+        if b is None or b.family != "h3_image":
+            raise GmlxRefusal("gmlx: gmlx PDD Heads takes a gmlx MiniMax-H3-Image model, "
+                              "the model with PDD heads")
+        m = model.clone()
+        to = dict(m.model_options.get("transformer_options") or {})
+        to[HEADS_OPTION] = "in_order" if heads_in_order else "span"
+        m.model_options["transformer_options"] = to
+        return (m,)
+
+
 _FRAMES_TIP = ("Frame count at 24 fps, snapped up to the model's 17k+5 grid (124 = ~5s; "
                "trained range is ~124-362, longer is untested)")
 
@@ -289,6 +319,7 @@ NODE_CLASS_MAPPINGS = {
     "GmlxVideoVAELoader": GmlxVideoVAELoader,
     "GmlxAudioVAELoader": GmlxAudioVAELoader,
     "GmlxSigmas": GmlxSigmas,
+    "GmlxPDDHeads": GmlxPDDHeads,
     "GmlxH3ImageToVideo": GmlxH3ImageToVideo,
     "GmlxServerStatus": GmlxServerStatus,
 }
@@ -300,6 +331,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "GmlxVideoVAELoader": VIDEO_VAE,
     "GmlxAudioVAELoader": AUDIO_VAE,
     "GmlxSigmas": "gmlx Sigmas",
+    "GmlxPDDHeads": "gmlx PDD Heads",
     "GmlxH3ImageToVideo": GMLX_NODE,
     "GmlxServerStatus": "gmlx Server Status",
 }

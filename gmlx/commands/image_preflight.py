@@ -48,6 +48,20 @@ def dit_transient(dit: str, act) -> int:
     return memfit.dit_transient(_header_view(dit), act)
 
 
+def int8_transient(dit: str, int8: str) -> int:
+    """Bytes the conversion of the DiT at the int8 setting ``int8`` holds
+    beside it, from its header: the largest converted matrix's with int8
+    linears, else none. The load holds the cast or this, not both."""
+    from gmlx.image import int8 as neutral
+    from gmlx.image.text_encoder import _header_view
+
+    if neutral.int8_parts(int8)[1] != "int8":
+        return 0
+    fam = identify_dit(str(dit)).family
+    return neutral.int8_transient(_header_view(dit), fam.strip_prefixes,
+                                  fam.int8_linears)
+
+
 def cast_of(view, family: str) -> int:
     """File bytes of the 16-bit float tensors of a DiT header view that
     its load casts to the activation dtype of ``family`` on this chip, as
@@ -130,7 +144,7 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
           width: int, cfg: float | None, adapters=(),
           init_image: bool = False, keep_encoder: bool = False,
           mmproj: str | None = None, refs=(), variant: str | None = None,
-          prompts=()):
+          prompts=(), int8: str = "off"):
     """The memory plan of one request, or None when the check is off or
     the variant has no defaults and no cfg is given. ``adapters`` is the
     byte count of each adapter, ``init_image`` says the request encodes
@@ -139,13 +153,15 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     the (height, width) in pixels of each reference image of the request.
     ``prompts`` holds the texts the encoder reads, the positive first,
     priced by ``prompt_terms``; with none, or on a family whose plan does
-    not price the prompt, the rows are the family's most.
+    not price the prompt, the rows are the family's most. ``int8`` is the
+    DiT's int8 setting.
     Raises ``ImageMemoryError`` when the request cannot fit."""
     if not enabled():
         return None
     from gmlx.image import memfit
-    from gmlx.image.api import _header_bytes, sampler_defaults
+    from gmlx.image.api import _header_bytes, _int8_bytes, sampler_defaults
     from gmlx.image.dtypes import image_activation
+    from gmlx.image.int8 import int8_parts
     from gmlx.image.text_encoder import _header_view
 
     ident = identify_dit(dit, variant=variant)
@@ -158,10 +174,12 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
     act = image_activation(fam)
     tower = None if mmproj is None else _header_view(mmproj)
     # The DiT loads after the encoder, in either order.
-    cast = dit_transient(dit, act.dit)
+    cast = max(dit_transient(dit, act.dit), int8_transient(dit, int8))
     sizes = [(int(h), int(w)) for h, w in refs]
+    attention, linears = int8_parts(int8)
     return memfit.plan_memory(
-        _header_bytes(dit, "dit"), _header_bytes(encoder, "encoder"),
+        _header_bytes(dit, "dit") + _int8_bytes(dit, int8),
+        _header_bytes(encoder, "encoder"),
         _header_bytes(vae, "vae"), tower,
         adapters=adapters, family=fam, height=height, width=width, cfg=cfg,
         dtype=act.dit, vae_dtype=act.vae, init_image=init_image,
@@ -170,4 +188,5 @@ def check(dit: str, encoder: str | None, vae: str | None, *, height: int,
         # Each part alone, for the staged order.
         load_parts=(load_transient(encoder, None, mmproj),
                     max(load_transient(None, vae, None), cast)),
+        attention=attention, linears=linears,
         encoder_owned=not keep_encoder)

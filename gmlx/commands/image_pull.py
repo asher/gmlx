@@ -9,9 +9,9 @@ encoder. The rest downloads after a summary of files, sizes and free disk.
 The VAE comes as safetensors from its source repository, is checked
 against the recipe's sha256, packed to GGUF and checked again, and the
 source is deleted unless ``--keep-source``. For a family that ships no
-upsampler prompt, the pull also fetches the one its recipe pins, checks
-its sha256 before it lands, and the entry names it as
-``upsample_prompt``. A fetch that fails, or a file of another digest
+upsampler prompt, the pull also fetches the one its recipe pins, with the
+files it reads, checks each sha256 before it lands, and the entry names
+the prompt as ``upsample_prompt``. A fetch that fails, or a file of another digest
 already at its path, which stays as it is, leaves a new entry without it,
 and an entry that already names the file keeps it. The entry is then
 added under ``image_models:`` in the server config.
@@ -264,27 +264,35 @@ def plan_pull(r: catalog.Recipe, *, dit_quant: str, encoder_quant: str,
             size=None if size is None else size + cfg_size,
             need=None if need is None else need + cfg_size), dest)
 
-    # The upsampler prompt, in the folder of its repository as the other
-    # parts are. A file there of another digest is the user's: it stays as
-    # it is, and the entry does not name it.
+    # The upsampler prompt and the files it reads beside it, in the folder
+    # of its repository as the other parts are. A file there of another
+    # digest is the user's: it stays as it is, and the entry does not name
+    # the prompt.
     if r.prompt_repo:
         d = _dest(r.prompt_repo, base_dir, nest)
         dest = os.path.join(d, r.prompt_file)
-        if not os.path.lexists(dest):
-            size = _repo_sizes(r.prompt_repo, r.prompt_revision, sizes).get(
-                r.prompt_file)
-            plan.parts.append(Part(
-                "prompt", r.prompt_file, dest, repo=r.prompt_repo,
-                files=(r.prompt_file,), root=d, revision=r.prompt_revision,
-                size=size, need=_remaining(dest, size), optional=True))
-        elif os.path.isfile(dest) and \
-                catalog.sha256_file(dest) == r.prompt_sha256:
-            plan.parts.append(Part("prompt", r.prompt_file, dest,
-                                   size=os.path.getsize(dest), need=0,
-                                   optional=True))
-        else:
+        pins = _prompt_pins(r)
+        missing = [f for f in pins if not os.path.lexists(os.path.join(d, f))]
+        if any(not os.path.isfile(os.path.join(d, f))
+               or catalog.sha256_file(os.path.join(d, f)) != sha
+               for f, sha in pins.items() if f not in missing):
             plan.blocked.append(Part("prompt", r.prompt_file, dest,
                                      repo=r.prompt_repo, optional=True))
+        elif missing:
+            listing = _repo_sizes(r.prompt_repo, r.prompt_revision, sizes)
+            got = [listing.get(f) for f in missing]
+            size = None if None in got else sum(got)
+            need = (_remaining(dest, size) if missing == [r.prompt_file]
+                    else size)
+            plan.parts.append(Part(
+                "prompt", r.prompt_file, dest, repo=r.prompt_repo,
+                files=tuple(missing), root=d, revision=r.prompt_revision,
+                size=size, need=need, optional=True))
+        else:
+            plan.parts.append(Part(
+                "prompt", r.prompt_file, dest, size=sum(
+                    os.path.getsize(os.path.join(d, f)) for f in pins),
+                need=0, optional=True))
 
     for p in plan.parts + plan.blocked:
         role = {"mmproj": "encoder", "prompt": "dit"}.get(p.role, p.role)
@@ -374,12 +382,31 @@ def _print_plan(plan: Plan, *, ram: int | None, free: int | None,
           f"encoder {r.encoder_license}{vae}")
     prompt = plan.part("prompt")
     if prompt is not None and prompt.download and prompt.wanted:
-        print(f"  license: the upsampler prompt {r.prompt_file} of "
+        more = " and the files it reads" if r.prompt_more else ""
+        print(f"  license: the upsampler prompt {r.prompt_file}{more} of "
               f"{r.prompt_repo}, {r.prompt_license} "
               f"({r.prompt_license_url})")
 
 
 _PACK_ITEMSIZE = {"BF16": 2, "F16": 2, "F32": 4}
+
+
+def encoder_download_price(name: str, whole: int) -> tuple[int, int]:
+    """(resident bytes, load transient) of the encoder file ``name`` of
+    ``whole`` bytes that a pull downloads, as the memory plan of the file
+    on disk counts them: less the output matrix the load reads and drops
+    (``catalog.ENCODER_OUTPUT_BYTES``), which the transient holds."""
+    from types import SimpleNamespace
+
+    from gmlx.image import memfit
+
+    out = min(whole, catalog.ENCODER_OUTPUT_BYTES.get(name, 0))
+    # A tensor of no bytes would count as one float32 scalar.
+    view = SimpleNamespace(tensors={
+        n: SimpleNamespace(nbytes=b, shape=(), codec="F32")
+        for n, b in (("weights", whole - out), ("output.weight", out)) if b})
+    return (memfit.file_bytes(view, skip=("output.weight",)),
+            memfit.load_transient(view, None, None))
 
 
 def _image_plan(plan: Plan, ram: int):
@@ -433,14 +460,8 @@ def _image_plan(plan: Plan, ram: int):
     if got:
         enc_b, enc_load = got
     else:
-        whole = part["encoder"].size or 0
-        out = min(whole, catalog.ENCODER_OUTPUT_BYTES.get(
-            part["encoder"].name, 0))
-        view = SimpleNamespace(tensors={
-            n: SimpleNamespace(nbytes=b, shape=(), codec="F32")
-            for n, b in (("weights", whole - out), ("output.weight", out))})
-        enc_b = memfit.file_bytes(view, skip=("output.weight",))
-        enc_load = memfit.load_transient(view, None, None)
+        enc_b, enc_load = encoder_download_price(part["encoder"].name,
+                                                 part["encoder"].size or 0)
     got = held("vae", lambda f: (_header_bytes(f, "vae"),
                                  load_transient(None, f, None)))
     if got:
@@ -542,32 +563,47 @@ def _pack(plan: Plan, part: Part, got: list, *, keep_source: bool) -> str:
     return part.path
 
 
+def _prompt_pins(r) -> dict:
+    """{file: sha256} of the upsampler prompt and the files it reads."""
+    return {r.prompt_file: r.prompt_sha256, **dict(r.prompt_more)}
+
+
 def _fetch_prompt(plan: Plan, part: Part) -> str:
-    """Download the upsampler prompt into a folder of its own beside its
-    path, check its sha256 there, and move it into place, so a copy of
-    another digest never lands on the path."""
+    """Download the upsampler prompt files the part names into a folder of
+    their own beside the prompt's path, check each sha256 there, and move
+    them into place, so a copy of another digest never lands on a path."""
     import shutil
     import tempfile
 
     from gmlx.commands import manage
 
     r = plan.recipe
-    os.makedirs(os.path.dirname(part.path), exist_ok=True)
-    tmp = tempfile.mkdtemp(prefix=".gmlx-pull-", dir=os.path.dirname(
-        part.path))
+    pins = _prompt_pins(r)
+    root = part.root or os.path.dirname(part.path)
+    os.makedirs(root, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix=".gmlx-pull-", dir=root)
     try:
-        print(f"downloading {part.repo}/{r.prompt_file}", file=sys.stderr)
-        got = manage._hf_download(part.repo, r.prompt_file, part.revision,
-                                  tmp)
-        sha = catalog.sha256_file(got)
-        if sha != r.prompt_sha256:
-            raise remote.RemoteError(
-                f"the download has sha256 {sha}, and {r.prompt_file} of "
-                f"{r.prompt_repo} at {r.prompt_revision[:12]} has "
-                f"{r.prompt_sha256}")
-        if os.path.lexists(part.path):
-            raise remote.RemoteError(f"{part.path} appeared during the pull")
-        os.replace(got, part.path)
+        got = {}
+        for name in part.files or (r.prompt_file,):
+            print(f"downloading {part.repo}/{name}", file=sys.stderr)
+            got[name] = manage._hf_download(part.repo, name, part.revision,
+                                            tmp)
+            sha = catalog.sha256_file(got[name])
+            if sha != pins[name]:
+                raise remote.RemoteError(
+                    f"the download has sha256 {sha}, and {name} of "
+                    f"{r.prompt_repo} at {r.prompt_revision[:12]} has "
+                    f"{pins[name]}")
+        for name in got:
+            dest = os.path.join(root, name)
+            if os.path.lexists(dest):
+                raise remote.RemoteError(f"{dest} appeared during the pull")
+        # The prompt the entry names lands last, once the files it reads
+        # are in place.
+        for name in sorted(got, key=lambda n: n == r.prompt_file):
+            dest = os.path.join(root, name)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.replace(got[name], dest)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return part.path
@@ -770,8 +806,8 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
     dit_q = next(h for h in r.dit_quants if h.upper() == dit_q.upper())
     enc_q = next(h for h in r.encoder_quants if h.upper() == enc_q.upper())
     cls = catalog.memory_class(ram)
-    if not a.quant and catalog.makes_no_image(ram):
-        least = catalog.MEMORY_CLASSES[0]
+    if not a.quant and catalog.makes_no_image(ram, r):
+        least = r.least_class
         msg = (f"no {r.title} DiT that gmlx pulls makes an image in this "
                f"Mac's {_gb(ram, 0)} RAM; the smallest Mac that runs one has "
                f"{least} GB. Pass --quant to pull one anyway")
@@ -825,7 +861,7 @@ def pull_recipe(a, r: catalog.Recipe) -> int:
                     f"GB Mac; the pull takes {enc_q}")
                 plan = own
     plan.default = (plan.dit_quant, plan.encoder_quant) == \
-        catalog.default_quants(r, ram) and not catalog.makes_no_image(ram)
+        catalog.default_quants(r, ram) and not catalog.makes_no_image(ram, r)
     need = _need(plan)
     free = manage._disk_free(base_dir)
     if a.json:

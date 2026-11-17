@@ -1,0 +1,111 @@
+{
+ "what": "MiniMax-H3-Image UD-Q4_K_XL (unsloth minimax_h3_image_pruned-UD-Q4_K_XL.gguf) on an M5 Max, one fresh process per cell, through api.sample under the bounded cache with no pacer, as the CLI runs, with random features of text_rows rows at guidance 1. steps_gib is the footprint of each of three steps over the settled process, the DiT loaded. encode holds one prompt encode of H3's text encoder alone (Qwen3-VL-32B, its layers past the tap dropped), by file, at rows rows, the footprint over the settled process.",
+ "cells": [
+  {
+   "width": 1024,
+   "height": 1024,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    1.0571,
+    1.0575,
+    1.0575
+   ]
+  },
+  {
+   "width": 1024,
+   "height": 1024,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    2.7646,
+    2.765,
+    2.765
+   ]
+  },
+  {
+   "width": 2048,
+   "height": 2048,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    1.7748,
+    1.778,
+    1.778
+   ]
+  },
+  {
+   "width": 2048,
+   "height": 2048,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    3.0565,
+    3.0582,
+    3.067
+   ]
+  },
+  {
+   "width": 4096,
+   "height": 4096,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    4.711,
+    4.7132,
+    4.8271
+   ]
+  },
+  {
+   "width": 5472,
+   "height": 3072,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    4.7179,
+    4.7388,
+    4.7248
+   ]
+  },
+  {
+   "width": 4096,
+   "height": 4096,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    5.4904,
+    5.5112,
+    5.4679
+   ]
+  },
+  {
+   "width": 7712,
+   "height": 2592,
+   "text_rows": 80,
+   "guided": false,
+   "steps_gib": [
+    5.3689,
+    5.4772,
+    5.3754
+   ]
+  },
+  {
+   "width": 7712,
+   "height": 2592,
+   "text_rows": 4096,
+   "guided": false,
+   "steps_gib": [
+    5.902,
+    5.9445,
+    5.9123
+   ]
+  }
+ ],
+ "encode": [
+  {
+   "file": "Qwen3-VL-32B-Instruct-Q4_K_M.gguf",
+   "rows": 4096,
+   "gib": 1.4726
+  }
+ ]
+}

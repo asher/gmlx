@@ -14,6 +14,23 @@ import sys
 import threading
 
 
+@contextlib.contextmanager
+def media_job():
+    """The state a served image or video job runs in on its worker: the
+    fine command-buffer caps (``cb_phase.hold``) and the wired limit held
+    at 0 (``wired_limit_held``), whatever a chat engine beside it asks
+    for. After a chat turn the engine's generator keeps the decode caps
+    and the working set as the wired limit, under which a MiniMax-H3-Image
+    edit's encode held 43 GB more and everything the job loaded wired.
+    Every image and video measurement ran in this state."""
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    from .cb_phase import hold
+
+    with hold(), wired_limit_held():
+        yield
+
+
 class SingleWorker:
     """Lazily-created single-thread executor owning all of one sub-service's
     model work (the load and every forward). MLX streams are per-thread:
@@ -21,10 +38,13 @@ class SingleWorker:
     raises "There is no Stream(gpu, N) in current thread" and aborts the
     process. ``max_workers=1`` also serializes the service's Metal jobs (one
     at a time, still interleaving with LLM batch decode). Created lazily so
-    importing the service module stays side-effect free."""
+    importing the service module stays side-effect free. ``scope``, a
+    callable that gives a context manager, wraps each job the worker runs,
+    a :meth:`reserved` block's whole span among them."""
 
-    def __init__(self, thread_name_prefix: str):
+    def __init__(self, thread_name_prefix: str, scope=None):
         self._prefix = thread_name_prefix
+        self._scope = scope
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._lock = threading.Lock()
         # The calling thread's hold of the worker, set in ``reserved``.
@@ -39,7 +59,14 @@ class SingleWorker:
         return self._executor
 
     def submit(self, fn, /, *args, **kwargs) -> concurrent.futures.Future:
-        return self.get().submit(fn, *args, **kwargs)
+        if self._scope is None:
+            return self.get().submit(fn, *args, **kwargs)
+
+        def scoped():
+            with self._scope():
+                return fn(*args, **kwargs)
+
+        return self.get().submit(scoped)
 
     def on_thread(self) -> bool:
         """True on the worker's own thread."""

@@ -19,6 +19,7 @@ import functools
 import importlib
 import json
 import logging
+import secrets
 import statistics
 import threading
 import time
@@ -566,6 +567,7 @@ def make_endpoint(route: str):
         check_family,
         fit_check,
         parse_request,
+        request_schedule,
         run_job,
         target_size,
     )
@@ -603,15 +605,35 @@ def make_endpoint(route: str):
         timeout_s = gen.get_token_queue_timeout()
 
         def prepare():
+            from gmlx.image.upsample import takes_pictures
+
             from ..image_upsample import revise
 
+            # The seed is drawn before the upsampler runs, which it seeds
+            # when it samples, so the seed reruns the caption with the
+            # image.
+            if req.seed is None:
+                req.seed = secrets.randbelow(1 << 32)
+            seen = {"pictures": req.images, "canvas": req.size} \
+                if req.images else {}
             req.revised_prompt = revise(
                 req.model, req.prompt, req.prompt_upsampling,
-                req.route != "generations", stop=stop)
-            hold = residency.acquire_image_model(req.model)
+                req.route != "generations", stop=stop, seed=req.seed,
+                **seen)
+            # The wired limit stays at 0 from the build to the job's
+            # release (residency._media_wired_hold).
+            hold = residency.acquire_image_model(req.model,
+                                                 hold_wired=True)
             holds.append(hold)
             served = hold._entry.pipeline
             check_family(req, served)
+            # The schedule the request's adapters declare, and the size
+            # one gives a request with none of its own.
+            request_schedule(req, served, STATE.model_dirs)
+            if req.prompt_upsampling and req.route != "generations" and \
+                    not takes_pictures(served.pipe.family):
+                # A prompt with reference images runs as typed.
+                warn_ignored_fields(path, {"prompt_upsampling"})
             size = target_size(req, served)
             _hopeless(hold, served, req)
             budget = _budget(hold)
@@ -925,7 +947,11 @@ def is_file_path(path: str, method: str) -> bool:
 def install_image_routes(cfg) -> None:
     """Replace mlx-vlm's image routes with gmlx's, at both prefixes, with
     or without an image model in ``cfg``, and serve the URL-response
-    files. A reload calls it again with the new config."""
+    files. A reload calls it again with the new config, which drops the
+    families the requests' size checks read."""
+    from ..image_service import clear_request_families
+
+    clear_request_families()
     STATE.configure(cfg)
     if STATE.store is not None:
         STATE.store.sweep()

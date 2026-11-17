@@ -8,7 +8,8 @@ nodes, keyframes and guides from the stock nodes through the gmlx CLIP and
 VAEs to the AV step, and the refusals of what a
 gmlx model does not run: references, FastH3 with keyframes, the noise masks
 and the Fun ControlNet. Every ComfyUI the pack supports has MiniMax-H3,
-which came in v0.30.0.
+which came in v0.30.0. MiniMax-H3-Image, which came in v0.45.0, steps on
+one latent frame with the sampler's schedule.
 
 Needs ``COMFYUI_DIR``. Run with ``python -m unittest`` from this folder."""
 
@@ -26,11 +27,15 @@ import support
 support.setup_comfy()
 P = support.load_pack()
 
+import comfy.lora  # noqa: E402
 import comfy.model_base  # noqa: E402
 import comfy.model_management as mm  # noqa: E402
 import comfy.nested_tensor  # noqa: E402
 import comfy.samplers  # noqa: E402
 import comfy.sd  # noqa: E402
+import comfy.supported_models  # noqa: E402
+import comfy.utils  # noqa: E402
+import comfy.weight_adapter  # noqa: E402
 import node_helpers  # noqa: E402
 import nodes as comfy_nodes  # noqa: E402
 from comfy_extras import nodes_custom_sampler as CS  # noqa: E402
@@ -43,6 +48,9 @@ HID, FID, ZID = "h3", "fasth3", "z-image-turbo"
 SIZE, FRAMES = 64, 5
 NO_REFS = ("the gmlx nodes run MiniMax-H3 from the text prompt with keyframes and guides, and "
            "take no references")
+IID = "minimax-h3-image"
+HAS_H3_IMAGE = hasattr(comfy.supported_models, "MiniMaxH3Image")
+needs_h3_image = unittest.skipUnless(HAS_H3_IMAGE, "this ComfyUI has no MiniMax-H3-Image")
 
 
 def _out(node_output):
@@ -534,9 +542,47 @@ class Int8(Base):
     def test_int8_on_an_image_model_is_refused_at_the_load(self):
         with self.assertRaises(C.GmlxRefusal) as e:
             self.loaded("attention", ZID)
-        self.assertEqual(str(e.exception), "gmlx: int8 attention runs on MiniMax-H3, and "
-                         "'z-image-turbo' is an image model; set int8 to entry")
+        self.assertEqual(str(e.exception), "gmlx: int8 attention runs on MiniMax-H3 and "
+                         "MiniMax-H3-Image, and 'z-image-turbo' takes no int8 setting; "
+                         "set int8 to entry")
         self.loaded("off", ZID)
+
+    def image_steps(self, int8, steps=2):
+        """A stock sample of MiniMax-H3-Image from the loader at ``int8``,
+        and the int8 setting each of its image steps carried."""
+        model = self.loaded(int8, IID)
+        with torch.inference_mode():
+            comfy_nodes.common_ksampler(model, 1, steps, 1.0, "euler", "simple",
+                                        image_cond(self.client), image_cond(self.client),
+                                        image_latent())
+        return [e["int8"] for e in self.stub.events("step")]
+
+    @needs_h3_image
+    def test_minimax_h3_image_loads_at_each_int8_value_and_each_step_carries_it(self):
+        """MiniMax-H3-Image's status names its entry's setting, so the
+        loader takes a value past off, and each image step carries it."""
+        for entry, values in (("off", ("entry", "off", "attention")),
+                              ("linears", ("entry", "linears", "all"))):
+            self.stub.int8(entry)
+            for value in values:
+                with self.subTest(entry=entry, value=value):
+                    self.stub.reset()
+                    self.assertEqual(self.image_steps(value),
+                                     [None if value == "entry" else value] * 2)
+
+    @needs_h3_image
+    def test_a_minimax_h3_image_value_whose_linears_differ_is_refused_at_the_load(self):
+        for entry, value, a, b in (("off", "linears", "off", "attention"),
+                                   ("linears", "attention", "linears", "all")):
+            self.stub.int8(entry)
+            with self.subTest(entry=entry, value=value):
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    self.loaded(value, IID)
+                self.assertEqual(str(e.exception), (
+                    f"gmlx: this model's entry loads its DiT at int8 {entry}, so a request "
+                    f"names int8 {a} or {b}, not {value}; set the entry's defaults.int8 to "
+                    f"run {value}"))
+        self.assertEqual(self.stub.events("step"), [])
 
 
 class Interrupt(Base):
@@ -1269,6 +1315,377 @@ class Refusals(Base):
             H.MiniMaxH3ImageToVideo.execute(clip, video, "a dog", SIZE, SIZE, FRAMES,
                                             first_frame=torch.rand(1, SIZE, SIZE, 3))
         self.assertIn("fasth3 runs text to video only", str(e.exception))
+
+
+def image_latent(size=SIZE):
+    """MiniMax-H3-Image's latent of one frame, as its conditioning node
+    makes it."""
+    return {"samples": torch.zeros(1, 24, 1, size // 16, size // 16)}
+
+
+def image_cond(client, text="a lighthouse on a cliff at dusk"):
+    out, _ = client.encode(IID, text)
+    return [[out["cond"], {}]]
+
+
+@needs_h3_image
+class H3Image(Base):
+    """MiniMax-H3-Image: the weightless model on the PDD heads its manifest's
+    config names, a stock sample of one latent frame through the image step
+    with the sampler's schedule, the VAE's frame axis and its noise, an edit
+    through the stock conditioning node, and the refusals of what a gmlx
+    model does not run of what that node gives."""
+
+    def ksample(self, model, pos=None, latent=None, steps=6):
+        pos = pos or image_cond(self.client)
+        with torch.inference_mode():
+            (out,) = comfy_nodes.common_ksampler(model, 1, steps, 1.0, "euler", "simple", pos,
+                                                 pos, latent or image_latent())
+        return out["samples"]
+
+    def test_it_builds_on_meta_on_the_pdd_heads_its_manifest_names(self):
+        import json
+
+        m = P.nodes.GmlxModelLoader().load(IID, self.stub.url, False)[0]
+        uc = m.model.model_config.unet_config
+        want = json.loads(self.client.manifest(IID)["metadata"]["config"])["transformer"]
+        self.assertEqual(type(m.model.model_config).__name__, "MiniMaxH3Image")
+        self.assertEqual((uc["pdd_steps"], uc["pdd_sigmas"]),
+                         (want["pdd_steps"], want["pdd_sigmas"]))
+        self.assertEqual(m.model.diffusion_model.final_layer.pdd_steps, 6)
+        f = m.model.diffusion_model.forward
+        self.assertEqual((f.reads_target, f.flow_map, f.av), (True, False, False))
+        self.assertTrue(all(p.device.type == "meta" for p in m.model.parameters()))
+        self.assertEqual(m.model.get_dtype(), torch.float32)
+        # The refiner runs on the server, in each step.
+        feats = torch.rand(1, 3, 5120)
+        self.assertIs(m.model.diffusion_model.preprocess_text_embeds(feats), feats)
+
+    def test_a_sample_steps_one_frame_on_the_schedule_and_gets_the_frame_back(self):
+        """Each step sends (B, C, h, w), the timestep as sigma times 1000 and
+        ComfyUI's sample_sigmas, so the server's target is the entry after
+        the step's sigma, as ComfyUI's final layer finds it."""
+        m = self.model(IID)
+        out = self.ksample(m)
+        sig = [float(v) for v in comfy.samplers.calculate_sigmas(
+            m.get_model_object("model_sampling"), "simple", 6)]
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), 6)
+        for i, s in enumerate(steps):
+            self.assertEqual(s["sample_sigmas"], sig)
+            self.assertAlmostEqual(s["timestep"][0], sig[i] * 1000, places=2)
+            self.assertEqual(s["targets"], [sig[i + 1]])
+        self.assertEqual({tuple(s["tensors"]) for s in steps}, {("sample_sigmas", "timestep", "x")})
+        self.assertEqual({tuple(s["x_shape"]) for s in steps}, {(1, 24, 4, 4)})
+        self.assertEqual({s["convention"] for s in steps}, {"comfy"})
+        self.assertEqual({tuple(s["row_keys"]) for s in steps}, {("cond", "num_tokens")})
+        self.assertEqual(tuple(out.shape), (1, 24, 1, 4, 4))
+        self.assertTrue(bool(torch.isfinite(out).all()))
+
+    def test_the_conditioning_node_on_the_gmlx_clip_gives_a_frame_that_samples(self):
+        clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]
+        pos, latent = _out(H.MiniMaxH3ImageConditioning.execute(clip, "a lighthouse", SIZE, SIZE))
+        self.assertEqual(tuple(latent["samples"].shape), (1, 24, 1, SIZE // 16, SIZE // 16))
+        self.ksample(self.model(IID), pos=pos, latent=latent, steps=2)
+        self.assertEqual(len(self.stub.events("step")), 2)
+
+    def test_the_vae_gives_and_takes_latents_of_one_frame(self):
+        """An encode sends the noise ComfyUI's H3ImageVAE samples with, a
+        generator at the status's seed in the shape of the latents."""
+        vae = P.nodes.GmlxVAELoader().load(IID, self.stub.url, False)[0]
+        (lat,) = comfy_nodes.VAEEncode().encode(vae, torch.rand(1, SIZE, SIZE, 3))
+        self.assertEqual(tuple(lat["samples"].shape), (1, 24, 1, SIZE // 16, SIZE // 16))
+        enc = self.stub.events("vae_encode")[-1]
+        self.assertEqual(enc["noise"], [1, 24, 4, 4])
+        want = torch.randn((1, 24, 1, 4, 4), generator=torch.Generator().manual_seed(42))
+        self.assertAlmostEqual(enc["noise_sum"], float(want.double().sum()), places=4)
+        (img,) = comfy_nodes.VAEDecode().decode(vae, lat)
+        self.assertEqual(tuple(img.shape), (1, SIZE, SIZE, 3))
+        self.assertEqual(self.stub.events("vae_decode")[-1]["shape"], [1, 24, 4, 4])
+
+    def test_an_edit_steps_with_its_references_their_noise_and_its_vision_rows(self):
+        """MiniMaxH3ImageConditioning shows the gmlx CLIP each picture's
+        vision copy after its label, and its VAE node encodes each VAE copy
+        with the noise of seed 42. Each step carries the reference latents
+        of one frame, the noise ComfyUI's forward mixes into their rows,
+        drawn at the sampler's seed for each, and the vision rows of the
+        prompt's pictures, on the latent of image_1's VAE copy."""
+        clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]
+        vae = P.nodes.GmlxVAELoader().load(IID, self.stub.url, False)[0]
+        g = torch.Generator().manual_seed(3)
+        images = {"image_1": torch.randint(0, 256, (1, 48, 64, 3), generator=g) / 255.0,
+                  "image_2": torch.randint(0, 256, (1, 64, 64, 3), generator=g) / 255.0}
+        pos, latent = _out(H.MiniMaxH3ImageConditioning.execute(
+            clip, "put the cup of Picture 2 on the table of Picture 1", 0, 0, vae=vae,
+            images=images))
+        self.assertEqual(tuple(latent["samples"].shape), (1, 24, 1, 64, 86))
+        (enc,) = self.stub.events("encode")
+        self.assertEqual((enc["images"], enc["refs"]), (2, False))
+        self.assertEqual(enc["image_shapes"], [[1024, 1376, 3], [1024, 1024, 3]])
+        vae_enc = self.stub.events("vae_encode")
+        self.assertEqual([e["noise"] for e in vae_enc], [[1, 24, 64, 86], [1, 24, 64, 64]])
+        for e, (h, w) in zip(vae_enc, ((64, 86), (64, 64))):
+            want = torch.randn((1, 24, 1, h, w), generator=torch.Generator().manual_seed(42))
+            self.assertAlmostEqual(e["noise_sum"], float(want.double().sum()), places=3)
+        tags = pos[0][1]["minimax_token_tags"]
+        self.assertEqual(P.patcher.tag_spans(tags), enc["spans"])
+        self.ksample(self.model(IID), pos=pos, latent=latent, steps=2)
+        steps = self.stub.events("step")
+        self.assertEqual(len(steps), 2)
+        slots = [r for a, b in enc["spans"] for r in range(a + 1, b - 1)]
+        for st in steps:
+            self.assertEqual(st["x_shape"], [1, 24, 64, 86])
+            self.assertEqual(st["ref_shapes"], [[[1, 24, 64, 86], [1, 24, 64, 64]]])
+            self.assertEqual(st["ref_noise"], [[[32 * 43, 96], [32 * 32, 96]]])
+            self.assertEqual(st["image_slots"], [slots])
+            # Each reference's noise restarts the generator at the seed.
+            want = [float(torch.randn((n, 96), generator=torch.Generator().manual_seed(1))
+                          .double().sum()) for n in (32 * 43, 32 * 32)]
+            for got, w in zip(st["ref_noise_sums"][0], want):
+                self.assertAlmostEqual(got, w, places=3)
+            self.assertEqual(st["row_keys"], ["cond", "image_slots", "num_tokens",
+                                              "ref_latents", "ref_noise"])
+
+    def _lora(self, stems, prefix):
+        """A rank 4 LoRA on ``stems`` of the image DiT, each (stem, module
+        name in the manifest), the stems under ``prefix``."""
+        names = {t["name"]: t["shape"] for t in self.client.manifest(IID)["tensors"]}
+        g = torch.Generator().manual_seed(0)
+        sd = {}
+        for stem, module in stems:
+            dout, din = names[f"{module}.weight"]
+            if stem.endswith(("to_q", "to_k", "to_v")):
+                dout //= 3
+            k = f"{prefix}{stem}"
+            sd[f"{k}.lora_A.weight"] = (torch.randn(4, din, generator=g) * 0.01).bfloat16()
+            sd[f"{k}.lora_B.weight"] = (torch.randn(dout, 4, generator=g) * 0.01).bfloat16()
+        return sd
+
+    def test_a_lora_in_the_release_names_steps_under_its_table(self):
+        stems = [(s, s) for s in ("blocks.0.attn.qkv_proj", "blocks.49.mlp.fc1",
+                                  "token_refiner.blocks.1.attn.out_proj")]
+        m, _ = comfy.sd.load_lora_for_models(self.model(IID), None,
+                                             self._lora(stems, "diffusion_model."), 0.8, 0.0)
+        self.assertEqual(set(m.patches), {f"diffusion_model.{s}.weight" for s, _ in stems})
+        self.ksample(m, steps=1)
+        (put,) = self.stub.events("put_table")
+        self.assertEqual((put["entries"], put["bands"], put["strengths"]), (3, 0, [0.8]))
+        (step,) = self.stub.events("step")
+        self.assertEqual(step["patch_table"], put["id"])
+
+    def test_a_lora_in_diffusers_names_steps_as_comfyui_reads_flux_ones(self):
+        """Stock ComfyUI drops these names on MiniMax-H3-Image; the pack's
+        key map puts q, k and v on thirds of qkv_proj's rows and
+        ff.net.0.proj on fc1 with the halves of its product swapped, under
+        transformer. or bare, and leaves the key map of any other model as
+        ComfyUI writes it."""
+        stems = [("transformer_blocks.0.attn.to_q", "blocks.0.attn.qkv_proj"),
+                 ("transformer_blocks.0.attn.to_k", "blocks.0.attn.qkv_proj"),
+                 ("transformer_blocks.0.attn.to_v", "blocks.0.attn.qkv_proj"),
+                 ("transformer_blocks.0.attn.to_out.0", "blocks.0.attn.out_proj"),
+                 ("transformer_blocks.49.ff.net.0.proj", "blocks.49.mlp.fc1"),
+                 ("transformer_blocks.49.ff.net.2", "blocks.49.mlp.fc2"),
+                 ("token_refiner.refiner_blocks.1.attn.to_out.0",
+                  "token_refiner.blocks.1.attn.out_proj")]
+        for prefix in ("transformer.", ""):
+            with self.subTest(prefix=prefix):
+                self.stub.forget()
+                self.stub.reset()
+                sd = self._lora(stems, prefix)
+                m, _ = comfy.sd.load_lora_for_models(self.model(IID), None, sd, 0.8, 0.0)
+                self.assertEqual(set(m.patches), {f"diffusion_model.{x}.weight" for _, x in stems})
+                qkv = m.patches["diffusion_model.blocks.0.attn.qkv_proj.weight"]
+                third = 56 * 128
+                self.assertEqual(sorted(t[3] for t in qkv),
+                                 [(0, 0, third), (0, third, third), (0, 2 * third, third)])
+                table, tensors = P.patches.build_table(IID, m.patches, family="h3_image")
+                (e,) = [e for e in table["entries"]
+                        if e["key"] == "diffusion_model.blocks.49.mlp.fc1.weight"]
+                (pp,) = e["patches"]
+                up = sd[f"{prefix}transformer_blocks.49.ff.net.0.proj.lora_B.weight"]
+                half = up.shape[0] // 2
+                self.assertTrue(torch.equal(tensors[pp["up"]], torch.cat([up[half:], up[:half]])))
+                self.ksample(m, steps=1)
+                (put,) = self.stub.events("put_table")
+                self.assertEqual((put["entries"], put["bands"]), (7, 3))
+                self.assertEqual(self.stub.events("step")[0]["patch_table"], put["id"])
+        plain = comfy.lora.model_lora_keys_unet(self.model(HID).model, {})
+        self.assertNotIn("transformer_blocks.0.attn.to_q", plain)
+
+    def test_the_key_map_wraps_once_under_another_nodes_wrap(self):
+        """Another node's wrap on top links down by ``__wrapped__`` alone,
+        without the pack's flag; the next model load keeps it on top."""
+        ours = comfy.lora.model_lora_keys_unet
+
+        def other(model, key_map={}):  # noqa: B006
+            return ours(model, key_map)
+
+        other.__wrapped__ = ours
+        comfy.lora.model_lora_keys_unet = other
+        try:
+            self.model(IID)
+            self.assertIs(comfy.lora.model_lora_keys_unet, other)
+        finally:
+            comfy.lora.model_lora_keys_unet = ours
+
+    def test_a_swap_off_fc1_is_refused_on_minimax_h3_image(self):
+        LoRA = comfy.weight_adapter.LoRAAdapter
+        up, down = torch.zeros(64, 4), torch.zeros(4, 32)
+        for key in ("diffusion_model.blocks.0.mlp.fc2.weight",
+                    "diffusion_model.final_layer.adaln_proj.linear.weight"):
+            patches = {key: [(1.0, LoRA(set(), (up, down, 1.0, None, None, None)), 1.0, None,
+                              comfy.utils.swap_scale_shift)]}
+            with self.subTest(key), self.assertRaises(C.GmlxRefusal) as e:
+                P.patches.build_table(IID, patches, family="h3_image")
+            self.assertIn("swap_scale_shift", str(e.exception))
+
+    def test_pdd_heads_in_order_reach_each_step_on_pdmds_manual_sigmas(self):
+        """pDMD's example graph: ManualSigmas 1, 12/13, 0 into SamplerCustom
+        on the model through gmlx PDD Heads. Each step asks for heads in
+        order beside the schedule; off, or without the node, a step names
+        no rule and reads the heads of its span."""
+        (sig,) = _out(CS.ManualSigmas.execute("1, 0.9230769230769231, 0"))
+        sampler = comfy.samplers.sampler_object("euler")
+        pos = image_cond(self.client)
+        for on, want in ((True, "in_order"), (False, None), (None, None)):
+            with self.subTest(on=on):
+                self.stub.forget()
+                self.stub.reset()
+                m = self.model(IID)
+                if on is not None:
+                    (m,) = P.nodes.GmlxPDDHeads().patch(m, on)
+                with torch.inference_mode():
+                    CS.SamplerCustom.execute(m, True, 42, 1.0, pos, pos, sampler, sig,
+                                             image_latent())
+                steps = self.stub.events("step")
+                self.assertEqual([e["heads"] for e in steps], [want, want])
+                for e in steps:
+                    self.assertEqual(e["sample_sigmas"], [1.0, torch.tensor(12 / 13).item(), 0.0])
+
+    def test_pdd_heads_on_another_model_or_an_older_server_are_refused(self):
+        with self.assertRaises(C.GmlxRefusal) as e:
+            P.nodes.GmlxPDDHeads().patch(self.model(HID), True)
+        self.assertIn("takes a gmlx MiniMax-H3-Image model", str(e.exception))
+        (m,) = P.nodes.GmlxPDDHeads().patch(self.model(IID), True)
+        caps = self.client.capabilities
+        self.client.capabilities = dict(caps, features=[
+            f for f in caps["features"] if f != "heads_in_order"])
+        try:
+            with self.assertRaises(C.GmlxRefusal) as e:
+                self.ksample(m, steps=1)
+            self.assertIn("reads no PDD heads in order", str(e.exception))
+        finally:
+            self.client.capabilities = caps
+        self.assertEqual(self.stub.events("step"), [])
+
+    def test_pictures_under_another_label_are_refused_by_name(self):
+        clip = P.nodes.GmlxCLIPLoader().load(IID, self.stub.url, False)[0]
+        img = torch.zeros(1, 64, 64, 3)
+        for label in ("<Picture %d>: ", None):
+            with self.subTest(label):
+                kw = {} if label is None else {"picture_label": label}
+                tokens = clip.tokenize("a cup", images=[img], **kw)
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    clip.encode_from_tokens(tokens)
+                self.assertIn(f"after the label 'Picture %d: ', as MiniMaxH3ImageConditioning "
+                              f"puts them, and this encode names them {label!r}",
+                              str(e.exception))
+        self.assertEqual(self.stub.events("encode"), [])
+
+    def test_keyframes_another_mix_and_an_older_server_are_refused_by_name(self):
+        f = self.model(IID).model.diffusion_model.forward
+        cond = image_cond(self.client)[0][0]
+        x, t = torch.zeros(1, 24, 1, 4, 4), torch.tensor([1000.0])
+        to = {"sample_sigmas": torch.tensor([1.0, 0.5, 0.0])}
+        lat = [torch.zeros(1, 24, 1, 4, 4)]
+        cases = {"keyframes reached the DiT forward": {"keyframes": [{"latent": x}]},
+                 "a reference noise mix of 0.5 (minimax_payload['visual_cond_noise_aug']": {
+                     "cond_video_latents": lat, "visual_cond_noise_aug": 0.5}}
+        for want, payload in cases.items():
+            with self.subTest(want):
+                with self.assertRaises(C.GmlxRefusal) as e:
+                    f(x, t, context=cond, transformer_options=dict(to), minimax_payload=payload)
+                self.assertIn(want, str(e.exception))
+        with self.assertRaises(C.GmlxError) as e:
+            f(x, t, context=cond, transformer_options=dict(to),
+              minimax_payload={"text_token_tags": torch.ones(cond.shape[1] + 1)})
+        self.assertIn(f"hold {cond.shape[1] + 1} tags for its {cond.shape[1]} rows",
+                      str(e.exception))
+        caps = self.client.capabilities
+        self.client.capabilities = dict(caps, features=[
+            k for k in caps["features"] if k != "ref_noise"])
+        try:
+            with self.assertRaises(C.GmlxRefusal) as e:
+                f(x, t, context=cond, transformer_options=dict(to),
+                  minimax_payload={"cond_video_latents": lat, "seed": 3})
+        finally:
+            self.client.capabilities = caps
+        self.assertIn("runs no MiniMax-H3-Image reference images; update it", str(e.exception))
+        with self.assertRaises(C.GmlxError) as e:
+            f(x, t, context=cond, transformer_options={})
+        self.assertIn(f"{IID!r} runs PDD heads, which read the schedule the sampler runs on",
+                      str(e.exception))
+        self.assertEqual(self.stub.events("step"), [])
+        # The payload of a text prompt steps.
+        f(x, t, context=cond, transformer_options=dict(to), minimax_payload={
+            "text_token_tags": torch.ones(cond.shape[1], dtype=torch.long), "refs": [],
+            "keyframes": [], "cond_video_latents": [], "cond_audio_latents": [], "seed": 0,
+            "audio_scale": 1.0})
+        (st,) = self.stub.events("step")
+        self.assertEqual(st["row_keys"], ["cond", "num_tokens"])
+
+    def test_a_payload_key_comfyui_stops_writing_is_named_at_the_load(self):
+        """The forward reads the references, the vision tokens and the seed
+        of the references' noise by their payload keys, so a ComfyUI that
+        renames one is named at the load, not run as text to image or on
+        other noise."""
+        owner = comfy.model_base.MiniMaxH3Image
+        real = owner.__dict__["extra_conds"]
+
+        def renamed(key):
+            def extra_conds(self, **kwargs):
+                out = real(self, **kwargs)
+                held = out["minimax_payload"].cond
+                held[key + "_v2"] = held.pop(key)
+                return out
+            return extra_conds
+
+        for key, (_what, given) in P.model.H3_IMAGE_PAYLOAD.items():
+            with self.subTest(key):
+                owner.extra_conds = renamed(key)
+                try:
+                    with self.assertRaises(C.GmlxError) as e:
+                        self.model(IID)
+                finally:
+                    owner.extra_conds = real
+                self.assertIn(f"gmlx: ComfyUI {P.compat.comfyui_version()}'s MiniMaxH3Image "
+                              f"model does not write minimax_payload[{key!r}] from {given}",
+                              str(e.exception))
+
+    def test_a_missing_h3_image_internal_is_named_with_the_version(self):
+        self.assertIsNone(P.compat.first_missing(P.compat.H3_IMAGE_NAMES))
+        names = P.compat.H3_IMAGE_NAMES
+        try:
+            P.compat.H3_IMAGE_NAMES = names + (("comfy.ldm.minimax.model",
+                                                "MiniMaxH3ImageModel.gone"),)
+            with self.assertRaises(C.GmlxError) as e:
+                self.model(IID)
+        finally:
+            P.compat.H3_IMAGE_NAMES = names
+        for want in ("run MiniMax-H3-Image through",
+                     "comfy.ldm.minimax.model.MiniMaxH3ImageModel.gone",
+                     f"ComfyUI {P.compat.comfyui_version()}", "update ComfyUI"):
+            self.assertIn(want, str(e.exception))
+
+
+@unittest.skipIf(HAS_H3_IMAGE, "this ComfyUI has MiniMax-H3-Image")
+class H3ImageOnAnOlderComfyUI(Base):
+    def test_it_is_refused_by_name(self):
+        with self.assertRaises(C.GmlxError) as e:
+            self.model(IID)
+        for want in (f"ComfyUI {P.compat.comfyui_version()} has no MiniMaxH3Image model",
+                     repr(IID), "update ComfyUI"):
+            self.assertIn(want, str(e.exception))
 
 
 if __name__ == "__main__":

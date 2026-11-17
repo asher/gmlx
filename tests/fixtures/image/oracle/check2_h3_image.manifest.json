@@ -1,0 +1,291 @@
+{
+ "schema": 1,
+ "name": "check2_h3_image",
+ "check": 2,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check2_h3_image.py",
+ "argv": ["check2_h3_image.py", "--encoder", "Qwen3-VL-32B-Instruct-Q4_K_M.gguf"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "encoder": {
+   "name": "Qwen3-VL-32B-Instruct-Q4_K_M.gguf",
+   "size": 19762151200,
+   "sha256": "92d605566f8661b296251c535ed028ecf81c32e14e06948a3d8bef829e96a804"
+  }
+ },
+ "inputs": {
+  "prompts": {
+   "plain": "A red bicycle leaning against a weathered brick wall at sunset, a cat asleep in its basket, warm light, 35mm photograph",
+   "empty": "",
+   "non_ascii": "Un caf\u00e9 \u00e0 Montr\u00e9al en hiver, \u7a93\u8fba\u3067\u5bdd\u3066\u3044\u308b\u732b, \u4e00\u676f\u62ff\u94c1\u548c\u4e00\u672c\u4e66, \u0441\u043d\u0435\u0433 \u0437\u0430 \u043e\u043a\u043d\u043e\u043c, \ud83d\udc31\u2615",
+   "long": "A narrow cobblestone street in an old harbor town at dusk, lined with three story houses painted ochre, teal and faded red. Laundry hangs on lines strung between the balconies, and a bicycle with a wicker basket leans against a green door. A fishmonger closes the shutters of a small shop while gulls circle above the masts in the harbor. Warm lamplight spills from a cafe where two old men play chess at a marble table, and a cat watches them from a windowsill full of geraniums. Puddles from an afternoon rain reflect the lamps and the violet sky, and the far end of the street opens onto the sea, where a lighthouse is just switching on. In the foreground a girl in a yellow raincoat crouches to inspect a snail on the curb, her boots splashed with mud. Behind her a baker carries a tray of round loaves dusted with flour toward a delivery van whose rear doors stand open. A hand painted sign above the bakery reads Panificio in chipped gold letters. Strings of small bulbs zigzag overhead, some of them dark, and a pigeon sits on the wire between two of them. On the left, a stone staircase climbs toward a chapel with a bell tower, its steps worn into shallow bowls by centuries of feet. Moss grows in the cracks, and someone has left a bunch of wildflowers on the third step. A scooter with a dented fender is parked at an angle beside a bollard shaped like a lion. The sky shades from deep indigo at the top of the frame to a band of apricot just above the horizon, with a thin crescent moon and a single bright planet. Fishing boats with blue and white hulls rock at their moorings, nets heaped on their decks, and a man in a wool cap coils rope on the quay. Far out on the water the running lights of a ferry move slowly toward an island whose hills are already black. The air looks cool and damp, with a faint haze that softens the distant lights into halos. Shot on medium format film with a normal lens at eye level, shallow depth of field on the girl and the snail, gentle grain, muted greens and warm highlights, no text other than the bakery sign, no watermark. The composition follows the curve of the street from the lower left corner to the lighthouse at the upper right, leading the eye past each small story along the way. Every window tells something: a family eating soup under a hanging lamp, a tailor pinning the hem of a coat on a wooden dummy, an empty room with a piano and a vase of dry roses, a boy practicing the violin with his music stand turned toward the glass. Rainwater still drips from the gutters, catching the light in bright beads, and the cobbles shine like the backs of beetles. A black dog trots out of an alley with a paper bag in its mouth, looking over its shoulder as if someone might follow.",
+   "typography": "A hand-painted wooden sign above a bakery door that reads \"FRESH BREAD 7AM\" in cream letters, a chalkboard beside it listing \"Rye 4.50\" and \"Sourdough 6\", morning light",
+   "rows_4096": "Panel 1: A lighthouse stands on a granite cliff above a cold green sea. Panel 2: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 3: Fog lies in the valley below a village of slate roofs and stone walls. Panel 4: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 5: Lanterns hang from a wire strung between two crooked chimneys. Panel 6: A market stall sells lemons, figs and bunches of dried lavender. Panel 7: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 8: An old tram climbs a steep street lined with tiled facades. Panel 9: A heron waits in the reeds at the edge of a still brown pond. Panel 10: Snow dusts the pines on a ridge under a pale winter sun. Panel 11: A clock tower shows ten past four above a busy railway station. Panel 12: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 13: A lighthouse stands on a granite cliff above a cold green sea. Panel 14: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 15: Fog lies in the valley below a village of slate roofs and stone walls. Panel 16: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 17: Lanterns hang from a wire strung between two crooked chimneys. Panel 18: A market stall sells lemons, figs and bunches of dried lavender. Panel 19: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 20: An old tram climbs a steep street lined with tiled facades. Panel 21: A heron waits in the reeds at the edge of a still brown pond. Panel 22: Snow dusts the pines on a ridge under a pale winter sun. Panel 23: A clock tower shows ten past four above a busy railway station. Panel 24: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 25: A lighthouse stands on a granite cliff above a cold green sea. Panel 26: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 27: Fog lies in the valley below a village of slate roofs and stone walls. Panel 28: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 29: Lanterns hang from a wire strung between two crooked chimneys. Panel 30: A market stall sells lemons, figs and bunches of dried lavender. Panel 31: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 32: An old tram climbs a steep street lined with tiled facades. Panel 33: A heron waits in the reeds at the edge of a still brown pond. Panel 34: Snow dusts the pines on a ridge under a pale winter sun. Panel 35: A clock tower shows ten past four above a busy railway station. Panel 36: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 37: A lighthouse stands on a granite cliff above a cold green sea. Panel 38: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 39: Fog lies in the valley below a village of slate roofs and stone walls. Panel 40: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 41: Lanterns hang from a wire strung between two crooked chimneys. Panel 42: A market stall sells lemons, figs and bunches of dried lavender. Panel 43: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 44: An old tram climbs a steep street lined with tiled facades. Panel 45: A heron waits in the reeds at the edge of a still brown pond. Panel 46: Snow dusts the pines on a ridge under a pale winter sun. Panel 47: A clock tower shows ten past four above a busy railway station. Panel 48: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 49: A lighthouse stands on a granite cliff above a cold green sea. Panel 50: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 51: Fog lies in the valley below a village of slate roofs and stone walls. Panel 52: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 53: Lanterns hang from a wire strung between two crooked chimneys. Panel 54: A market stall sells lemons, figs and bunches of dried lavender. Panel 55: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 56: An old tram climbs a steep street lined with tiled facades. Panel 57: A heron waits in the reeds at the edge of a still brown pond. Panel 58: Snow dusts the pines on a ridge under a pale winter sun. Panel 59: A clock tower shows ten past four above a busy railway station. Panel 60: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 61: A lighthouse stands on a granite cliff above a cold green sea. Panel 62: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 63: Fog lies in the valley below a village of slate roofs and stone walls. Panel 64: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 65: Lanterns hang from a wire strung between two crooked chimneys. Panel 66: A market stall sells lemons, figs and bunches of dried lavender. Panel 67: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 68: An old tram climbs a steep street lined with tiled facades. Panel 69: A heron waits in the reeds at the edge of a still brown pond. Panel 70: Snow dusts the pines on a ridge under a pale winter sun. Panel 71: A clock tower shows ten past four above a busy railway station. Panel 72: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 73: A lighthouse stands on a granite cliff above a cold green sea. Panel 74: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 75: Fog lies in the valley below a village of slate roofs and stone walls. Panel 76: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 77: Lanterns hang from a wire strung between two crooked chimneys. Panel 78: A market stall sells lemons, figs and bunches of dried lavender. Panel 79: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 80: An old tram climbs a steep street lined with tiled facades. Panel 81: A heron waits in the reeds at the edge of a still brown pond. Panel 82: Snow dusts the pines on a ridge under a pale winter sun. Panel 83: A clock tower shows ten past four above a busy railway station. Panel 84: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 85: A lighthouse stands on a granite cliff above a cold green sea. Panel 86: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 87: Fog lies in the valley below a village of slate roofs and stone walls. Panel 88: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 89: Lanterns hang from a wire strung between two crooked chimneys. Panel 90: A market stall sells lemons, figs and bunches of dried lavender. Panel 91: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 92: An old tram climbs a steep street lined with tiled facades. Panel 93: A heron waits in the reeds at the edge of a still brown pond. Panel 94: Snow dusts the pines on a ridge under a pale winter sun. Panel 95: A clock tower shows ten past four above a busy railway station. Panel 96: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 97: A lighthouse stands on a granite cliff above a cold green sea. Panel 98: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 99: Fog lies in the valley below a village of slate roofs and stone walls. Panel 100: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 101: Lanterns hang from a wire strung between two crooked chimneys. Panel 102: A market stall sells lemons, figs and bunches of dried lavender. Panel 103: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 104: An old tram climbs a steep street lined with tiled facades. Panel 105: A heron waits in the reeds at the edge of a still brown pond. Panel 106: Snow dusts the pines on a ridge under a pale winter sun. Panel 107: A clock tower shows ten past four above a busy railway station. Panel 108: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 109: A lighthouse stands on a granite cliff above a cold green sea. Panel 110: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 111: Fog lies in the valley below a village of slate roofs and stone walls. Panel 112: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 113: Lanterns hang from a wire strung between two crooked chimneys. Panel 114: A market stall sells lemons, figs and bunches of dried lavender. Panel 115: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 116: An old tram climbs a steep street lined with tiled facades. Panel 117: A heron waits in the reeds at the edge of a still brown pond. Panel 118: Snow dusts the pines on a ridge under a pale winter sun. Panel 119: A clock tower shows ten past four above a busy railway station. Panel 120: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 121: A lighthouse stands on a granite cliff above a cold green sea. Panel 122: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 123: Fog lies in the valley below a village of slate roofs and stone walls. Panel 124: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 125: Lanterns hang from a wire strung between two crooked chimneys. Panel 126: A market stall sells lemons, figs and bunches of dried lavender. Panel 127: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 128: An old tram climbs a steep street lined with tiled facades. Panel 129: A heron waits in the reeds at the edge of a still brown pond. Panel 130: Snow dusts the pines on a ridge under a pale winter sun. Panel 131: A clock tower shows ten past four above a busy railway station. Panel 132: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 133: A lighthouse stands on a granite cliff above a cold green sea. Panel 134: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 135: Fog lies in the valley below a village of slate roofs and stone walls. Panel 136: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 137: Lanterns hang from a wire strung between two crooked chimneys. Panel 138: A market stall sells lemons, figs and bunches of dried lavender. Panel 139: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 140: An old tram climbs a steep street lined with tiled facades. Panel 141: A heron waits in the reeds at the edge of a still brown pond. Panel 142: Snow dusts the pines on a ridge under a pale winter sun. Panel 143: A clock tower shows ten past four above a busy railway station. Panel 144: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 145: A lighthouse stands on a granite cliff above a cold green sea. Panel 146: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 147: Fog lies in the valley below a village of slate roofs and stone walls. Panel 148: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 149: Lanterns hang from a wire strung between two crooked chimneys. Panel 150: A market stall sells lemons, figs and bunches of dried lavender. Panel 151: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 152: An old tram climbs a steep street lined with tiled facades. Panel 153: A heron waits in the reeds at the edge of a still brown pond. Panel 154: Snow dusts the pines on a ridge under a pale winter sun. Panel 155: A clock tower shows ten past four above a busy railway station. Panel 156: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 157: A lighthouse stands on a granite cliff above a cold green sea. Panel 158: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 159: Fog lies in the valley below a village of slate roofs and stone walls. Panel 160: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 161: Lanterns hang from a wire strung between two crooked chimneys. Panel 162: A market stall sells lemons, figs and bunches of dried lavender. Panel 163: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 164: An old tram climbs a steep street lined with tiled facades. Panel 165: A heron waits in the reeds at the edge of a still brown pond. Panel 166: Snow dusts the pines on a ridge under a pale winter sun. Panel 167: A clock tower shows ten past four above a busy railway station. Panel 168: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 169: A lighthouse stands on a granite cliff above a cold green sea. Panel 170: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 171: Fog lies in the valley below a village of slate roofs and stone walls. Panel 172: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 173: Lanterns hang from a wire strung between two crooked chimneys. Panel 174: A market stall sells lemons, figs and bunches of dried lavender. Panel 175: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 176: An old tram climbs a steep street lined with tiled facades. Panel 177: A heron waits in the reeds at the edge of a still brown pond. Panel 178: Snow dusts the pines on a ridge under a pale winter sun. Panel 179: A clock tower shows ten past four above a busy railway station. Panel 180: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 181: A lighthouse stands on a granite cliff above a cold green sea. Panel 182: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 183: Fog lies in the valley below a village of slate roofs and stone walls. Panel 184: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 185: Lanterns hang from a wire strung between two crooked chimneys. Panel 186: A market stall sells lemons, figs and bunches of dried lavender. Panel 187: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 188: An old tram climbs a steep street lined with tiled facades. Panel 189: A heron waits in the reeds at the edge of a still brown pond. Panel 190: Snow dusts the pines on a ridge under a pale winter sun. Panel 191: A clock tower shows ten past four above a busy railway station. Panel 192: Copper pots hang over a stove in a narrow kitchen with blue tiles. Panel 193: A lighthouse stands on a granite cliff above a cold green sea. Panel 194: Gulls circle a fishing boat whose red hull is streaked with rust. Panel 195: Fog lies in the valley below a village of slate roofs and stone walls. Panel 196: A woman in a yellow raincoat walks a grey dog along the harbor wall. Panel 197: Lanterns hang from a wire strung between two crooked chimneys. Panel 198: A market stall sells lemons, figs and bunches of dried lavender. Panel 199: Children chalk a hopscotch grid on the wet cobbles of a square. Panel 200: An old tram climbs a steep street lined with tiled facades. Panel and and"
+  },
+  "lengths": {
+   "plain": 28,
+   "empty": 1,
+   "non_ascii": 37,
+   "long": 617,
+   "typography": 50,
+   "rows_4096": 4096
+  },
+  "comfyui_commit": "2aa4d535a76e4b6acf6a94f263bc482430c396dd",
+  "tap": "output of decoder layer 50 of 64, before the final norm, every row",
+  "tokenizer": "comfy.text_encoders.minimax.MiniMaxH3Tokenizer.tokenize_with_weights(prompt, images=[], picture_label='Picture %d: '), as MiniMaxH3ImageConditioning calls it without images: the raw prompt ids, the seven MiniMax tokens at their fixed ids, an empty prompt the pad token 151643",
+  "rows_prompts": "SCENES numbered in turn, cut to the most words of at most N ids, then ' and' until N ids",
+  "encoder": "transformers Qwen3VLTextDecoderLayer, one resident at a time, weights from the text GGUF by gguf-py float32 dequantization; SDPA attention, causal, batch 1, no padding",
+  "config": {
+   "hidden_size": 5120,
+   "intermediate_size": 25600,
+   "num_attention_heads": 64,
+   "num_key_value_heads": 8,
+   "head_dim": 128,
+   "rms_norm_eps": 9.999999974752427e-07,
+   "rope_parameters": {
+    "rope_type": "default",
+    "rope_theta": 5000000.0,
+    "mrope_section": [24, 20, 20],
+    "mrope_interleaved": true
+   }
+  },
+  "gguf_codecs": {
+   "Q6_K": 65,
+   "F32": 257,
+   "Q4_K": 385
+  }
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_matmul": "bf16 operands, float32 GEMM, one bf16 rounding"
+  },
+  "name_map_check": {
+   "prompt": "The capital of France is",
+   "token_id": 12095,
+   "token": " Paris",
+   "logit": 19.171100616455078
+  },
+  "bf16_vs_fp32": {
+   "plain": {
+    "rel_l2": 0.008344952530119212,
+    "cosine": 0.9999829121666998,
+    "max_abs": 104.1826171875,
+    "token_cosine_min": 0.9999253661613227,
+    "token_cosine_min_row": 2,
+    "token_cosine_min_token_id": 34986,
+    "rel_l2_by_layer": [0.0037424662949455474, 0.003897926816041305, 0.003986382853359519, 0.005146874586856185, 0.005376736821034036, 0.005917924442849268, 0.002759349178789756, 0.0034179688988979187, 0.0021746865523168987, 0.0018744095412564746, 0.0009035767327559756, 0.0007166772925030322, 0.0015981021984657984, 0.002257667879398874, 0.002928607087396557, 0.0033529405036057825, 0.004061240029143745, 0.004576343466183861, 0.004953988895256206, 0.006196669434690537, 0.006860856031760376, 0.007240597093659239, 0.007650945912473311, 0.008444721110000277, 0.008603102952425256, 0.008868176697890974, 0.009088146991065261, 0.009619307145613735, 0.009906276141641652, 0.010823495900456321, 0.01226653737320531, 0.010243891864160857, 0.011257304561192888, 0.012241105798221229, 0.012846066646615494, 0.013750905426223885, 0.014356070422217095, 0.01449386312582468, 0.014399815465730133, 0.014212434121526129, 0.01377352600925493, 0.013911001542984731, 0.013736315574340498, 0.010199373882286415, 0.007868714618202686, 0.007892661556755694, 0.008471899885324586, 0.00887915881169339, 0.008453584261528901, 0.008344952530119212],
+    "rel_l2_after_first": 0.009937017865075877
+   },
+   "empty": {
+    "rel_l2": 0.019410235917198024,
+    "cosine": 0.9998147515237203,
+    "max_abs": 6.4229736328125,
+    "token_cosine_min": 0.9998147515237203,
+    "token_cosine_min_row": 0,
+    "token_cosine_min_token_id": 151643,
+    "rel_l2_by_layer": [0.0036015350933463527, 0.0053412846733569335, 0.0040471740365499, 0.0038685317000489794, 0.004930229435688952, 0.004030749943232002, 0.004643039616535166, 0.004588866994357098, 0.005977005882096246, 0.006398652406340765, 0.0066013723080398864, 0.007267711342998877, 0.006258126129267289, 0.00627066777570162, 0.005826709207456858, 0.006352425496821865, 0.006253632753884001, 0.006421272743441551, 0.006866754088054471, 0.007245227100262802, 0.007906573047489688, 0.008118335359223204, 0.007912904028423106, 0.00909522421911406, 0.010231817081749842, 0.010131812509612197, 0.010217722593940303, 0.010153437495090076, 0.010260263821145157, 0.01155068900392894, 0.01141762303159597, 0.01121931751934108, 0.010163097488077349, 0.011474066614029808, 0.012989288841692323, 0.012502957774299994, 0.013739267093399439, 0.012595436022830924, 0.01432993190743086, 0.013808785327982664, 0.014269186821707285, 0.015317263660665808, 0.014965538773785047, 0.015637870978228857, 0.016524847626320262, 0.01862441425317368, 0.018736508426683077, 0.018030692730233316, 0.01917804133068583, 0.019410235917198024]
+   },
+   "non_ascii": {
+    "rel_l2": 0.011960089166827717,
+    "cosine": 0.9999866481275784,
+    "max_abs": 179.7783203125,
+    "token_cosine_min": 0.9998762344748201,
+    "token_cosine_min_row": 12,
+    "token_cosine_min_token_id": 15827,
+    "rel_l2_by_layer": [0.0035360331912359143, 0.004122209435459161, 0.00461749779866346, 0.005121008904681404, 0.005547488101726805, 0.006001978495578577, 0.0023854922430683926, 0.001942784936403004, 0.0030757984940603697, 0.0033751587564044994, 0.0044044402496060805, 0.005383603639827157, 0.006458554498485799, 0.007111889297750135, 0.007777608450809817, 0.008192959555624648, 0.008892609340366928, 0.009393010823220761, 0.009759493261126092, 0.010994328171599854, 0.011643673862309046, 0.012014101704910357, 0.012410906165566586, 0.013186740865539913, 0.013333918756346656, 0.013580509025107696, 0.013785482020579677, 0.014300933712037882, 0.014572321126716277, 0.015472955502540789, 0.016903076879045912, 0.014931717134343298, 0.015903143189538973, 0.016855259357493883, 0.01743457291555405, 0.01830996114858989, 0.018880271323780413, 0.01899405576437967, 0.018868506702682124, 0.01865442864113296, 0.018187446271304076, 0.018308474460134342, 0.018116935464738942, 0.014358323557999163, 0.011827005367511214, 0.011754019934842168, 0.01233105511921628, 0.012706284589031938, 0.012143087509457397, 0.011960089166827717],
+    "rel_l2_after_first": 0.01135668886292146
+   },
+   "long": {
+    "rel_l2": 0.008495433944262148,
+    "cosine": 0.9999739000413742,
+    "max_abs": 104.1826171875,
+    "token_cosine_min": 0.9992813015887472,
+    "token_cosine_min_row": 563,
+    "token_cosine_min_token_id": 49411,
+    "rel_l2_by_layer": [0.0034039584961326258, 0.004048345250160619, 0.004524109685492775, 0.005124791079280255, 0.0054059037391566605, 0.0057691057553505365, 0.0028234927041784837, 0.0034803942506135407, 0.0023125801222723032, 0.0020685339556513046, 0.001360863351533024, 0.0013523757776842285, 0.0020067108815304806, 0.0025781954119856415, 0.00319621515313867, 0.0036120281688412706, 0.004282414933496792, 0.00478122106092239, 0.005151383754010046, 0.0063309409509307146, 0.006964361240854117, 0.007330913180916523, 0.007728005627104279, 0.008472412643845637, 0.008624279297709574, 0.008865919730090963, 0.009061383310422406, 0.009542395084488718, 0.009806985978687762, 0.010627258666120512, 0.01196537167690063, 0.010152064681119352, 0.011088704427244207, 0.011967437841791186, 0.012542155331330369, 0.013424073238429595, 0.014044316108994707, 0.014206551717553263, 0.01407792043508843, 0.01391555211771381, 0.01347822621026863, 0.013580744217899293, 0.013390075179803446, 0.010159480959429005, 0.008058731401106724, 0.008078373532992988, 0.008575648629216467, 0.008930937012503866, 0.008604596333669551, 0.008495433944262148],
+    "rel_l2_after_first": 0.009207646194950113
+   },
+   "typography": {
+    "rel_l2": 0.008359763516981922,
+    "cosine": 0.9999824651379389,
+    "max_abs": 104.1826171875,
+    "token_cosine_min": 0.9998517316646188,
+    "token_cosine_min_row": 2,
+    "token_cosine_min_token_id": 2268,
+    "rel_l2_by_layer": [0.003272857320667864, 0.003949607436965454, 0.004017556529738804, 0.005099686281956283, 0.005578906965647978, 0.005844441514169609, 0.0027620711432957937, 0.003420504351304867, 0.002180668447693277, 0.001882390877112689, 0.0009254826757594388, 0.0007554458824535833, 0.0016184982828673037, 0.0022729380378260313, 0.002940628433798913, 0.003365853114493682, 0.004073577081159075, 0.0045876876546192165, 0.0049648353318521915, 0.006204319548092601, 0.006866259362949164, 0.007245315511409165, 0.007655532620480004, 0.008447373861012433, 0.008605743750662795, 0.008869517514201859, 0.0090881773812911, 0.009616363245885372, 0.009902875923769892, 0.010817641361585672, 0.01225693355860615, 0.010243514338445264, 0.011253753931396854, 0.012233567947757063, 0.012836676785590221, 0.013738042297260491, 0.014343923375942334, 0.01448129411092472, 0.014386718229205397, 0.01420026645707341, 0.013761324184487151, 0.013897089348686057, 0.013723076546650073, 0.010198817114944908, 0.007878252360794952, 0.007908323063872933, 0.008483413823929553, 0.008891021061399267, 0.00846969981026345, 0.008359763516981922],
+    "rel_l2_after_first": 0.00998655397892456
+   },
+   "rows_4096": {
+    "rel_l2": 0.09844991746381672,
+    "cosine": 0.9951773674580248,
+    "max_abs": 2707.898193359375,
+    "token_cosine_min": 0.6247532123388149,
+    "token_cosine_min_row": 2122,
+    "token_cosine_min_token_id": 220,
+    "rel_l2_by_layer": [0.003357765066219331, 0.00407513043388825, 0.0045943391482593235, 0.0050857743161366945, 0.005395636686212339, 0.005802809138103779, 0.010364737873905983, 0.01039931379957531, 0.009169772893390386, 0.008715214831520792, 0.007793649689164212, 0.007001723950935879, 0.006150205118666025, 0.0056721585476352705, 0.00521473153835124, 0.0050031300275141, 0.004617402187834062, 0.004438291128798303, 0.00438908187803393, 0.004050031272410488, 0.0040795786403919785, 0.004203936648085278, 0.004372950195566735, 0.004688301055718071, 0.004933901269575521, 0.005101060301230383, 0.005379242978048561, 0.005668493088900332, 0.006101876896923117, 0.0066564289964488, 0.007569281707401927, 0.007125214468305078, 0.007482253123661731, 0.00787550689312875, 0.00826910609340119, 0.009181211413284771, 0.010129067562389273, 0.01077295598793961, 0.011516235884661653, 0.012724831480026667, 0.014633932070027446, 0.016721772956452816, 0.01950620124807298, 0.08632813758624201, 0.09282465930432059, 0.09238669077072632, 0.09277523740411261, 0.09557588120408209, 0.09531916404010769, 0.09844991746381672],
+    "rel_l2_after_first": 0.11590139453799647
+   }
+  },
+  "seconds": {
+   "layers_s": 962.4
+  },
+  "max_rss_gib": 27.08
+ },
+ "tolerances": {
+  "rule": "relative L2 = 2 x the oracle's own bf16 against fp32 relative L2 of the same prompt, over every row and over the rows after the first; per-token cosine at least 1 - 4 (1 - c), c the oracle's own smallest per-token cosine of the same prompt, and at most the starting value",
+  "starting": {
+   "rel_l2": 0.02,
+   "token_cosine_min": 0.999
+  },
+  "rel_l2": {
+   "plain": 0.016689905060238423,
+   "empty": 0.03882047183439605,
+   "non_ascii": 0.023920178333655433,
+   "long": 0.016990867888524296,
+   "typography": 0.016719527033963844,
+   "rows_4096": 0.19689983492763344
+  },
+  "rel_l2_after_first": {
+   "plain": 0.019874035730151753,
+   "non_ascii": 0.02271337772584292,
+   "long": 0.018415292389900226,
+   "typography": 0.01997310795784912,
+   "rows_4096": 0.23180278907599294
+  },
+  "token_cosine_min": {
+   "plain": 0.999,
+   "empty": 0.999,
+   "non_ascii": 0.999,
+   "long": 0.9971252063549887,
+   "typography": 0.999,
+   "rows_4096": -0.5009871506447405
+  }
+ },
+ "notes": [],
+ "created": "2026-11-16T03:46:22Z",
+ "npz": "check2_h3_image.npz",
+ "tensors": {
+  "ids_empty": {
+   "shape": [1],
+   "dtype": "int32",
+   "sha256": "760b68531cab7e8a5007dde42c3f91a8a1954193e80d93908cff50c00938b72b"
+  },
+  "ids_long": {
+   "shape": [617],
+   "dtype": "int32",
+   "sha256": "b65de1dfda175dddeb93dc0bc77d62de64ffa7b730df14d4c27535f826185b12"
+  },
+  "ids_non_ascii": {
+   "shape": [37],
+   "dtype": "int32",
+   "sha256": "fc04cb5c056c141eb7de4e23ee920ace7299449ff50d0ece13c723025be32537"
+  },
+  "ids_plain": {
+   "shape": [28],
+   "dtype": "int32",
+   "sha256": "9d48f6ce15004d4551a3dffecf10004d97774918917d9cb991e3b8de17c51670"
+  },
+  "ids_rows_4096": {
+   "shape": [4096],
+   "dtype": "int32",
+   "sha256": "b967dfe770036c58f08ad69071d2a28f6adc1a64771345187f6d4292253ac182"
+  },
+  "ids_typography": {
+   "shape": [50],
+   "dtype": "int32",
+   "sha256": "b0eefbadc7f1ba017b56ad55cb1cce6c7c8820944e881ddf12502a6ef8e18b8f"
+  },
+  "tap_bf16_empty": {
+   "shape": [1, 5120],
+   "dtype": "float32",
+   "sha256": "f82999512841b11c587cfc185a7a0ed358f12886b53ba08f43be5225702cc922"
+  },
+  "tap_bf16_long": {
+   "shape": [617, 5120],
+   "dtype": "float32",
+   "sha256": "df9a0a18a7ef20d34454664dece70fe0e059e10d7a07a403adf31d93f6c9e1a4"
+  },
+  "tap_bf16_non_ascii": {
+   "shape": [37, 5120],
+   "dtype": "float32",
+   "sha256": "42925e19dbb69faa220c3d99aadd5736b51550637098e8a20074c13b29b9fbc2"
+  },
+  "tap_bf16_plain": {
+   "shape": [28, 5120],
+   "dtype": "float32",
+   "sha256": "872fb244cd5ba172cfb47cce3fd9465e3344601fee6ddf1fe0457a27389fda24"
+  },
+  "tap_bf16_rows_4096": {
+   "shape": [4096, 5120],
+   "dtype": "float32",
+   "sha256": "053d60c91c26cf4372bf94e1f77a984a71473e96fe021e9e144cde567fbb89d6"
+  },
+  "tap_bf16_typography": {
+   "shape": [50, 5120],
+   "dtype": "float32",
+   "sha256": "58a88dbb281a92e145726e2297a32803460bd5a4f8689df61b9ba62a6405a7a0"
+  },
+  "tap_empty": {
+   "shape": [1, 5120],
+   "dtype": "float32",
+   "sha256": "7b6a227ff84d193004b2e43fd64872b41fe79eae6751a771958324c34c431aa7"
+  },
+  "tap_long": {
+   "shape": [617, 5120],
+   "dtype": "float32",
+   "sha256": "4cfa626f96bfc1420e6960943f6111a44f5895062934d0c979fcbbb8eba40a4a"
+  },
+  "tap_non_ascii": {
+   "shape": [37, 5120],
+   "dtype": "float32",
+   "sha256": "fceaf60994bed18ca9a4f453cf0a241b3d6394af00cdf8fa40530f403af37545"
+  },
+  "tap_plain": {
+   "shape": [28, 5120],
+   "dtype": "float32",
+   "sha256": "5b6a80b80b0afc63049168b46716b91cbfe1e66df7cf3c698368216fb1a02a00"
+  },
+  "tap_rows_4096": {
+   "shape": [4096, 5120],
+   "dtype": "float32",
+   "sha256": "77e64c792ac36b219b91bc673fa34b8a07eaa69110494248a9ff09f3899711a6"
+  },
+  "tap_typography": {
+   "shape": [50, 5120],
+   "dtype": "float32",
+   "sha256": "719bd7fb46e2db4c24874f32d1e31eeebe79ec5d6e13c7a5188681d04ea90bd3"
+  }
+ }
+}

@@ -414,9 +414,12 @@ def test_gmlx_image_names_an_h3_file_it_cannot_read(tmp_path):
 
 
 def test_gmlx_video_takes_no_image_file():
+    """Nor H3's own DiT without its audio stream, MiniMax-H3-Image, which
+    it names an image GGUF."""
     import image_fixtures
 
-    for name in (image_fixtures.Z_HEADER, image_fixtures.Q_HEADER):
+    for name in (image_fixtures.Z_HEADER, image_fixtures.Q_HEADER,
+                 "h3_image_pruned_ud_q4_k_xl.header.json"):
         view = image_fixtures.fixture_view(name)
         assert vfp.video_family_of(view) is None
         title = ifp.identify(view).family.title

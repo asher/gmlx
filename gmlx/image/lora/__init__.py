@@ -14,8 +14,8 @@ from __future__ import annotations
 from .install import (EncoderLoRALinear, ImageLoRALinear, pair_hash,
                       register_pair)
 from .patch_table import (LoadedAdapter, apply_text_adapters, fit_cache,
-                          load_adapter, plans_from_patches, register_patch,
-                          table_entries, text_state)
+                          load_adapter, plans_from_patches, refuse,
+                          register_patch, table_entries, text_state)
 from .reader import (AdapterError, AdapterFamilyError, UnmatchedKeysError,
                      UnsupportedAdapterError, read_lora, resolve,
                      vet_header)
@@ -34,6 +34,7 @@ __all__ = [
     "pair_hash",
     "plans_from_patches",
     "read_lora",
+    "refuse",
     "register_pair",
     "register_patch",
     "resolve",

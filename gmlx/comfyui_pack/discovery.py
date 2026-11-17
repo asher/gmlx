@@ -54,6 +54,7 @@ PULL_NAMES = {
     "flux-2-klein-9b-kv": (),
     "flux-3-klein": (),
     "flux-3-klein-base": (),
+    "minimax-h3-image": (),
 }
 PULL_KINDS = {
     "z-image-turbo": ("z_image", "turbo"),
@@ -69,6 +70,7 @@ PULL_KINDS = {
     "flux-2-klein-9b-kv": ("flux2_klein_9b_kv", "distilled"),
     "flux-3-klein": ("flux3_klein", "distilled"),
     "flux-3-klein-base": ("flux3_klein", "base"),
+    "minimax-h3-image": ("h3_image", "pruned"),
 }
 
 # The video models `gmlx video pull` downloads that the gmlx nodes run, in
@@ -307,8 +309,8 @@ def loader_inputs() -> dict:
             "default": True, "tooltip": "Run gmlx serve when no server answers."})}}
 
 
-# The int8 setting a MiniMax-H3 model's steps run, from the model loader:
-# the entry's, or one of the server's values.
+# The int8 setting a MiniMax-H3 or MiniMax-H3-Image model's steps run, from
+# the model loader: the entry's, or one of the server's values.
 INT8 = ("entry", "off", "attention", "linears", "all")
 # The linears of each value: a property of the loaded DiT, which a step
 # cannot change.
@@ -317,12 +319,12 @@ INT8_LINEARS = {"off": False, "attention": False, "linears": True, "all": True}
 
 def model_loader_inputs() -> dict:
     """The INPUT_TYPES of the model loader: the loaders', and the int8
-    setting of a MiniMax-H3 model's steps."""
+    setting of a MiniMax-H3 or MiniMax-H3-Image model's steps."""
     return {**loader_inputs(), "optional": {"int8": (list(INT8), {
         "default": INT8[0],
-        "tooltip": "The int8 setting of each MiniMax-H3 step: the entry's, or off, "
-                   "attention, linears or all. Lossy, on an M5 or newer; the linears "
-                   "part must match the entry's."})}}
+        "tooltip": "The int8 setting of each MiniMax-H3 or MiniMax-H3-Image step: "
+                   "the entry's, or off, attention, linears or all. Lossy, on an M5 "
+                   "or newer; the linears part must match the entry's."})}}
 
 
 def int8_refusal(entry: str, value: str) -> str | None:

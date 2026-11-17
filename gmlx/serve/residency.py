@@ -153,17 +153,25 @@ class _BusyHold:
     that never reach generate (token-count endpoints, pre-generate 4xx paths) -
     the hold dies with the request context, so the refcount can't leak."""
 
-    __slots__ = ("_pool", "_entry")
+    __slots__ = ("_pool", "_entry", "_end")
 
-    def __init__(self, pool, entry):
+    def __init__(self, pool, entry, end=None):
         self._pool = pool
         self._entry = entry
+        # Called once at the release: the end of a media request's wired
+        # hold (_media_wired_hold).
+        self._end = end
 
     def release(self):
         pool, self._pool = self._pool, None
-        if pool is not None:
-            pool.release(self._entry)
-            self._entry = None
+        end, self._end = self._end, None
+        try:
+            if pool is not None:
+                pool.release(self._entry)
+                self._entry = None
+        finally:
+            if end is not None:
+                end()
 
     def __del__(self):
         try:
@@ -411,13 +419,42 @@ def _installed_pool():
     return getattr(pkg, "_kq_residency_pool", None) if pkg else None
 
 
-def acquire_image_model(model_field, *, pool=None) -> "_BusyHold":
+def _media_wired_hold():
+    """Hold the MLX wired limit at 0 (``wired_limit_held``) and return the
+    callable that ends the hold. A media request's build and its job are
+    two jobs on the worker, each holding the limit at 0
+    (``subservice.media_job``); between them the limit a chat turn's
+    generator asked would come back and wire everything the build loaded.
+    The hold spans both: from the acquire to the busy hold's release."""
+    from gmlx.stream.wired_limit import wired_limit_held
+
+    cm = wired_limit_held()
+    cm.__enter__()
+    return lambda: cm.__exit__(None, None, None)
+
+
+def acquire_image_model(model_field, *, pool=None,
+                        hold_wired: bool = False) -> "_BusyHold":
     """Resolve an image route's ``model`` field and acquire its entry,
     loading it on a miss. Returns the busy hold the caller releases when
     its job ends; ``hold._entry.pipeline`` is the ``ServedImage``.
     Resolver errors and a deferred load raise the ``HTTPException`` the
     chat routes raise: a chat model id is a 400, as an image id is on a
-    chat route."""
+    chat route. ``hold_wired`` holds the wired limit at 0 from here to the
+    release (``_media_wired_hold``), for a caller whose hold ends with its
+    request."""
+    end = _media_wired_hold() if hold_wired else None
+    try:
+        hold = _acquire_image_model(model_field, pool)
+    except BaseException:
+        if end is not None:
+            end()
+        raise
+    hold._end = end
+    return hold
+
+
+def _acquire_image_model(model_field, pool) -> "_BusyHold":
     from fastapi import HTTPException
 
     from . import bridge_vlm as _serving
@@ -453,12 +490,25 @@ def acquire_image_model(model_field, *, pool=None) -> "_BusyHold":
     return _BusyHold(pool, entry)
 
 
-def acquire_video_model(model_field, *, pool=None) -> "_BusyHold":
+def acquire_video_model(model_field, *, pool=None,
+                        hold_wired: bool = False) -> "_BusyHold":
     """Acquire the entry of a configured video model id, loading it on a
     miss, as :func:`acquire_image_model` does an image model;
     ``hold._entry.pipeline`` is the ``ServedVideo``. A file that is no
     model of the family, or an entry whose default clip does not fit the
-    working budget, is a 400."""
+    working budget, is a 400. ``hold_wired`` as for an image model."""
+    end = _media_wired_hold() if hold_wired else None
+    try:
+        hold = _acquire_video_model(model_field, pool)
+    except BaseException:
+        if end is not None:
+            end()
+        raise
+    hold._end = end
+    return hold
+
+
+def _acquire_video_model(model_field, pool) -> "_BusyHold":
     from fastapi import HTTPException
 
     from gmlx.video.fingerprint import VideoModelError

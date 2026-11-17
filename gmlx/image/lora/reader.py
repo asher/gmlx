@@ -187,7 +187,8 @@ class LoraKeyMap:
     ComfyUI finds the family's targets, and only those that are not
     ``diffusers_only``: ComfyUI drops every other spelling.
     ``comfy_stems``, when not None, is every DiT stem that ComfyUI's key
-    map reads for the family, and ComfyUI drops every other stem;
+    map reads for the family, the gmlx nodes' additions to it included,
+    and ComfyUI drops every other stem;
     ``comfy_reads`` says which stems those are, for the warning. None
     keeps the prefix rules above."""
     family: str
@@ -479,11 +480,24 @@ def _split(key: str) -> tuple[str, str] | None:
     return None
 
 
+# The close of a spelling warning. A key map's comfy_stems hold what the
+# gmlx nodes add to ComfyUI's map, so ComfyUI with the nodes drops a
+# warned key too.
+_WITH_NODES = ("with or without the gmlx nodes, so the image differs from "
+               "ComfyUI's")
+
+
 def _listed(keys) -> str:
     keys = list(keys)
     text = ", ".join(keys[:_LISTED])
     more = len(keys) - _LISTED
     return text + (f", and {more} more" if more > 0 else "")
+
+
+def _prefixes(prefixes) -> str:
+    """The prefixes joined by "or", those that end on a dot first, so the
+    period after them does not double it."""
+    return " or ".join(sorted(prefixes, key=lambda p: not p.endswith(".")))
 
 
 def _matrix(arr: mx.array, key: str, path: str) -> mx.array:
@@ -899,22 +913,23 @@ def resolve(raw: RawLora, keymap: LoraKeyMap, *,
                "strength that ComfyUI gives them" if stable else ""))
     if dropped and keymap.comfy_stems is not None:
         warnings.append(
-            f"{raw.path}: {len(dropped)} keys have a spelling that ComfyUI "
-            f"does not read for {keymap.title} ({_listed(dropped)}). "
-            f"ComfyUI reads {keymap.comfy_reads}. gmlx applies them and "
-            "ComfyUI drops them, so the image differs from ComfyUI's")
+            f"{raw.path}: {len(dropped)} keys have a spelling that stock "
+            f"ComfyUI does not read for {keymap.title} "
+            f"({_listed(dropped)}). Stock ComfyUI reads "
+            f"{keymap.comfy_reads}. gmlx applies them and ComfyUI drops "
+            f"them, {_WITH_NODES}")
     elif dropped and keymap.comfy_prefixes:
         warnings.append(
-            f"{raw.path}: {len(dropped)} keys have a spelling that ComfyUI "
-            f"does not read for {keymap.title} ({_listed(dropped)}). "
-            "ComfyUI reads the GGUF names under "
-            f"{' or '.join(keymap.comfy_prefixes)}. gmlx applies them and "
-            "ComfyUI drops them, so the image differs from ComfyUI's")
+            f"{raw.path}: {len(dropped)} keys have a spelling that stock "
+            f"ComfyUI does not read for {keymap.title} "
+            f"({_listed(dropped)}). Stock ComfyUI reads the GGUF names "
+            f"under {_prefixes(keymap.comfy_prefixes)}. gmlx applies "
+            f"them and ComfyUI drops them, {_WITH_NODES}")
     elif dropped:
         warnings.append(
             f"{raw.path}: {len(dropped)} underscore keys spell diffusers "
             f"names ({_listed(dropped)}). gmlx applies them and ComfyUI "
-            "drops them, so the image differs from ComfyUI's")
+            f"drops them, {_WITH_NODES}")
     _one_stem_per_target(raw.path, [(t.pair.stem, t.module, t.band)
                                     for t in dit + text])
     return ResolvedLora(path=raw.path, dit=tuple(dit), text=tuple(text),

@@ -174,8 +174,8 @@ def test_capabilities_answer_without_the_version_header(host):
     assert caps["contract"] == {"major": 1, "minor": 0}
     assert caps["families"] == ["flux2_klein", "flux2_klein_9b",
                                 "flux2_klein_9b_kv", "flux3_klein", "h3",
-                                "krea2", "moss_image", "qwen_image21",
-                                "z_image"]
+                                "h3_image", "krea2", "moss_image",
+                                "qwen_image21", "z_image"]
     assert {"skip_blocks", "av_step", "anchors", "keyframe_upsampling",
             "int8"} <= set(caps["features"])
     assert "int8_attention" not in caps["features"]
@@ -361,6 +361,28 @@ def test_a_step_names_every_hash_the_server_lacks_in_a_409(host):
     out = c.step("zit", None, np.zeros(SHAPE, np.float32), [0.5],
                  [{"cond": array_hash(feats)}])
     assert out.shape == SHAPE and out.dtype == np.float32
+    assert host.held == 0
+
+
+def test_a_step_runs_only_an_int8_setting_its_model_takes(host):
+    """A step names int8 off on any model; a setting off the four, or one
+    whose part its family does not run, is refused before the step."""
+    c = _client()
+    feats = _features()
+    x, t = np.zeros(SHAPE, np.float32), np.array([0.5], np.float32)
+    out, _, _ = c.container("step", {"x": x, "timestep": t},
+                         {"model": "zit", "rows": _rows(c, feats),
+                          "int8": "off"})
+    assert out["out"].shape == SHAPE
+    for int8, why in (("fast", "int8 is off, attention, linears or all, "
+                       "not 'fast'"),
+                      ("attention", "gmlx runs Z-Image with dense attention "
+                       "only")):
+        with pytest.raises(StepsClientError) as e:
+            c.container("step", {"x": x, "timestep": t},
+                        {"model": "zit", "rows": _rows(c, feats),
+                         "int8": int8})
+        assert why in str(e.value)
     assert host.held == 0
 
 
@@ -775,6 +797,294 @@ def test_flow_targets_follow_comfyuis_rule():
     assert steps.flow_targets(s, [0.625]) == [0.5]
 
 
+# MiniMax-H3-Image: ComfyUI's forward takes the timestep as sigma x 1000
+# and hands its PDD heads the sigma the step goes to, from the schedule
+# its sampler runs on.
+
+H3I_SHAPE = (1, 24, 4, 6)               # 64x96 pixels at the stride of 16
+
+
+@pytest.fixture(scope="module")
+def hpipe():
+    """The tiny MiniMax-H3-Image DiT of the check 3 self-test, without
+    the family's least pixels."""
+    def build():
+        import h3_image_gates as hg
+        from oracle_fixture import committed_fixture
+
+        from gmlx.image.families.h3_image import family as hi
+
+        weights, m = committed_fixture("selftest_h3_image_tiny_weights")
+        return api.ImagePipeline(
+            dit=hg.tiny_model(weights, m["inputs"]["config"]),
+            family=dataclasses.replace(hi.FAMILY, min_pixels=None),
+            variant="pruned")
+    return _on_worker(build)
+
+
+@pytest.mark.parametrize("schedule", ["grid", "simple_3"])
+def test_an_h3_image_step_reads_comfyuis_timestep_and_the_next_sigma(
+        host, hpipe, schedule):
+    """A timestep of sigma x 1000 in float32 gives the core step at that
+    sigma to the entry of ``sample_sigmas`` after it, bit for bit, on the
+    release's grid and on ComfyUI's simple schedule at 3 steps, which
+    lands off the grid and spans two heads a step."""
+    from oracle_fixture import committed_fixture
+
+    s = committed_fixture("check4_h3_image")[0][schedule]
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    feats = np.random.default_rng(12).standard_normal(
+        (1, 8, 40)).astype(np.float32)
+    x = noise_from_seed(7, H3I_SHAPE)
+    rows = _rows(c, feats)
+    for i in range(len(s) - 1):
+        t = np.float32(s[i]) * np.float32(1000)
+        out = c.step("h3i", None, x, [t], rows, sample_sigmas=s)
+        assert np.array_equal(out, _f3_velocity(
+            hpipe, x, s[i], _f3_cond(feats), s[i + 1])), i
+    # The next sigma of another schedule gives another step.
+    t = np.float32(s[0]) * np.float32(1000)
+    other = c.step("h3i", None, x, [t], rows,
+                   sample_sigmas=np.array([1.0, 0.0], np.float32))
+    assert not np.array_equal(other, c.step("h3i", None, x, [t], rows,
+                                            sample_sigmas=s))
+    assert host.held == 0
+
+
+def test_an_h3_image_step_reads_head_i_at_step_i_under_heads_in_order(
+        host, hpipe, fpipes):
+    """On pDMD's schedule, 1, 12/13, 0, each step under heads in order is
+    the core step that names head i, bit for bit, where step 1 by its span
+    reads other heads. A step past the bank, a DiT with no bank and
+    another rule are refused."""
+    s = np.asarray((1.0, 12 / 13, 0.0), np.float32)
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    feats = np.random.default_rng(12).standard_normal(
+        (1, 8, 40)).astype(np.float32)
+    x = noise_from_seed(7, H3I_SHAPE)
+    rows = _rows(c, feats)
+    cond = _f3_cond(feats)
+    for i in range(2):
+        t = np.float32(s[i]) * np.float32(1000)
+        out = c.step("h3i", None, x, [t], rows, sample_sigmas=s,
+                     heads="in_order")
+        assert np.array_equal(out, _on_worker(lambda i=i: np.array(
+            api.denoise_step(hpipe, mx.array(x), s[i], cond, head=i)))), i
+    t = np.float32(s[1]) * np.float32(1000)
+    assert not np.array_equal(out, c.step("h3i", None, x, [t], rows,
+                                          sample_sigmas=s))
+    long = np.linspace(1.0, 0.0, 8).astype(np.float32)
+    with pytest.raises(StepsClientError, match="bank holds 6 heads; this "
+                       "is step 6 of the client's schedule"):
+        c.step("h3i", None, x, [long[6] * np.float32(1000)], rows,
+               sample_sigmas=long, heads="in_order")
+    with pytest.raises(StepsClientError, match="heads is span or in_order"):
+        c.step("h3i", None, x, [t], rows, sample_sigmas=s, heads="first")
+    _serve(host, "f3d", fpipes[True])
+    with pytest.raises(StepsClientError, match="no bank of step heads"):
+        c.step("f3d", None, np.zeros(SHAPE, np.float32), [0.5], rows,
+               sample_sigmas=SIGMAS, heads="in_order")
+    assert host.held == 0
+
+
+def test_an_h3_image_step_without_its_schedule_is_refused(host, hpipe):
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    with pytest.raises(StepsClientError, match="reads the sigma its step "
+                       "goes to: a step body holds sample_sigmas"):
+        c.step("h3i", None, np.zeros(H3I_SHAPE, np.float32), [500.0],
+               _rows(c, np.ones((1, 8, 40), np.float32)))
+    assert host.held == 0
+
+
+def test_an_h3_image_step_mixes_the_noise_its_row_names_into_each_reference(
+        host, hpipe):
+    """A row's reference latents run with the noise it names for each,
+    in the shape of the reference's rows, as ComfyUI's forward draws it,
+    and its image slots are the vision rows of its cond: the core step
+    of that conditioning bit for bit. Other noise gives another step, and
+    a row without the noise, with noise of another shape or with a slot
+    whose end marker is past the cond is refused."""
+    from oracle_fixture import committed_fixture
+
+    s = committed_fixture("check4_h3_image")[0]["grid"]
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    rng = np.random.default_rng(21)
+    feats = rng.standard_normal((1, 8, 40)).astype(np.float32)
+    a = rng.standard_normal((1, 24, 4, 4)).astype(np.float32)
+    b = rng.standard_normal((1, 24, 2, 6)).astype(np.float32)
+    na = rng.standard_normal((4, 96)).astype(np.float32)
+    nb = rng.standard_normal((3, 96)).astype(np.float32)
+    x = noise_from_seed(7, H3I_SHAPE)
+    t = np.float32(s[1]) * np.float32(1000)
+    slots = [2, 3, 4]
+
+    def row(noise, slots=slots):
+        return [{"cond": c.put(feats), "ref_latents": [c.put(a), c.put(b)],
+                 "ref_noise": [c.put(n) for n in noise],
+                 "image_slots": slots}]
+
+    def want(noise):
+        cond = api.Conditioning(
+            mx.array(feats[0]), "", ref_latents=(mx.array(a[0]),
+                                                 mx.array(b[0])),
+            image_slots=tuple(slots),
+            ref_noise=tuple(mx.array(n) for n in noise))
+        return _f3_velocity(hpipe, x, s[1], cond, s[2])
+
+    out = c.step("h3i", None, x, [t], row([na, nb]), sample_sigmas=s)
+    assert np.array_equal(out, want([na, nb]))
+    other = c.step("h3i", None, x, [t], row([na, nb * 2]), sample_sigmas=s)
+    assert np.array_equal(other, want([na, nb * 2]))
+    assert not np.array_equal(other, out)
+    # The noise names the references beside their latents.
+    r = row([na, nb])[0]
+    cond = _on_worker(lambda: steps.conditioning(r, steps.STATE.tensors,
+                                                 "h3_image"))
+    assert cond.ref_hashes == tuple(
+        f"{z}+{n}" for z, n in zip(r["ref_latents"], r["ref_noise"]))
+    bare = row([na, nb])
+    del bare[0]["ref_noise"]
+    for rows, match in (
+            (bare, "names the noise of each of its reference latents in "
+                   "ref_noise"),
+            (row([na, na]), r"ref_noise 1 is \(4, 96\), and the rows of "
+                            r"reference latents \(24, 2, 6\) take \(3, 96\)"),
+            (row([na]), "a row's ref_noise names 1 tensor and its "
+                        "ref_latents 2"),
+            (row([na, nb], [6, 7]), "image slot 7 and its end marker are "
+                                    "past the cond's 8 rows")):
+        with pytest.raises(StepsClientError, match=match) as e:
+            c.step("h3i", None, x, [t], rows, sample_sigmas=s)
+        assert e.value.status == 400
+    assert host.held == 0
+
+
+def test_a_step_of_a_family_without_noisy_references_takes_no_ref_noise():
+    with pytest.raises(steps.StepError, match="a flux3_klein row takes no "
+                       "ref_noise: its DiT mixes no noise into its "
+                       "references"):
+        steps._ref_noise("flux3_klein", [object()], [object()])
+    assert steps._ref_noise("flux3_klein", [], [object()]) == ()
+
+
+def test_an_h3_image_vae_encode_samples_with_the_noise_it_is_sent(
+        host, hpipe, monkeypatch):
+    """ComfyUI's MiniMax-H3-Image VAE samples an encode with the noise of
+    its seed: noise in the shape of the latents reaches the core encode
+    as a sample's, an encode without it takes the mean, and noise of
+    another shape is refused."""
+    pipe = dataclasses.replace(hpipe, vae=SimpleNamespace(
+        config=SimpleNamespace(in_channels=3, scale=16, latent_channels=24)))
+    _serve(host, "h3v", pipe)
+    seen = []
+    lat = np.random.default_rng(3).standard_normal(
+        (1, 24, 2, 3)).astype(np.float32)
+
+    def encode(p, img, **kw):
+        seen.append({k: np.array(v) if k == "noise" else v
+                     for k, v in kw.items()})
+        return mx.array(lat)
+    monkeypatch.setattr(api, "vae_encode", encode)
+    c = _client()
+    img = np.zeros((2, 32, 48, 3), np.float32)
+    noise = np.random.default_rng(4).standard_normal(
+        (2, 24, 2, 3)).astype(np.float32)
+    got, _, _ = c.container("vae/encode", {"image": img, "noise": noise},
+                            {"model": "h3v"})
+    assert got["latents"].shape == (2, 24, 2, 3)
+    assert [k["mode"] for k in seen] == ["sample", "sample"]
+    assert np.array_equal(np.concatenate([k["noise"] for k in seen]), noise)
+    seen.clear()
+    c.container("vae/encode", {"image": img[:1]}, {"model": "h3v"})
+    assert seen == [{}]
+    with pytest.raises(StepsClientError, match=r"takes noise \(2, 24, 2, 3\), "
+                       r"the shape of the latents of its image, not "
+                       r"\(2, 24, 3, 2\)") as e:
+        c.container("vae/encode", {"image": img,
+                                   "noise": noise.reshape(2, 24, 3, 2)},
+                    {"model": "h3v"})
+    assert e.value.status == 400
+    assert host.held == 0
+
+
+def test_the_h3_image_status_names_comfyuis_model_and_the_entrys_int8(
+        host, hpipe, monkeypatch):
+    """The pack builds ComfyUI's MiniMaxH3Image on latents of one frame
+    and samples on the release's grid; the status names the int8 setting
+    the entry loads at, whose int8 linears the DiT's bytes count, and the
+    seed of the noise ComfyUI's VAE samples an encode with, the family's
+    for its references. The DiT takes reference latents."""
+    from gmlx.image.families.h3_image import family as hi
+
+    monkeypatch.setattr(steps, "family_of", lambda spec: (hi.FAMILY,
+                                                          "pruned"))
+    monkeypatch.setattr(api, "_header_bytes", lambda path, part: 7)
+    monkeypatch.setattr(api, "_int8_bytes", lambda path, int8: (
+        5 if int8 in ("linears", "all") else 0))
+    _serve(host, "h3i", hpipe)
+    c = _client()
+    for int8, dit in (("off", 7), ("attention", 7), ("linears", 12),
+                      ("all", 12)):
+        host.served["h3i"].spec.defaults = {"int8": int8}
+        st = c.status("h3i")
+        assert st["int8"] == int8 and st["memory"]["dit_bytes"] == dit
+    host.served["h3i"].spec.defaults = None
+    st = c.status("h3i")
+    assert st["int8"] == "off"
+    assert st["comfy"] == {"model_class": "MiniMaxH3Image",
+                           "image_model": "minimax_h3_image"}
+    assert st["latent"] == {"channels": 24, "stride": 16, "patch": 2,
+                            "frames": 1}
+    assert st["vae"] == {"channels_out": 3, "stride": 16, "space": "model",
+                         "encode_seed": hi.FAMILY.ref_encode_seed}
+    assert hi.FAMILY.ref_encode_seed == 42 and st["edit_capable"]
+    assert st["sampling"] == {"steps": 6, "cfg": 1.0, "shift": 1.0,
+                              "sigmas": [float(v) for v in hi.PDD_SIGMAS],
+                              "schedule": None, "neg_skip": []}
+
+
+def test_the_h3_image_manifest_carries_the_config_comfyui_detects_by(
+        tmp_path, monkeypatch):
+    """ComfyUI's detection of MiniMax-H3-Image reads the PDD steps and
+    sigmas from the file's ``config`` metadata, which the release does
+    not hold; the manifest carries them from the DiT's config, and a
+    family that reads no config gets no metadata."""
+    import gguf
+
+    from gmlx.image import loader
+    from gmlx.image.families.h3_image import family as hi
+
+    path = tmp_path / "dit.gguf"
+    w = gguf.GGUFWriter(str(path), "hyvid")
+    w.add_tensor("condition_proj.weight", np.ones((4, 40), np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    cfg = {"pdd_steps": 6, "pdd_sigmas": list(hi.PDD_SIGMAS),
+           "hidden_size": 32}
+    seen = []
+
+    def identify(p, variant=None):
+        seen.append((p, variant))
+        return SimpleNamespace(config=cfg)
+    monkeypatch.setattr(loader, "identify_dit", identify)
+    spec = SimpleNamespace(id="h3i", path=str(path), variant="pruned")
+    for fam, meta in (("h3_image", True), ("z_image", False)):
+        monkeypatch.setattr(steps, "family_of", lambda spec, f=fam: (
+            get_family(f), "v"))
+        out = steps.manifest(spec)
+        assert out["count"] == 1 and out["arch"] == "hyvid"
+        if not meta:
+            assert "metadata" not in out
+            continue
+        assert json.loads(out["metadata"]["config"]) == {"transformer": {
+            "pdd_steps": 6, "pdd_sigmas": list(hi.PDD_SIGMAS)}}
+    assert seen == [(str(path), "pruned")]
 
 
 # FLUX.2 klein: ComfyUI's Flux2 forward takes sigma as the timestep,
@@ -1564,14 +1874,43 @@ def test_an_upsampled_encode_also_answers_the_prompt_as_typed(host, monkeypatch)
         return {"cond": cond, "refs": [], "image_slots": [], "typed": typed}
 
     monkeypatch.setattr(steps, "encode", encode)
-    monkeypatch.setattr(host, "revise", lambda model, text, requested, has_refs:
-                        "a caption of " + text, raising=False)
+    monkeypatch.setattr(host, "revise", lambda model, text, requested, has_refs,
+                        **kw: "a caption of " + text, raising=False)
     fields, got = _client().encode("zit", "a cat")
     assert seen == [("a caption of a cat", "a cat")]
     assert fields["revised_prompt"] == "a caption of a cat"
     assert np.array_equal(got["cond_typed"], typed)
     assert fields["cond_typed"] == array_hash(typed) != fields["cond"]
     assert fields["cond_typed"] in steps.STATE.tensors
+
+
+def test_an_encode_with_images_gives_them_to_the_rewrite(host, monkeypatch):
+    """The rewrite of an encode with images gets them as its pictures, for
+    a family whose upsampler sees them; one without images gets none. Each
+    rewrite has the same seed, so an upsampler that samples, as
+    MiniMax-H3-Image's does, writes a graph's caption again on a rerun."""
+    seen = []
+
+    def encode(served, text, images, borrow=None, ref_latents=True, also=None):
+        return {"cond": _features(), "refs": [], "image_slots": []}
+
+    def revise(model, text, requested, has_refs, **kw):
+        seen.append((has_refs, kw))
+        return None
+
+    monkeypatch.setattr(steps, "encode", encode)
+    monkeypatch.setattr(host, "revise", revise, raising=False)
+    img = np.full((8, 16, 3), 9, np.uint8)
+    body = wire.write({"image_0": img}, {"model": "qit", "text": "a cat"})
+    r = _http().post(f"{P}/encode", content=body,
+                     headers={**V, "Content-Type": wire.CONTENT_TYPE})
+    assert r.status_code == 200, r.text
+    ((has_refs, kw),) = seen
+    seed = kw["seed"]
+    assert has_refs is True and isinstance(seed, int)
+    assert [np.asarray(i).shape for i in kw["pictures"]] == [(8, 16, 3)]
+    _client().encode("zit", "a cat")
+    assert seen[-1] == (False, {"seed": seed})
 
 
 def _stub_step_encode(monkeypatch):
@@ -1632,6 +1971,32 @@ def test_step_encode_keeps_each_reference_at_its_own_size(monkeypatch):
         with pytest.raises(steps.StepError) as e:
             _on_worker(lambda im=im: steps.encode(served, "a", [im]))
         assert e.value.status == 400
+
+
+def test_an_h3_image_step_encode_takes_the_vision_copies_comfyui_gives(
+        monkeypatch):
+    """ComfyUI's MiniMaxH3ImageConditioning gives its encoder the vision
+    copy of each image, whose size MiniMax-H3-Image's rules keep for both
+    copies, and its forward reads the vision rows by their tags: the
+    encode answers their spans with their markers beside the slots. Past
+    16 images the encode is refused."""
+    served, seen, _ = _stub_step_encode(monkeypatch)
+    served.pipe.family = get_family("h3_image")
+    a = np.full((1024, 1376, 3), 7, np.uint8)
+    b = np.full((2048, 1024, 3), 9, np.uint8)
+    got = _on_worker(lambda: steps.encode(served, "a", [a, b],
+                                          ref_latents=False))
+    refs = seen[0]
+    assert [r.pixels.shape[:2] for r in refs] == [(1024, 1376), (2048, 1024)]
+    assert [r.vision.shape[:2] for r in refs] == [(1024, 1376), (2048, 1024)]
+    assert np.all(refs[0].pixels[..., :3] == 7) and np.all(refs[1].vision == 9)
+    n = got["image_slots"]
+    assert n == list(range(2, 2 + 32 * 43 + 64 * 32))
+    assert got["spans"] == [[1, 3 + 32 * 43 + 64 * 32]]
+    with pytest.raises(steps.StepError, match="at most 16 reference images, "
+                       "and the request has 17") as e:
+        _on_worker(lambda: steps.encode(served, "a", [a[:64, :64]] * 20))
+    assert e.value.status == 400
 
 
 @pytest.mark.parametrize("fam, title", [("flux2_klein", "FLUX.2 klein"),
@@ -1747,6 +2112,35 @@ def test_a_step_or_vae_pass_over_the_size_limits_is_413(host, path, tensors,
     assert host.held == 0
 
 
+def test_a_limited_family_holds_the_step_routes_to_its_limits(monkeypatch):
+    """A MiniMax-H3-Image entry takes a 4096x4096 step, past the image
+    limits, refuses one over its own with 413, and a step under its least
+    pixels with 400 naming the smallest size of the shape. A VAE pass is
+    held to the upper limits alone."""
+    import gmlx.serve.image_service as svc
+
+    hold = SimpleNamespace(_entry=SimpleNamespace(pipeline=SimpleNamespace(
+        pipe=SimpleNamespace(family=get_family("h3_image")))))
+    monkeypatch.setattr(svc, "size_fits", lambda *a, **k: True)
+    monkeypatch.setenv("GMLX_OVERCOMMIT", "1")
+    kw = dict(what="a step", phase="denoise")
+    routes._check_size(hold, 4096, 4096, **kw)
+    with pytest.raises(steps.StepError, match="a step of 8000x2000 pixels is "
+                       "over the 20,000,000 pixels and a side of 7712 that "
+                       "MiniMax-H3-Image takes") as e:
+        routes._check_size(hold, 8000, 2000, **kw)
+    assert e.value.status == 413
+    with pytest.raises(steps.StepError, match="a step: 512x512 is 262,144 "
+                       "pixels.*832x832") as e:
+        routes._check_size(hold, 512, 512, **kw)
+    assert e.value.status == 400
+    routes._check_size(hold, 512, 512, what="a VAE decode", phase="decode")
+    with pytest.raises(steps.StepError) as e:
+        routes._check_size(hold, 8000, 2000, what="a VAE decode",
+                           phase="decode")
+    assert e.value.status == 413
+
+
 @pytest.mark.parametrize("path, tensors, fields", [
     ("step", {"x": np.zeros(SHAPE, np.float32),
               "timestep": np.zeros((1,), np.float32)},
@@ -1775,7 +2169,8 @@ def test_a_vae_encode_is_planned_with_its_image_and_a_decode_without(
     seen = []
     monkeypatch.setattr(image_service, "size_fits",
                         lambda served, w, h, budget, cfg=1.0, init=False,
-                        held_in=None: seen.append((init, held_in)) or False)
+                        held_in=None, int8=None:
+                        seen.append((init, held_in)) or False)
     for path, tensors in (
             ("vae/encode", {"image": np.zeros((1, 32, 48, 3), np.float32)}),
             ("vae/decode", {"latents": np.zeros((1, 4, 4, 6), np.float32)})):
@@ -2057,7 +2452,7 @@ def test_the_step_route_plans_its_rows_under_its_table_and_guidance(
 
     def size_fits(served, w, h, budget, *, cfg=1.0, init=False, conds=None,
                   patch_table=None, joined=False, ref_cache=None, building=0,
-                  held_in=None, hint=False):
+                  held_in=None, hint=False, int8=None):
         seen.append(dict(cfg=cfg, conds=conds, patch_table=patch_table))
         if conds is not None:
             raise memfit.ImageMemoryError("refused", None, "a hint")

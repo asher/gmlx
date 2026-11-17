@@ -1,0 +1,321 @@
+{
+ "schema": 1,
+ "name": "check6_h3_image_edit_1024",
+ "check": 6,
+ "family": "h3_image",
+ "script": "scripts/image_oracle/check6_h3_image.py",
+ "argv": ["check6_h3_image.py", "--dit", "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf", "--source", "minimax_h3_image_pruned-UD-Q4_K_XL.gguf", "--edit", "edit-inputs.npz", "--vae", "minimax_h3_image_vae_fp16.safetensors", "--sizes", "1024", "--bf16", "1024"],
+ "oracle": {
+  "python": "3.12.11",
+  "platform": "macOS-26.5-arm64-arm-64bit",
+  "machine": "arm64",
+  "packages": {
+   "torch": {
+    "version": "2.14.1"
+   },
+   "diffusers": null,
+   "transformers": {
+    "version": "5.23.0"
+   },
+   "tokenizers": {
+    "version": "0.23.3"
+   },
+   "accelerate": null,
+   "huggingface-hub": {
+    "version": "2.4.0"
+   },
+   "gguf": {
+    "version": "0.19.0"
+   },
+   "safetensors": {
+    "version": "0.8.0"
+   },
+   "numpy": {
+    "version": "2.5.5"
+   }
+  },
+  "hf_hub_offline": "1"
+ },
+ "files": {
+  "dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL.gguf",
+   "size": 13607428832,
+   "sha256": "90616d8cef7d4c234485c17ba63db85db1cbe38f50400e66e704060c2494ffdd"
+  },
+  "oracle_dit": {
+   "name": "minimax_h3_image_pruned-UD-Q4_K_XL-config.gguf",
+   "size": 13607429024,
+   "sha256": "99df1f83bdccc8c1823c2fdfad8500be4a1333d0a4df5dac9beb2983935cc273"
+  },
+  "edit_inputs": {
+   "name": "edit-inputs.npz",
+   "size": 70304812,
+   "sha256": "af6cce98d485ad694338e678a42f2ea812fbb97d1b2005278adba0657bab35a0"
+  },
+  "vae": {
+   "name": "minimax_h3_image_vae_fp16.safetensors",
+   "size": 1168505312,
+   "sha256": "d80e9c2e5cfc9844869961ff5a58c9a9e52182df6bfb30b26018dd7f348721af"
+  }
+ },
+ "inputs": {
+  "edit": true,
+  "refs": [
+   [1024, 1024],
+   [1024, 1376]
+  ],
+  "spans": [
+   [5, 1031],
+   [1036, 2414]
+  ],
+  "ref_seed": 6,
+  "edit_prompt": "Put the lighthouse from Picture 2 on the hill behind the brick wall in Picture 1, keep the red bicycle and the sunset light",
+  "pictures": [
+   [1024, 1024],
+   [768, 1024]
+  ],
+  "copies": "MiniMaxH3ImageConditioning's _size_short_edge and _resize_to: the VAE copy's short edge into 1024 to 2048, the vision copy's to 1024, uint8",
+  "vae_encode": "MiniMaxH3ImageVAE.encode in fp32 on (VAE copy / 255) x 2 - 1: the posterior sample with torch.Generator().manual_seed(42) draws over the whole latent (ref_vae_noise_i, C x h x w), normalized (ref_latents_i)",
+  "ref_noise": "check3_h3_image.ref_noise at the run seed",
+  "text_tags": "minimax_token_tags: 1, 0 over each vision span",
+  "size": 1024,
+  "steps": 6,
+  "guidance": 1.0,
+  "seed": 6,
+  "prompt": "edit",
+  "features": "gmlx's encode of the edit prompt with its pictures",
+  "text_rows": 2442,
+  "gate_size": 1024,
+  "sigmas": "the PDD grid of pdd_config.json, the sampler's sigmas and the step sigmas",
+  "timestep": "sigma x 1000 in float32",
+  "euler": "x + (sigma_next - sigma) v in float32, the velocity in float32",
+  "noise": "numpy Generator(PCG64(seed)).standard_normal(shape, dtype=float32), NCHW, shape (1, 24, size / 16, size / 16)",
+  "latents": "(1, 24, size / 16, size / 16) float32 in model space, after the step",
+  "dequant": "ComfyUI-GGUF dequantize_tensor with dequant_dtype float32: K-quant block math in float32, on every call",
+  "matmul_bf16": "bf16 operands, float32 GEMM, one bf16 rounding",
+  "attention": "attention_pytorch"
+ },
+ "results": {
+  "oracle": {
+   "device": "cpu",
+   "threads": 16,
+   "bf16_features": "the fp32 tap cast to bfloat16"
+  },
+  "steps_run": 6,
+  "fp32_step_s": [188.0, 200.9, 233.4, 189.1, 163.8, 164.3],
+  "fp32_s": 1139.5,
+  "bf16_step_s": [1513.4, 1244.0, 1192.0, 1175.0, 1246.7, 1185.8],
+  "bf16_s": 7556.8,
+  "latents_bf16_vs_fp32": {
+   "rel_l2": 0.013991809988763195,
+   "cosine": 0.9999022014870873,
+   "max_abs": 0.3205566257238388
+  },
+  "bf16_vs_fp32_by_step": [0.0015006863702125644, 0.0056536526326155054, 0.007114999283187797, 0.010161212870403148, 0.01306054776476114, 0.013991809988763195],
+  "max_rss_gib": 20.43,
+  "edit": {
+   "copies_equal_the_npz": true,
+   "draw_share_of_encode": [0.023055783646673326, 0.02913946142895838]
+  }
+ },
+ "tolerances": {
+  "rule": "latents after every step. At 1024: gmlx's bf16 run at relative L2 twice the oracle's own bf16 against fp32 relative L2 after that step. At any other size: gmlx's exact fp32 run against the fp32 latents at the larger of exact_rel_l2 and twice gmlx's own exact floor, and its bf16 run read as a share of the 1024 gate of the step, not gated",
+  "latents_rel_l2": 0.02798361997752639,
+  "step1_rel_l2": 0.0030013727404251287,
+  "step2_rel_l2": 0.011307305265231011,
+  "step3_rel_l2": 0.014229998566375595,
+  "step4_rel_l2": 0.020322425740806296,
+  "step5_rel_l2": 0.02612109552952228,
+  "step6_rel_l2": 0.02798361997752639
+ },
+ "notes": ["oracle: ComfyUI 2aa4d535a76e4b6acf6a94f263bc482430c396dd, ComfyUI-GGUF 373048b8403a7820620065210a691263d4da0a61, UnetLoaderGGUF with dequant_dtype float32", "oracle_dit is dit with the config key {\"transformer\": {\"pdd_steps\": 6, \"pdd_sigmas\": [...]}} and every tensor unchanged", "the edit's features are gmlx's: the tap of the Qwen3-VL-32B Q4_K_M encoder, tower in float32, on the prompt with the vision copies of its pictures; both sides take them as given"],
+ "created": "2026-11-16T20:59:04Z",
+ "npz": "check6_h3_image_edit_1024.npz",
+ "tensors": {
+  "features": {
+   "shape": [2442, 5120],
+   "dtype": "float32",
+   "sha256": "abfe32e3d0d5b7ed259980ecdea779783e18efaed308d6443a4dc6000220b6b0"
+  },
+  "latents": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "baa780d636d7f105fde5f6cdd067c9ae2bb4cc38fa0258a3287f96027ffc1860"
+  },
+  "latents_bf16": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "ec806e70c524177730a336b468ff4d0d32621cdfaa9a3a1fa2c1626f82bc3515"
+  },
+  "latents_bf16_step1": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "d413c04e2c7e98e8d73cdca77aa50c03a416d2fc51b0199a006711d149fa29e0"
+  },
+  "latents_bf16_step2": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "3dc0af64f024c7b52c2ee525192eaf115f47902f148c622c9bedca63cee74b75"
+  },
+  "latents_bf16_step3": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "8c01ebd26cc05cbd7cfe2204410bc0c2ffae07c67d74157b9481a526ba1a866b"
+  },
+  "latents_bf16_step4": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "3bf7a919e35336714e19c538a08e4c3a47e8f1eaac41d02b5bdcb9a2978e2da7"
+  },
+  "latents_bf16_step5": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "16edca1e4852a4dd1a4f077e53a14a83115af515fbe9370638d0a3492fc93d8c"
+  },
+  "latents_bf16_step6": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "ec806e70c524177730a336b468ff4d0d32621cdfaa9a3a1fa2c1626f82bc3515"
+  },
+  "latents_step1": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "7bacedab9c4cc17c41f9cc4c29e0ae08152f85deb7d1e69c5ac8d6909605dbff"
+  },
+  "latents_step2": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "a29760e6d050e5826b5770e0ee7279b0559230c0809b6b319e4d018d7a618575"
+  },
+  "latents_step3": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "7c2c283e2335ab92d91d5f07ae0b05cc5cc4658b3ddfbba7a7608a5956258cb8"
+  },
+  "latents_step4": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "161a84822419db4bcbf0a719a730a1b733602f7cc9698603444f861c5493a95e"
+  },
+  "latents_step5": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "47a98ba05e4db6350497678b66af936d7f23bada1b54b84ff7406c0a07ce9cdd"
+  },
+  "latents_step6": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "baa780d636d7f105fde5f6cdd067c9ae2bb4cc38fa0258a3287f96027ffc1860"
+  },
+  "noise": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "1f23f84c20eeb68ca96534e49aa79e0cc30733aca5d800df09390d04329bd281"
+  },
+  "picture_1": {
+   "shape": [1024, 1024, 3],
+   "dtype": "uint8",
+   "sha256": "46cda632520cea4cc62cb95e878a7329ae974afcc816ceb956b8c40c375bc61d"
+  },
+  "picture_2": {
+   "shape": [1024, 768, 3],
+   "dtype": "uint8",
+   "sha256": "e931aa5810a4b5b796269d2e8196d2e1fd63ffe38c80a8e138ed9496e2a026ec"
+  },
+  "ref_latents_0": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "4cfd0fc92805a0e116da168e070e67f2c4e4fb917b7e03768a9d89e3ec262a01"
+  },
+  "ref_latents_1": {
+   "shape": [1, 24, 86, 64],
+   "dtype": "float32",
+   "sha256": "0323ffe53aeb57541b0e5f0b769ef8dacf78bfa4db4a07b6ab2d8612cd6dc185"
+  },
+  "ref_noise_0": {
+   "shape": [1024, 96],
+   "dtype": "float32",
+   "sha256": "ea7f486ed96233b24d2f12707d248a21f6ea0b513cd6e855eac0ce0b4977e15f"
+  },
+  "ref_noise_1": {
+   "shape": [1376, 96],
+   "dtype": "float32",
+   "sha256": "461f096e63dc65c5e9541cd219555143b0967dad6dbc6c676da7aa41609f5333"
+  },
+  "ref_vae_noise_0": {
+   "shape": [24, 64, 64],
+   "dtype": "float32",
+   "sha256": "14ba925cf9d55e3bd00dc0c458153089dc731c457799f97405b5b92663a78311"
+  },
+  "ref_vae_noise_1": {
+   "shape": [24, 86, 64],
+   "dtype": "float32",
+   "sha256": "f594ce6840c8fc19303d85c57eaaa73bbef142d9c6c35956c42941fc505a860f"
+  },
+  "sigmas": {
+   "shape": [7],
+   "dtype": "float32",
+   "sha256": "a974c89ae39ca1cfc6d6bb8236dbc6ce3c339b229809cb075c5c4f5a859b09cd"
+  },
+  "text_tags": {
+   "shape": [2442],
+   "dtype": "int64",
+   "sha256": "8cd0043b739d927b571262c7752bc4f5df3fdc645e7f89f33adc5458cc4d41a1"
+  },
+  "timesteps": {
+   "shape": [6],
+   "dtype": "float32",
+   "sha256": "0c82805eb8220e38462c1804bcf0d26732278e69dfe6eaa4dc088e45c986d777"
+  },
+  "vae_copy_1": {
+   "shape": [1024, 1024, 3],
+   "dtype": "uint8",
+   "sha256": "46cda632520cea4cc62cb95e878a7329ae974afcc816ceb956b8c40c375bc61d"
+  },
+  "vae_copy_2": {
+   "shape": [1376, 1024, 3],
+   "dtype": "uint8",
+   "sha256": "75df1fc71f9623c6ff1095bf78cd88d247b8ae03e14280a3b9461ae57276da32"
+  },
+  "velocity_step1": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "d5b2fbffeb3a7b0bc283679b2aa33f181e3dd2c31f64f3b9d81dcf26fd350ae8"
+  },
+  "velocity_step2": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "98fc796c8e01e5fc0c7245cbe9ce8f70b044d6fd3025957f5740ccc7cff8406a"
+  },
+  "velocity_step3": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "901fe3ac755589b24b05e6a4a7f305ed3e31f97144bc8cb8bd2999601941c076"
+  },
+  "velocity_step4": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "97a8fea80ace14201630e519a5b460ea93afbef79ca4e45dc733cdaa3a015782"
+  },
+  "velocity_step5": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "41b9ff40deaebbacd8d175345984ee6137a776256096668b65e757af953ca4bd"
+  },
+  "velocity_step6": {
+   "shape": [1, 24, 64, 64],
+   "dtype": "float32",
+   "sha256": "6b3a13440918727b9766d12f36aa1a49e306275ce51edc20ef31e8f2f97cf425"
+  },
+  "vision_copy_1": {
+   "shape": [1024, 1024, 3],
+   "dtype": "uint8",
+   "sha256": "46cda632520cea4cc62cb95e878a7329ae974afcc816ceb956b8c40c375bc61d"
+  },
+  "vision_copy_2": {
+   "shape": [1376, 1024, 3],
+   "dtype": "uint8",
+   "sha256": "75df1fc71f9623c6ff1095bf78cd88d247b8ae03e14280a3b9461ae57276da32"
+  }
+ }
+}

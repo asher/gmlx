@@ -765,7 +765,8 @@ The recommended models:
 An image model name, `z-image-turbo`, `qwen-image`, `qwen-image-turbo`,
 `krea-2-turbo`, `flux-2-klein`, `flux-2-klein-base`, `flux-2-klein-9b`,
 `flux-2-klein-base-9b`, `flux-2-klein-9b-kv`, `flux-3-klein`,
-`flux-3-klein-base`, `moss-image` or `moss-image-base`, pulls its DiT, text encoder and VAE, checks the VAE
+`flux-3-klein-base`, `moss-image`, `moss-image-base` or
+`minimax-h3-image`, pulls its DiT, text encoder and VAE, checks the VAE
 against its published sha256, packs it to GGUF, and adds an
 `image_models` entry. The quants default to
 the ones for this Mac's memory, and an encoder already on disk is used
@@ -773,7 +774,8 @@ again when its weights match. `gmlx pull <image model name> --list`
 prints its quants with their downloads for this Mac and downloads nothing.
 On a Mac with less than 16 GB, where no image model makes an image, `pull`
 downloads nothing, names 16 GB, and takes a DiT only when `--quant` names
-it. When the three parts do not fit the Mac's memory together, or an image
+it, and so does a `minimax-h3-image` pull on a Mac with less than 32 GB,
+naming 32 GB. When the three parts do not fit the Mac's memory together, or an image
 does not fit at all, the plan gives the peak of an image at the entry's
 size, as `image generate` plans it. A VAE GGUF on disk packed from the recipe's
 source is used again. Without one, a pack from another source serves when
@@ -1354,6 +1356,7 @@ the weights load.
 | FLUX.3 klein | Qwen3-VL-4B-Instruct, its text GGUF | The FLUX.2 autoencoder | 16 steps and guidance 1. Base: 50 steps and guidance 3.5. |
 | FLUX.2 klein | Qwen3-4B | The FLUX.2 autoencoder | 4 steps and guidance 1, which is the only guidance it takes. Base: 50 steps and guidance 4. |
 | FLUX.2 klein 9B | Qwen3-8B | The FLUX.2 autoencoder | The same as FLUX.2 klein's. Its license allows non-commercial use only. |
+| MiniMax-H3-Image | Qwen3-VL-32B-Instruct, its text GGUF | The MiniMax-H3-Image autoencoder | 6 steps at 2048x2048 and guidance 1, the only guidance it takes. Other steps need `--sigmas`. |
 
 FLUX.3 klein Base shares the distilled model's architecture, encoder and
 VAE, and gmlx tells the two apart by their tensors. The distilled model
@@ -1403,6 +1406,19 @@ the output of a single reference is cropped back to the scaled image.
 FLUX.3 klein sizes its references by this rule, and `--ref-size` exits 2
 on it.
 
+`--ref` gives MiniMax-H3-Image up to 16 reference images, the first the
+picture to edit, and the prompt names them as Picture 1, Picture 2 and so
+on. Each reference has two copies, as ComfyUI's MiniMax H3 Image
+Conditioning node makes them: the VAE's, its short side scaled into 1024
+to 2048 pixels, and the vision tower's, its short side scaled to 1024,
+each side a multiple of 32, and an alpha channel is dropped. The text
+encoder reads the vision copies through its vision tower, which
+`--encoder-mmproj` loads (`gmlx pull minimax-h3-image` fetches it), and
+the VAE encodes the VAE copies. A reference outside 1:3 to 3:1 exits 2.
+Without `--size` the output has the first reference's VAE copy's size.
+MiniMax-H3-Image sizes its references by this rule, and `--ref-size`
+exits 2 on it.
+
 `--ref` gives FLUX.2 klein up to 10 reference images as well, read as
 FLUX.3 klein reads them, with no `--encoder-mmproj`. A single reference is
 scaled down to at most the area of 2024x2024 pixels, and each of several
@@ -1416,7 +1432,10 @@ too.
 
 `--adapter` applies a LoRA safetensors file to the DiT, live beside the
 quantized weights, so the file is read once and nothing is merged. The
-kohya, diffusers, PEFT and OneTrainer key spellings are read. The rank and
+kohya, diffusers, PEFT and OneTrainer key spellings are read. A
+MiniMax-H3-Image file may name MiniMax's modules, such as
+`blocks.0.attn.qkv_proj`, or diffusers' modules, such as
+`transformer_blocks.0.attn.to_q`, bare or under `transformer.`. The rank and
 alpha in a diffusers file's PEFT header scale each pair as the diffusers
 loader scales it, rank-stabilized LoRA included. ComfyUI does not read that
 header, so such a file runs at another strength there, and gmlx warns of
@@ -1427,9 +1446,18 @@ its header, before any model loads. So is a file for another model family or one
 that match no module of the DiT, which its GGUF header names. An adapter's
 text encoder pairs are applied to the text encoder at the same strength.
 
+An adapter can bring the schedule it was trained on, from its entry in the
+config, its sidecar or gmlx's table of known adapters, as
+[Adapter schedules](images.md#adapter-schedules) describes. The command
+then prints a line that names the adapter and what it sets.
+`--sigmas`, `--steps` and `--size` win over it. Adapters that set
+different values exit 2 and name the flag that chooses, as does a sidecar
+that does not read or was written for another file.
+
 A PNG holds a text chunk keyed `gmlx` with the prompt, seed, steps, size,
 sampler, scheduler, guidance, adapters, file names and gmlx version, unless
-`--no-metadata` is set. Each adapter is recorded with its file name, its
+`--no-metadata` is set, with the `sigmas` and `heads` of a schedule
+other than the model's. Each adapter is recorded with its file name, its
 strength, the `sha256` of the file, and `rows_sha256`, a digest of the
 LoRA pairs gmlx applied and the layers it applied them to. Each reference
 is recorded with its file name, the size it ran at and the `sha256` of the
@@ -1450,16 +1478,19 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--negative-prompt TEXT` | Empty | Guide away from this prompt, or from the empty prompt without it. It is unused when `--guidance` is 1. |
 | `--upsampler GGUF` | The entry's `upsampler` | Rewrite the prompt with this chat model, a GGUF or a `models` id, as [Prompt upsampling](images.md#prompt-upsampling) describes. |
 | `--no-upsample` | Off | Run the prompt as typed, without the upsampler. |
-| `--upsample-prompt FILE` | The entry's `upsample_prompt` | The upsampler takes the system prompt in this text file in place of the family's. Qwen-Image 2.1 ships none and needs one. |
-| `--size WxH` | The init image's, else a FLUX.2 klein or FLUX.3 klein reference's, else the entry's `defaults.size`, else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and of 16 on the others. Another size exits 2 and names the multiple. |
-| `--steps N` | The variant's | Sample for N steps. |
+| `--upsample-prompt FILE` | The entry's `upsample_prompt` | Take the upsampler's system prompt from this file. Qwen-Image 2.1 ships none and needs one; MiniMax-H3-Image reads MiniMax's `prompt/manifest.json`. |
+| `--upsampler-mmproj GGUF` | The `mmproj` of the upsampler's `models` entry | Read the `--ref` images with this vision tower of `--upsampler`. MiniMax-H3-Image's upsampler sees the references, and needs it with `--ref`. |
+| `--size WxH` | The init image's, else the first `--ref`'s, as above, else `defaults.size`, else a LoRA's [schedule](images.md#adapter-schedules), else the variant's | Set the width and height, each a multiple of 32 on Qwen-Image 2.1 and MiniMax-H3-Image and of 16 on the others. Another size exits 2 and names the multiple. |
+| `--steps N` | The variant's | Sample for N steps on the variant's schedule, in place of an adapter's. |
+| `--sigmas LIST` | An adapter's [schedule](images.md#adapter-schedules), else the variant's | Sample on these noise levels, such as `1,12/13,0`, one step between each two. On MiniMax-H3-Image step i reads step head i. |
+| `--save-adapter-schedule` | Off | Write `--sigmas` and `--size` to the sidecar of the one `--adapter` file, `<file>.gmlx.json`, then generate. Exits 2 when the folder is not writable. |
 | `--seed N` | Random, and printed | Seed the first image. |
 | `--guidance CFG` | The variant's | Set classifier-free guidance. 1 turns it off. |
 | `--sampler NAME` | `euler` | Sample with `euler` or `uni_pc_bh2`. |
 | `--init-image PATH` | None | Start from this image, resized to `--size` (img2img). |
 | `--mask PATH` | None | Change only where this mask is white (inpainting). It needs `--init-image`. |
 | `--strength F` | `0.6`, or `1` with `--mask` | Set how far img2img moves from the init image, from 0.01 to 1. |
-| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1, FLUX.2 klein and FLUX.3 klein. Repeat the flag for up to 10 images, in the order the prompt names them. |
+| `--ref PATH` | None | Edit from this reference image, on Qwen-Image 2.1, FLUX.2 klein, FLUX.3 klein and MiniMax-H3-Image. Repeat it for each image, in the prompt's order. |
 | `--ref-size N` | `1024` | On Qwen-Image 2.1, resize each reference to about N x N pixels at its own aspect ratio, from 256 to 1024. It needs `--ref`. |
 | `--count N` | `1` | Generate N images. |
 | `--output PATH` | `./gmlx-<time>-<seed>.<ext>` | Write to this file, directory or template with `{seed}` and `{index}`. |
@@ -1469,11 +1500,14 @@ and `crop`, the left, top, right and bottom of the image in it.
 | `--background opaque/transparent` | `opaque` | `transparent` writes the alpha channel that Qwen-Image 2.1 decodes, as a png or a webp. It exits 2 with jpeg, and on a model that decodes no alpha channel. |
 | `--save-latent PATH` | None | Also write the final latents and seeds to this `.npz` file. |
 | `--adapter PATH[:STRENGTH]` | None | Apply this LoRA safetensors file at this strength, 1 when left out. Repeat the flag to stack adapters. |
+| `--int8 {off,attention,linears,all}` | The entry's `defaults.int8`, else `off` | Run the DiT's attention, its linears or both in int8 on an M5 or newer, for MiniMax-H3-Image, with any `--adapter`. Lossy; `linears` and `all` hold more memory. |
 | `--encoder-release auto/always/never` | `auto` | Release the text encoder after encoding when the memory plan needs it, always, or never. `never` exits 2 when the plan needs it. |
 | `--json` | Off | Print a JSON record on stdout, and progress on stderr. |
 
 With several images, a `--output` file gains `-<seed>` before its
 extension.
+
+`--ref` takes up to 10 images, and up to 16 on MiniMax-H3-Image.
 
 Under a `--ref-size` of 320, a reference that is not square can come out
 under the 256 x 256 pixels the text encoder takes. The command then exits 2
@@ -1497,6 +1531,7 @@ the other phases.
 | `--encoder GGUF` | Required with a DiT GGUF | Encode the prompt with this text encoder. |
 | `--vae PATH` | Required with a DiT GGUF | Decode with this VAE. |
 | `--adapter PATH[:STRENGTH]` | None | Time with this LoRA safetensors file applied, as in `generate`. Repeat the flag to stack adapters. |
+| `--int8 {off,attention,linears,all}` | The entry's `defaults.int8`, else `off` | Time the DiT at this int8 setting, as in `generate`. |
 | `--prompt TEXT` | A fixed bench prompt | Generate from this prompt. |
 | `--ref PATH` | None | Time an edit from this reference image, as in `generate`. Repeat the flag for several. FLUX.2 klein and FLUX.3 klein only, without `--via-steps`. |
 | `--sizes LIST` | The entry's `defaults.size`, else the variant's size, or the size the references give an edit | Time each of these comma-separated sizes, such as `1024x1024,2048x2048`. |

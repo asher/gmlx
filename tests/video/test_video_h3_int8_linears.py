@@ -21,6 +21,7 @@ from mlx_kquant.nn import KQuantLinear
 from video_fixtures import (H3_HEADER, H3_IDENTITY_FASTH3, fasth3_view,
                             fixture_view, int8_kernel, load_json, vsa_kernel)
 
+from gmlx.image.h3 import blocks
 from gmlx.image.ops import int8_linear
 from gmlx.image.ops.int8_linear import Int8Linear
 from gmlx.video import fingerprint as vfp
@@ -554,9 +555,9 @@ def test_chunked_fc1_rows_have_the_whole_calls_bits(tiny_gguf, monkeypatch):
     int8_matmul gives a slice of rows the bits of those rows of a whole
     call."""
     model = _load(monkeypatch, tiny_gguf, "int8")
-    monkeypatch.setattr(hm, "MLP_ROWS", 1 << 30)
+    monkeypatch.setattr(blocks, "MLP_ROWS", 1 << 30)
     whole = _forward(model)
-    monkeypatch.setattr(hm, "MLP_ROWS", 64)
+    monkeypatch.setattr(blocks, "MLP_ROWS", 64)
     for x, y in zip(whole, _forward(model)):
         assert mx.array_equal(x, y)
 
