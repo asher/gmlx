@@ -34,13 +34,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [Images, video and sound](docs/decisions.md#images-video-and-sound).
 - `gmlx pull`, `image generate`, `serve` and the ComfyUI pack run
   MiniMax-H3-Image on a Mac with 32 GB or more, at 2048x2048 or up to 20 MP,
-  with edits of up to 16 pictures. See [MiniMax-H3-Image](docs/images.md#minimax-h3-image).
+  with edits of up to 16 pictures. See
+  [MiniMax-H3-Image](docs/images.md#minimax-h3-image).
 - MiniMax-H3-Image rewrites prompts with MiniMax's prompt expander, which sees
   an edit's pictures. See [Prompt expander](docs/images.md#prompt-expander).
 - `--int8 attention`, `linears` or `all` runs MiniMax-H3-Image in int8 on an M5
-  or newer. See [Faster images with int8](docs/images.md#faster-images-with-int8).
+  or newer. See
+  [Faster images with int8](docs/images.md#faster-images-with-int8).
 - MiniMax-H3-Image LoRAs run in MiniMax's module names or diffusers', in gmlx
-  and through the gmlx ComfyUI nodes. See [LoRA files](docs/images.md#lora-files).
+  and through the gmlx ComfyUI nodes. See
+  [LoRA files](docs/images.md#lora-files).
 - The ComfyUI pack has MiniMax-H3-Image workflows at 2048x2048 and 4096x4096,
   an edit of two pictures, and pDMD-2steps in 2 steps with `gmlx PDD Heads`.
 - An image LoRA such as pDMD-2steps runs on the schedule it was trained on,

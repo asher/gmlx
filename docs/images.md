@@ -174,7 +174,7 @@ Prompt upsampling says how it reads an edit and how it samples.
 ### Faster images with int8
 
 On an M5 or newer, `--int8` runs parts of the DiT in 8-bit integer math
-in place of the default products. It is off unless you set it. The image
+in place of its default float math. It is off unless you set it. The image
 changes: it is not the one `off` makes from the same seed.
 
 ```sh
@@ -507,9 +507,10 @@ Qwen's reply is not used.
 MiniMax's prompt expander, `MiniMaxAI/MiniMax-H3-Image-PE`, is a chat
 model of its own, a Qwen3.8-27B fine-tune: set its GGUF as the
 `upsampler`. `mradermacher/MiniMax-H3-Image-PE-GGUF` has GGUF files of
-it, which `gmlx pull` does not fetch. Its prompts are under the
-MiniMax-H3-Image Community License, and gmlx ships none of them.
-`gmlx pull minimax-h3-image` downloads `prompt/manifest.json` and the
+it, which `gmlx pull minimax-h3-image` does not fetch; `gmlx pull hf:`
+fetches them, as [Prompt expander](#prompt-expander) shows. Its prompts
+are under the MiniMax-H3-Image Community License, and gmlx ships none of
+them. `gmlx pull minimax-h3-image` downloads `prompt/manifest.json` and the
 files it lists, and names the manifest as the entry's `upsample_prompt`.
 
 The expander also sees the reference images of an edit, through the
