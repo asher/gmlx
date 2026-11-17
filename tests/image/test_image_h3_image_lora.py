@@ -201,9 +201,11 @@ def test_a_lora_runs_live_as_the_merged_weights(tiny, tmp_path, form):
         assert len(ad.dit) == len(APPLIED) + 4 * (form != "comfy")
         if form == "diffusion_model":
             (w,) = ad.warnings
-            assert f"{len(ad.dit)} keys have a spelling that ComfyUI does " \
-                   "not read" in w and "with the gmlx nodes diffusers' " \
-                   "names bare or under transformer." in w, w
+            assert f"{len(ad.dit)} keys have a spelling that stock " \
+                   "ComfyUI does not read" in w and "ComfyUI with the gmlx " \
+                   "nodes also reads diffusers' names bare or under " \
+                   "transformer." in w and "with or without the gmlx " \
+                   "nodes" in w, w
         else:
             assert ad.warnings == (), ad.warnings
         tid = api.define_patch_table(pipe,

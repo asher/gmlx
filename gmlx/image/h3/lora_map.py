@@ -29,7 +29,10 @@ qkv's rows, which map to those bands of ``attn.qkv_proj``;
 ``audio_proj_out`` outside the blocks. diffusers' SwiGLU holds fc1's
 value rows before its gate rows, the GGUF the gate rows first, so the
 halves of the up rows of a pair on ``ff.net.0.proj`` are swapped back.
-gmlx applies these names, which ComfyUI drops, with the reader's warning.
+gmlx applies these names, which stock ComfyUI drops. On MiniMax-H3-Image
+the gmlx ComfyUI nodes read them bare or under ``transformer.``, so the
+reader warns of them only under another prefix; on H3 video, where the
+nodes keep ComfyUI's map, it warns of them all.
 
 ``refusal`` names the files gmlx does not run:
 
@@ -75,8 +78,8 @@ COMFY_READS = ("the GGUF names bare, under diffusion_model. or as "
 # names on a MiniMax-H3-Image model (comfyui_pack/patches.py,
 # h3_diffusers_keys), so ComfyUI with the nodes drops none of those.
 _PACK_DIFFUSERS = ("", "transformer.")
-PACK_READS = (COMFY_READS + ", and with the gmlx nodes diffusers' names "
-              "bare or under transformer.")
+PACK_READS = (COMFY_READS + ", and ComfyUI with the gmlx nodes also "
+              "reads diffusers' names bare or under transformer.")
 
 
 def _blocks(config: dict) -> dict:
