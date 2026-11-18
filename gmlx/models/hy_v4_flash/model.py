@@ -96,6 +96,20 @@ def _kq_tail_kernel(name: str):
     return fn
 
 
+@functools.cache
+def _kq_router_kernel():
+    """kq.moe_router_topk when the mlx_kquant build has its sigmoid arm,
+    else None."""
+    try:
+        import mlx_kquant as kq
+    except ImportError:
+        return None
+    fn = getattr(kq, "moe_router_topk", None)
+    if fn is None or "sigmoid" not in (fn.__doc__ or ""):
+        return None
+    return fn
+
+
 def _sparse_disabled() -> bool:
     """``GMLX_HY4_SPARSE_DISABLE=1`` makes every sparse layer attend its
     whole context. The indexer still runs and writes its cache, so the two
@@ -877,6 +891,27 @@ class HyV4FlashMoEGate(nn.Module):
 
     def __call__(self, x: mx.array):
         logits = x.astype(mx.float32) @ self.weight.T
+        t = logits.size // self.n_routed_experts
+        kernel = _kq_router_kernel()
+        # The kernel has no backward and no CPU form.
+        if (kernel is not None and t * self.top_k < 64 and not self.training
+                and mx.default_device().type == mx.DeviceType.gpu
+                and env_bool("GMLX_HY4_KQ_ROUTER", True)):
+            # A decode step: score, pick, renormalize and scale in one
+            # dispatch. Ties at the boundary go to the lower index here
+            # and by argpartition order below; fp32 scores make them rare.
+            inds, weights = kernel(
+                logits.reshape(t, self.n_routed_experts),
+                self.top_k,
+                self.norm_topk_prob,
+                shared_gate=False,
+                bias=self.e_score_correction_bias,
+                scoring="sigmoid",
+                scale=self.routed_scaling_factor,
+            )
+            shp = logits.shape[:-1]
+            return (inds.reshape(*shp, self.top_k),
+                    weights.reshape(*shp, self.top_k))
         return _expert_select(
             logits,
             self.e_score_correction_bias,
