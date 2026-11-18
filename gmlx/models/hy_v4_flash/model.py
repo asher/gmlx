@@ -55,6 +55,7 @@ from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
 from gmlx.models.deepseek_v41.model import EngramTable
+from gmlx.models.hy_v4_flash import row_kernels
 from gmlx.models.hy_v4.model import (
     _STREAM_MIN_KEYS,
     _STREAM_Q,
@@ -141,6 +142,37 @@ def _row_offsets(r: int) -> mx.array:
     out = mx.arange(r, dtype=mx.int32)
     mx.eval(out)
     return out
+
+
+@functools.cache
+def _zero_values_const(B: int, L: int, dtype) -> mx.array:
+    out = mx.zeros((B, 1, L, 1), dtype=dtype)
+    mx.eval(out)
+    return out
+
+
+def _zero_values(B: int, L: int, dtype) -> mx.array:
+    """What the unused value slot of a cache takes. A decode step gets one
+    evaluated constant behind a fresh handle, since a cache may keep the
+    array it is handed and write into it; a chunk gets its own zeros."""
+    if L > _GATHER_MAX_L:
+        return mx.zeros((B, 1, L, 1), dtype=dtype)
+    return _zero_values_const(B, L, dtype).__copy__()
+
+
+@functools.cache
+def _no_rows(B: int, L: int) -> mx.array:
+    """An index list that names no row, for a decode step with no picked
+    pools. Evaluated once."""
+    out = mx.full((B, L, 1), -1, dtype=mx.int32)
+    mx.eval(out)
+    return out
+
+
+@functools.partial(mx.compile, shapeless=True)
+def _gated(out: mx.array, gate: mx.array) -> mx.array:
+    # One dispatch for the sigmoid and the product.
+    return out * mx.sigmoid(gate).astype(out.dtype)
 
 
 def _sparse_disabled() -> bool:
@@ -696,18 +728,21 @@ class HyV4FlashAttention(nn.Module):
             (sel < own)[..., None], sel.shape + (r,)).reshape(B, L, -1)
         return mx.where(seen, pos, -1)
 
-    def _step_kq(self, q_nope, q_pe, kv, sel, offset: int, base: int = 0):
+    def _step_kq(self, q_nope, q_pe, kv, sel, offset: int, base: int = 0,
+                 q=None):
         """A decode step (a few queries) as one kq kernel call over the
         cache rows: the window rows read whole, the picked rows through an
         index list, the rope half as the score-only tail. Row 0 of ``kv``
-        is position ``base``. None where the kernel does not apply."""
+        is position ``base``; ``q`` is the query rows when the caller has
+        built them. None where the kernel does not apply."""
         kernel = _kq_tail_kernel("sdpa_sparse_decode")
         if not self._kq_ok(kernel, q_nope):
             return None
         B, H, L, _ = q_nope.shape
         rows = kv.shape[2]
         r = self.kpool
-        q = mx.concatenate([self.embed_q(q_nope), q_pe], axis=-1)
+        if q is None:
+            q = mx.concatenate([self.embed_q(q_nope), q_pe], axis=-1)
         q_pos = offset + mx.arange(L)
         # Window rows every query may read, from the first query's bound.
         low = None
@@ -740,7 +775,7 @@ class HyV4FlashAttention(nn.Module):
             idx = idx.astype(mx.int32)
         else:
             pool = win[:, 0, :1]
-            idx = mx.full((B, L, 1), -1, dtype=mx.int32)
+            idx = _no_rows(B, L)
         out = kernel(q, win, pool, idx, self.scale, sinks=self.sinks,
                      win_mask=win_mask, score_tail=64)
         return self.unembed_out(out)
@@ -860,29 +895,44 @@ class HyV4FlashAttention(nn.Module):
         B, L, _ = x.shape
 
         qr = self.q_a_layernorm(self.q_a_proj(x))
-        q = self.q_b_proj(qr).reshape(
+        q_flat = self.q_b_proj(qr)
+        q = q_flat.reshape(
             B, L, self.num_heads, self.q_head_dim).transpose(0, 2, 1, 3)
         q_nope, q_pe = mx.split(q, [self.qk_nope_head_dim], axis=-1)
 
         compressed = self.kv_a_proj_with_mqa(x)
-        compressed, k_pe = mx.split(compressed, [self.kv_lora_rank], axis=-1)
-        k_pe = k_pe.reshape(
-            B, L, 1, self.qk_rope_head_dim).transpose(0, 2, 1, 3)
-        latent = mx.expand_dims(self.kv_a_layernorm(compressed), axis=1)
-
         kv_cache, pool_cache = split_cache(cache)
         offset = kv_cache.offset if kv_cache is not None else 0
-        q_pe = self.rope(q_pe, offset)
-        k_pe = self.rope(k_pe, offset)
         # One row per key, the latent then its rope half, so a kernel reads
         # both in place. The cache's value slot holds nothing.
-        kv = mx.concatenate([latent, k_pe], axis=-1)
+        q_rows = None
+        if (L <= _GATHER_MAX_L
+                and self._kq_ok(_kq_tail_kernel("sdpa_sparse_decode"), q_nope)
+                and q_flat.dtype == compressed.dtype
+                and row_kernels.eligible(
+                    compressed, self.kv_a_layernorm, self.rope,
+                    self.kv_lora_rank, self.qk_rope_head_dim)):
+            # A decode step: the key row and the query rows, a kernel each.
+            kv = row_kernels.kv_row(
+                compressed, self.kv_a_layernorm, self.rope, offset)
+            q_rows = row_kernels.q_row(
+                self.embed_q(q_nope).astype(q_flat.dtype), q_flat,
+                self.rope, offset)
+        else:
+            compressed, k_pe = mx.split(
+                compressed, [self.kv_lora_rank], axis=-1)
+            k_pe = k_pe.reshape(
+                B, L, 1, self.qk_rope_head_dim).transpose(0, 2, 1, 3)
+            latent = mx.expand_dims(self.kv_a_layernorm(compressed), axis=1)
+            q_pe = self.rope(q_pe, offset)
+            k_pe = self.rope(k_pe, offset)
+            kv = mx.concatenate([latent, k_pe], axis=-1)
         # Row 0 of the fetched rows is position ``base``: 0 for a cache
         # that keeps every key, the window's first key for one that rolls.
         base = 0
         if kv_cache is not None:
             kv, _ = kv_cache.update_and_fetch(
-                kv, mx.zeros((B, 1, L, 1), dtype=kv.dtype))
+                kv, _zero_values(B, L, kv.dtype))
             base = kv_cache.offset - kv.shape[2]
         S = kv.shape[2]
 
@@ -900,7 +950,8 @@ class HyV4FlashAttention(nn.Module):
 
         out = None
         if L <= _GATHER_MAX_L:
-            out = self._step_kq(q_nope, q_pe, kv, sel, offset, base)
+            out = self._step_kq(
+                q_nope, q_pe, kv, sel, offset, base, q=q_rows)
         elif sel is not None:
             out = self._sparse_prefill_kq(q_nope, q_pe, kv, sel, offset)
         latent, k_pe = mx.split(kv, [self.kv_lora_rank], axis=-1)
@@ -947,7 +998,7 @@ class HyV4FlashAttention(nn.Module):
             out = self._attend(q_nope, q_pe, latent, k_pe, mask)
 
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        out = out * mx.sigmoid(self.attn_gate(x)).astype(out.dtype)
+        out = _gated(out, self.attn_gate(x))
         return self.post_norm(self.o_proj(out))
 
 
