@@ -11,14 +11,14 @@ from the GGUF instead, which is what the reference runtime does too.
 The rows a step needs are tiny next to the table: 24 rows of 264 bytes
 per token per engram table. Rows stored in a GGUF quant decode through
 ``kq.dequantize``, float rows by their bytes' dtype. MXFP8 rows (one E8M0 scale byte, then 32 E4M3 values,
-per block) decode through the engram codec's lookup tables, so reading
-them needs no kquant codec. Reads bypass the page cache and round out to
+per block) and F8_E4M3 rows (one E4M3 byte per value) decode through the
+engram codec's lookup tables, so reading them needs no kquant codec. Reads bypass the page cache and round out to
 page boundaries, per the ``decode_feeder`` rules, since a 264-byte row
 is never page-aligned and an unaligned F_NOCACHE read can wedge in the
 kernel. The cost is one host sync per gather, to read the row ids.
 
 An MXFP8 table is read the same way at any size when mlx-kquant has no
-mxfp8 codec to hold it as an array.
+mxfp8 codec to hold it as an array, and an F8_E4M3 table always is.
 
 ``GMLX_TABLE_MAX_BUFFER`` overrides the ceiling (bytes), for tests.
 ``GMLX_TABLE_PREAD_WORKERS`` sets the reader thread count.
@@ -238,6 +238,7 @@ def no_array_holds(nbytes: int, type_name: str, cap: int | None) -> bool:
     ``type_name``: past the device ceiling ``cap``, or MXFP8 when
     mlx-kquant cannot hold it."""
     return ((cap is not None and nbytes > cap)
+            or type_name == "F8_E4M3"
             or (type_name == "MXFP8" and not _kq_has("mxfp8")))
 
 
@@ -310,7 +311,8 @@ def _row_codec(type_name: str) -> str | None:
 
 
 def _check_codec(name: str, src: TableSource) -> None:
-    if src.codec is None or src.codec == "mxfp8" or src.codec in _FLOAT_ROWS:
+    if (src.codec is None or src.codec in ("mxfp8", "f8_e4m3")
+            or src.codec in _FLOAT_ROWS):
         return
     if not _kq_has(src.codec):
         raise RuntimeError(
@@ -327,6 +329,7 @@ def _kq_has(codec: str) -> bool:
 _FLOAT_ROWS = {"f32": mx.float32, "f16": mx.float16, "bf16": mx.bfloat16}
 
 _MXFP8_LUTS: tuple | None = None
+_E4M3_LUT: mx.array | None = None
 
 
 def _decode_mxfp8(raw: mx.array, dims: int) -> mx.array:
@@ -343,12 +346,23 @@ def _decode_mxfp8(raw: mx.array, dims: int) -> mx.array:
     return out.reshape(*raw.shape[:-1], dims)
 
 
+def _decode_f8_e4m3(raw: mx.array) -> mx.array:
+    global _E4M3_LUT
+    if _E4M3_LUT is None:
+        from gmlx.models.deepseek_v41.engram_codec import tables
+
+        _E4M3_LUT = mx.array(tables()[0])
+    return _E4M3_LUT[raw.astype(mx.int32)]
+
+
 def _decode_rows(raw: mx.array, src: TableSource) -> mx.array:
     """``[..., row_bytes]`` uint8 rows to ``[..., dims]`` values. K-quant
     scales live in the row bytes; the scales input is the same 1-byte
     placeholder ``KQuantEmbedding`` passes."""
     if src.codec == "mxfp8":
         out = _decode_mxfp8(raw, src.dims)
+    elif src.codec == "f8_e4m3":
+        out = _decode_f8_e4m3(raw)
     elif src.codec in _FLOAT_ROWS:
         out = raw.view(_FLOAT_ROWS[src.codec])
     else:

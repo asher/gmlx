@@ -191,6 +191,8 @@ def _indexer_layers(c, layers):
     mt = _get(c, "model_type")
     if mt == "deepseek_v32":
         return set(range(layers))
+    if mt == "hy_v4_flash":
+        return None
     if mt == "hy_v4":
         if not _get(c, "index_topk"):
             return set()
@@ -243,6 +245,17 @@ def pool_bytes_per_token(c, layers):
             return out
         return [dim * _POOL_BYTES * (1 + 1 / int(r)) if int(r) > 0 else 0.0
                 for r in ratios[:layers]]
+    if mt == "hy_v4_flash":
+        # A value and a gate per token wait in a kpool-row buffer; what
+        # grows is one pooled key per index_kpool tokens.
+        kpool = _get(c, "index_kpool")
+        types = _get(c, "index_types")
+        if (isinstance(kpool, int) and kpool > 0 and index
+                and isinstance(types, (list, tuple))):
+            return [index * _POOL_BYTES / kpool
+                    if i < len(types) and types[i] else 0.0
+                    for i in range(layers)]
+        return out
     if mt == "glm5_next":
         kpool = _get(c, "index_kpool")
         if isinstance(kpool, int) and kpool > 0 and index:

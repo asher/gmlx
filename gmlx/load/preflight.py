@@ -30,8 +30,8 @@ SUPPORTED_QUANT_TYPES = frozenset({
     "MXFP4", "NVFP4",
 })
 # Formats gmlx decodes itself, for the lookup-table rows it reads from the
-# file. MXFP8 only backs gathers, never a matmul.
-TABLE_ROW_TYPES = frozenset({"MXFP8"})
+# file. MXFP8 and F8_E4M3 only back gathers, never a matmul.
+TABLE_ROW_TYPES = frozenset({"MXFP8", "F8_E4M3"})
 # Micro-scaling float codecs that additionally have MLX-native packed kernels.
 # Served like every other codec above (zero-copy ggml wire bytes through the
 # kq kernels), or de-interleaved into MLX's packed layout at load

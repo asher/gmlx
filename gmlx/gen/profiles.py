@@ -225,7 +225,7 @@ FAMILIES: dict[str, dict] = {
     # criteria and the stream splitter all read.
     "hy4": {
         "label": "HY4",
-        "arches": ("hyv4",),
+        "arches": ("hyv4", "hy_v4_flash"),
         "base": {"sampling": {
             "temperature": 0.9,
             "top_p": 1.0,

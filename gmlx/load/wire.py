@@ -66,6 +66,11 @@ def load_gguf_wire_bytes(
     meta: dict = {}
     tensor_shapes: dict = {}
     for i, shard in enumerate(shards):
+        if i and skip:
+            held = _table_only_shapes(shard, skip)
+            if held is not None:
+                tensor_shapes.update(held)
+                continue
         try:
             s_arrays, s_codecs, s_meta, s_shapes = _load_shard(
                 gguf_path, shard, arch, zero_copy, skip)
@@ -97,6 +102,20 @@ def load_gguf_wire_bytes(
 
     arch = meta.get("general.architecture")
     return arrays, kquant_meta, arch, meta, tensor_shapes
+
+
+def _table_only_shapes(shard: str, skip) -> dict | None:
+    """Wire shapes of a later shard that holds nothing but tables read
+    from the file, or None when it holds anything else. Such a shard is
+    never opened by mlx-kquant, which may not know the tables' format
+    (F8_E4M3 shares GGML type 43 with two formats it does read)."""
+    from .headerscan import scan_gguf
+
+    tensors = scan_gguf(shard, array_limit=0).tensors
+    names = set(skip)
+    if not tensors or any(t.name not in names for t in tensors):
+        return None
+    return {t.name: list(t.shape) for t in tensors}
 
 
 def _load_shard(gguf_path: str, shard: str, arch: str | None,
