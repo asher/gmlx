@@ -196,3 +196,25 @@ def test_sparse_keys_are_the_reference_set():
         assert got == want
         mask = attn._sparse_mask(sel[None], q_abs, 1, q_abs + 1)
         assert sorted(np.flatnonzero(np.array(mask[0, 0])).tolist()) == want
+
+
+def test_gathered_sparse_chunk_matches_the_masked_dense_form():
+    # The chunk path gathers each query's keys; the same selection as a
+    # visibility mask over every key is the reference.
+    model = _model()
+    attn = model.layers[0].self_attn
+    B, L, S, offset = 1, 23, 37, 14
+    H, R = attn.num_heads, attn.kv_lora_rank
+    q_nope = mx.random.normal((B, H, L, attn.qk_nope_head_dim))
+    q_pe = mx.random.normal((B, H, L, attn.qk_rope_head_dim))
+    latent = mx.random.normal((B, 1, S, R))
+    k_pe = mx.random.normal((B, 1, S, attn.qk_rope_head_dim))
+    n_pool = S // attn.kpool
+    # Distinct pools per query, as a top-k hands out.
+    rng = np.random.default_rng(3)
+    sel = mx.array(np.stack([[rng.permutation(n_pool)[:3]
+                              for _ in range(L)]]).astype(np.int32))
+    got = attn._sparse_prefill(q_nope, q_pe, latent, k_pe, sel, offset)
+    mask = attn._sparse_mask(sel, offset, L, S)[:, None]
+    want = attn._attend(q_nope, q_pe, latent, k_pe, mask)
+    assert mx.allclose(got, want, atol=1e-4, rtol=1e-4).item()

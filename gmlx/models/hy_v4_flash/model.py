@@ -27,6 +27,7 @@ hyper-connections (``gmlx.models.hy_v4``) and changes the rest:
 The MTP block past the trunk is dropped here; the drafter loads it.
 """
 
+import functools
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -42,6 +43,8 @@ from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache.kv_append import depends_keys
 from gmlx.cache.kv_cache import ArraysCache, CacheList
+from gmlx.cache.window_sdpa import _HD_OK, _MIN_ROWS, _kq_window_kernel
+from gmlx.envflags import env_bool
 from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
 from gmlx.models.deepseek_v4.model import (
@@ -68,11 +71,29 @@ ENGRAM_EPS = 1.1920929e-07
 # Queries per sparse decode call that take the per-query key gather: a
 # decode step, or an MTP verify block.
 _GATHER_MAX_L = 8
+# Queries per gather in a sparse prefill: 256 queries hold 0.6 GB of
+# gathered keys at a time.
+_GATHER_TILE = 256
 
 
 def ensure_registered() -> None:
     """Register the deepseek_v4 companions this module borrows from."""
     _ds4_ensure_registered()
+
+
+@functools.cache
+def _kq_tail_kernel(name: str):
+    """kq's sparse attention kernel ``name`` when the mlx_kquant build
+    takes a score-only tail on its rows (the rope half beside the latent),
+    else None."""
+    try:
+        import mlx_kquant as kq
+    except ImportError:
+        return None
+    fn = getattr(kq, name, None)
+    if fn is None or "score_tail" not in (fn.__doc__ or ""):
+        return None
+    return fn
 
 
 def _sparse_disabled() -> bool:
@@ -544,6 +565,161 @@ class HyV4FlashAttention(nn.Module):
         return mx.fast.scaled_dot_product_attention(
             q_nope, k, v, scale=self.scale, mask=pe_scores, sinks=sinks)
 
+    def _window_prefill(self, q_nope, q_pe, latent, k_pe):
+        """A sliding-window chunk on kq's window kernel, which reads only
+        the key blocks inside each query block's window. The kernel takes
+        per-head keys and values, so the latent is expanded for the window
+        rows. None where the kernel does not apply."""
+        B, H, L, _ = q_nope.shape
+        kernel = _kq_window_kernel()
+        if (kernel is None or L < _MIN_ROWS
+                or self.q_head_dim not in _HD_OK
+                or self.v_head_dim != self.q_head_dim
+                or q_nope.dtype not in (mx.float16, mx.bfloat16)
+                or mx.default_device().type != mx.DeviceType.gpu
+                or not env_bool("GMLX_SWA_KQ", True)):
+            return None
+        S = latent.shape[2]
+        q = mx.concatenate([q_nope, q_pe], axis=-1)
+        k = mx.concatenate(
+            [self.embed_q(latent, transpose=False),
+             mx.broadcast_to(k_pe, (B, H, S, k_pe.shape[-1]))], axis=-1)
+        v = self.unembed_out(latent)
+        return kernel(q, k, v, self.scale, self.window, sinks=self.sinks)
+
+    def _kq_ok(self, kernel, q_nope) -> bool:
+        return (kernel is not None and self.kv_lora_rank == 512
+                and self.qk_rope_head_dim == 64
+                and q_nope.dtype in (mx.float16, mx.bfloat16)
+                and mx.default_device().type == mx.DeviceType.gpu
+                and env_bool("GMLX_HY4_SPARSE_KQ", True))
+
+    def _picked_rows(self, sel, q_pos, B: int, L: int):
+        """Row list [B, L, select_k * kpool] of the picked pools that end
+        before each query's group; -1 for a pool the query cannot see."""
+        r = self.kpool
+        own = (q_pos // r)[None, :, None]
+        pos = (sel[..., None] * r + mx.arange(r)).reshape(B, L, -1)
+        seen = mx.broadcast_to(
+            (sel < own)[..., None], sel.shape + (r,)).reshape(B, L, -1)
+        return mx.where(seen, pos, -1)
+
+    def _step_kq(self, q_nope, q_pe, kv, sel, offset: int):
+        """A decode step (a few queries) as one kq kernel call over the
+        cache rows: the window rows read whole, the picked rows through an
+        index list, the rope half as the score-only tail. None where the
+        kernel does not apply."""
+        kernel = _kq_tail_kernel("sdpa_sparse_decode")
+        if not self._kq_ok(kernel, q_nope):
+            return None
+        B, H, L, _ = q_nope.shape
+        S = kv.shape[2]
+        r = self.kpool
+        q = mx.concatenate([self.embed_q(q_nope), q_pe], axis=-1)
+        q_pos = offset + mx.arange(L)
+        # Window rows every query may read, from the first query's bound.
+        low = None
+        if self.window:
+            start = max(0, offset + 1 - self.window)
+            low = q_pos - self.window + 1
+        elif sel is not None:
+            start = offset // r * r
+            low = q_pos // r * r
+        else:
+            start = 0
+        win = kv[:, :, start:]
+        win_mask = None
+        if L > 1:
+            key_pos = start + mx.arange(S - start)
+            win_mask = key_pos <= q_pos[:, None]
+            if low is not None:
+                win_mask = win_mask & (key_pos >= low[:, None])
+        if sel is not None:
+            pool = kv[:, 0]
+            idx = self._picked_rows(sel, q_pos, B, L).astype(mx.int32)
+        else:
+            pool = win[:, 0, :1]
+            idx = mx.full((B, L, 1), -1, dtype=mx.int32)
+        out = kernel(q, win, pool, idx, self.scale, sinks=self.sinks,
+                     win_mask=win_mask, score_tail=64)
+        return self.unembed_out(out)
+
+    def _sparse_prefill_kq(self, q_nope, q_pe, kv, sel, offset: int):
+        """The chunk on kq's sparse prefill kernel, which reads each
+        query's listed rows where they lie. None where it does not apply."""
+        kernel = _kq_tail_kernel("sdpa_sparse_prefill")
+        if not self._kq_ok(kernel, q_nope):
+            return None
+        B, H, L, _ = q_nope.shape
+        r = self.kpool
+        q = mx.concatenate([self.embed_q(q_nope), q_pe], axis=-1)
+        q_pos = offset + mx.arange(L)
+        own = (q_pos // r)[None, :, None]
+        # Listed rows: the picked pools that end before the query's group,
+        # then the group's rows before the query. The query's own row is
+        # the kernel's band of one.
+        tail = (own * r + mx.arange(r - 1))
+        tail = mx.broadcast_to(tail, (B, L, r - 1))
+        idx = mx.concatenate(
+            [self._picked_rows(sel, q_pos, B, L),
+             mx.where(tail < q_pos[None, :, None], tail, -1)],
+            axis=-1).astype(mx.int32)
+        out = kernel(q, kv, kv[:, 0], idx, self.scale, 1,
+                     sinks=self.sinks, score_tail=64)
+        return self.unembed_out(out)
+
+    def _sparse_prefill(self, q_nope, q_pe, latent, k_pe, sel, offset: int):
+        """Sparse attention for a chunk: each query attends its selected
+        pools and its own group up to itself. The keys are gathered a pool
+        at a time, a tile of queries per step, so the work per query is
+        the key budget whatever the depth."""
+        B, H, L, _ = q_nope.shape
+        S, R = latent.shape[2], latent.shape[3]
+        r = self.kpool
+        kv = mx.concatenate([latent[:, 0], k_pe[:, 0]], axis=-1)
+        if S % r:
+            kv = mx.pad(kv, [(0, 0), (0, -S % r), (0, 0)])
+        W = kv.shape[-1]
+        kv = kv.reshape(B, -1, r * W)
+        q_abs = self.embed_q(q_nope)
+        sinks = self.sinks.astype(q_nope.dtype)
+        neg = mx.array(mx.finfo(q_pe.dtype).min, q_pe.dtype)
+        rows = mx.arange(B)[:, None, None]
+        within = mx.arange(r)
+        outs = []
+        for j0 in range(0, L, _GATHER_TILE):
+            j1 = min(j0 + _GATHER_TILE, L)
+            Q = j1 - j0
+            q_pos = offset + mx.arange(j0, j1)
+            own = (q_pos // r)[None, :, None]
+            picked = sel[:, j0:j1]
+            pools = mx.concatenate(
+                [picked, mx.broadcast_to(own, (B, Q, 1))], axis=-1)
+            if outs:
+                # One tile's gathered keys at a time.
+                pools = mx.depends([pools], [outs[-1]])[0]
+            g = kv[rows, pools].reshape(B * Q, 1, -1, W)
+            lat_g, pe_g = mx.split(g, [R], axis=-1)
+            # A picked pool counts when it ends before the query's group;
+            # the group itself counts up to the query.
+            seen = mx.concatenate(
+                [picked < own, mx.ones((B, Q, 1), dtype=mx.bool_)], axis=-1)
+            pos = pools[..., None] * r + within
+            keep = seen[..., None] & (pos <= q_pos[None, :, None, None])
+            qn = q_abs[:, :, j0:j1].transpose(0, 2, 1, 3).reshape(
+                B * Q, H, 1, R)
+            qp = q_pe[:, :, j0:j1].transpose(0, 2, 1, 3).reshape(
+                B * Q, H, 1, -1)
+            pe_scores = (qp * self.scale) @ pe_g.swapaxes(-1, -2)
+            pe_scores = mx.where(
+                keep.reshape(B * Q, 1, 1, -1), pe_scores, neg)
+            out = mx.fast.scaled_dot_product_attention(
+                qn, lat_g, lat_g, scale=self.scale, mask=pe_scores,
+                sinks=sinks)
+            outs.append(out.reshape(B, Q, H, R).transpose(0, 2, 1, 3))
+        out = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+        return self.unembed_out(out)
+
     def _sparse_keys(self, sel, q_abs: int, B: int):
         """Key positions one query attends: its selected pools expanded
         ``kpool`` wide, then its own group up to itself. A pool the query
@@ -597,9 +773,13 @@ class HyV4FlashAttention(nn.Module):
         offset = kv_cache.offset if kv_cache is not None else 0
         q_pe = self.rope(q_pe, offset)
         k_pe = self.rope(k_pe, offset)
+        # One row per key, the latent then its rope half, so a kernel reads
+        # both in place. The cache's value slot holds nothing.
+        kv = mx.concatenate([latent, k_pe], axis=-1)
         if kv_cache is not None:
-            latent, k_pe = kv_cache.update_and_fetch(latent, k_pe)
-        S = latent.shape[2]
+            kv, _ = kv_cache.update_and_fetch(
+                kv, mx.zeros((B, 1, L, 1), dtype=kv.dtype))
+        S = kv.shape[2]
 
         sel = None
         if self.indexer is not None:
@@ -613,18 +793,29 @@ class HyV4FlashAttention(nn.Module):
             if _sparse_disabled():
                 sel = None
 
-        if self.window:
+        out = None
+        if L <= _GATHER_MAX_L:
+            out = self._step_kq(q_nope, q_pe, kv, sel, offset)
+        elif sel is not None:
+            out = self._sparse_prefill_kq(q_nope, q_pe, kv, sel, offset)
+        latent, k_pe = mx.split(kv, [self.kv_lora_rank], axis=-1)
+        if out is not None:
+            pass
+        elif self.window:
             # Sliding window: a query sees itself and the window - 1 keys
             # before it.
             start = max(0, offset + 1 - self.window)
             latent, k_pe = latent[:, :, start:], k_pe[:, :, start:]
-            mask = None
-            if L > 1:
-                q_pos = offset + mx.arange(L)[:, None]
-                key_pos = start + mx.arange(S - start)
-                mask = (key_pos <= q_pos) & (key_pos > q_pos - self.window)
-                mask = mask[None, None]
-            out = self._attend(q_nope, q_pe, latent, k_pe, mask)
+            out = self._window_prefill(q_nope, q_pe, latent, k_pe)
+            if out is None:
+                mask = None
+                if L > 1:
+                    q_pos = offset + mx.arange(L)[:, None]
+                    key_pos = start + mx.arange(S - start)
+                    mask = ((key_pos <= q_pos)
+                            & (key_pos > q_pos - self.window))
+                    mask = mask[None, None]
+                out = self._attend(q_nope, q_pe, latent, k_pe, mask)
         elif sel is not None and L <= _GATHER_MAX_L:
             # Sparse decode: gather each query's keys and attend those.
             outs = []
@@ -639,8 +830,7 @@ class HyV4FlashAttention(nn.Module):
                     keep[:, None, None, :]))
             out = outs[0] if L == 1 else mx.concatenate(outs, axis=2)
         elif sel is not None:
-            mask = self._sparse_mask(sel, offset, L, S)[:, None]
-            out = self._attend(q_nope, q_pe, latent, k_pe, mask)
+            out = self._sparse_prefill(q_nope, q_pe, latent, k_pe, sel, offset)
         else:
             mask = None
             if L > 1:
