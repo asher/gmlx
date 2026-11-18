@@ -857,6 +857,18 @@ class HyV4FlashAttention(nn.Module):
         return self.post_norm(self.o_proj(out))
 
 
+class HyV4FlashKVCache(HyV4KVCache):
+    """The key rows of one layer, appended in place. A slice write copies
+    the whole buffer whenever the step before still holds it, which is
+    every step of a pipelined decode: a copy of the cache per layer per
+    token, growing with depth. Rows at or past the offset are never
+    handed out, which is what the in-place append needs
+    (gmlx/cache/kv_append.py)."""
+
+    _kv_routed = True
+    _kv_grid = True
+
+
 def split_cache(cache):
     """``(latent_cache, pool_cache)`` for one layer's cache entry. A layer
     with an indexer holds a ``CacheList``; the first engram layer's list
@@ -1115,7 +1127,7 @@ class Model(nn.Module):
         first_engram = args.engram_layer_ids[:1]
         caches = []
         for idx in range(args.num_hidden_layers):
-            slots: List[Any] = [HyV4KVCache()]
+            slots: List[Any] = [HyV4FlashKVCache()]
             if args.has_indexer(idx):
                 # The score path reads the pool in full every step, so it
                 # opts out of --kv-bits packing.
