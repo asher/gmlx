@@ -103,6 +103,9 @@ def test_score_heads():
     assert pd.score_heads(SimpleNamespace(config=SimpleNamespace())) == 32
     # config objects work directly too (drafter path)
     assert pd.score_heads(SimpleNamespace(num_attention_heads=16)) == 16
+    # a head count per layer (hy_v4_flash) counts the widest layer
+    assert pd.score_heads(SimpleNamespace(
+        num_attention_heads=[64, 32, 64])) == 64
 
 
 def _batch(base, depth, heads=HEADS):

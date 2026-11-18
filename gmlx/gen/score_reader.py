@@ -159,7 +159,10 @@ def config_value(model, name: str, default=None):
 
 
 def attention_heads(model) -> int:
-    return int(config_value(model, "num_attention_heads", 32) or 32)
+    from gmlx.gen.prefill_decay import widest_heads
+
+    return int(widest_heads(
+        config_value(model, "num_attention_heads", 32)) or 32)
 
 
 def adopted_step(model) -> int:

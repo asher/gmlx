@@ -41,11 +41,15 @@ from gmlx._vendor.mlx_lm.models.mla import MultiLinear
 from gmlx._vendor.mlx_lm.models.rope_utils import initialize_rope
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
+import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.cache.kv_append import depends_keys
 from gmlx.cache.kv_cache import ArraysCache, CacheList, RotatingKVCache
 from gmlx.cache.window_sdpa import _HD_OK, _MIN_ROWS, _kq_window_kernel
 from gmlx.envflags import env_bool
-from gmlx.models.deepseek_v4.cache import DS4PoolingCache
+from gmlx.models.deepseek_v4.cache import (
+    DS4BatchPoolingCache,
+    DS4PoolingCache,
+)
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
 from gmlx.models.deepseek_v4.model import (
     LimitedSwiGLU,
@@ -1410,3 +1414,33 @@ class Model(nn.Module):
             return True
 
         return predicate
+
+
+def _prefill_score_profile(model, prompt_cache):
+    """What a prefill chunk's scores hold, for the chunk sizing in
+    ``prefill_decay``. No layer scores a query against the whole depth: a
+    window layer sees its window, a sparse layer the keys its indexer
+    picked, and the indexer one row per pool of ``index_kpool`` tokens. On
+    kq's chunk kernel the head sum runs inside, so a chunk holds one
+    16-bit score per query and pool, priced as fp32 for the select beside
+    it. The ops path scores 512 queries at a time against every head in
+    fp32. A batched pool keeps the dense model."""
+    for c in _prefill_decay._walk_caches(prompt_cache):
+        if isinstance(c, DS4BatchPoolingCache):
+            return None
+    cfg = getattr(model, "config", model)
+    kpool = int(_prefill_decay._config_value(cfg, "index_kpool") or 0)
+    heads = int(_prefill_decay._config_value(cfg, "index_n_heads") or 0)
+    if kpool < 2 or heads < 1:
+        return None
+    if (_kq_indexer_kernels() is not None
+            and _kq_indexer_chunk_kernel() is not None
+            and env_bool("GMLX_HY4_IDX_KQ", True)
+            and mx.default_device().type == mx.DeviceType.gpu):
+        return _prefill_decay.ScoreTransientProfile(
+            heads=1, bytes_per_elem=4, depth_divisor=kpool)
+    return _prefill_decay.ScoreTransientProfile(
+        heads=heads + 1, bytes_per_elem=4, depth_divisor=kpool, rows=512)
+
+
+_prefill_decay.register_score_profile("hy_v4_flash", _prefill_score_profile)

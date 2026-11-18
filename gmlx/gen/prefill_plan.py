@@ -79,7 +79,9 @@ def prefill_plan(model, *, V: int, cap_gb: float = 4.0, floor: bool = False,
         cfg = getattr(model, "args", None)
         cfg = getattr(cfg, "__dict__", cfg) if cfg is not None else {}
     cfg = cfg.get("text_config", cfg) if isinstance(cfg, dict) else {}
-    heads = int(cfg.get("num_attention_heads", 32)) if isinstance(cfg, dict) else 32
+    heads = (int(prefill_decay.widest_heads(
+        cfg.get("num_attention_heads", 32)) or 32)
+        if isinstance(cfg, dict) else 32)
     target = requested_trunk or (target_streaming_trunk if streaming else dense_trunk)
     t = min(int(target), int(base)) if streaming else int(target)
     t = min(t, int(prefill_decay.decayed_step(max(t, 64), 0, heads)))

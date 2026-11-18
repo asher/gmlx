@@ -182,6 +182,41 @@ def test_a_table_that_reads_by_slot_gives_the_one_gather_logits():
     assert mx.array_equal(got, want)
 
 
+def test_a_deep_prefill_chunk_is_sized_by_the_pooled_scores(monkeypatch):
+    # The server sizes each prefill chunk by the score transient. A head
+    # count per layer failed that sizing, and the dense model (64 heads
+    # against the whole depth) would cut a 128k-deep chunk to a few rows.
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.models.hy_v4_flash.model as hy
+
+    assert pd._SCORE_PROFILES["hy_v4_flash"] is hy._prefill_score_profile
+    monkeypatch.setenv("GMLX_PREFILL_SCORE_CAP_GB", "6")
+    model = _model()
+    cache = model.make_cache()
+    kpool = model.args.index_kpool
+    heads = pd.score_heads(model.args)
+    assert heads == max(model.args.num_attention_heads)
+
+    # The ops path: 512 queries at a time, every indexer head in fp32.
+    ops = pd.resolve_score_profile(model, cache)
+    assert ops == pd.ScoreTransientProfile(
+        heads=model.args.index_n_heads + 1, bytes_per_elem=4,
+        depth_divisor=kpool, rows=512)
+    # kq's chunk kernel: one score per query and pool.
+    monkeypatch.setattr(hy, "_kq_indexer_kernels", lambda: (None, None))
+    monkeypatch.setattr(hy, "_kq_indexer_chunk_kernel", lambda: object())
+    monkeypatch.setattr(mx, "default_device", lambda: mx.Device(mx.gpu))
+    kq = pd.resolve_score_profile(model, cache)
+    assert kq == pd.ScoreTransientProfile(
+        heads=1, bytes_per_elem=4, depth_divisor=kpool)
+
+    depth = 131072
+    for prof in (ops, kq):
+        assert pd.decayed_step(2048, depth, 64, profile=prof) == 2048
+    assert pd.decayed_step(2048, depth, 64) < 512
+    assert pd.score_transient_bytes(model, cache, depth) < 0.5e9
+
+
 def test_a_sliding_window_layer_holds_its_window_alone(monkeypatch):
     model = _model()
     ids = [int(v) for v in np.random.default_rng(4).integers(0, VOCAB, 41)]
