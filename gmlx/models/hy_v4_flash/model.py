@@ -71,6 +71,12 @@ ENGRAM_EPS = 1.1920929e-07
 # Queries per sparse decode call that take the per-query key gather: a
 # decode step, or an MTP verify block.
 _GATHER_MAX_L = 8
+# Queries per call kq's decode-width pool score takes.
+_IDX_KQ_MAX_L = 4
+# The pool keys are stored in fp16 whatever the model's 16-bit type: the
+# kernel route emits its scores in the key type, and fp16 keeps 11 bits of
+# a score where bf16 keeps 8.
+_POOL_DTYPE = mx.float16
 # Queries per gather in a sparse prefill: 256 queries hold 0.6 GB of
 # gathered keys at a time.
 _GATHER_TILE = 256
@@ -108,6 +114,33 @@ def _kq_router_kernel():
     if fn is None or "sigmoid" not in (fn.__doc__ or ""):
         return None
     return fn
+
+
+@functools.cache
+def _kq_indexer_kernels():
+    """kq's decode-width pool score and its radix select when the
+    mlx_kquant build takes 16 indexer heads and a 511-wide select, else
+    None."""
+    try:
+        import mlx_kquant as kq
+    except ImportError:
+        return None
+    score = getattr(kq, "dsa_indexer_score_decode", None)
+    select = getattr(kq, "dsa_topk_indices", None)
+    if (score is None or select is None
+            or "16, 32, 64" not in (score.__doc__ or "")
+            or "511" not in (select.__doc__ or "")):
+        return None
+    return score, select
+
+
+@functools.cache
+def _row_offsets(r: int) -> mx.array:
+    """``arange(r)`` as int32, evaluated once: a constant of every decode
+    step's row list."""
+    out = mx.arange(r, dtype=mx.int32)
+    mx.eval(out)
+    return out
 
 
 def _sparse_disabled() -> bool:
@@ -409,6 +442,7 @@ class HyV4FlashIndexer(nn.Module):
         self.weights_proj = nn.Linear(
             args.hidden_size, self.n_heads, bias=False)
         self._w_scale = (self.head_dim * self.n_heads) ** -0.5
+        self._w_scaled = None
         self.rope = initialize_rope(
             dims=args.qk_rope_head_dim,
             base=rope_theta,
@@ -425,8 +459,10 @@ class HyV4FlashIndexer(nn.Module):
         else:
             ready_v, ready_g, base = pool_cache.accumulate_windows(
                 values, gates, offset)
+        dtype = (_POOL_DTYPE if values.dtype == mx.bfloat16
+                 else values.dtype)
         if ready_v.size == 0:
-            new_pooled = mx.zeros((B, 0, D), dtype=values.dtype)
+            new_pooled = mx.zeros((B, 0, D), dtype=dtype)
         else:
             vw = mx.unflatten(ready_v, 1, (-1, self.kpool))
             gw = mx.unflatten(ready_g, 1, (-1, self.kpool))
@@ -435,10 +471,46 @@ class HyV4FlashIndexer(nn.Module):
             pos = base + self.kpool * mx.arange(pooled.shape[1])
             new_pooled = mx.concatenate(
                 [nope, rope_at(pe, pos, self.rope_theta)], axis=-1
-            ).astype(values.dtype)
+            ).astype(dtype)
         if pool_cache is not None:
             return pool_cache.update_and_fetch(new_pooled)
         return new_pooled
+
+    def _select_kq(self, q, x, pooled, offset: int):
+        """The selection of a decode step on kq's kernels: the pool rows
+        scored where they lie and a radix select, in place of a fp32 copy
+        of the whole pool and a sort per token. The head sum runs in fp32
+        with fp32 head weights and the scores are stored in the pool's
+        16-bit type, so pools tied in 16 bits at the threshold are taken
+        lowest index first where the ops path orders them in fp32. None
+        where the kernels do not apply."""
+        kernels = _kq_indexer_kernels()
+        B, H, L, D = q.shape
+        if (kernels is None or L > _IDX_KQ_MAX_L
+                or pooled.dtype not in (mx.float16, mx.bfloat16)
+                or q.dtype not in (mx.float16, mx.bfloat16)
+                or mx.default_device().type != mx.DeviceType.gpu
+                or not env_bool("GMLX_HY4_IDX_KQ", True)):
+            return None
+        score, select = kernels
+        proj = self.weights_proj.weight
+        held = self._w_scaled
+        if held is None or held[0] is not proj:
+            # The scale folded into the transposed weight once.
+            held = (proj, (proj.astype(mx.float32) * self._w_scale).T)
+            # Not a parameter: kept out of the module's own dict.
+            object.__setattr__(self, "_w_scaled", held)
+        w = x.astype(mx.float32) @ held[1]
+        if L == 1:
+            # The kernel scores every row it is given to one query: hand
+            # it the pools that end before the query's group.
+            keys, q_offset = pooled[:, :offset // self.kpool], 0
+        else:
+            # Row p is visible to query j when p < (offset + j) // kpool.
+            keys, q_offset = pooled, offset - 1
+        scores = score(q.astype(keys.dtype), keys, w, q_offset, self.kpool)
+        sel = select(scores, self.select_k)[:, 0]
+        return mx.stop_gradient(sel.astype(mx.int32))
 
     def __call__(
         self,
@@ -463,6 +535,12 @@ class HyV4FlashIndexer(nn.Module):
         q = q.transpose(0, 2, 1, 3)
         nope, pe = mx.split(q, [self.nope_head_dim], axis=-1)
         q = mx.concatenate([nope, self.rope(pe, offset)], axis=-1)
+
+        if (self.n_heads == 16 and self.head_dim == 128
+                and self.select_k == 511 and "weight" in self.weights_proj):
+            sel = self._select_kq(q, x, pooled, offset)
+            if sel is not None:
+                return sel
 
         # fp32 head weights: they are sign-free, and a bf16 head gate moves
         # scores enough to flip near-tied pools.
@@ -650,7 +728,13 @@ class HyV4FlashAttention(nn.Module):
                 win_mask = win_mask & (key_pos >= low[:, None])
         if sel is not None:
             pool = kv[:, 0]
-            idx = self._picked_rows(sel, q_pos, B, L).astype(mx.int32)
+            if L == 1:
+                # One query past the key budget sees more pools than it
+                # picks, so every picked pool ends before its group.
+                idx = (sel[..., None] * r + _row_offsets(r)).reshape(B, 1, -1)
+            else:
+                idx = self._picked_rows(sel, q_pos, B, L)
+            idx = idx.astype(mx.int32)
         else:
             pool = win[:, 0, :1]
             idx = mx.full((B, L, 1), -1, dtype=mx.int32)
