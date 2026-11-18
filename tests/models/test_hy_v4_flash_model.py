@@ -182,6 +182,85 @@ def test_a_table_that_reads_by_slot_gives_the_one_gather_logits():
     assert mx.array_equal(got, want)
 
 
+def _held_table(table):
+    """The file-backed table's face over ``table``, holding the rows of
+    one call: the chunk widths it was asked to hold, and per read whether
+    the held rows were this call's."""
+    held, served = [], []
+
+    class Held:
+        ahead = None
+
+        def hold_ahead(self, x):
+            held.append(x.shape[1])
+            self.ahead = x
+
+        def rows_by_slot(self, x):
+            ahead, self.ahead = self.ahead, None
+            n = x.shape[1]
+            served.append(ahead is not None and n <= ahead.shape[1]
+                          and mx.array_equal(x, ahead[:, :n]).item())
+            return [table(x[:, :, s]) for s in range(x.shape[2])]
+
+    return Held(), held, served
+
+
+def test_a_planned_chunk_reads_its_rows_during_the_chunk_before():
+    model = _model()
+    ids = [int(v) for v in np.random.default_rng(3).integers(0, VOCAB, 30)]
+    splits = [8, 16, 21, 29, 30]
+    want = _logits(model, ids, splits)
+    model.model.engram_embed, held, served = _held_table(
+        model.model.engram_embed)
+    cache, outs, lo = model.make_cache(), [], 0
+    for hi in splits:
+        # As a prefill loop plans: a step of 8, the last token no chunk's.
+        rest = len(ids) - hi - 1
+        if rest >= 1:
+            model.table_rows_ahead(
+                mx.array([ids[hi:hi + min(8, rest)]]), hi - lo)
+        outs.append(model(mx.array([ids[lo:hi]]), cache))
+        mx.eval(outs[-1], [c.state for c in cache])
+        lo = hi
+    got = mx.concatenate(outs, axis=1)
+    # Chunks of 8, 8, 5 (short of its plan), 8, then the last token.
+    assert held == [8, 8, 8]
+    assert served == [False, True, True, True, False]
+    assert mx.array_equal(got, want)
+
+    # A plan for a call of another length is dropped, not read.
+    model.table_rows_ahead(mx.array([ids[:4]]), 7)
+    model(mx.array([ids[:3]]), model.make_cache())
+    assert held == [8, 8, 8]
+
+
+def test_generate_reads_each_chunk_s_rows_a_chunk_ahead(monkeypatch):
+    # The prefill loop of run and chat: every chunk after the first finds
+    # its rows held, and the token it keeps for the first step reads its
+    # own.
+    from gmlx._vendor.mlx_lm.generate import generate_step
+
+    model = _model()
+    ids = [int(v) for v in np.random.default_rng(4).integers(0, VOCAB, 30)]
+
+    def first_token():
+        return next(generate_step(mx.array(ids), model, max_tokens=1,
+                                  prefill_step_size=8))[0]
+
+    want = first_token()
+    model.model.engram_embed, held, served = _held_table(
+        model.model.engram_embed)
+    assert first_token() == want
+    # Chunks of 8, 8, 8, 5, then the decode steps.
+    assert held == [8, 8, 5]
+    assert served[:4] == [False, True, True, True] and not any(served[4:])
+
+    monkeypatch.setenv("GMLX_TABLE_READAHEAD", "0")
+    del held[:], served[:]
+    assert first_token() == want
+    assert held == [] and not any(served)
+
+
 def test_a_deep_prefill_chunk_is_sized_by_the_pooled_scores(monkeypatch):
     # The server sizes each prefill chunk by the score transient. A head
     # count per layer failed that sizing, and the dense model (64 heads

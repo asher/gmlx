@@ -1775,10 +1775,14 @@ def stream_speculative(
             seed_kv = None
     seed_active = seed_kv is not None
     i = 0
+    from gmlx.stream.table_readahead import plan_rows_ahead
+
     with mx.stream(generation_stream):
         while i < body:
             take = min(prefill_chunk, body - i)
             last = (i + take >= n)
+            plan_rows_ahead(lm, prompt[:, i:], take, prefill_chunk,
+                            keep=n - body)
             rows = {}
             if prompt_rows is not None:
                 rows = {"inputs_embeds": prompt_rows[:, :take]}

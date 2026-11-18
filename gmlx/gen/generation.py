@@ -918,8 +918,11 @@ def _chunked_prefill_cache(lm, input_ids, chunk, cache=None, *, owner=None):
     c = cache if cache is not None else make_prompt_cache(lm)
     n_total = input_ids.shape[1]
     i = 0
+    from gmlx.stream.table_readahead import plan_rows_ahead
+
     while i < n_total - 1:
         n = min(chunk, n_total - 1 - i)
+        plan_rows_ahead(lm, input_ids[:, i:], n, chunk)
         lm(input_ids[:, i : i + n], cache=c, n_to_process=n)
         mx.eval([cc.state for cc in c])
         i += n
@@ -1511,10 +1514,13 @@ def _prefill_into_cache(lm, input_ids, cache, chunk, *, owner=None):
     for attr in ("_position_ids", "_rope_deltas"):
         if hasattr(lm, attr):
             setattr(lm, attr, None)
+    from gmlx.stream.table_readahead import plan_rows_ahead
+
     n_total = input_ids.shape[1]
     i = 0
     while i < n_total:
         n = min(chunk, n_total - i)
+        plan_rows_ahead(lm, input_ids[:, i:], n, chunk, keep=0)
         lm(input_ids[:, i : i + n], cache=cache, n_to_process=n)
         mx.eval([cc.state for cc in cache])
         i += n

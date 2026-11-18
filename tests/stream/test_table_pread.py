@@ -290,7 +290,7 @@ def test_gather_stats_totals_the_row_reads(table_gguf, monkeypatch):
     install_deferred_tables(model, {"blk.1.engram_embd.weight": src})
     try:
         assert gather_stats(model) == {"tables": 1, "gathers": 0, "rows": 0,
-                                       "seconds": 0.0}
+                                       "ahead": 0, "seconds": 0.0}
         model.model.layers[1].engram.embed(mx.array([[3, 900, 3]]))
         got = gather_stats(model)
         # Duplicate ids read once.
@@ -783,6 +783,56 @@ def test_rows_by_slot_reads_each_slot_alone_and_matches_one_read(
         want = table.decode_gathered(mx.array(raw[np.array(ids)]))
         for slot, got in enumerate(rows):
             assert mx.array_equal(got, want[:, :, slot])
+    finally:
+        s.close()
+
+
+def test_rows_held_ahead_serve_the_call_they_were_read_for(
+        table_gguf, monkeypatch):
+    path, raw = table_gguf
+    src = _sources(path, monkeypatch)
+    _lazy(monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    s = table._kq_table_source
+    rng = np.random.default_rng(5)
+    try:
+        # [B, L, slots, cols] of the chunk to come, still a graph.
+        ahead = mx.array(rng.integers(0, ROWS, (2, 6, 3, 2))) + mx.array(0)
+        want = table.decode_gathered(mx.array(raw[np.array(ahead)]))
+
+        # The whole chunk: no second read.
+        table.hold_ahead(ahead)
+        assert s.gathers == 3 and s.gathered_rows == 72
+        rows = table.rows_by_slot(ahead + mx.array(0))
+        assert s.gathers == 3 and s.ahead_rows == 72
+        for slot, got in enumerate(rows):
+            assert mx.array_equal(got, want[:, :, slot])
+
+        # A shorter chunk takes the rows it opens with.
+        table.hold_ahead(ahead)
+        rows = table.rows_by_slot(ahead[:, :4])
+        assert s.gathers == 6
+        for slot, got in enumerate(rows):
+            assert mx.array_equal(got, want[:, :4, slot])
+
+        # Held once: the same ids read again.
+        rows = table.rows_by_slot(ahead)
+        assert s.gathers == 9
+
+        # Other ids, a longer chunk and another batch read for themselves
+        # and drop what was held.
+        other = mx.array(rng.integers(0, ROWS, (2, 6, 3, 2)))
+        for ids in (other, mx.concatenate([ahead, other], axis=1), ahead[:1]):
+            table.hold_ahead(ahead)
+            before = s.gathers
+            rows = table.rows_by_slot(ids)
+            assert s.gathers == before + 3
+            assert "_kq_rows_ahead" not in table.__dict__
+            assert s.ahead_rows == 72 + 48
+            want_ids = table.decode_gathered(mx.array(raw[np.array(ids)]))
+            for slot, got in enumerate(rows):
+                assert mx.array_equal(got, want_ids[:, :, slot])
     finally:
         s.close()
 

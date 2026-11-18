@@ -152,6 +152,43 @@ def test_a_prefill_chunk_queues_its_rows_before_its_forward(monkeypatch):
     assert ra.sent == [[(0, 4)], [(4, 12)]]
 
 
+class _PlannedForward(_ServedForward):
+    """A served model whose text model takes row plans."""
+
+    def __init__(self, order):
+        owner = types.SimpleNamespace(table_rows_ahead=self._plan)
+        super().__init__(owner, order)
+        self.plans = []
+
+    def _plan(self, next_ids, n):
+        self.order.append("plan")
+        self.plans.append((n, np.array(next_ids).tolist()))
+
+
+def test_a_prefill_chunk_names_the_next_chunk_before_its_forward(monkeypatch):
+    # The model starts the next chunk's row reads behind its own, so the
+    # plan reaches it before the forward. The last token is no chunk's.
+    from gmlx._vendor.mlx_vlm.generate import ar
+    from gmlx._vendor.mlx_vlm.models.cache import BatchKVCache
+
+    monkeypatch.setenv("GMLX_PREFILL_DECAY", "0")
+    monkeypatch.setenv("GMLX_CB_PHASE", "0")
+    order = []
+    model = _PlannedForward(order)
+    ids = list(range(1, 12))
+    batch = ar.PromptProcessingBatch(
+        model, [0], [ids], [4], mx.zeros((1, 11, 4)),
+        {}, warm_cache=[BatchKVCache(left_padding=[0])], prefill_step_size=4,
+        suffix_lens=[11])
+    assert [batch.prompt_step() for _ in range(3)] == [4, 4, 2]
+    assert order == ["plan", "forward", "plan", "forward", "forward"]
+    assert model.plans == [(4, [[5, 6, 7, 8]]), (4, [[9, 10]])]
+
+    monkeypatch.setenv("GMLX_TABLE_READAHEAD", "0")
+    tra.plan_rows_ahead(model, mx.array([ids]), 4, 4)
+    assert len(model.plans) == 2
+
+
 class _HeldHasher(_RowIsToken):
     """A hasher that says when it starts its first submission and holds
     it until ``go`` is set."""

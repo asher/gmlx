@@ -18,6 +18,12 @@ batches keep each whole prompt in their cache metadata.
 ``GMLX_TABLE_READAHEAD_WORKERS`` sets the reader count (16). The model's
 streaming owner holds it (``installs.STREAM_ATTRS``), so a release closes
 it with the other helpers.
+
+A table read from its file without the page cache (``table_pread``) is
+read ahead by rows instead: a prefill loop names the tokens of its next
+chunk (``plan_rows_ahead``), and the model starts their reads behind the
+chunk in hand and holds the rows (``table_rows_ahead``). The same switch
+turns it off.
 """
 from __future__ import annotations
 
@@ -279,12 +285,46 @@ def plan_spans(batch, n: int) -> list:
     return [spans for spans in (now, ahead) if spans]
 
 
+def plan_rows_ahead(model, ids, n: int, step: int | None = None, *,
+                    keep: int = 1) -> None:
+    """Name the prefill chunk after the one about to run to a model that
+    holds table rows ahead (``table_rows_ahead`` on a module along its
+    wrapper chain). ``ids`` [B, W] are the token ids still to run, the
+    chunk of ``n`` columns first; the last ``keep`` columns are no prefill
+    chunk's (the token a generate loop keeps for its first step). The
+    model's next call starts the reads of up to ``step`` tokens past its
+    own. Every prefill loop calls this before a chunk's forward. Nothing
+    when no module takes a plan, and a plan that fails is dropped: the
+    chunk then reads its own rows."""
+    if ids is None or not readahead_enabled():
+        return
+    from .installs import wrapper_chain
+
+    try:
+        if len(ids.shape) != 2:
+            return
+        rest = int(ids.shape[1]) - int(n) - int(keep)
+        if rest < 1:
+            return
+        for m in wrapper_chain(model):
+            plan = getattr(m, "table_rows_ahead", None)
+            if callable(plan):
+                take = min(rest, max(int(n), int(step or 0)))
+                plan(ids[:, n:n + take], int(n))
+                return
+    except Exception:
+        _log.debug("table row plan failed", exc_info=True)
+
+
 def read_ahead(batch, n: int) -> None:
     """Queue what a prompt batch reads in the chunk of ``n`` columns it is
     about to run, and in the two steps after it, on its model's read-ahead.
     Called just before the chunk's forward, whose table gather reads the
     chunk's rows. Nothing when the model has none."""
-    ra = readahead_of(getattr(batch, "model", None))
+    model = getattr(batch, "model", None)
+    plan_rows_ahead(model, getattr(batch, "_input_ids", None), n,
+                    getattr(batch, "prefill_step_size", None))
+    ra = readahead_of(model)
     if ra is None:
         return
     try:

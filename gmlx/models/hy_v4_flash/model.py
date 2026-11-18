@@ -1270,6 +1270,22 @@ class HyV4FlashModel(nn.Module):
         member = inner[-1]
         return member if isinstance(member, ArraysCache) else None
 
+    def plan_rows_ahead(self, next_ids: mx.array, n: int) -> None:
+        """``next_ids`` [B, T] follow the ``n`` tokens of the next call.
+        That call starts their table reads behind its own, so a prefill
+        chunk finds the rows of its first engram layer read."""
+        object.__setattr__(self, "_rows_plan", (int(n), next_ids))
+
+    def _hold_rows_ahead(self, inputs: mx.array, history: mx.array) -> None:
+        plan = self.__dict__.pop("_rows_plan", None)
+        if plan is None:
+            return
+        n, next_ids = plan
+        hold = getattr(self.engram_embed, "hold_ahead", None)
+        if (hold is not None and inputs.shape[1] == n
+                and next_ids.shape[0] == inputs.shape[0]):
+            hold(self.engram_hash(next_ids, history, None)[0])
+
     def __call__(
         self,
         inputs: mx.array,
@@ -1297,6 +1313,7 @@ class HyV4FlashModel(nn.Module):
                 pf(row_ids)
             if live is not None:
                 rows = _slot_rows(self.engram_embed, row_ids)
+            self._hold_rows_ahead(inputs, new_history)
 
         if input_embeddings is not None:
             h = input_embeddings
@@ -1345,6 +1362,12 @@ class Model(nn.Module):
     @property
     def layers(self):
         return self.model.layers
+
+    def table_rows_ahead(self, next_ids: mx.array, n: int) -> None:
+        """The tokens of the prefill chunk after the next call's ``n``
+        (``table_readahead.plan_rows_ahead``)."""
+        if self.model.engram_hash is not None:
+            self.model.plan_rows_ahead(next_ids, n)
 
     def make_cache(self):
         args = self.args

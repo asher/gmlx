@@ -354,10 +354,17 @@ class ScoreReader:
         r = max(1, self.reduce)
         out: list[Entry] = []
         trunk = head = step = cap = hidden = logits = None
-        for depth, w in self.plan(len(ids) - 1):
+        from gmlx.stream.table_readahead import plan_rows_ahead
+
+        steps = self.plan(len(ids) - 1)
+        for j, (depth, w) in enumerate(steps):
             if should_stop is not None and should_stop():
                 raise Cancelled("the scoring job was cancelled")
             x = mx.array([ids[depth:depth + w]], dtype=mx.int32)
+            if j + 1 < len(steps):
+                ahead = ids[depth:depth + w + steps[j + 1][1]]
+                plan_rows_ahead(self.model, mx.array([ahead], dtype=mx.int32),
+                                w, keep=0)
             targets = ids[depth + 1:depth + w + 1]
             self.forwards += 1
             if self.split is not None:

@@ -85,6 +85,8 @@ class TableSource:
     gathers: int = field(default=0, repr=False)
     gathered_rows: int = field(default=0, repr=False)
     gather_seconds: float = field(default=0.0, repr=False)
+    # Rows a call took from the read started a chunk ahead of it.
+    ahead_rows: int = field(default=0, repr=False)
 
     @property
     def nbytes(self) -> int:
@@ -474,17 +476,52 @@ def _pread_class(cls):
             src = self._kq_table_source
             if not _lazy_rows(src):
                 return None
+            raws = self._held_rows(x)
+            if raws is None:
+                raws = self._start_slots(x)
+            return [self._lazy_decode(raw)[:, :, 0] for raw in raws]
+
+        def _start_slots(self, x):
+            """One read per slot of ``x``, each started, as raw rows."""
             from .table_stream import table_stream
 
             # Split on the table's stream: the ids cross from the GPU once.
             parts = mx.split(x, x.shape[2], axis=2, stream=table_stream())
-            rows = []
+            raws = []
             for part in parts:
                 raw = self._lazy_read(part)
                 # One evaluation per slot: its readers wait on it alone.
                 mx.async_eval(raw)
-                rows.append(self._lazy_decode(raw)[:, :, 0])
-            return rows
+                raws.append(raw)
+            return raws
+
+        def hold_ahead(self, x) -> None:
+            """Start the reads of ``x`` [B, L, slots, cols], the rows of
+            a call still to come, and hold them for the ``rows_by_slot``
+            whose ids open ``x``. Called after the reads of the call in
+            hand, which run first. One set is held, and the next
+            ``rows_by_slot`` takes or drops it."""
+            if _lazy_rows(self._kq_table_source):
+                object.__setattr__(
+                    self, "_kq_rows_ahead", (x, self._start_slots(x)))
+
+        def _held_rows(self, x):
+            """The raw rows held for ``x``, by slot, or None when none
+            are held or they are the rows of other ids."""
+            held = self.__dict__.pop("_kq_rows_ahead", None)
+            if held is None:
+                return None
+            ids, raws = held
+            n = x.shape[1]
+            if (x.ndim != ids.ndim or x.dtype != ids.dtype
+                    or x.shape[0] != ids.shape[0] or n > ids.shape[1]
+                    or x.shape[2:] != ids.shape[2:]):
+                return None
+            whole = n == ids.shape[1]
+            if not mx.array_equal(x, ids if whole else ids[:, :n]).item():
+                return None
+            self._kq_table_source.ahead_rows += int(x.size)
+            return raws if whole else [raw[:, :n] for raw in raws]
 
         def __call__(self, x):
             src = self._kq_table_source
@@ -532,11 +569,13 @@ def _pread_class(cls):
 
 
 def gather_stats(model) -> dict:
-    """Row-gather totals over every file-backed table on ``model``. The
-    tables run one after another in a forward, so the walls add up."""
+    """Row-gather totals over every file-backed table on ``model``:
+    reads, rows read, and of those the rows a call found read a chunk
+    ahead. The tables run one after another in a forward, so the walls
+    add up."""
     from .table_stream import streamable_tables_for
 
-    out = {"tables": 0, "gathers": 0, "rows": 0, "seconds": 0.0}
+    out = {"tables": 0, "gathers": 0, "rows": 0, "ahead": 0, "seconds": 0.0}
     for _, mod in streamable_tables_for(model):
         src = getattr(mod, "_kq_table_source", None)
         if src is None:
@@ -544,6 +583,7 @@ def gather_stats(model) -> dict:
         out["tables"] += 1
         out["gathers"] += src.gathers
         out["rows"] += src.gathered_rows
+        out["ahead"] += src.ahead_rows
         out["seconds"] += src.gather_seconds
     return out
 
