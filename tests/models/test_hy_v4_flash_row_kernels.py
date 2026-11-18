@@ -97,3 +97,28 @@ def test_the_kernels_leave_other_shapes_to_the_ops(monkeypatch):
         x, norm, nn.RoPE(ROPE, traditional=False, base=1e4), LATENT, ROPE)
     monkeypatch.setenv("GMLX_HY4_ROW_KERNEL", "0")
     assert not row_kernels.eligible(x, norm, rope, LATENT, ROPE)
+
+
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+@pytest.mark.parametrize("rows", [1, 3])
+def test_router_logits_are_the_fp32_products(dtype, rows, monkeypatch):
+    if not _gpu():
+        pytest.skip("Metal row kernels unavailable")
+    mx.random.seed(5)
+    experts, width = 24, 512
+    w = mx.random.normal((experts, width)) * 0.05
+    x = mx.random.normal((1, rows, width)).astype(dtype)
+    assert row_kernels.router_eligible(x, w)
+    got = np.array(row_kernels.router_logits(x, w))
+    want = (np.array(x.astype(mx.float32)).astype(np.float64)
+            @ np.array(w).astype(np.float64).T)
+    assert got.shape == (1, rows, experts)
+    np.testing.assert_allclose(
+        got, want, rtol=0, atol=1e-5 * np.abs(want).max())
+    # A prefill chunk, a width that does not split, fp32 rows, the switch.
+    wide = mx.zeros((1, row_kernels.MAX_ROWS + 1, width), dtype=dtype)
+    assert not row_kernels.router_eligible(wide, w)
+    assert not row_kernels.router_eligible(x[..., :500], w[:, :500])
+    assert not row_kernels.router_eligible(x.astype(mx.float32), w)
+    monkeypatch.setenv("GMLX_HY4_ROUTER_SPLIT", "0")
+    assert not row_kernels.router_eligible(x, w)

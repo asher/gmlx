@@ -222,3 +222,80 @@ def q_row(emb, q_flat, rope, offset: int) -> mx.array:
         output_shapes=[(B, H, L, R + ROPE)],
         output_dtypes=[emb.dtype],
     )[0]
+
+
+# The router's logits at a decode step: each expert row of the fp32 gate
+# is one threadgroup of 64 threads, each a 64th of the row against the
+# token's bf16 row, so a row of 3072 is read by 64 threads at once instead
+# of by one matmul thread group a row.
+ROUTER_THREADS = 64
+
+_ROUTER_LOGITS = """
+        uint tid = thread_index_in_threadgroup;
+        uint row = threadgroup_position_in_grid.x;
+        uint e = row % E;
+        uint t = row / E;
+        constexpr uint CH = K / 64;
+        const device float* wr = w + e * K + tid * CH;
+        const device T* xr = x + t * K + tid * CH;
+        float acc = 0;
+        for (uint i = 0; i < CH; i += 4) {
+            float4 wv = *(const device packed_float4*)(wr + i);
+            acc += wv.x * float(xr[i]) + wv.y * float(xr[i + 1])
+                + wv.z * float(xr[i + 2]) + wv.w * float(xr[i + 3]);
+        }
+        acc = simd_sum(acc);
+        threadgroup float part[2];
+        if (thread_index_in_simdgroup == 0) {
+            part[simdgroup_index_in_threadgroup] = acc;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            out[row] = part[0] + part[1];
+        }
+"""
+
+
+@functools.cache
+def _router_kernel():
+    if mx.default_device() != mx.gpu or not mx.metal.is_available():
+        return None
+    return mx.fast.metal_kernel(
+        name="hy4_flash_router_logits",
+        input_names=["w", "x"],
+        output_names=["out"],
+        source=_ROUTER_LOGITS,
+        ensure_row_contiguous=True,
+    )
+
+
+def router_eligible(x: mx.array, weight: mx.array) -> bool:
+    """A decode-width call on the GPU: 16-bit rows against an fp32 gate
+    whose width splits into 64 runs of whole float4s."""
+    return (
+        x.size // x.shape[-1] <= MAX_ROWS
+        and x.dtype in (mx.float16, mx.bfloat16)
+        and weight.dtype == mx.float32
+        and weight.ndim == 2
+        and weight.shape[1] == x.shape[-1]
+        and weight.shape[1] % (ROUTER_THREADS * 4) == 0
+        and mx.default_device() == mx.gpu
+        and env_bool("GMLX_HY4_ROUTER_SPLIT", True)
+        and _router_kernel() is not None
+    )
+
+
+def router_logits(x: mx.array, weight: mx.array) -> mx.array:
+    """``x`` [..., K] against the gate ``weight`` [E, K] -> fp32 logits
+    [..., E], the sums of ``x.astype(float32) @ weight.T`` in another
+    order."""
+    E, K = weight.shape
+    rows = x.size // K
+    return _router_kernel()(
+        inputs=[weight, x],
+        template=[("T", x.dtype), ("E", E), ("K", K)],
+        grid=(rows * E * ROUTER_THREADS, 1, 1),
+        threadgroup=(ROUTER_THREADS, 1, 1),
+        output_shapes=[x.shape[:-1] + (E,)],
+        output_dtypes=[mx.float32],
+    )[0]

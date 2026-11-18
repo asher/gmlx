@@ -1120,7 +1120,10 @@ class HyV4FlashMoEGate(nn.Module):
             (args.n_routed_experts,), dtype=mx.float32)
 
     def __call__(self, x: mx.array):
-        logits = x.astype(mx.float32) @ self.weight.T
+        if not self.training and row_kernels.router_eligible(x, self.weight):
+            logits = row_kernels.router_logits(x, self.weight)
+        else:
+            logits = x.astype(mx.float32) @ self.weight.T
         t = logits.size // self.n_routed_experts
         kernel = _kq_router_kernel()
         # The kernel has no backward and no CPU form.
