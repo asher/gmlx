@@ -42,7 +42,7 @@ from gmlx._vendor.mlx_lm.models.rope_utils import initialize_rope
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache.kv_append import depends_keys
-from gmlx.cache.kv_cache import ArraysCache, CacheList
+from gmlx.cache.kv_cache import ArraysCache, CacheList, RotatingKVCache
 from gmlx.cache.window_sdpa import _HD_OK, _MIN_ROWS, _kq_window_kernel
 from gmlx.envflags import env_bool
 from gmlx.models.deepseek_v4.cache import DS4PoolingCache
@@ -696,16 +696,16 @@ class HyV4FlashAttention(nn.Module):
             (sel < own)[..., None], sel.shape + (r,)).reshape(B, L, -1)
         return mx.where(seen, pos, -1)
 
-    def _step_kq(self, q_nope, q_pe, kv, sel, offset: int):
+    def _step_kq(self, q_nope, q_pe, kv, sel, offset: int, base: int = 0):
         """A decode step (a few queries) as one kq kernel call over the
         cache rows: the window rows read whole, the picked rows through an
-        index list, the rope half as the score-only tail. None where the
-        kernel does not apply."""
+        index list, the rope half as the score-only tail. Row 0 of ``kv``
+        is position ``base``. None where the kernel does not apply."""
         kernel = _kq_tail_kernel("sdpa_sparse_decode")
         if not self._kq_ok(kernel, q_nope):
             return None
         B, H, L, _ = q_nope.shape
-        S = kv.shape[2]
+        rows = kv.shape[2]
         r = self.kpool
         q = mx.concatenate([self.embed_q(q_nope), q_pe], axis=-1)
         q_pos = offset + mx.arange(L)
@@ -719,10 +719,13 @@ class HyV4FlashAttention(nn.Module):
             low = q_pos // r * r
         else:
             start = 0
-        win = kv[:, :, start:]
+        # A cache that rolls may hold less than the window after a restore.
+        start = max(start, base)
+        lo = start - base
+        win = kv[:, :, lo:] if lo else kv
         win_mask = None
         if L > 1:
-            key_pos = start + mx.arange(S - start)
+            key_pos = start + mx.arange(rows - lo)
             win_mask = key_pos <= q_pos[:, None]
             if low is not None:
                 win_mask = win_mask & (key_pos >= low[:, None])
@@ -874,9 +877,13 @@ class HyV4FlashAttention(nn.Module):
         # One row per key, the latent then its rope half, so a kernel reads
         # both in place. The cache's value slot holds nothing.
         kv = mx.concatenate([latent, k_pe], axis=-1)
+        # Row 0 of the fetched rows is position ``base``: 0 for a cache
+        # that keeps every key, the window's first key for one that rolls.
+        base = 0
         if kv_cache is not None:
             kv, _ = kv_cache.update_and_fetch(
                 kv, mx.zeros((B, 1, L, 1), dtype=kv.dtype))
+            base = kv_cache.offset - kv.shape[2]
         S = kv.shape[2]
 
         sel = None
@@ -893,7 +900,7 @@ class HyV4FlashAttention(nn.Module):
 
         out = None
         if L <= _GATHER_MAX_L:
-            out = self._step_kq(q_nope, q_pe, kv, sel, offset)
+            out = self._step_kq(q_nope, q_pe, kv, sel, offset, base)
         elif sel is not None:
             out = self._sparse_prefill_kq(q_nope, q_pe, kv, sel, offset)
         latent, k_pe = mx.split(kv, [self.kv_lora_rank], axis=-1)
@@ -901,15 +908,18 @@ class HyV4FlashAttention(nn.Module):
             pass
         elif self.window:
             # Sliding window: a query sees itself and the window - 1 keys
-            # before it.
-            start = max(0, offset + 1 - self.window)
-            latent, k_pe = latent[:, :, start:], k_pe[:, :, start:]
+            # before it. One query over a rolled cache reads every row it
+            # is handed, in whatever order the ring holds them.
+            start = max(0, offset + 1 - self.window, base)
+            lo = start - base
+            if lo:
+                latent, k_pe = latent[:, :, lo:], k_pe[:, :, lo:]
             out = self._window_prefill(q_nope, q_pe, latent, k_pe)
             if out is None:
                 mask = None
                 if L > 1:
                     q_pos = offset + mx.arange(L)[:, None]
-                    key_pos = start + mx.arange(S - start)
+                    key_pos = start + mx.arange(S - lo)
                     mask = ((key_pos <= q_pos)
                             & (key_pos > q_pos - self.window))
                     mask = mask[None, None]
@@ -1210,8 +1220,13 @@ class Model(nn.Module):
         args = self.args
         first_engram = args.engram_layer_ids[:1]
         caches = []
+        roll = env_bool("GMLX_HY4_SWA_ROLL", True)
         for idx in range(args.num_hidden_layers):
-            slots: List[Any] = [HyV4FlashKVCache()]
+            # A sliding-window layer keeps its window alone, so a long
+            # context costs it nothing past that.
+            slots: List[Any] = [
+                RotatingKVCache(max_size=args.sliding_window)
+                if roll and args.is_swa(idx) else HyV4FlashKVCache()]
             if args.has_indexer(idx):
                 # The score path reads the pool in full every step, so it
                 # opts out of --kv-bits packing.

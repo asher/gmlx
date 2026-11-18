@@ -13,6 +13,7 @@ from gmlx.models.hy_v4_flash.model import (
     Model,
     ModelArgs,
     rope_at,
+    split_cache,
 )
 
 
@@ -158,6 +159,27 @@ def test_chunked_prefill_and_decode_match_one_pass(sparse, monkeypatch):
     # A prefill in uneven chunks, then single-token decode steps.
     split = _logits(model, ids, [5, 18, 19, 30] + list(range(31, 42)))
     assert mx.allclose(one, split, atol=1e-4, rtol=1e-4).item()
+
+
+def test_a_sliding_window_layer_holds_its_window_alone(monkeypatch):
+    model = _model()
+    ids = [int(v) for v in np.random.default_rng(4).integers(0, VOCAB, 41)]
+    splits = [30] + list(range(31, 42))
+    cache = model.make_cache()
+    outs, a = [], 0
+    for b in splits:
+        outs.append(model(mx.array([ids[a:b]]), cache))
+        mx.eval(outs[-1], [c.state for c in cache])
+        a = b
+    window = model.args.sliding_window
+    for i, swa in enumerate(SWA):
+        rows = split_cache(cache[i])[0].state[0].shape[2]
+        assert rows == (window if swa else 41), i
+    # The same steps over caches that keep every key.
+    monkeypatch.setenv("GMLX_HY4_SWA_ROLL", "0")
+    full = _logits(model, ids, splits)
+    rolled = mx.concatenate(outs, axis=1)
+    assert mx.allclose(rolled, full, atol=1e-4, rtol=1e-4).item()
 
 
 def test_the_selection_binds_past_the_key_budget():
