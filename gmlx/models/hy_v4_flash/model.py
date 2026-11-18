@@ -264,6 +264,9 @@ class ModelArgs(BaseModelArgs):
     attention_bias: bool = False
     tie_word_embeddings: bool = False
     num_nextn_predict_layers: int = 0
+    # The draft block (block num_hidden_layers of the file) is a sparse
+    # layer with an indexer of its own. 0 takes the trunk's sparse count.
+    mtp_num_attention_heads: int = 0
     # Engram. Multipliers are [module][ngram]; primes and offsets are
     # [module][column], with the offsets rebased into the one shared table.
     engram_layer_ids: List[int] = field(default_factory=list)
@@ -406,6 +409,17 @@ class EngramHash(nn.Module):
             cols.append(rolling[..., None] % self._primes[:, i - 1])
         ids = mx.concatenate(cols, axis=-1).astype(mx.int64) + self._offsets
         return ids, live, new_history
+
+    def history_after(self, history, input_ids):
+        """The history ``input_ids`` leave behind ``history``, as a call
+        over them stores it."""
+        B = input_ids.shape[0]
+        mapped = self._token_map[input_ids.astype(mx.int64)]
+        if history is None or history.shape[0] != B:
+            history = mx.full((B, self.context_len), self.pad_id,
+                              dtype=mx.int64)
+        full = mx.concatenate([history, mapped], axis=1)
+        return mx.contiguous(full[:, -self.context_len:])
 
 
 class Engram(nn.Module):

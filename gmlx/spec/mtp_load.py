@@ -100,6 +100,8 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
     "qwen4_exp": 1,
     # Glm5NextMTPDrafter.make_cache raises on batched left_padding.
     "glm5_next": 1,
+    # HyV4FlashMTPDrafter.make_cache raises on batched left_padding.
+    "hy_v4_flash": 1,
     # The DFlash2 loader stamps hard_limit=1 for every target.
     "ricursive": 1,
 }
@@ -313,6 +315,25 @@ def _load_mtp_drafter(
         )
         log(
             f"[mtp] drafter: Glm5NextMTPDrafter layer_idx={first_mtp_block} "
+            f"block_size={drafter.config.block_size}"
+        )
+    elif model_type == "hy_v4_flash":
+        from gmlx.models.hy_v4_flash.model import ModelArgs
+        from gmlx.models.hy_v4_flash.mtp import (
+            HyV4FlashMTPConfig,
+            HyV4FlashMTPDrafter,
+        )
+
+        drafter = HyV4FlashMTPDrafter(
+            HyV4FlashMTPConfig(
+                text_config=ModelArgs.from_dict(config_dict),
+                # Pinned at 2, as glm5_next: a deeper rollout needs a pool
+                # cache undo log of more than one update.
+                block_size=2,
+            )
+        )
+        log(
+            f"[mtp] drafter: HyV4FlashMTPDrafter layer_idx={first_mtp_block} "
             f"block_size={drafter.config.block_size}"
         )
     elif model_type == "nemotron_h":
@@ -2189,7 +2210,7 @@ def load_mtp_model(
             hf_kquant_meta,
             log=_log,
             sanitize=(_mt in ("deepseek_v4", "deepseek_v4_vl", "hy_v3",
-                              "glm5_next")),
+                              "glm5_next", "hy_v4_flash")),
             no_alias=owned_names,
             fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
             source_key=weights_source_key(*pf.shards),

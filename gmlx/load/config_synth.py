@@ -4273,6 +4273,10 @@ def _synth_hy_v4_flash(meta, shapes, config: dict) -> None:
 
     heads = [int(v) for v in per_layer("attention.head_count")]
     config["num_attention_heads"] = heads
+    # The draft block's entry follows the trunk's.
+    all_heads = _read_int_array(meta, f"{arch}.attention.head_count")
+    if config.get("mtp_num_hidden_layers") and len(all_heads) > n_layer:
+        config["mtp_num_attention_heads"] = int(all_heads[n_layer])
     config["q_lora_rank"] = need_int("attention.q_lora_rank")
     config["kv_lora_rank"] = need_int("attention.kv_lora_rank")
     qk_rope = need_int("rope.dimension_count")

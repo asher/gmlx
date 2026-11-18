@@ -177,6 +177,7 @@ class UnsupportedArchError(Exception):
 MTP_WIRED_MODEL_TYPES = frozenset({
     "qwen3_5", "qwen3_5_moe", "gemma4_text", "deepseek_v4", "hy_v3",
     "muse_glimmer", "qwen4_exp", "glm5_next", "nemotron_h", "ricursive",
+    "hy_v4_flash",
 })
 
 
