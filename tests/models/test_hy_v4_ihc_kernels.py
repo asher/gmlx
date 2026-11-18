@@ -139,3 +139,21 @@ def test_other_stream_counts_take_the_ops_path():
 def test_a_width_the_float4_loads_cannot_cover_is_declined():
     x = mx.zeros((1, 2, HC, 12), dtype=mx.bfloat16)
     assert not ihc_kernels.eligible(x, HC)
+
+
+@pytest.mark.parametrize("length", [1, 37])
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+def test_expand_and_collapse_in_one_dispatch_give_the_two_kernels_bits(
+        hc_and_norm, length, dtype):
+    hc, norm = hc_and_norm
+    resid = mx.random.normal((2, length, HC, D)).astype(dtype)
+    y = mx.random.normal((2, length, D)).astype(dtype)
+    post = mx.random.uniform(0.0, 2.0, (2, length, HC))
+    if not ihc_kernels.eligible(resid, HC):
+        pytest.skip("no Metal device")
+    h = hc.expand(y, resid, post)
+    x, post_next = hc.pre_norm(h, norm)
+    got = hc.expand_pre_norm(y, resid, post, norm)
+    for a, b in zip(got, (h, x, post_next)):
+        assert a.dtype == b.dtype and a.shape == b.shape
+        assert mx.array_equal(a, b).item()

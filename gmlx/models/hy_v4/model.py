@@ -213,6 +213,23 @@ class IndependentHyperConnection(nn.Module):
         collapsed, post = self.pre(x)
         return norm(collapsed), post
 
+    def expand_pre_norm(self, y: mx.array, residual: mx.array,
+                        post: mx.array, norm: nn.RMSNorm):
+        """The ``expand`` that closes the sublayer before, then this
+        sublayer's ``pre_norm`` of the streams it leaves: (streams, normed
+        collapse, post). One dispatch when the fused kernel applies, with
+        the same bits as the two."""
+        if (not self.training and y.dtype == residual.dtype
+                and os.environ.get("GMLX_HY4_IHC_FUSE", "1") != "0"
+                and ihc_kernels.eligible(residual, self.hc_mult)):
+            return ihc_kernels.expand_front_collapse(
+                y, residual, post, self._fn_transposed(), self.scale,
+                self.base, norm.weight, self.hc_eps, self.norm_eps,
+                self.magnitude)
+        h = self.expand(y, residual, post)
+        x, post = self.pre_norm(h, norm)
+        return h, x, post
+
     def expand(self, y: mx.array, residual: mx.array, post: mx.array):
         """``y`` [B, L, D] scaled by ``post`` into each residual stream."""
         if not self.training and ihc_kernels.eligible(residual, self.hc_mult):

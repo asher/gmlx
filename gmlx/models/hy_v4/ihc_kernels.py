@@ -29,11 +29,47 @@ import mlx.core as mx
 _HC_ENABLED = os.environ.get("GMLX_HY4_IHC_KERNEL", "1") != "0"
 
 
-def _make_front_collapse_kernel():
-    if mx.default_device() != mx.gpu or not mx.metal.is_available():
-        return None
+def _front_collapse_source(fused: bool) -> str:
+    """The front-collapse body. ``fused`` reads each stream value as the
+    expand of the sublayer before (``resid + post_prev * y``, rounded to
+    the stream dtype as ``ihc_expand`` rounds it) and writes it out, so
+    one dispatch does that expand and this collapse."""
+    source = _FRONT_COLLAPSE
+    if not fused:
+        return (source.replace("@HEAD@", "").replace("@Y4@", "")
+                .replace("@LOAD1@", "float xv = (float)xr[i];")
+                .replace("@X0@", "float4(x_row0[d4])")
+                .replace("@X1@", "float4(x_row1[d4])")
+                .replace("@X2@", "float4(x_row2[d4])")
+                .replace("@X3@", "float4(x_row3[d4])")
+                .replace("@STORE@", ""))
+    head = """
+        const device T* yr = (const device T*)y_in + row * D;
+        device T* hr = (device T*)h_out + row * KD;
+        const float q0 = post_prev[row * HC + 0];
+        const float q1 = post_prev[row * HC + 1];
+        const float q2 = post_prev[row * HC + 2];
+        const float q3 = post_prev[row * HC + 3];
+        const float qs[4] = {q0, q1, q2, q3};
+    """
+    load1 = """uint si = i / (uint)D;
+                float xv = (float)T(metal::fma(
+                    qs[si], (float)yr[i - si * (uint)D], (float)xr[i]));"""
+    x = ("float4(T4(fma(float4(q{0}), float4(y4[d4]), "
+         "float4(x_row{0}[d4]))))")
+    store = """
+                ((device T4*)(hr + 0*D))[d4] = T4(x0);
+                ((device T4*)(hr + 1*D))[d4] = T4(x1);
+                ((device T4*)(hr + 2*D))[d4] = T4(x2);
+                ((device T4*)(hr + 3*D))[d4] = T4(x3);"""
+    return (source.replace("@HEAD@", head).replace("@LOAD1@", load1)
+            .replace("@Y4@", "const device T4* y4 = (const device T4*)yr;")
+            .replace("@X0@", x.format(0)).replace("@X1@", x.format(1))
+            .replace("@X2@", x.format(2)).replace("@X3@", x.format(3))
+            .replace("@STORE@", store))
 
-    source = """
+
+_FRONT_COLLAPSE = """
         uint tid  = thread_position_in_threadgroup.x;
         uint row  = threadgroup_position_in_grid.x;
         uint lane = tid % 32;
@@ -46,6 +82,7 @@ def _make_front_collapse_kernel():
         constexpr float MAG  = MAG_INT * 1e-6;
 
         device float* post_out = (device float*)post + row * HC;
+        @HEAD@
 
         threadgroup float pre_sh[HC];
         threadgroup float mix_sh[MIX];
@@ -62,7 +99,7 @@ def _make_front_collapse_kernel():
             float acc[MIX] = {0.0f};
             float ssq = 0.0f;
             for (uint i = tid; i < (uint)KD; i += 256) {
-                float xv = (float)xr[i];
+                @LOAD1@
                 ssq = metal::fma(xv, xv, ssq);
                 const device float4* f4 = fr + i * (MIX / 4);
                 #pragma clang loop unroll(full)
@@ -125,6 +162,7 @@ def _make_front_collapse_kernel():
         const device T4* x_row2 = (const device T4*)(x_row + 2*D);
         const device T4* x_row3 = (const device T4*)(x_row + 3*D);
         device U4* out4 = (device U4*)out_row;
+        @Y4@
 
         constexpr uint D4 = (uint)D / 4;
         constexpr uint CHUNKS = (D4 + 255) / 256;
@@ -137,10 +175,10 @@ def _make_front_collapse_kernel():
             uint d4 = c * 256 + tid;
             float4 result = float4(0.0f);
             if (d4 < D4) {
-                float4 x0 = float4(x_row0[d4]);
-                float4 x1 = float4(x_row1[d4]);
-                float4 x2 = float4(x_row2[d4]);
-                float4 x3 = float4(x_row3[d4]);
+                float4 x0 = @X0@;
+                float4 x1 = @X1@;
+                float4 x2 = @X2@;
+                float4 x3 = @X3@;@STORE@
                 result = fma(float4(p0), x0,
                          fma(float4(p1), x1,
                          fma(float4(p2), x2, float4(p3) * x3)));
@@ -172,12 +210,30 @@ def _make_front_collapse_kernel():
                 out4[d4] = U4(vals[c] * inv * wv);
             }
         }
-    """
+"""
+
+
+def _make_front_collapse_kernel():
+    if mx.default_device() != mx.gpu or not mx.metal.is_available():
+        return None
     return mx.fast.metal_kernel(
         name="ihc_front_collapse",
         input_names=["x_in", "fn_t", "scale", "base", "w"],
         output_names=["collapsed", "post"],
-        source=source,
+        source=_front_collapse_source(False),
+        ensure_row_contiguous=True,
+    )
+
+
+def _make_expand_front_collapse_kernel():
+    if mx.default_device() != mx.gpu or not mx.metal.is_available():
+        return None
+    return mx.fast.metal_kernel(
+        name="ihc_expand_front_collapse",
+        input_names=["y_in", "x_in", "post_prev", "fn_t", "scale", "base",
+                     "w"],
+        output_names=["h_out", "collapsed", "post"],
+        source=_front_collapse_source(True),
         ensure_row_contiguous=True,
     )
 
@@ -231,6 +287,7 @@ def _make_expand_kernel():
 
 _front_collapse_kernel = _make_front_collapse_kernel()
 _expand_kernel = _make_expand_kernel()
+_expand_front_collapse_kernel = _make_expand_front_collapse_kernel()
 
 _NTG = 2
 
@@ -281,3 +338,27 @@ def expand(y, residual, post):
         output_shapes=[(B, L, H, D)],
         output_dtypes=[y.dtype],
     )[0]
+
+
+def expand_front_collapse(y, residual, post_prev, fn_t, scale, base, w,
+                          hc_eps, norm_eps, magnitude):
+    """``expand(y, residual, post_prev)`` and the ``front_collapse`` of its
+    result in one dispatch: (streams [B, L, hc, D], normed collapse
+    [B, L, D], post [B, L, hc]), each the bits the two kernels give."""
+    B, L, H, D = residual.shape
+    return _expand_front_collapse_kernel(
+        inputs=[y, residual, post_prev, fn_t, scale, base, w],
+        template=[
+            ("T", residual.dtype),
+            ("U", residual.dtype),
+            ("HC", H),
+            ("D", D),
+            ("EPS_INT", round(hc_eps / 1e-9)),
+            ("NEPS_INT", round(norm_eps / 1e-9)),
+            ("MAG_INT", round(magnitude / 1e-6)),
+        ],
+        grid=(B * L * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(B, L, H, D), (B, L, D), (B, L, H)],
+        output_dtypes=[residual.dtype, residual.dtype, mx.float32],
+    )

@@ -980,13 +980,26 @@ class HyV4FlashDecoderLayer(nn.Module):
         self.engram_slot = None
 
     def __call__(self, h: mx.array, cache: Optional[Any] = None) -> mx.array:
-        x, post = self.attn_hc.pre_norm(h, self.input_layernorm)
-        x = self.self_attn(x, cache=cache)
-        h = self.attn_hc.expand(x, h, post)
+        return self.close(self.body(h, None, cache))
 
-        x, post = self.ffn_hc.pre_norm(h, self.post_attention_layernorm)
-        x = self.ffn_post_norm(self.mlp(x))
-        return self.ffn_hc.expand(x, h, post)
+    def body(self, h: mx.array, pending, cache: Optional[Any] = None):
+        """The block up to its last expand, which it hands back unapplied
+        as ``(y, streams, post)``. ``pending`` is the layer before's, and
+        ``h`` is unused then: each expand runs in the dispatch of the
+        collapse after it."""
+        if pending is None:
+            x, post = self.attn_hc.pre_norm(h, self.input_layernorm)
+        else:
+            h, x, post = self.attn_hc.expand_pre_norm(
+                *pending, self.input_layernorm)
+        x = self.self_attn(x, cache=cache)
+        h, x, post = self.ffn_hc.expand_pre_norm(
+            x, h, post, self.post_attention_layernorm)
+        return self.ffn_post_norm(self.mlp(x)), h, post
+
+    def close(self, pending) -> mx.array:
+        """The streams after a ``body``'s last expand."""
+        return self.ffn_hc.expand(*pending)
 
 
 class HyV4FlashModel(nn.Module):
@@ -1055,13 +1068,18 @@ class HyV4FlashModel(nn.Module):
             h[:, :, None, :],
             (h.shape[0], h.shape[1], self.args.hc_mult, h.shape[2])))
 
+        pending = prev = None
         for layer, layer_cache in zip(self.layers, cache):
             if layer.engram is not None and live is not None:
                 if rows is None:
                     # One gather serves every engram layer.
                     rows = self.engram_embed(row_ids)
+                if pending is not None:
+                    h, pending = prev.close(pending), None
                 h = layer.engram(h, rows[:, :, layer.engram_slot], live)
-            h = layer(h, layer_cache)
+            pending, prev = layer.body(h, pending, layer_cache), layer
+        if pending is not None:
+            h = prev.close(pending)
 
         return self.norm(self.hc_head(h))
 
