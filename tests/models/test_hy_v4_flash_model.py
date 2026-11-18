@@ -261,3 +261,33 @@ def test_gathered_sparse_chunk_matches_the_masked_dense_form():
     mask = attn._sparse_mask(sel, offset, L, S)[:, None]
     want = attn._attend(q_nope, q_pe, latent, k_pe, mask)
     assert mx.allclose(got, want, atol=1e-4, rtol=1e-4).item()
+
+
+def test_window_keys_from_the_dequantized_stack_match_the_gather(monkeypatch):
+    """A prefill chunk's per-head keys: the K-quant stack dequantized and
+    multiplied in one matmul, against kq's untransposed gather."""
+    kq = pytest.importorskip("mlx_kquant")
+    from mlx_kquant.nn import KQuantMultiLinear
+
+    from gmlx.models.hy_v4_flash.model import _head_keys
+
+    heads, nope, rank, rows = 4, 64, 96, 37
+    mx.random.seed(3)
+    wire = kq.quantize(
+        mx.random.normal((heads * rank, nope)) * 0.05, "q8_0")
+    wire = wire[0] if isinstance(wire, (list, tuple)) else wire
+    emb = KQuantMultiLinear(nope, rank, heads, "q8_0")
+    emb.weight = wire.reshape(heads, rank, -1)
+    latent = mx.random.normal((2, 1, rows, rank)).astype(mx.bfloat16)
+
+    want = np.array(emb(latent, transpose=False).astype(mx.float32))
+    got = _head_keys(emb, latent)
+    assert got.shape == (2, heads, rows, nope) and got.dtype == mx.bfloat16
+    # The matmul reads the weights rounded to bf16, the gather exact.
+    np.testing.assert_allclose(
+        np.array(got.astype(mx.float32)), want, rtol=0,
+        atol=0.02 * np.abs(want).max())
+
+    monkeypatch.setenv("GMLX_HY4_KEYS_DENSE", "0")
+    np.testing.assert_array_equal(
+        np.array(_head_keys(emb, latent).astype(mx.float32)), want)

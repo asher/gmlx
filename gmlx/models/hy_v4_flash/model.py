@@ -184,6 +184,22 @@ def _no_rows(B: int, L: int) -> mx.array:
     return out
 
 
+def _head_keys(embed_q, latent: mx.array) -> mx.array:
+    """Per-head keys ``latent @ W[h]`` [B, H, S, qk_nope_head_dim] of a
+    head-shared ``latent`` [B, 1, S, kv_lora_rank]. A K-quant stack is
+    dequantized for the call and multiplied by MLX's matmul, which runs
+    on the tensor-op units where kq's untransposed gather does not.
+    ``GMLX_HY4_KEYS_DENSE=0`` restores the gather."""
+    if (getattr(embed_q, "mode", None) == "kquant"
+            and latent.dtype == mx.bfloat16
+            and env_bool("GMLX_HY4_KEYS_DENSE", True)):
+        import mlx_kquant as kq
+        w = kq.dequantize(embed_q["weight"], embed_q["scales"],
+                          embed_q.kquant_type, latent.dtype)
+        return latent @ w[None]
+    return embed_q(latent, transpose=False)
+
+
 @functools.partial(mx.compile, shapeless=True)
 def _gated(out: mx.array, gate: mx.array) -> mx.array:
     # One dispatch for the sigmoid and the product.
@@ -763,7 +779,7 @@ class HyV4FlashAttention(nn.Module):
         S = latent.shape[2]
         q = mx.concatenate([q_nope, q_pe], axis=-1)
         k = mx.concatenate(
-            [self.embed_q(latent, transpose=False),
+            [_head_keys(self.embed_q, latent),
              mx.broadcast_to(k_pe, (B, H, S, k_pe.shape[-1]))], axis=-1)
         v = self.unembed_out(latent)
         return kernel(q, k, v, self.scale, self.window, sinks=self.sinks)
