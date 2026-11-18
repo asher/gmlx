@@ -46,6 +46,7 @@ CANDIDATE_ARCHES = [
     "seed_oss", "smollm3", "granite", "ernie4_5-moe", "minimax-m2", "minimax-m3",
     "hunyuan-moe", "granitehybrid", "falcon-h1", "qwen3next", "hy_v3",
     "kimi-k3", "muse-glimmer", "muse-spark", "qwen4exp", "glm5-next", "glm5next", "hyv4",
+    "hy_v4_flash",
     "k2-horizon", "beam", "flint", "ricursive", "graniteswitch",
     "qwen3vl", "lfm3",
 ]
@@ -153,7 +154,12 @@ def _load(path):
     arches that fit keep the sweep's existing behaviour untouched.
     """
     from gmlx import load_model
+    from gmlx.serve.memory import apply_local_cache_limit
 
+    # The cache bound run and chat set before a load: without it a deep
+    # prefill of a model near the working set keeps gigabytes of freed
+    # buffers wired.
+    apply_local_cache_limit([path])
     model, config, tok = load_model(path, verbose=False)
     if _over_wired_budget(model):
         from gmlx.stream.expert_streaming import install_expert_streaming
