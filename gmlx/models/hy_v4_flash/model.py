@@ -425,6 +425,20 @@ class Engram(nn.Module):
         return (hf + delta).astype(h.dtype)
 
 
+def _slot_rows(table, row_ids: mx.array) -> list:
+    """The rows of each engram layer, [B, L, cols, head_dim], by slot. A
+    file-backed table starts one read per slot here: the first engram
+    layer waits for its own rows, and the rest come off the drive under
+    the layers ahead of their readers."""
+    by_slot = getattr(table, "rows_by_slot", None)
+    rows = by_slot(row_ids) if by_slot is not None else None
+    if rows is None:
+        # A table in memory: one gather serves every engram layer.
+        every = table(row_ids)
+        rows = [every[:, :, slot] for slot in range(row_ids.shape[2])]
+    return rows
+
+
 # Pooled indexer
 
 
@@ -1211,10 +1225,12 @@ class HyV4FlashModel(nn.Module):
             if slot is not None:
                 slot[0] = new_history
             # A file-backed table reads its rows off-thread from here on,
-            # under the layers that run before the first engram.
+            # under the layers that run before their engram.
             pf = getattr(self.engram_embed, "prefetch", None)
             if pf is not None:
                 pf(row_ids)
+            if live is not None:
+                rows = _slot_rows(self.engram_embed, row_ids)
 
         if input_embeddings is not None:
             h = input_embeddings
@@ -1228,12 +1244,9 @@ class HyV4FlashModel(nn.Module):
         pending = prev = None
         for layer, layer_cache in zip(self.layers, cache):
             if layer.engram is not None and live is not None:
-                if rows is None:
-                    # One gather serves every engram layer.
-                    rows = self.engram_embed(row_ids)
                 if pending is not None:
                     h, pending = prev.close(pending), None
-                h = layer.engram(h, rows[:, :, layer.engram_slot], live)
+                h = layer.engram(h, rows[layer.engram_slot], live)
             pending, prev = layer.body(h, pending, layer_cache), layer
         if pending is not None:
             h = prev.close(pending)

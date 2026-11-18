@@ -433,28 +433,63 @@ def _pread_class(cls):
             ids = np.asarray(x, dtype=np.int64).reshape(-1)
             self._kq_ahead = (ids, src.read_ahead(ids))
 
+        def _lazy_read(self, x):
+            """The raw rows of ``x``, a ``kq.file_rows`` node."""
+            import mlx_kquant as kq
+
+            from .table_stream import table_stream
+
+            src = self._kq_table_source
+            # A failed read shows up one call late: the reads of this
+            # call have not run yet.
+            _check_lazy_reads(src)
+            if src._closed:
+                raise RuntimeError(
+                    f"table source {os.path.basename(src.path)} is closed")
+            out = kq.file_rows(x, src.path, src.offset, src.row_bytes,
+                               src.rows, stream=table_stream())
+            src.gathers += 1
+            src.gathered_rows += int(x.size)
+            return out
+
+        def _lazy_decode(self, raw):
+            src = self._kq_table_source
+            if src.codec is not None:
+                return _decode_rows(raw, src)
+            decode = getattr(self, "decode_gathered", None)
+            return raw if decode is None else decode(raw)
+
+        def rows_by_slot(self, x):
+            """The rows of ``x`` [B, L, slots, cols] as one read per slot,
+            a list in slot order of [B, L, cols, dims], or None when the
+            rows are not read lazily.
+
+            For a model that reads slot by slot, layers apart. Each read
+            is started here, so the reads run one after another from the
+            moment the ids exist, under the layers ahead of their
+            readers, and a reader waits for its own slot only. Left to
+            the evaluation of the model's graph, a read is issued when
+            the encoder reaches its reader, and the GPU idles through
+            it."""
+            src = self._kq_table_source
+            if not _lazy_rows(src):
+                return None
+            from .table_stream import table_stream
+
+            # Split on the table's stream: the ids cross from the GPU once.
+            parts = mx.split(x, x.shape[2], axis=2, stream=table_stream())
+            rows = []
+            for part in parts:
+                raw = self._lazy_read(part)
+                # One evaluation per slot: its readers wait on it alone.
+                mx.async_eval(raw)
+                rows.append(self._lazy_decode(raw)[:, :, 0])
+            return rows
+
         def __call__(self, x):
             src = self._kq_table_source
             if _lazy_rows(src):
-                import mlx_kquant as kq
-
-                from .table_stream import table_stream
-
-                # A failed read shows up one call late: the reads of this
-                # call have not run yet.
-                _check_lazy_reads(src)
-                if src._closed:
-                    raise RuntimeError(
-                        f"table source {os.path.basename(src.path)} is "
-                        "closed")
-                out = kq.file_rows(x, src.path, src.offset, src.row_bytes,
-                                   src.rows, stream=table_stream())
-                src.gathers += 1
-                src.gathered_rows += int(x.size)
-                if src.codec is not None:
-                    return _decode_rows(out, src)
-                decode = getattr(self, "decode_gathered", None)
-                return out if decode is None else decode(out)
+                return self._lazy_decode(self._lazy_read(x))
             mx.eval(x)
             ids = np.asarray(x, dtype=np.int64).reshape(-1)
             ahead = getattr(self, "_kq_ahead", None)

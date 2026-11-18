@@ -161,6 +161,27 @@ def test_chunked_prefill_and_decode_match_one_pass(sparse, monkeypatch):
     assert mx.allclose(one, split, atol=1e-4, rtol=1e-4).item()
 
 
+def test_a_table_that_reads_by_slot_gives_the_one_gather_logits():
+    model = _model()
+    ids = [int(v) for v in np.random.default_rng(2).integers(0, VOCAB, 23)]
+    splits = [9, 20, 21, 22, 23]
+    want = _logits(model, ids, splits)
+    table = model.model.engram_embed
+    shapes = []
+
+    class BySlot:
+        """The file-backed table's face: no gather of every slot at once."""
+
+        def rows_by_slot(self, x):
+            shapes.append(tuple(x.shape))
+            return [table(x[:, :, s]) for s in range(x.shape[2])]
+
+    model.model.engram_embed = BySlot()
+    got = _logits(model, ids, splits)
+    assert shapes == [(1, n, len(ENGRAM_LAYERS), COLS) for n in (9, 11, 1, 1, 1)]
+    assert mx.array_equal(got, want)
+
+
 def test_a_sliding_window_layer_holds_its_window_alone(monkeypatch):
     model = _model()
     ids = [int(v) for v in np.random.default_rng(4).integers(0, VOCAB, 41)]

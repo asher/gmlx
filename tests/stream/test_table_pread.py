@@ -765,6 +765,40 @@ def test_a_lazy_read_returns_the_file_rows_without_a_host_sync(
         table(mx.array([[1]]))
 
 
+def test_rows_by_slot_reads_each_slot_alone_and_matches_one_read(
+        table_gguf, monkeypatch):
+    path, raw = table_gguf
+    src = _sources(path, monkeypatch)
+    _lazy(monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    s = table._kq_table_source
+    try:
+        # [B, L, slots, cols], still a graph.
+        ids = mx.array([[[[3, 900], [0, 999], [500, 3]],
+                         [[7, 7], [1, 2], [998, 0]]]]) + mx.array(0)
+        rows = table.rows_by_slot(ids)
+        assert s._fd is None  # the host reader never opened the file
+        assert len(rows) == 3 and s.gathers == 3 and s.gathered_rows == 12
+        want = table.decode_gathered(mx.array(raw[np.array(ids)]))
+        for slot, got in enumerate(rows):
+            assert mx.array_equal(got, want[:, :, slot])
+    finally:
+        s.close()
+
+
+def test_rows_by_slot_leaves_a_host_read_to_the_call(table_gguf, monkeypatch):
+    path, _raw = table_gguf
+    src = _sources(path, monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    try:
+        ids = mx.zeros((1, 2, 3, 2), dtype=mx.int64)
+        assert table.rows_by_slot(ids) is None
+    finally:
+        table._kq_table_source.close()
+
+
 def test_a_lazy_mxfp8_table_decodes_as_the_host_read_does(
         mxfp8_table_gguf, monkeypatch):
     from gmlx.models.deepseek_v41.model import EngramTable
