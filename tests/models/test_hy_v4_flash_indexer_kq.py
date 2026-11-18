@@ -1,4 +1,5 @@
-"""Hy4-flash pooled indexer: the kq decode route against a fp32 reference.
+"""Hy4-flash pooled indexer: the kq routes of a decode step and of a
+prefill chunk against a fp32 reference.
 
 The route stores its scores in 16 bits, so it may part from the fp32 top
 set on pools that tie at the threshold in 16 bits. The gate is that every
@@ -58,7 +59,11 @@ def _ref_scores(idx, x, qr, pooled, offset):
     q = q.transpose(0, 2, 1, 3)
     nope, pe = mx.split(q, [idx.nope_head_dim], axis=-1)
     q = mx.concatenate([nope, idx.rope(pe, offset)], axis=-1)
-    w = x.astype(mx.float32) @ idx.weights_proj.weight.T * idx._w_scale
+    # The head weights as the route forms them: a fp32 matmul of several
+    # rows runs at reduced precision on a tensor-op GPU, and the two
+    # groupings of the scale then round apart by more than a 16-bit score.
+    w = x.astype(mx.float32) @ (
+        idx.weights_proj.weight.astype(mx.float32) * idx._w_scale).T
     qf = np.array(q.astype(mx.float32))[0].astype(np.float64)
     kf = np.array(pooled.astype(mx.float32))[0].astype(np.float64)
     wf = np.array(w)[0].astype(np.float64)
@@ -103,6 +108,48 @@ def test_the_kernel_route_picks_the_fp32_top_pools(dtype, length):
             assert row[picks].min() >= thr - tol, (step, j)
             clear = np.flatnonzero(row > thr + tol)
             assert np.isin(clear, picks).all(), (step, j)
+        offset += length
+
+
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+def test_a_prefill_chunk_picks_the_fp32_top_pools(dtype):
+    """Two chunks: the first starts with rows that see fewer pools than
+    they pick, the second has a ragged length over a ragged pool count."""
+    if (mx.default_device().type != mx.DeviceType.gpu
+            or flash._kq_indexer_kernels() is None
+            or flash._kq_indexer_chunk_kernel() is None):
+        pytest.skip("kq indexer kernels unavailable")
+    idx = _indexer(dtype)
+    pool = flash.DS4PoolingCache(KPOOL, lookback=False)
+    mx.random.seed(7)
+    offset = 0
+    for length in (TOPK + 300, 333):
+        x = mx.random.normal((1, length, HIDDEN)).astype(dtype)
+        qr = mx.random.normal((1, length, RANK)).astype(dtype)
+        sel = idx(x, qr, pool, offset)
+        mx.eval(sel)
+        assert sel.shape == (1, length, SELECT) and sel.dtype == mx.int32
+        pooled = pool.pooled
+        n_pool = pooled.shape[1]
+        assert n_pool == (offset + length) // KPOOL
+        ref = _ref_scores(idx, x, qr, pooled, offset)
+        got = np.array(sel)[0]
+        assert got.min() >= 0 and got.max() < n_pool
+        for j in range(length):
+            visible = (offset + j) // KPOOL
+            picks = got[j][got[j] < visible]
+            assert len(set(picks.tolist())) == len(picks)
+            if visible <= SELECT:
+                # Every pool the row sees, the rest of the list unseen.
+                assert len(picks) == visible, j
+                continue
+            assert len(picks) == SELECT, j
+            row = ref[j, :visible]
+            thr = np.partition(row, -SELECT)[-SELECT]
+            tol = abs(thr) * 2.0 ** -9 + 1e-4
+            assert row[picks].min() >= thr - tol, j
+            clear = np.flatnonzero(row > thr + tol)
+            assert np.isin(clear, picks).all(), j
         offset += length
 
 

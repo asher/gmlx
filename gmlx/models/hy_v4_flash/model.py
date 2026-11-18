@@ -72,7 +72,8 @@ ENGRAM_EPS = 1.1920929e-07
 # Queries per sparse decode call that take the per-query key gather: a
 # decode step, or an MTP verify block.
 _GATHER_MAX_L = 8
-# Queries per call kq's decode-width pool score takes.
+# Queries per call kq's decode-width pool score takes. Longer calls take
+# its chunk score.
 _IDX_KQ_MAX_L = 4
 # The pool keys are stored in fp16 whatever the model's 16-bit type: the
 # kernel route emits its scores in the key type, and fp16 keeps 11 bits of
@@ -133,6 +134,20 @@ def _kq_indexer_kernels():
             or "511" not in (select.__doc__ or "")):
         return None
     return score, select
+
+
+@functools.cache
+def _kq_indexer_chunk_kernel():
+    """kq's pool score for a prefill chunk when the mlx_kquant build
+    takes pooled keys (a ratio in its causal rule), else None."""
+    try:
+        import mlx_kquant as kq
+    except ImportError:
+        return None
+    score = getattr(kq, "dsa_indexer_scores", None)
+    if score is None or "causal_ratio" not in (score.__doc__ or ""):
+        return None
+    return score
 
 
 @functools.cache
@@ -523,16 +538,19 @@ class HyV4FlashIndexer(nn.Module):
         return new_pooled
 
     def _select_kq(self, q, x, pooled, offset: int):
-        """The selection of a decode step on kq's kernels: the pool rows
-        scored where they lie and a radix select, in place of a fp32 copy
-        of the whole pool and a sort per token. The head sum runs in fp32
-        with fp32 head weights and the scores are stored in the pool's
-        16-bit type, so pools tied in 16 bits at the threshold are taken
-        lowest index first where the ops path orders them in fp32. None
-        where the kernels do not apply."""
+        """The selection on kq's kernels: the pool rows scored where they
+        lie and a radix select, in place of a fp32 score of every head
+        against the whole pool and a sort per query. The head sum runs in
+        fp32 with fp32 head weights and the scores are stored in the
+        pool's 16-bit type, so pools tied in 16 bits at the threshold are
+        taken lowest index first where the ops path orders them in fp32.
+        None where the kernels do not apply."""
         kernels = _kq_indexer_kernels()
         B, H, L, D = q.shape
-        if (kernels is None or L > _IDX_KQ_MAX_L
+        chunk = None
+        if L > _IDX_KQ_MAX_L:
+            chunk = _kq_indexer_chunk_kernel()
+        if (kernels is None or (L > _IDX_KQ_MAX_L and chunk is None)
                 or pooled.dtype not in (mx.float16, mx.bfloat16)
                 or q.dtype not in (mx.float16, mx.bfloat16)
                 or mx.default_device().type != mx.DeviceType.gpu
@@ -547,6 +565,8 @@ class HyV4FlashIndexer(nn.Module):
             # Not a parameter: kept out of the module's own dict.
             object.__setattr__(self, "_w_scaled", held)
         w = x.astype(mx.float32) @ held[1]
+        if chunk is not None:
+            return self._select_chunk(chunk, select, q, w, pooled, offset)
         if L == 1:
             # The kernel scores every row it is given to one query: hand
             # it the pools that end before the query's group.
@@ -557,6 +577,29 @@ class HyV4FlashIndexer(nn.Module):
         scores = score(q.astype(keys.dtype), keys, w, q_offset, self.kpool)
         sel = select(scores, self.select_k)[:, 0]
         return mx.stop_gradient(sel.astype(mx.int32))
+
+    def _select_chunk(self, score, select, q, w, pooled, offset: int):
+        """A prefill chunk's selection. The score kernel works in tiles of
+        64 rows by 64 keys, so both pad: a padded key lies past the pools
+        of every row and a padded row is dropped. A row that sees fewer
+        pools than it picks is handed pools it cannot see, as on the ops
+        path, held inside the pool rows."""
+        L, P = q.shape[2], pooled.shape[1]
+        keys = pooled[:, None]
+        q = q.astype(keys.dtype)
+        pad_n, pad_l = -P % 64, -L % 64
+        if pad_n:
+            keys = mx.pad(keys, [(0, 0), (0, 0), (0, pad_n), (0, 0)])
+        if pad_l:
+            q = mx.pad(q, [(0, 0), (0, 0), (0, pad_l), (0, 0)])
+            w = mx.pad(w, [(0, 0), (0, pad_l), (0, 0)])
+        # Row p is visible to query j when p < (offset + j) // kpool.
+        scores = score(q, keys, w, causal=True, causal_q_offset=offset - 1,
+                       causal_ratio=self.kpool)
+        sel = select(scores, self.select_k)[:, 0, :L].astype(mx.int32)
+        if pad_n:
+            sel = mx.minimum(sel, P - 1)
+        return mx.stop_gradient(sel)
 
     def __call__(
         self,
@@ -582,7 +625,7 @@ class HyV4FlashIndexer(nn.Module):
         nope, pe = mx.split(q, [self.nope_head_dim], axis=-1)
         q = mx.concatenate([nope, self.rope(pe, offset)], axis=-1)
 
-        if (self.n_heads == 16 and self.head_dim == 128
+        if (self.n_heads == 16 and self.head_dim == 128 and self.kpool > 1
                 and self.select_k == 511 and "weight" in self.weights_proj):
             sel = self._select_kq(q, x, pooled, offset)
             if sel is not None:
