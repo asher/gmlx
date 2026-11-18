@@ -17,6 +17,11 @@ page boundaries, per the ``decode_feeder`` rules, since a 264-byte row
 is never page-aligned and an unaligned F_NOCACHE read can wedge in the
 kernel. The cost is one host sync per gather, to read the row ids.
 
+With an mlx-kquant that has ``file_rows``, a byte-row table reads through
+it instead: the same reads as a node on the table stream, which start
+when the row ids are ready, so a decode loop builds its next step while
+the GPU runs. ``GMLX_TABLE_LAZY=0`` keeps the host read.
+
 An MXFP8 table is read the same way at any size when mlx-kquant has no
 mxfp8 codec to hold it as an array, and an F8_E4M3 table always is.
 
@@ -373,6 +378,35 @@ def _decode_rows(raw: mx.array, src: TableSource) -> mx.array:
     return out.reshape(*raw.shape[:-1], src.dims).astype(src.out_dtype)
 
 
+def _lazy_rows(src: TableSource) -> bool:
+    """Whether ``src`` reads through ``kq.file_rows``: the op is there,
+    and the rows decode without a codec input the load skipped."""
+    import mlx_kquant as kq
+    from gmlx.envflags import env_bool
+
+    return (hasattr(kq, "file_rows") and env_bool("GMLX_TABLE_LAZY", True)
+            and (src.codec is None or src.codec in ("mxfp8", "f8_e4m3")
+                 or src.codec in _FLOAT_ROWS))
+
+
+# kq.file_rows returns zeros for a row it cannot read and counts it; the
+# count as of the last check.
+_FAILURES_SEEN = 0
+
+
+def _check_lazy_reads(src: TableSource) -> None:
+    global _FAILURES_SEEN
+    import mlx_kquant as kq
+
+    n = kq.file_rows_failures()
+    if n != _FAILURES_SEEN:
+        bad, _FAILURES_SEEN = n - _FAILURES_SEEN, n
+        raise OSError(
+            f"{bad} table rows could not be read from "
+            f"{os.path.basename(src.path)} (row id out of range or a "
+            "failed read); the output since the last check is not valid")
+
+
 _PREAD_CACHE: dict[type, type] = {}
 
 
@@ -393,12 +427,34 @@ def _pread_class(cls):
             the input tokens, so a forward can issue every table's read
             before its first layer runs."""
             src = self._kq_table_source
+            if _lazy_rows(src):
+                return
             mx.eval(x)
             ids = np.asarray(x, dtype=np.int64).reshape(-1)
             self._kq_ahead = (ids, src.read_ahead(ids))
 
         def __call__(self, x):
             src = self._kq_table_source
+            if _lazy_rows(src):
+                import mlx_kquant as kq
+
+                from .table_stream import table_stream
+
+                # A failed read shows up one call late: the reads of this
+                # call have not run yet.
+                _check_lazy_reads(src)
+                if src._closed:
+                    raise RuntimeError(
+                        f"table source {os.path.basename(src.path)} is "
+                        "closed")
+                out = kq.file_rows(x, src.path, src.offset, src.row_bytes,
+                                   src.rows, stream=table_stream())
+                src.gathers += 1
+                src.gathered_rows += int(x.size)
+                if src.codec is not None:
+                    return _decode_rows(out, src)
+                decode = getattr(self, "decode_gathered", None)
+                return out if decode is None else decode(out)
             mx.eval(x)
             ids = np.asarray(x, dtype=np.int64).reshape(-1)
             ahead = getattr(self, "_kq_ahead", None)
