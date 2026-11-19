@@ -124,6 +124,25 @@ def test_weight_bytes_leave_out_a_table_mlx_never_wires(
     assert sm.model_weight_bytes(a) == whole - (table if left_out else 0)
 
 
+@pytest.mark.parametrize("capped", [True, False])
+def test_weight_bytes_leave_out_a_table_no_array_holds(
+        monkeypatch, tmp_path, capped):
+    """A plain E4M3 table (Hy4-flash) is read from the file by every load
+    and never mapped, so it comes off the file in any process. Counted,
+    the 63 GB table put the cache limit of a model that fits on its
+    floor."""
+    from helpers import mint_type43_gguf
+
+    import gmlx.serve.capacity as capacity
+
+    a = str(tmp_path / "m.gguf")
+    mint_type43_gguf(
+        a, [("per_layer_token_embd.weight", (8, 64), "F8_E4M3", None)],
+        arch="hy_v4_flash")
+    monkeypatch.setattr(capacity, "_CAP", capped)
+    assert sm.model_weight_bytes(a) == os.path.getsize(a) - 8 * 64
+
+
 def test_a_wired_cap_of_zero_keeps_the_cache_bounded(monkeypatch):
     """A cap of 0 (the memory wired outside the server leaves the RAM
     term nothing) is a known cap, not an unknown working set. The auto
