@@ -127,7 +127,7 @@ _CAVEATS = {
     "gemma3": "Pass hf_source for 27B.",
     "phi3": "Pass hf_source for the 128K long-context variants.",
     "hy_v3": "Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them.",
-    "hy_v4_flash": "MTP and vision are unverified on the released files. The engram table is always read from the file. `--kv-bits` has no effect. Rope run options are refused.",
+    "hy_v4_flash": "MTP drafts one sequence at a time. The engram table is always read from the file. `--kv-bits` has no effect. Rope run options are refused.",
     "hyv4": "The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16.",
     "muse-spark": "The GGUF has no MTP head, so speculative decoding is not available.",
     "k2-horizon": "The GGUF has no MTP head, so speculative decoding is not available.",

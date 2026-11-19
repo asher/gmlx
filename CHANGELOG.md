@@ -97,6 +97,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- gmlx commands no longer start with a torch note about redirects on
+  macOS where torch is installed.
 - An image or video request served after a chat turn no longer takes tens of
   GB more memory than the same request alone, nor wires all of it.
 - Qwen3.8-Flash-Next requests that decoded together past 2052 tokens of
@@ -222,6 +224,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Ricursive Ripple-65B Preview loads, and `gmlx pull ripple-65b` fetches it with
   its DFlash2 drafter for speculative decoding. `scripts/convert_dflash2.py`
   converts the drafter to GGUF.
+- Tencent Hy4-flash GGUFs run with sparse attention and the engram table
+  read from the file, so the experts stay in memory on a 128 GB Mac. MTP
+  drafts from the file's own draft block, two tokens a round by default.
+- Hy4-flash takes image input through an mmproj file (`--mmproj`) in the
+  layout of llama.cpp's `hy_v4_flash` projector.
 - Gemma 3n GGUFs load and serve, such as ggml-org's gemma-3n-E2B-it, where
   gmlx refused every Gemma 3n file.
 - A chat model entry loads several LoRA adapters with `adapters:`, each at a

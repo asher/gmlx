@@ -50,7 +50,7 @@ family, backend, status and caveat:
 | `graniteswitch` | granite | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `hunyuan-moe` | hunyuan | mlx-lm | loadable |  |
 | `hy_v3` | hunyuan | mlx-lm | loadable | Early GGUFs whose arch is hy-v3 with a dash are not mapped. Reconvert them. |
-| `hy_v4_flash` | hunyuan | mlx-lm | loadable | MTP and vision are unverified on the released files. The engram table is always read from the file. `--kv-bits` has no effect. Rope run options are refused. |
+| `hy_v4_flash` | hunyuan | mlx-lm | loadable | MTP drafts one sequence at a time. The engram table is always read from the file. `--kv-bits` has no effect. Rope run options are refused. |
 | `hyv4` | hunyuan | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. `--kv-bits` has no effect, and the KV cache stays fp16. |
 | `k2-horizon` | k2-horizon | mlx-lm | loadable | The GGUF has no MTP head, so speculative decoding is not available. |
 | `kimi-k3` | kimi | mlx-lm | loadable | The hybrid cache cannot go back in place, so after `/retry` or `/undo`, chat reads the earlier conversation again with the next message. |
