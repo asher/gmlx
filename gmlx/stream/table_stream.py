@@ -125,6 +125,13 @@ STREAMABLE_TABLES: dict[str, ArchTables] = {
         reads_ahead=True,
         label="engram tables",
     ),
+    "hy_v4_flash_vl": ArchTables(
+        arch="hy_v4_flash",
+        name_pattern=r"per_layer_token_embd\.weight",
+        tiers=_deepseek_v41_vl_tiers,
+        reads_ahead=True,
+        label="engram table",
+    ),
 }
 
 _NAME_RE_CACHE: dict[str, re.Pattern] = {}

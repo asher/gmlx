@@ -1008,6 +1008,13 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
                     ".engram.kv_bias", ".engram.gate_weight",
                     ".engram.lookup_norm", ".engram.pre_gamma",
                     ".engram.hc_scale"),
+    # hy_v4_flash_vl: the same set under language_model.*; the vision
+    # tower casts normally.
+    "hy_v4_flash_vl": ("_hc.", "hc_head.", ".sinks",
+                       ".e_score_correction_bias", ".mlp.gate.weight",
+                       ".weights_proj.", ".indexer.ape", ".engram.kv_bias",
+                       ".engram.gate_weight", ".engram.lookup_norm",
+                       ".engram.pre_gamma", ".engram.hc_scale"),
     # muse_spark: sigmoid top-8-of-256 routing with a selection bias is
     # near-tie-heavy, and the residual alpha/beta scale every layer's stream.
     # Kept in step with the model class's cast_predicate.

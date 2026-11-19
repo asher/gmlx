@@ -287,6 +287,8 @@ _VLM_SPEC_MODEL_TYPE_ALIASES = {
     # The Bolt image container's language model is NemotronHSpecLM.
     "nemotron_h_omni": "nemotron_h",
     "nemotron_h_transcribe": "nemotron_h",
+    # The vision container's language model carries HyV4FlashSpecHooks.
+    "hy_v4_flash_vl": "hy_v4_flash",
 }
 
 

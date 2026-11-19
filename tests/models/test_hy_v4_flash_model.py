@@ -125,12 +125,13 @@ def test_hash_is_the_uint64_reference_in_one_call_and_across_calls():
     assert np.array_equal(np.concatenate(parts), want)
 
 
-def test_a_dead_token_is_masked_and_reads_as_pad_in_later_ngrams():
+def test_a_token_with_no_map_entry_is_masked_and_reads_as_pad_later():
     args = _args()
-    h = EngramHash(args)
     ids = [5, 9, 20, 31, 44]
-    mask = mx.array([[True, True, False, True, True]])
-    got, live, _ = h(mx.array([ids]), None, mask)
+    unmapped = list(args.engram_token_map)
+    unmapped[20] = EngramHash.DEAD
+    h = EngramHash(_args(engram_token_map=unmapped))
+    got, live, _ = h(mx.array([ids]), None)
     assert np.array(live[0]).tolist() == [True, True, False, True, True]
     # The reference with the dead token's mapped id replaced by the pad id.
     tmap = list(args.engram_token_map)

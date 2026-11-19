@@ -59,6 +59,7 @@ from gmlx.models.deepseek_v4.model import (
     ensure_registered as _ds4_ensure_registered,
 )
 from gmlx.models.deepseek_v41.model import EngramTable
+from gmlx.models.hy_v4_flash import positions as rope_positions
 from gmlx.models.hy_v4_flash import row_kernels
 from gmlx.models.hy_v4.model import (
     _STREAM_MIN_KEYS,
@@ -326,11 +327,16 @@ def rope_at(x: mx.array, positions: mx.array, base: float) -> mx.array:
 
     The same rotation ``nn.RoPE(traditional=True)`` applies at consecutive
     positions, for rows whose positions are not consecutive (a pooled key
-    sits at its group's first position)."""
+    sits at its group's first position). ``positions`` [N, 3] is (t, h, w)
+    per row, each rope pair reading its own axis (``positions.pair_axes``)."""
     d = x.shape[-1]
     freqs = mx.exp(
         -mx.arange(0, d // 2, dtype=mx.float32) * (np.log(base) / (d // 2)))
-    ang = positions.astype(mx.float32)[:, None] * freqs
+    at = positions.astype(mx.float32)
+    if at.ndim == 2:
+        ang = mx.take(at, rope_positions.pair_axes(d // 2), axis=1) * freqs
+    else:
+        ang = at[:, None] * freqs
     cos, sin = mx.cos(ang), mx.sin(ang)
     xf = x.astype(mx.float32)
     x1, x2 = xf[..., 0::2], xf[..., 1::2]
@@ -348,9 +354,8 @@ class EngramHash(nn.Module):
     mapped token id pass 2**63, and a signed modulo of the wrapped product
     lands in another bucket. A look-back slot before the start of the
     sequence, or on a token with no map entry, reads the pad id; only that
-    slot is replaced. A token with no map entry of its own (an image
-    position) still hashes, from the pad id, and is reported dead so the
-    engram write is masked.
+    slot is replaced. A token with no map entry of its own still hashes,
+    from the pad id, and is reported dead so the engram write is masked.
     """
 
     DEAD = -1
@@ -378,16 +383,13 @@ class EngramHash(nn.Module):
             np.asarray(config.engram_offsets, dtype=np.int64)
         ).reshape(self.n_modules, self.n_cols)
 
-    def __call__(self, input_ids, history, token_mask=None):
+    def __call__(self, input_ids, history):
         """``(row ids [B, L, modules, cols], live [B, L], new history)``.
 
-        ``token_mask`` is False on tokens that take no part in an n-gram.
         ``history`` holds the mapped ids of the last ``ngram - 1`` tokens,
         DEAD where a token had none."""
         B, L = input_ids.shape
         mapped = self._token_map[input_ids.astype(mx.int64)]
-        if token_mask is not None:
-            mapped = mx.where(token_mask, mapped, self.DEAD)
         if history is None or history.shape[0] != B:
             history = mx.full((B, self.context_len), self.pad_id,
                               dtype=mx.int64)
@@ -546,7 +548,7 @@ class HyV4FlashIndexer(nn.Module):
             scaling_config=args.rope_scaling,
         )
 
-    def _pool(self, values, gates, pool_cache, offset):
+    def _pool(self, values, gates, pool_cache, offset, pos=None):
         B, L, D = values.shape
         if pool_cache is None:
             usable = (L // self.kpool) * self.kpool
@@ -563,9 +565,13 @@ class HyV4FlashIndexer(nn.Module):
             gw = mx.unflatten(ready_g, 1, (-1, self.kpool))
             pooled = self.pool_norm(_pool_windows(vw, gw, self.ape))
             nope, pe = mx.split(pooled, [self.nope_head_dim], axis=-1)
-            pos = base + self.kpool * mx.arange(pooled.shape[1])
+            # A pooled key sits at its group's first slot.
+            if pos is None:
+                at = base + self.kpool * mx.arange(pooled.shape[1])
+            else:
+                at = pos.slots(int(base), self.kpool, pooled.shape[1])
             new_pooled = mx.concatenate(
-                [nope, rope_at(pe, pos, self.rope_theta)], axis=-1
+                [nope, rope_at(pe, at, self.rope_theta)], axis=-1
             ).astype(dtype)
         if pool_cache is not None:
             return pool_cache.update_and_fetch(new_pooled)
@@ -641,13 +647,16 @@ class HyV4FlashIndexer(nn.Module):
         qr: mx.array,
         pool_cache: Optional[DS4PoolingCache],
         offset: int,
+        pos=None,
     ) -> Optional[mx.array]:
         """Store this chunk's values and gates; return the selected pool
-        ordinals ``[B, L, select_k]`` when the selection binds, else None."""
+        ordinals ``[B, L, select_k]`` when the selection binds, else None.
+        ``pos`` is the call's rope positions where they are not its slots
+        (``positions.RopePositions``)."""
         B, L, _ = x.shape
         ik = self.k_norm(self.wk(x))
         pooled = self._pool(
-            self.pool_value(ik), self.pool_gate(ik), pool_cache, offset)
+            self.pool_value(ik), self.pool_gate(ik), pool_cache, offset, pos)
 
         if offset + L <= self.index_topk:
             return None
@@ -657,7 +666,11 @@ class HyV4FlashIndexer(nn.Module):
         q = self.wq_b(qr).reshape(B, L, self.n_heads, self.head_dim)
         q = q.transpose(0, 2, 1, 3)
         nope, pe = mx.split(q, [self.nope_head_dim], axis=-1)
-        q = mx.concatenate([nope, self.rope(pe, offset)], axis=-1)
+        if pos is None or pos.start is not None:
+            pe = self.rope(pe, offset if pos is None else pos.start)
+        else:
+            pe = rope_at(pe, pos.rows, self.rope_theta)
+        q = mx.concatenate([nope, pe], axis=-1)
 
         if (self.n_heads == 16 and self.head_dim == 128 and self.kpool > 1
                 and self.select_k == 511 and "weight" in self.weights_proj):
@@ -717,6 +730,7 @@ class HyV4FlashAttention(nn.Module):
         self.window = args.sliding_window if args.is_swa(layer_idx) else 0
         self.kpool = args.index_kpool
         theta = args.rope_theta_swa if self.window else args.rope_theta
+        self.rope_theta = theta
 
         hidden = args.hidden_size
         self.q_a_proj = nn.Linear(hidden, args.q_lora_rank, bias=False)
@@ -982,7 +996,11 @@ class HyV4FlashAttention(nn.Module):
             sel, mx.minimum(tok, S - 1), mx.array(True), axis=-1)
         return (causal & tail)[None] | (causal[None] & sel)
 
-    def __call__(self, x: mx.array, cache: Optional[Any] = None) -> mx.array:
+    def __call__(self, x: mx.array, cache: Optional[Any] = None,
+                 pos=None) -> mx.array:
+        """``pos`` is the call's rope positions where they are not its
+        slots (``positions.RopePositions``). Everything but the rope stays
+        on slots."""
         B, L, _ = x.shape
 
         qr = self.q_a_layernorm(self.q_a_proj(x))
@@ -994,10 +1012,13 @@ class HyV4FlashAttention(nn.Module):
         compressed = self.kv_a_proj_with_mqa(x)
         kv_cache, pool_cache = split_cache(cache)
         offset = kv_cache.offset if kv_cache is not None else 0
+        # Where the rope starts: the slot, or the text position after an
+        # image. None for rows that hold image slots.
+        rope_at_0 = offset if pos is None else pos.start
         # One row per key, the latent then its rope half, so a kernel reads
         # both in place. The cache's value slot holds nothing.
         q_rows = None
-        if (L <= _GATHER_MAX_L
+        if (L <= _GATHER_MAX_L and rope_at_0 is not None
                 and self._kq_ok(_kq_tail_kernel("sdpa_sparse_decode"), q_nope)
                 and q_flat.dtype == compressed.dtype
                 and row_kernels.eligible(
@@ -1005,18 +1026,22 @@ class HyV4FlashAttention(nn.Module):
                     self.kv_lora_rank, self.qk_rope_head_dim)):
             # A decode step: the key row and the query rows, a kernel each.
             kv = row_kernels.kv_row(
-                compressed, self.kv_a_layernorm, self.rope, offset)
+                compressed, self.kv_a_layernorm, self.rope, rope_at_0)
             q_rows = row_kernels.q_row(
                 self.embed_q(q_nope).astype(q_flat.dtype), q_flat,
-                self.rope, offset)
+                self.rope, rope_at_0)
         else:
             compressed, k_pe = mx.split(
                 compressed, [self.kv_lora_rank], axis=-1)
             k_pe = k_pe.reshape(
                 B, L, 1, self.qk_rope_head_dim).transpose(0, 2, 1, 3)
             latent = mx.expand_dims(self.kv_a_layernorm(compressed), axis=1)
-            q_pe = self.rope(q_pe, offset)
-            k_pe = self.rope(k_pe, offset)
+            if rope_at_0 is not None:
+                q_pe = self.rope(q_pe, rope_at_0)
+                k_pe = self.rope(k_pe, rope_at_0)
+            else:
+                q_pe = rope_at(q_pe, pos.rows, self.rope_theta)
+                k_pe = rope_at(k_pe, pos.rows, self.rope_theta)
             kv = mx.concatenate([latent, k_pe], axis=-1)
         # Row 0 of the fetched rows is position ``base``: 0 for a cache
         # that keeps every key, the window's first key for one that rolls.
@@ -1029,7 +1054,7 @@ class HyV4FlashAttention(nn.Module):
 
         sel = None
         if self.indexer is not None:
-            sel = self.indexer(x, qr, pool_cache, offset)
+            sel = self.indexer(x, qr, pool_cache, offset, pos)
             if pool_cache is not None and kv_cache is not None:
                 # Keep the pool write on the graph when the selection goes
                 # unused, so the graph does not grow across steps.
@@ -1230,10 +1255,12 @@ class HyV4FlashDecoderLayer(nn.Module):
         self.engram = None
         self.engram_slot = None
 
-    def __call__(self, h: mx.array, cache: Optional[Any] = None) -> mx.array:
-        return self.close(self.body(h, None, cache))
+    def __call__(self, h: mx.array, cache: Optional[Any] = None,
+                 pos=None) -> mx.array:
+        return self.close(self.body(h, None, cache, pos))
 
-    def body(self, h: mx.array, pending, cache: Optional[Any] = None):
+    def body(self, h: mx.array, pending, cache: Optional[Any] = None,
+             pos=None):
         """The block up to its last expand, which it hands back unapplied
         as ``(y, streams, post)``. ``pending`` is the layer before's, and
         ``h`` is unused then: each expand runs in the dispatch of the
@@ -1243,7 +1270,7 @@ class HyV4FlashDecoderLayer(nn.Module):
         else:
             h, x, post = self.attn_hc.expand_pre_norm(
                 *pending, self.input_layernorm)
-        x = self.self_attn(x, cache=cache)
+        x = self.self_attn(x, cache=cache, pos=pos)
         h, x, post = self.ffn_hc.expand_pre_norm(
             x, h, post, self.post_attention_layernorm)
         return self.ffn_post_norm(self.mlp(x)), h, post
@@ -1298,26 +1325,46 @@ class HyV4FlashModel(nn.Module):
         hold = getattr(self.engram_embed, "hold_ahead", None)
         if (hold is not None and inputs.shape[1] == n
                 and next_ids.shape[0] == inputs.shape[0]):
-            hold(self.engram_hash(next_ids, history, None)[0])
+            hold(self.engram_hash(next_ids, history)[0])
 
     def __call__(
         self,
         inputs: mx.array,
         cache: Optional[List[Any]] = None,
         input_embeddings: Optional[mx.array] = None,
-        token_mask: Optional[mx.array] = None,
+        slot_kinds: Optional[List[int]] = None,
     ) -> mx.array:
-        """``token_mask`` is False on positions that take no part in an
-        n-gram and get no engram write (image positions)."""
+        """``slot_kinds`` is each row's kind where the call holds image
+        slots (``positions``): TEXT, or an image kind on a row whose
+        embedding is an image's. ``inputs`` holds the image pad token's
+        id there. An image slot is rotated at its (t, h, w), takes no
+        engram write, and is hashed as the pad token by the n-grams of
+        the tokens after it, as the reference does."""
+        have_cache = cache is not None
         if cache is None:
             cache = [None] * len(self.layers)
 
+        slot = self._history_slot(cache)
+        pos = None
+        if ((slot_kinds is not None or rope_positions.active(slot))
+                and not env_bool("GMLX_HY4_IMAGE_POS_1D", False)):
+            kv_cache, _ = split_cache(cache[0])
+            if have_cache and slot is None:
+                raise ValueError(
+                    "hy_v4_flash: image slots need the engram history "
+                    "cache to carry their positions")
+            pos = rope_positions.plan(
+                slot, slot_kinds,
+                kv_cache.offset if kv_cache is not None else 0,
+                inputs.shape[1], max(int(self.args.index_kpool) - 1, 0))
+
         rows = live = None
         if self.engram_hash is not None:
-            slot = self._history_slot(cache)
             history = slot[0] if slot is not None else None
-            row_ids, live, new_history = self.engram_hash(
-                inputs, history, token_mask)
+            row_ids, live, new_history = self.engram_hash(inputs, history)
+            if slot_kinds is not None:
+                live = live & mx.array(
+                    [k == rope_positions.TEXT for k in slot_kinds])[None]
             if slot is not None:
                 slot[0] = new_history
             # A file-backed table reads its rows off-thread from here on,
@@ -1344,7 +1391,7 @@ class HyV4FlashModel(nn.Module):
                 if pending is not None:
                     h, pending = prev.close(pending), None
                 h = layer.engram(h, rows[layer.engram_slot], live)
-            pending, prev = layer.body(h, pending, layer_cache), layer
+            pending, prev = layer.body(h, pending, layer_cache, pos), layer
         if pending is not None:
             h = prev.close(pending)
 

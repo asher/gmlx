@@ -35,6 +35,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from . import model as hy
+from . import positions as rope_positions
 from gmlx.cache.kv_cache import (
     MTP_UNDO_WIDTH,
     ArraysCache,
@@ -123,9 +124,11 @@ class HyV4FlashSpecHooks:
 
     def speculative_verify_hidden(self, verify_input: mx.array, prompt_cache):
         """The verify forward, with what a rollback needs: the rotating
-        undo stash armed, and the engram history it started from."""
+        undo stash armed, and the engram history and the image position
+        walk it started from."""
         slot = self.model._history_slot(prompt_cache)
-        sink = [(slot[0] if slot is not None else None, verify_input)]
+        sink = [(slot[0] if slot is not None else None, verify_input,
+                 rope_positions.snapshot(slot))]
         set_undo_armed(True)
         try:
             out = self.model(verify_input, prompt_cache)
@@ -169,9 +172,17 @@ class HyV4FlashSpecHooks:
                     "state is now inconsistent")
         slot = self.model._history_slot(prompt_cache)
         if slot is not None and gdn_states:
-            history, tokens = gdn_states[0]
+            history, tokens, walk = gdn_states[0]
             slot[0] = self.model.engram_hash.history_after(
                 history, tokens[:, :accepted + 1])
+            if walk is not None:
+                # The walk again from where the verify started, over the
+                # rows that stay.
+                rope_positions.restore(slot, walk)
+                keys, _ = hy.split_cache(prompt_cache[0])
+                rope_positions.plan(
+                    slot, None, keys.offset - (accepted + 1), accepted + 1,
+                    max(int(self.args.index_kpool) - 1, 0))
 
 
 class HyV4FlashSpecLM(HyV4FlashSpecHooks, hy.Model):
@@ -272,9 +283,35 @@ class HyV4FlashMTPDrafter(QwenMTPDrafter):
         self._seed_token: Optional[mx.array] = None
         self._seed_hidden: Optional[mx.array] = None
         self._round_appended = 0
+        # The image pad token's id where the target is the vision
+        # container, which spells an image slot as an id past the vocab.
+        self._slot_pad: Optional[int] = None
 
         self.accept_lens: List[float] = []
         self.draft_lens: List[int] = []
+
+    def bind(self, target_model):
+        super().bind(target_model)
+        lm = getattr(target_model, "language_model", target_model)
+        self._slot_pad = getattr(lm, "image_token_id", None)
+        return self
+
+    def _prompt_ids(self, ids: mx.array) -> mx.array:
+        """Prompt ids as the block embeds them: an image slot reads the
+        pad token's row. The block rotates its keys at their slots, so
+        after an image its drafts are the 1-D rule's."""
+        if self._slot_pad is None:
+            return ids
+        vocab = int(self.config.text_config.vocab_size)
+        return mx.where(ids >= vocab, self._slot_pad, ids)
+
+    def seed_chunk(self, shifted_tokens, hidden, cache) -> None:
+        super().seed_chunk(self._prompt_ids(shifted_tokens), hidden, cache)
+
+    def prefill_from_target_hidden(self, input_ids, hidden, *args,
+                                   **kwargs) -> None:
+        super().prefill_from_target_hidden(
+            self._prompt_ids(input_ids), hidden, *args, **kwargs)
 
     def make_cache(self, left_padding: Optional[List[int]] = None) -> List[Any]:
         if left_padding is not None:

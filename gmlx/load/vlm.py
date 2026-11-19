@@ -175,6 +175,16 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
                 "not supported (only DeepSeek-V4.1 text GGUFs, arch "
                 "'deepseek41')")
         return "deepseek_v41_vl"
+    if proj == "hy_v4_flash":
+        # Tencent Hy4-flash: a 16 px patch ViT with a learned position grid
+        # and a 2x2 merge projector onto the hy_v4_flash text tower
+        # (gmlx.models.hy_v4_flash.vlm_model).
+        if llm_arch != "hy_v4_flash":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'hy_v4_flash' on LLM arch {llm_arch!r} is "
+                "not supported (only Hy4-flash text GGUFs, arch "
+                "'hy_v4_flash')")
+        return HY4FLASH_VISION
     if proj in ("minicpmv4_6", "minicpmv4_7"):
         # OpenBMB MiniCPM-V 4.6 / 4.7: a SigLIP ViT with a window-attention
         # merger and a 2x2 downsample MLP onto the qwen3.5 dense or MoE text
@@ -1294,6 +1304,60 @@ _DEEPSEEK41V_TOP_MAP = {
 }
 
 
+HY4FLASH_VISION = "hy_v4_flash_vl"
+_HY4FLASH_V_BLK_SUBMAP = {
+    "attn_q": "attn.q_proj",
+    "attn_k": "attn.k_proj",
+    "attn_v": "attn.v_proj",
+    "attn_out": "attn.out_proj",
+    "ln1": "norm1",
+    "ln2": "norm2",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+}
+_HY4FLASH_V_TOP_MAP = {
+    "v.patch_embd.bias": "vision_tower.patch_embed.proj.bias",
+    "v.position_embd.weight": "vision_tower.patch_embed.position_embedding",
+    "mm.pre_norm.weight": "vision_tower.projector.pre_norm.weight",
+    "mm.0.bias": "vision_tower.projector.merge.bias",
+    "mm.2.bias": "vision_tower.projector.out.bias",
+    "v.image_newline": "vision_tower.image_newline",
+}
+# Convolutions the model runs as Linears over the flattened kernel.
+_HY4FLASH_V_CONV_MAP = {
+    "v.patch_embd.weight": "vision_tower.patch_embed.proj.weight",
+    "mm.0.weight": "vision_tower.projector.merge.weight",
+    "mm.2.weight": "vision_tower.projector.out.weight",
+}
+
+
+def _remap_hy4flash_vision(arrays, out, skipped) -> None:
+    """The Hy4-flash mmproj (projector hy_v4_flash): clip names onto
+    gmlx.models.hy_v4_flash.vision."""
+    for name, arr in arrays.items():
+        if name.endswith(".scales") or name.endswith(".biases"):
+            continue
+        conv = _HY4FLASH_V_CONV_MAP.get(name)
+        if conv is not None:
+            # Conv [out, c, kh, kw] -> Linear [out, c*kh*kw].
+            out[conv] = arr.reshape(arr.shape[0], -1)
+            continue
+        hit = _HY4FLASH_V_TOP_MAP.get(name)
+        if hit is not None:
+            out[hit] = arr
+            continue
+        m = _VISION_BLK_RE.match(name)
+        if m is None:
+            skipped.append(name)
+            continue
+        sub, _, leaf = m.group(2).rpartition(".")  # leaf = weight | bias
+        tgt = _HY4FLASH_V_BLK_SUBMAP.get(sub)
+        if tgt is None:
+            skipped.append(name)
+            continue
+        out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
+
+
 def _remap_deepseek41v_clip(arrays, out, skipped) -> None:
     """The llama.cpp conversion of the V4.1 encoder (projector deepseek41v):
     the V4 clip names, with wqkv kept fused as attn_qkv and no image_pad."""
@@ -1761,6 +1825,10 @@ def _remap_float_arrays(
                 skipped.append(name)
                 continue
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
+        return out, skipped
+
+    if model_type == HY4FLASH_VISION:
+        _remap_hy4flash_vision(arrays, out, skipped)
         return out, skipped
 
     if model_type == "deepseek_v41_vl" and any(
@@ -3210,6 +3278,69 @@ def _synthesize_deepseek41v_vlm_config(
     return config
 
 
+# The image pad token's text up to its tokenizer revision tag, which
+# differs between conversions. The id is found by this prefix.
+HY4FLASH_IMAGE_PAD_PREFIX = "<\uff5chy_image\u2581pad:"
+HY4FLASH_IMAGE_PAD_TOKEN_ID = 120120
+
+
+def _hy4flash_image_pad_id(llm_meta: dict) -> int:
+    toks = llm_meta.get("tokenizer.ggml.tokens")
+    if toks is not None:
+        for i, tok in enumerate(toks):
+            if isinstance(tok, str) and tok.startswith(
+                    HY4FLASH_IMAGE_PAD_PREFIX):
+                return i
+    return HY4FLASH_IMAGE_PAD_TOKEN_ID
+
+
+def _synthesize_hy4flash_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict,
+    mm_shapes: dict | None,
+) -> dict:
+    """Hy4-flash VLM config: the hy_v4_flash text synth plus the vision
+    tower, read from ``clip.vision.*``. The merge width is the one size the
+    metadata does not carry; it comes from the merge bias."""
+    from gmlx.models.hy_v4_flash.positions import N_SLOT_KINDS
+
+    patch = _mm_int(mm_meta, "clip.vision.patch_size")
+    merge = (mm_shapes or {}).get("mm.0.bias")
+    if not merge:
+        raise ValueError(
+            "hy_v4_flash mmproj: mm.0.bias is missing, so the merge width "
+            "is unknown")
+    vision_config: dict = {
+        "model_type": HY4FLASH_VISION,
+        "depth": _mm_int(mm_meta, "clip.vision.block_count"),
+        "hidden_size": _mm_int(mm_meta, "clip.vision.embedding_length"),
+        "intermediate_size": _mm_int(
+            mm_meta, "clip.vision.feed_forward_length"),
+        "num_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "patch_size": patch,
+        "in_channels": 3,
+        "spatial_merge_size": _mm_int(
+            mm_meta, "clip.vision.spatial_merge_size"),
+        "merge_hidden_size": int(merge[0]),
+        "out_hidden_size": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "position_grid": _mm_int(mm_meta, "clip.vision.image_size") // patch,
+    }
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["layer_norm_eps"] = float(eps)
+
+    vocab = int(text_config["vocab_size"])
+    pad_id = _hy4flash_image_pad_id(llm_meta)
+    return {
+        "model_type": HY4FLASH_VISION,
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": vocab,
+        "media_token_ids": [vocab + k for k in range(N_SLOT_KINDS)],
+        "image_token_id": pad_id,
+        "image_token_index": pad_id,
+    }
+
+
 def scale_text_rope(model, config: dict) -> int:
     """Give the text tower of a built VLM the rope scaling its text config
     carries (gmlx.load.rope_swap). Qwen3-Omni nests the tower and its config
@@ -3278,6 +3409,10 @@ def synthesize_vlm_config(
     if model_type == "deepseek_v41_vl":
         return _synthesize_deepseek41v_vlm_config(
             text_config, mm_meta, llm_meta)
+
+    if model_type == HY4FLASH_VISION:
+        return _synthesize_hy4flash_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
 
     if model_type == "gemma4":
         standardize = "v.std_scale" in names and "v.std_bias" in names
@@ -3495,6 +3630,7 @@ _OWNED_VLM_REGISTRARS = {
     "glm5_next": ("gmlx.models.glm5_next.vlm_model",),
     "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
     "deepseek_v41_vl": ("gmlx.models.deepseek_v41.vlm_model",),
+    HY4FLASH_VISION: ("gmlx.models.hy_v4_flash.vlm_model",),
     MINIMAX_M3_VISION: ("gmlx.models.minimax_m3",),
 }
 
@@ -3607,6 +3743,9 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
         return _synthesize_deepseek4v_processor(tokenizer, mm_meta, config or {})
     if model_type == "deepseek_v41_vl":
         return _synthesize_deepseek41v_processor(
+            tokenizer, mm_meta, config or {})
+    if model_type == HY4FLASH_VISION:
+        return _synthesize_hy4flash_processor(
             tokenizer, mm_meta, config or {})
     if model_type == "kimi_k25":
         return _synthesize_kimi_k25_processor(tokenizer, mm_meta)
@@ -5556,6 +5695,205 @@ def _synthesize_deepseek41v_processor(tokenizer, mm_meta: dict, config: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+class _HyV4FlashGgufImageProcessor(ImageProcessingMixin):
+    """Torch-free Hy4-flash image preprocessing (numpy and PIL), after the
+    reference image processor. One image is one grid at its own aspect
+    ratio: both edges go to a multiple of patch_size * merge_size inside
+    the pixel budget, with no tiles and no padding.
+
+    Returns ``pixel_values`` [N_patches, C*ph*pw] for all images stacked in
+    order and ``image_patch_grid`` [n_img, 2] = (n_h, n_w) patches."""
+
+    model_input_names = ["pixel_values", "image_patch_grid"]
+
+    def __init__(self, patch_size=16, merge_size=2, min_pixels=4096,
+                 max_pixels=4194304, image_mean=(0.5, 0.5, 0.5),
+                 image_std=(0.5, 0.5, 0.5)):
+        super().__init__()
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
+        self.patch_size = int(patch_size)
+        self.merge_size = int(merge_size)
+        self.min_pixels = int(min_pixels)
+        self.max_pixels = int(max_pixels)
+
+    def resized(self, width: int, height: int) -> tuple[int, int]:
+        """The (height, width) an image is resized to."""
+        factor = self.patch_size * self.merge_size
+        if max(height, width) / min(height, width) > 200:
+            raise ValueError(
+                f"image {width}x{height}: the aspect ratio must be at most "
+                "200")
+        # Python's round, half to even, as the reference.
+        h_bar = round(height / factor) * factor
+        w_bar = round(width / factor) * factor
+        if h_bar * w_bar > self.max_pixels:
+            beta = math.sqrt(height * width / self.max_pixels)
+            h_bar = max(factor, math.floor(height / beta / factor) * factor)
+            w_bar = max(factor, math.floor(width / beta / factor) * factor)
+        elif h_bar * w_bar < self.min_pixels:
+            beta = math.sqrt(self.min_pixels / (height * width))
+            h_bar = math.ceil(height * beta / factor) * factor
+            w_bar = math.ceil(width * beta / factor) * factor
+        return h_bar, w_bar
+
+    def _one(self, img):
+        import numpy as np
+        from PIL import Image
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(np.asarray(img))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        h_bar, w_bar = self.resized(img.width, img.height)
+        p = self.patch_size
+        n_h, n_w = h_bar // p, w_bar // p
+        image = img.resize((w_bar, h_bar), Image.Resampling.BICUBIC)
+        x = np.asarray(image, dtype=np.float32).transpose(2, 0, 1) / 255.0
+        mean = np.array(self.image_mean, dtype=np.float32)[:, None, None]
+        std = np.array(self.image_std, dtype=np.float32)[:, None, None]
+        x = (x - mean) / std                                   # [C, H, W]
+        c = x.shape[0]
+        patches = x.reshape(c, n_h, p, n_w, p)
+        patches = patches.transpose(1, 3, 0, 2, 4)             # (h, w, c, ph, pw)
+        return patches.reshape(n_h * n_w, c * p * p), (n_h, n_w)
+
+    def __call__(self, images, **kwargs):
+        import numpy as np
+        vecs, grids = [], []
+        for img in _PixtralGgufImageProcessor._flatten(images):
+            v, grid = self._one(img)
+            vecs.append(v)
+            grids.append(grid)
+        return {
+            "pixel_values": np.concatenate(vecs, axis=0),
+            "image_patch_grid": np.array(grids, dtype=np.int64).reshape(-1, 2),
+        }
+
+
+def _synthesize_hy4flash_processor(tokenizer, mm_meta: dict, config: dict):
+    """Build the Hy4-flash processor from the GGUFs alone.
+
+    The chat template writes one image pad token per image, between the
+    image start and end tokens. The reference repeats the pad once per
+    image slot; gmlx writes each slot's kind as an id past the vocab
+    (vocab_size + kind, gmlx.models.hy_v4_flash.positions), so the text
+    tower can tell an image's rows and columns from the ids of any prefill
+    chunk."""
+    import numpy as np
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
+
+    from gmlx.models.hy_v4_flash.positions import image_slot_kinds
+
+    def _floats(key):
+        v = mm_meta.get(key)
+        return [float(x) for x in v] if v else [0.5, 0.5, 0.5]
+
+    vision = (config.get("vision_config") or {})
+    image_processor = _HyV4FlashGgufImageProcessor(
+        patch_size=vision.get("patch_size")
+        or _mm_int(mm_meta, "clip.vision.patch_size"),
+        merge_size=vision.get("spatial_merge_size")
+        or _mm_int(mm_meta, "clip.vision.spatial_merge_size"),
+        min_pixels=_mm_int(mm_meta, "clip.vision.image_min_pixels"),
+        max_pixels=_mm_int(mm_meta, "clip.vision.image_max_pixels"),
+        image_mean=_floats("clip.vision.image_mean"),
+        image_std=_floats("clip.vision.image_std"))
+    vocab_size = int(config["vocab_size"])
+    image_token_id = int(
+        config.get("image_token_id") or HY4FLASH_IMAGE_PAD_TOKEN_ID)
+
+    class HyV4FlashProcessor(ProcessorMixin):
+        attributes = ["image_processor", "tokenizer"]
+        image_processor_class = "AutoImageProcessor"
+        tokenizer_class = "AutoTokenizer"
+
+        image_token_id: ClassVar[int]       # set below
+        vocab_size: ClassVar[int]
+
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
+            if text is None and images is None:
+                raise ValueError("You must provide either text or images.")
+            if isinstance(text, str):
+                text = [text]
+
+            image_inputs = {}
+            grids = []
+            if images is not None:
+                if not isinstance(images, (list, tuple)):
+                    images = [images]
+                image_inputs = self.image_processor(images)
+                grids = [tuple(int(v) for v in row)
+                         for row in image_inputs["image_patch_grid"]]
+
+            kwargs.pop("return_tensors", None)
+            data = dict(image_inputs)
+            if text is not None:
+                bos = getattr(self.tokenizer, "bos_token", None)
+                if bos and all(t.startswith(bos) for t in text):
+                    # The template already emits BOS; never add a second.
+                    kwargs.setdefault("add_special_tokens", False)
+                enc = self.tokenizer(text, **kwargs)
+                rows = [[int(t) for t in row] for row in enc["input_ids"]]
+                if grids and len(rows) != 1:
+                    raise ValueError(
+                        "hy_v4_flash_vl image prompts run single-row")
+                if grids:
+                    rows[0] = self._expand(rows[0], grids)
+                if len({len(r) for r in rows}) == 1:
+                    data["input_ids"] = np.array(rows, dtype=np.int64)
+                    data["attention_mask"] = np.ones_like(data["input_ids"])
+                else:
+                    data.update(enc)
+            return BatchFeature(data=to_mlx(data))
+
+        def _expand(self, ids, grids):
+            merge = self.image_processor.merge_size
+            out, index = [], 0
+            for tok in ids:
+                if tok != self.image_token_id:
+                    out.append(tok)
+                    continue
+                if index >= len(grids):
+                    raise ValueError(
+                        f"{index + 1} image placeholders but {len(grids)} "
+                        "images")
+                n_h, n_w = grids[index]
+                index += 1
+                out.extend(
+                    self.vocab_size + kind
+                    for kind in image_slot_kinds(n_h // merge, n_w // merge))
+            if index != len(grids):
+                raise ValueError(
+                    f"{index} image placeholders but {len(grids)} images")
+            return out
+
+        def batch_decode(self, *args, **kwargs):
+            return self.tokenizer.batch_decode(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self.tokenizer.decode(*args, **kwargs)
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                list(self.tokenizer.model_input_names)
+                + list(self.image_processor.model_input_names)))
+
+    HyV4FlashProcessor.image_token_id = image_token_id
+    HyV4FlashProcessor.vocab_size = vocab_size
+    processor = HyV4FlashProcessor(
+        image_processor=image_processor, tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
+
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
 def _swap_spec_language_model(model, model_type: str, *, log) -> None:
     """Replace ``model.language_model`` with the spec-capable class the text
     MTP path builds (``_vlm_spec_language_model``), constructed from the
@@ -5757,9 +6095,11 @@ def load_vlm_model(
     # text tower's transforms (kquant scale placeholders, wo_a 2D->3D) under
     # language_model.*, which the text path gets from sanitize=True.
     # minimax_m3_vision: the same, for the indexer gating and narrowing.
+    # hy_v4_flash_vl: the same, to drop the draft block past the trunk.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log,
                       sanitize=(model_type in ("deepseek_v4_vl",
                                                  "deepseek_v41_vl",
+                                                 HY4FLASH_VISION,
                                                  MINIMAX_M3_VISION)),
                       no_alias=owned_names,
                       **float_dtype_rules(model_type),

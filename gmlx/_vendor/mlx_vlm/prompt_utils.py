@@ -128,6 +128,7 @@ MODEL_CONFIG = {
     # gmlx: the VLM model types gmlx owns and upstream has no row for.
     "deepseek_v4_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "deepseek_v41_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
+    "hy_v4_flash_vl": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "muse_spark": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "nemotron_h_omni": MessageFormat.LIST_WITH_IMAGE_FIRST,
     "lfm3_omni": MessageFormat.LIST_WITH_IMAGE_FIRST,

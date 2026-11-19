@@ -184,6 +184,7 @@ fusions.
 | `GMLX_HY4_ROW_KERNEL=0` | Build a Hy4-flash decode step's key and query rows on the op chain instead of one kernel each. Output is bit-identical. |
 | `GMLX_HY4_KQ_ROUTER=0` | Run a Hy4-flash decode step's expert routing as an op chain instead of one mlx-kquant dispatch. |
 | `GMLX_HY4_ROUTER_SPLIT=0` | Compute Hy4-flash router logits at decode widths with the stock matmul instead of the split-sum kernel. |
+| `GMLX_HY4_IMAGE_POS_1D=1` | Rotate Hy4-flash image slots at their slot index, as llama.cpp does, instead of the reference's (t, h, w) positions. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase command-buffer caps (same output, slower decode). `MLX_MAX_OPS_PER_BUFFER` or `MLX_MAX_MB_PER_BUFFER` set by hand holds in every phase. |
 | `GMLX_CB_FINE_DECODE=1` | Decode a model in memory on 50 ops per command buffer instead of 400, both with no size cap. Prefill and streamed models keep their caps. |
 | `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `auto`, the default, keeps the file bytes as `wire` does, and `packed` copies MoE experts into MLX's layout. |
