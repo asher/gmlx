@@ -48,6 +48,8 @@ ZERO_GRAD = {
     # The indexer's top-k ids only pick which keys attention reads.
     "hy_v4": {f"model.layers.{i}.self_attn.indexer.{n}" for i in (0, 2)
               for n in ("wq_b", "wk", "weights_proj")},
+    "hy_v4_flash": {f"model.layers.{i}.self_attn.indexer.{n}" for i in (0, 3)
+                    for n in ("wq_b", "wk", "weights_proj", "pool_value", "pool_gate")},
     # MSA scores blocks only when a cache is present. A training forward
     # has none and runs dense attention.
     "minimax_m3": {f"model.layers.{i}.self_attn.{n}" for i in (1, 2)
@@ -67,7 +69,7 @@ PARITY_TOL = {
     "qwen3_moe": 3e-2, "muse_glimmer": 3e-2, "muse_spark": 3e-2, "k2_horizon": 3e-2,
     "beam": 3e-2, "flint": 3e-2, "ricursive": 3e-2, "granite_switch": 3e-2,
     "hy_v3": 3e-2, "glm5_next": 4e-2,
-    "kimi_k3": 1e-1, "hy_v4": 4e-2, "minimax_m3": 3e-2, "qwen4_exp": 2e-2,
+    "kimi_k3": 1e-1, "hy_v4": 4e-2, "hy_v4_flash": 4e-2, "minimax_m3": 3e-2, "qwen4_exp": 2e-2,
     "qwen3_next": 4e-2, "qwen3_5": 3e-2, "qwen3_5_moe": 4e-2, "qwen3_5_hadamard": 4e-2,
 }
 
