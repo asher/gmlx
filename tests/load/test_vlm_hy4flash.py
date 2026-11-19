@@ -155,7 +155,16 @@ def test_remap_covers_the_whole_tower_and_nothing_else():
         assert mx.array_equal(out[dst], want), src
 
 
-def test_the_loaded_tower_is_the_file_s_convolutions():
+@pytest.fixture
+def _on_cpu():
+    # Exact fp32: a GPU matmul and a GPU convolution round apart.
+    prev = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    yield
+    mx.set_default_device(prev)
+
+
+def test_the_loaded_tower_is_the_file_s_convolutions(_on_cpu):
     """The patch embed and the merge, run as Linears on the remapped
     weights, give what the file's convolutions give on an image."""
     arrays = _mmproj_arrays()

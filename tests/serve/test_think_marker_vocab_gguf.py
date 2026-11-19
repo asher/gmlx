@@ -55,6 +55,7 @@ VOCABS = {
 NO_VOCAB = (
     "bundled/deepseek_v41", "fixtures/deepseek_v4_template.jinja",
     "fixtures/glm5_template.jinja", "fixtures/granite_switch_template.jinja",
+    "fixtures/hy4_flash_template.jinja",
     "fixtures/k2_horizon_template.jinja", "fixtures/kimi_k25_template.jinja",
     "fixtures/kimi_k3_template.jinja", "fixtures/minicpmv46_template.jinja",
     "fixtures/minicpmv47_template.jinja",

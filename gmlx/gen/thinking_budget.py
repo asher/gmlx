@@ -210,7 +210,15 @@ def think_pairs_in(template) -> list:
     if not pairs and (template == _K3_NATIVE_RENDERER or (
             "<|open|>" in template and "open_tag('think" in template)):
         pairs = [("<|open|>think<|sep|>", "<|close|>think<|sep|>")]
+    # Hy4-flash writes each marker as a format of its tag suffix, so the
+    # literal pair is not in the template source either.
+    if not pairs and all(s in template for s in _HY4_FORMAT_MARKS):
+        pairs = [("<think:6124c78e>", "</think:6124c78e>")]
     return pairs
+
+
+_HY4_FORMAT_MARKS = ("HYTK = ':6124c78e'", "'<think{}>'.format(HYTK)",
+                     "'</think{}>'.format(HYTK)")
 
 
 # The chat_template of mlx-vlm's KimiK3Processor.

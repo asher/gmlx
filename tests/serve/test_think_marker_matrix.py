@@ -83,6 +83,7 @@ _THINK = ("<think>", "</think>")
 _GEMMA = ("<|channel>thought", "<channel|>")
 _XTML = ("<|open|>think<|sep|>", "<|close|>think<|sep|>")
 _MM = ("<mm:think>", "</mm:think>")
+_HY4 = ("<think:6124c78e>", "</think:6124c78e>")
 
 _HARMONY_SINGLES = ("<|start|>", "<|end|>", "<|message|>", "<|channel|>",
                     "<|return|>", "<|constrain|>", "<|call|>")
@@ -93,6 +94,9 @@ _GEMMA_SINGLES = ("<|channel>", "<channel|>", "<|think|>", "<|turn>",
                   "<turn|>")
 _XTML_SINGLES = ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>")
 _DS_SINGLES = _THINK + ("<\uff5cUser\uff5c>", "<\uff5cAssistant\uff5c>")
+_HY4_SINGLES = _HY4 + ("<\uff5chy_start:6124c78e\uff5c>",
+                       "<\uff5chy_middle:6124c78e\uff5c>",
+                       "<\uff5chy_end:6124c78e\uff5c>")
 _K2_SINGLES = ("<ifm|think>", "</ifm|think>", "<ifm|think_fast>",
                "</ifm|think_fast>", "<ifm|think_faster>",
                "</ifm|think_faster>", "<|ifm|im_start|>", "<|ifm|im_end|>")
@@ -152,6 +156,10 @@ ROWS: dict[str, Row] = {
     "fixtures/granite_switch_template.jinja": Row(
         "granite_switch", None, (_ON, BARE), (_OFF, BARE), BARE,
         ("<|start_of_role|>", "<|end_of_role|>", "<|end_of_text|>")),
+    "fixtures/hy4_flash_template.jinja": Row(
+        "hy_v4_flash", _HY4, ({}, WAIT),
+        ({"reasoning_effort": "no_think"}, BARE), WAIT, _HY4_SINGLES,
+        vlm="hy_v4_flash_vl"),
     "fixtures/image/flux2_klein_chat_template.jinja": Row(exclude=_IMAGE),
     "fixtures/image/flux3_klein_chat_template.jinja": Row(exclude=_IMAGE),
     "fixtures/image/moss_image_chat_template.jinja": Row(exclude=_IMAGE),
@@ -316,7 +324,9 @@ _MM_META = {"clip.vision.patch_size": 16, "clip.vision.image_size": 224,
             "clip.vision.projection_dim": 8,
             "clip.vision.image_mean": [0.5] * 3,
             "clip.vision.image_std": [0.5] * 3,
-            "clip.vision.spatial_merge_size": 2}
+            "clip.vision.spatial_merge_size": 2,
+            "clip.vision.image_min_pixels": 64 * 64,
+            "clip.vision.image_max_pixels": 512 * 512}
 
 
 def _served(template, row, shape) -> Served:
@@ -327,8 +337,9 @@ def _served(template, row, shape) -> Served:
     else:
         from gmlx.load.vlm import _synthesize_vlm_processor
 
-        proc = _synthesize_vlm_processor(row.vlm, raw, _MM_META,
-                                         {"model_type": row.vlm})
+        proc = _synthesize_vlm_processor(
+            row.vlm, raw, _MM_META,
+            {"model_type": row.vlm, "vocab_size": len(raw.get_vocab())})
         model_type = row.vlm
     rg = _GEN.ResponseGenerator.__new__(_GEN.ResponseGenerator)
     rg.tokenizer, rg.processor = proc.tokenizer, proc
