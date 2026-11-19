@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-11-19
+
 ### Added
 
 - EmbeddingGemma 2 embeds text, images, audio and video at
