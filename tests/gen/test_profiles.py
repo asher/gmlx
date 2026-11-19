@@ -144,6 +144,35 @@ def test_nemotron_intents():
     assert profiles.groups_for("nemotron", "reasoning-high") == base
 
 
+def test_hy4_flash_card_sampling_and_effort_levels():
+    """The model card's temperature 0.9 and top_p 1.0, and the template's
+    levels: it thinks at high unless told, takes max, and thinking off is
+    its no_think."""
+    from gmlx.tui.reasoning import map_thinking_controls
+
+    assert profiles.detect_family("hy_v4_flash", "Hy4-flash") == "hy4-flash"
+    assert profiles.detect_family("hyv4", "Hy4-preview") == "hy4"
+    base = profiles.groups_for("hy4-flash")
+    assert base["sampling"]["temperature"] == 0.9
+    assert base["sampling"]["top_p"] == 1.0
+    assert "chat_template_kwargs" not in base
+    top = profiles.groups_for("hy4-flash", "reasoning-max")
+    assert top["chat_template_kwargs"] == {"reasoning_effort": "max"}
+    # Hy4-preview's template raises on max, so it has no such intent.
+    assert profiles.groups_for("hy4", "reasoning-max") == \
+        profiles.groups_for("hy4")
+    # The released template's level check.
+    template = ("{%- if not reasoning_effort is defined %}"
+                "{%- set reasoning_effort = 'high' %}"
+                "{%- elif reasoning_effort not in "
+                "['max', 'high', 'low', 'no_think'] %}{%- endif %}")
+    assert map_thinking_controls({}, thinking="off", template=template) == {
+        "reasoning_effort": "no_think"}
+    assert map_thinking_controls(
+        {}, thinking="on", reasoning_effort="max", template=template) == {
+            "reasoning_effort": "max"}
+
+
 def test_kimi_reasoning_intents_and_thinking_tokens():
     base = profiles.groups_for("kimi")
     assert base["sampling"]["temperature"] == 1.0

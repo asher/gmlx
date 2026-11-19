@@ -769,6 +769,7 @@ FAMILY_ROWS = {
     "minimax-m3": FamilyRow(_MM),
     "hy3": FamilyRow(("<think:opensource>", "</think:opensource>")),
     "hy4": FamilyRow(("<think:6124c78e>", "</think:6124c78e>")),
+    "hy4-flash": FamilyRow(("<think:6124c78e>", "</think:6124c78e>")),
 }
 _ECHO = "{{ messages[-1]['content'] }}"
 

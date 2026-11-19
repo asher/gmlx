@@ -225,7 +225,7 @@ FAMILIES: dict[str, dict] = {
     # criteria and the stream splitter all read.
     "hy4": {
         "label": "HY4",
-        "arches": ("hyv4", "hy_v4_flash"),
+        "arches": ("hyv4",),
         "base": {"sampling": {
             "temperature": 0.9,
             "top_p": 1.0,
@@ -235,6 +235,25 @@ FAMILIES: dict[str, dict] = {
         "intents": {
             "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
             "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+        },
+    },
+    # https://huggingface.co/tencent/Hy4-flash: temperature 0.9, top_p 1.0,
+    # which the GGUF's general.sampling.* repeats. HY4's think tags. The
+    # template thinks at reasoning_effort high unless told otherwise, and
+    # takes max as well; `--thinking off` maps onto its no_think.
+    "hy4-flash": {
+        "label": "Hy4-flash",
+        "arches": ("hy_v4_flash",),
+        "base": {"sampling": {
+            "temperature": 0.9,
+            "top_p": 1.0,
+            "thinking_start_token": "<think:6124c78e>",
+            "thinking_end_token": "</think:6124c78e>",
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+            "reasoning-max": {"chat_template_kwargs": {"reasoning_effort": "max"}},
         },
     },
     # moonshotai/Kimi-K3 model card, 2026-07 (generation_config carries no
