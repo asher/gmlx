@@ -405,3 +405,71 @@ def test_window_keys_from_the_dequantized_stack_match_the_gather(monkeypatch):
     monkeypatch.setenv("GMLX_HY4_KEYS_DENSE", "0")
     np.testing.assert_array_equal(
         np.array(_head_keys(emb, latent).astype(mx.float32)), want)
+
+
+# The released file's tensor names, by the parts a block is made of.
+_ATTN_TENSORS = (
+    "attn_gate", "attn_k_b", "attn_kv_a_mqa", "attn_kv_a_norm", "attn_norm",
+    "attn_output", "attn_q_a", "attn_q_a_norm", "attn_q_b", "attn_sinks",
+    "attn_v_b", "ffn_norm", "hc_attn_base", "hc_attn_fn", "hc_attn_scale",
+    "hc_ffn_base", "hc_ffn_fn", "hc_ffn_scale", "post_attention_norm",
+    "post_ffw_norm")
+_DENSE_TENSORS = ("ffn_down", "ffn_gate", "ffn_up")
+_MOE_TENSORS = (
+    "ffn_down_exps", "ffn_down_shexp", "ffn_gate_exps", "ffn_gate_inp",
+    "ffn_gate_shexp", "ffn_routed_down", "ffn_routed_up", "ffn_up_exps",
+    "ffn_up_shexp")
+_INDEXER_TENSORS = (
+    "indexer.attn_k", "indexer.attn_q_b", "indexer.k_norm", "indexer.proj",
+    "indexer_compressor_ape", "indexer_compressor_gate",
+    "indexer_compressor_norm", "indexer_compressor_value")
+_ENGRAM_TENSORS = (
+    "engram_gate", "engram_hc_scale", "engram_kv", "engram_kv_b",
+    "engram_lookup_norm", "engram_pre_gamma")
+_GLOBAL_TENSORS = (
+    "output", "output_hc_base", "output_hc_fn", "output_hc_scale",
+    "output_norm", "token_embd", "per_layer_token_embd")
+
+
+def test_the_file_s_tensor_names_fill_the_model_and_nothing_else():
+    """Every kind of block the released file has: the dense first block,
+    sparse and window blocks with and without engram, and the draft block
+    after the trunk, which a load without MTP drops."""
+    from gmlx.load.wire import remap_arrays
+
+    # Engram on a sparse layer (1) and on a window layer (3), as blocks 1
+    # and 11 of the file.
+    args = _args(engram_layer_ids=[1, 3])
+    model = Model(args)
+    params = {k for k, _ in tree_flatten(model.parameters())}
+
+    names = [f"{t}.weight" for t in _GLOBAL_TENSORS]
+    for i in range(N_LAYER):
+        parts = _ATTN_TENSORS + (_DENSE_TENSORS if i == 0 else _MOE_TENSORS)
+        if not SWA[i]:
+            parts += _INDEXER_TENSORS
+        if i in (1, 3):
+            parts += _ENGRAM_TENSORS
+        names += [f"blk.{i}.{t}.weight" for t in parts]
+        if i:
+            names.append(f"blk.{i}.exp_probs_b.bias")
+    trunk = len(names)
+    draft = _ATTN_TENSORS[:12] + _ATTN_TENSORS[18:] + _MOE_TENSORS \
+        + _INDEXER_TENSORS
+    names += [f"blk.{N_LAYER}.{t}.weight" for t in draft]
+    names.append(f"blk.{N_LAYER}.exp_probs_b.bias")
+    block = len(names) - trunk
+    # The draft block's own four, which only the MTP load reads.
+    nextn = [f"blk.{N_LAYER}.nextn.{t}.weight" for t in (
+        "eh_proj", "enorm", "hnorm", "shared_head_norm")]
+
+    weights, _, stats = remap_arrays(
+        {n: mx.zeros((4, 4)) for n in names + nextn}, {}, "hy_v4_flash",
+        n_head=2, n_head_kv=1)
+    assert stats["mapped"] == len(names) and stats["failed"] == 0
+    assert stats["skipped"] == len(nextn)
+    kept = set(model.sanitize(weights))
+    assert len(weights) - len(kept) == block
+    assert kept == params, (
+        f"only in the file: {sorted(kept - params)}; only in the model: "
+        f"{sorted(params - kept)}")

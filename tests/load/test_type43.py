@@ -1,5 +1,6 @@
-"""GGML type id 43 names two formats: STQ1_0 (ternary weights) and MXFP8
-(gather-only lookup tables). The bytes a tensor spans tell them apart."""
+"""GGML type id 43 names three formats: STQ1_0 (ternary weights), MXFP8
+(gather-only lookup tables) and plain F8_E4M3 (a lookup table of one byte a
+value). The bytes a tensor spans tell them apart."""
 from __future__ import annotations
 
 import pytest
@@ -86,3 +87,42 @@ def test_a_span_that_fits_neither_format_raises():
     # A header prefix with no file size cannot see the last span; it reads
     # as STQ1_0 and the local scan decides again.
     assert type_43_format(n, None, ALIGN) == "STQ1_0"
+
+
+# A plain E4M3 table, in both orders with an STQ1_0 weight. Its span is its
+# element count, which no other format of this id fills.
+_E4M3_ORDERS = [
+    [("blk.0.ffn_up.weight", 1024, "STQ1_0"),
+     ("per_layer_token_embd.weight", 96 * 64, "F8_E4M3")],
+    [("per_layer_token_embd.weight", 96 * 64, "F8_E4M3"),
+     ("blk.0.ffn_up.weight", 1024, "STQ1_0")],
+]
+
+
+@pytest.mark.parametrize("tensors", _E4M3_ORDERS + [_E4M3_ORDERS[0][1:]])
+@pytest.mark.parametrize("pad_last", [True, False])
+def test_scan_resolves_a_plain_e4m3_table(tmp_path, tensors, pad_last):
+    # The last case is the released Hy4-flash layout: the table alone in
+    # its shard.
+    path = tmp_path / "m.gguf"
+    _mint(path, tensors, pad_last=pad_last, arch="hy_v4_flash")
+    h = scan_gguf(str(path))
+    assert [(t.name, t.type_name, t.nbytes) for t in h.tensors] == [
+        (name, fmt, _size(n, fmt)) for name, n, fmt in tensors]
+    assert not h.truncated
+
+
+def test_an_exact_byte_per_value_span_is_plain_e4m3():
+    # The released table, 96 x 660006416, ends its file with no padding.
+    # The count divides by 32 and by 256, so every format could hold it:
+    # the span is short of MXFP8 by a scale byte per 32 values, and six
+    # times what STQ1_0 would take.
+    n = 96 * 660_006_416
+    assert n % 32 == 0 and n % 256 == 0
+    for pad in (0, ALIGN - 1):
+        assert type_43_format(n, n + pad, ALIGN) == "F8_E4M3"
+        assert type_43_format(n, n + pad, ALIGN, at_end=True) == "F8_E4M3"
+    # One alignment step past it is no longer an exact fit.
+    assert type_43_format(n, n + ALIGN, ALIGN) == "STQ1_0"
+    # An MXFP8 table of the same shape still reads as MXFP8.
+    assert type_43_format(n, _size(n, "MXFP8"), ALIGN) == "MXFP8"
