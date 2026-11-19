@@ -323,3 +323,24 @@ pytest tests/serve/test_admit_gate.py tests/test_envflags.py \
   `tests/arg_order.py`, so the paths of each directory are consecutive, in the order of first
   appearance at every level.
 - Test: `tests/test_arg_order.py` runs the repro in a child pytest and checks the grouping.
+
+## torch logs a redirect note on every macOS import of `torch.distributed`
+
+- Dependency: torch 2.12.1 with transformers 5.22.0. gmlx does not depend on torch: the note
+  shows only in an environment that has it installed.
+- Affected: every gmlx command that imports a transformers processor. transformers imports
+  `torch.distributed.checkpoint` when torch is present, which imports
+  `torch.distributed.elastic.multiprocessing.redirects`.
+- What goes wrong: that module logs a warning at import on macOS, so the first line a command
+  prints is `NOTE: Redirects are currently not supported in MacOs.` Nothing else is affected.
+
+Smallest repro:
+
+```
+python -c "import torch.distributed.elastic.multiprocessing"
+```
+
+- Guard: `_umbrella_impl` in `gmlx/commands/cli.py` raises that logger's level to error before
+  any command runs.
+- Test: `test_a_command_prints_no_torch_redirect_note` in `tests/commands/test_cli_quiet.py`
+  runs a command in a child process where torch is installed and reads its output.
