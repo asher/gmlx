@@ -274,6 +274,19 @@ def test_the_accept_finds_the_block_s_cache_without_its_draft_steps(
     assert mx.array_equal(deep[3], shallow[3]).item()
 
 
+def test_a_verify_block_at_16_experts_a_token_keeps_the_decode_expert_route():
+    """The released file routes 16 experts a token, so a verify of 4 rows
+    is 64 (row, expert) pairs, where the expert kernels of other models
+    start sorting by expert."""
+    from gmlx.models.hy_v4_flash.model import HyV4FlashMoE
+
+    moe = HyV4FlashMoE(_args(num_experts_per_tok=16, n_routed_experts=32))
+    widest = 16 * MTP_UNDO_WIDTH
+    assert moe.switch_mlp._kq_fused_pairs > widest
+    assert moe.gate._fused_pairs > widest
+    assert HyV4FlashMoE(_args()).switch_mlp._kq_fused_pairs == 64
+
+
 def test_the_drafter_meets_the_engine_contract():
     from gmlx.load.mtp_target import (
         _MTP_TARGET_HOOKS_BY_TYPE,

@@ -43,7 +43,12 @@ from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 import gmlx.gen.prefill_decay as _prefill_decay
 from gmlx.cache.kv_append import depends_keys
-from gmlx.cache.kv_cache import ArraysCache, CacheList, RotatingKVCache
+from gmlx.cache.kv_cache import (
+    MTP_UNDO_WIDTH,
+    ArraysCache,
+    CacheList,
+    RotatingKVCache,
+)
 from gmlx.cache.window_sdpa import _HD_OK, _MIN_ROWS, _kq_window_kernel
 from gmlx.envflags import env_bool
 from gmlx.models.deepseek_v4.cache import (
@@ -1146,6 +1151,14 @@ def split_cache(cache):
 # MoE
 
 
+def _fused_pairs(args) -> int:
+    """The (row, expert) pair count from which a call leaves the decode
+    kernels for the sorted route. The decode kernels are faster up to the
+    widest MTP verify, which at 16 experts a token passes the 64 pairs
+    other models switch at."""
+    return max(64, int(args.num_experts_per_tok) * MTP_UNDO_WIDTH + 1)
+
+
 class HyV4FlashMoEGate(nn.Module):
     """Sigmoid router over the full-width input: the correction bias steers
     selection only, weights are the unbiased scores, renormalized then
@@ -1161,6 +1174,7 @@ class HyV4FlashMoEGate(nn.Module):
             (args.n_routed_experts, args.hidden_size), dtype=mx.float32)
         self.e_score_correction_bias = mx.zeros(
             (args.n_routed_experts,), dtype=mx.float32)
+        self._fused_pairs = _fused_pairs(args)
 
     def __call__(self, x: mx.array):
         if not self.training and row_kernels.router_eligible(x, self.weight):
@@ -1170,7 +1184,8 @@ class HyV4FlashMoEGate(nn.Module):
         t = logits.size // self.n_routed_experts
         kernel = _kq_router_kernel()
         # The kernel has no backward and no CPU form.
-        if (kernel is not None and t * self.top_k < 64 and not self.training
+        if (kernel is not None and t * self.top_k < self._fused_pairs
+                and not self.training
                 and mx.default_device().type == mx.DeviceType.gpu
                 and env_bool("GMLX_HY4_KQ_ROUTER", True)):
             # A decode step: score, pick, renormalize and scale in one
@@ -1217,6 +1232,8 @@ class HyV4FlashMoE(nn.Module):
         )
         self.shared_experts = HyV4MLP(
             args, args.moe_intermediate_size * args.n_shared_experts)
+        # Read by the fused class the loader installs on the experts.
+        self.switch_mlp._kq_fused_pairs = _fused_pairs(args)
 
     def __call__(self, x: mx.array) -> mx.array:
         inds, scores = self.gate(x)
