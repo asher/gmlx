@@ -59,6 +59,8 @@ is already running does not see a variable you export later.
 | `GMLX_NEM_MTP_BLOCK=N` | Block of a Nemotron-H native head, drafts plus one: 8 on Nemotron 3.5 Transcribe, 3 on the others. `--draft-block-size` cannot go deeper. |
 | `GMLX_Q4_MTP_LADDER` | Drafts per Flash-Next round by the confidence in the first, as `conf:drafts` steps under the block size. Default `0.9:5,0.5:3,0:1`; `0` drafts a fixed three. |
 | `GMLX_Q4_MTP_STREAK_CAP=N` | After a Qwen3.8-Flash-Next round where the model rejected a draft, draft at most N tokens. The default is 3, and `0` lifts the cap. |
+| `GMLX_HY4_MTP_LADDER` | Drafts per Hy4-flash round by the confidence in the first, as `conf:drafts` steps; a step of 0 drafts runs a plain step. Default `0`: a fixed two drafts. |
+| `GMLX_HY4_MTP_STREAK_CAP=N` | With a Hy4-flash ladder, draft at most N tokens after a round where the model rejected a draft. Default `0`: no cap. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |
 | `GMLX_MTP_MIXED` | `1` runs a batch past the width cap as a [mixed batch](speculative-batching.md#mixed-batches), `auto` does except on MoE targets. Default `0`, plain decode. |

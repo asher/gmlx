@@ -1433,6 +1433,8 @@ def _owned_decode_rounds(
                 # must see the actual width or rejection math trims valid
                 # tokens from the cache.
                 bs = int(draft_tokens.shape[1]) + 1
+                # A drafter that returns no draft has gated the round itself.
+                gated = bs == 1
                 # Round gate. The verify graph is built while the GPU runs the
                 # draft, over a snapshot of the cache state, so a gated round
                 # drops the graph unevaluated and restores the cache. A stack
@@ -1441,7 +1443,8 @@ def _owned_decode_rounds(
                 threshold = (gate_cost.threshold() if gate_cost is not None
                              else _ROUND_GATE)
                 estimate = (getattr(drafter, "round_estimate", None)
-                            if threshold > 0 and not copied else None)
+                            if threshold > 0 and not copied and not gated
+                            else None)
                 if estimate is not None:
                     mx.async_eval(estimate)
                     snap = _cache_snapshot(prompt_cache)

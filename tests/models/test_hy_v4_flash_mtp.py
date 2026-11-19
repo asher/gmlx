@@ -274,6 +274,111 @@ def test_the_accept_finds_the_block_s_cache_without_its_draft_steps(
     assert mx.array_equal(deep[3], shallow[3]).item()
 
 
+LADDER = "0.9:5,0.5:3,0:1"
+LADDER_PLAIN = "0.9:5,0.5:2,0:0"
+
+
+def test_the_draft_ladder_sets_the_round_length(monkeypatch):
+    """The first draft's confidence picks the draft count from the ladder,
+    the streak cap trims it after a round the target cut short, and a
+    shorter round is the fixed block cut short."""
+    lm = _lm()
+    target = _target(lm)
+    vocab, width = lm.args.vocab_size, lm.args.hidden_size
+    mx.random.seed(2)
+    prompt = mx.random.randint(0, vocab, (1, 41)).astype(mx.int32)
+    states = mx.random.normal((1, 41, width))
+
+    def drafted(ladder, conf=None, last_round=(), streak_cap="0"):
+        monkeypatch.setenv("GMLX_HY4_MTP_LADDER", ladder)
+        monkeypatch.setenv("GMLX_HY4_MTP_STREAK_CAP", streak_cap)
+        drafter = _drafter(lm.args)
+        drafter.reset(target)
+        drafter.prefill_from_target_hidden(
+            prompt, states, 3, None, greedy=True)
+        assert (drafter._seed_conf is not None) == bool(drafter._ladder)
+        if conf is not None:
+            drafter._seed_conf = mx.array([conf], dtype=mx.float32)
+        drafter._last_round = last_round
+        draft = drafter.draft_block(
+            3, states[:, -1:], None, MTP_UNDO_WIDTH, None, greedy=True)
+        mx.eval(draft)
+        return drafter, draft
+
+    drafter, fixed = drafted("0")
+    assert fixed.shape == (1, MTP_UNDO_WIDTH - 1)
+    assert drafter.config.block_size == 3
+    drafter, sure = drafted(LADDER, conf=0.95)
+    assert drafter._ladder == ((0.9, 5), (0.5, 3), (0.0, 1))
+    # The ladder's deepest step is the block a round asks for.
+    assert drafter.config.block_size == MTP_UNDO_WIDTH
+    assert mx.array_equal(sure, fixed).item()
+    _, mid = drafted(LADDER, conf=0.7)
+    assert mx.array_equal(mid, fixed[:, :3]).item()
+    drafter, doubt = drafted(LADDER, conf=0.2)
+    assert mx.array_equal(doubt, fixed[:, :1]).item()
+    assert drafter._round_mark is None
+    # A step of 0 drafts hands the round to the engine as a plain step.
+    drafter, none = drafted(LADDER_PLAIN, conf=0.2)
+    assert none.shape == (1, 0) and drafter._seed_token is None
+    _, some = drafted(LADDER_PLAIN, conf=0.7)
+    assert mx.array_equal(some, fixed[:, :2]).item()
+    # The confidence is the first draft's argmax probability.
+    drafter, _ = drafted(LADDER)
+    assert drafter._seed_conf is None
+    drafter.prefill_from_target_hidden(prompt, states, 3, None, greedy=True)
+    conf = float(drafter._seed_conf[0].item())
+    assert 1.0 / vocab <= conf <= 1.0
+    # After a round the target cut short, the cap holds the long step back.
+    _, capped = drafted(LADDER, conf=0.95, last_round=(5, 1), streak_cap="3")
+    assert capped.shape == (1, 3)
+    _, held = drafted(LADDER, conf=0.95, last_round=(5, 5), streak_cap="3")
+    assert held.shape == (1, 5)
+    # A value that does not parse drafts the fixed block.
+    drafter, _ = drafted("0.9;5")
+    assert drafter._ladder == ()
+
+
+class _LadderOracle(_OracleDrafter):
+    """The oracle with a first-draft confidence that walks the ladder's
+    steps, so the rounds of one decode differ in length."""
+
+    def _set_seed(self, h_prenorm, sampler, greedy):
+        super()._set_seed(h_prenorm, sampler, greedy)
+        self._n_seeds = getattr(self, "_n_seeds", 0) + 1
+        conf = (0.95, 0.7, 0.2)[self._n_seeds % 3]
+        self._seed_conf = mx.array([conf], dtype=mx.float32)
+
+
+@pytest.mark.parametrize("ladder", [LADDER, LADDER_PLAIN])
+@pytest.mark.parametrize("miss", [(), (2, 3, 8, 12, 17, 21)])
+def test_greedy_mtp_decode_gives_the_plain_tokens_on_the_draft_ladder(
+        monkeypatch, miss, ladder):
+    monkeypatch.setenv("GMLX_HY4_MTP_LADDER", ladder)
+    monkeypatch.setenv("GMLX_HY4_MTP_STREAK_CAP", "3")
+    lm = _lm(seed=5)
+    prompt = _prompt(lm)
+    ref, _ = _greedy_reference(lm, prompt, N_GEN)
+    oracle = _drafter(lm.args, cls=_LadderOracle)
+    oracle._script = ref
+    oracle._miss = frozenset(miss)
+    spec = _spec_decode(
+        _target(lm), lm, oracle, prompt, N_GEN, oracle.config.block_size)
+
+    assert spec == ref
+    # Rounds at each step of the ladder, each kept as far as the script
+    # holds. A plain step is counted apart from the drafted rounds.
+    if ladder == LADDER:
+        assert {1, 3, 5} <= set(oracle.draft_lens)
+    else:
+        assert {2, 5} <= set(oracle.draft_lens)
+        assert 0 not in oracle.draft_lens and oracle.gated_rounds > 0
+    if not miss:
+        assert sum(a == d for a, d in zip(
+            oracle.accept_lens, oracle.draft_lens)) >= len(
+                oracle.draft_lens) - 1
+
+
 def test_a_verify_block_at_16_experts_a_token_keeps_the_decode_expert_route():
     """The released file routes 16 experts a token, so a verify of 4 rows
     is 64 (row, expert) pairs, where the expert kernels of other models

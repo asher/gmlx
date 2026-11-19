@@ -28,6 +28,7 @@ target's own tokens.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, replace
 from typing import Any, List, Optional
 
@@ -42,9 +43,54 @@ from gmlx.cache.kv_cache import (
     CacheList,
     set_undo_armed,
 )
+from gmlx.envflags import env_int
 from gmlx.models.deepseek_v4.cache import DS4PoolingCache
 from gmlx.spec.drafter_protocol import native_block_size
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
+
+
+# Draft length policy. A round drafts as many tokens as the block is sure
+# of: the count follows the first draft's argmax probability, which the
+# engine evaluates with that draft, so the read waits on nothing.
+# GMLX_HY4_MTP_LADDER lists "conf:drafts" steps, and the highest step the
+# first draft reaches gives the count, under the block size. A step of 0
+# drafts runs the round as one plain target step, which costs less than a
+# verify of a draft the target is likely to refuse. After a round the
+# target cut short the count is at most GMLX_HY4_MTP_STREAK_CAP (0 lifts
+# the cap). "0" drafts the fixed block every round.
+DRAFT_LADDER_DEFAULT = "0"
+STREAK_CAP_DEFAULT = 0
+# Two drafts a round: on sampled chat the second draft pays for its verify
+# row and the third does not.
+BLOCK_FIXED = 3
+
+
+def draft_ladder() -> tuple:
+    """((conf, drafts), ...) highest conf first; () for the fixed block."""
+    spec = os.environ.get("GMLX_HY4_MTP_LADDER", DRAFT_LADDER_DEFAULT).strip()
+    if not spec or spec == "0":
+        return ()
+    try:
+        return _parse_ladder(spec)
+    except ValueError:  # a malformed value keeps the default, like env_int
+        return ()
+
+
+def _parse_ladder(spec: str) -> tuple:
+    steps = []
+    for part in spec.split(","):
+        conf, drafts = part.split(":")
+        steps.append((float(conf), max(0, int(drafts))))
+    return tuple(sorted(steps, reverse=True))
+
+
+def default_block_size() -> int:
+    """The block total (drafts and the bonus token) a round requests."""
+    ladder = draft_ladder()
+    if not ladder:
+        return BLOCK_FIXED
+    return min(MTP_UNDO_WIDTH,
+               max(BLOCK_FIXED, 1 + max(d for _, d in ladder)))
 
 
 @dataclass
@@ -54,7 +100,7 @@ class HyV4FlashMTPConfig:
     deepest block a round can verify and undo."""
 
     text_config: Any
-    block_size: int = 2
+    block_size: int = field(default_factory=default_block_size)
     native_block_size: int = MTP_UNDO_WIDTH
 
 
@@ -284,6 +330,11 @@ class HyV4FlashMTPDrafter(QwenMTPDrafter):
         self._cache: List[Any] = []
         self._seed_token: Optional[mx.array] = None
         self._seed_hidden: Optional[mx.array] = None
+        self._seed_conf: Optional[mx.array] = None
+        self._ladder = draft_ladder()
+        self._streak_cap = max(
+            0, env_int("GMLX_HY4_MTP_STREAK_CAP", STREAK_CAP_DEFAULT))
+        self._last_round: tuple = ()
         self._round_appended = 0
         # The image pad token's id where the target is the vision
         # container, which spells an image slot as an id past the vocab.
@@ -351,20 +402,74 @@ class HyV4FlashMTPDrafter(QwenMTPDrafter):
             else:
                 leaf.trim(leaf.offset - mark[1])
 
+    def reset(self, target_model, left_padding=None):
+        self._seed_conf = None
+        self._last_round = ()
+        return super().reset(target_model, left_padding)
+
+    def _set_seed(self, h_prenorm: mx.array, sampler, greedy: bool) -> None:
+        logits = self._logits(h_prenorm)
+        self._seed_token = self._pick(logits, sampler, greedy)
+        self._seed_hidden = self._next_hidden(h_prenorm)
+        if self._ladder:
+            lp = logits.astype(mx.float32)
+            lp = lp - mx.logsumexp(lp, axis=-1, keepdims=True)
+            self._seed_conf = mx.exp(lp.max(axis=-1)).reshape(-1)
+        else:
+            self._seed_conf = None
+
+    def draft_eval_state(self) -> list:
+        # The confidence shares the seed's graph, so the engine's async
+        # eval of the seed covers it.
+        state = super().draft_eval_state()
+        if self._seed_conf is not None:
+            state.append(self._seed_conf)
+        return state
+
+    def _draft_count(self, conf: mx.array, block_size: int) -> int:
+        """Drafts this round, the seed included, at most block_size - 1.
+        0 where the ladder asks for a plain step."""
+        n = block_size - 1
+        c = float(conf[0].item())
+        for step_conf, drafts in self._ladder:
+            if c >= step_conf:
+                n = min(n, drafts)
+                break
+        if self._streak_cap and self._last_round:
+            drafted, accepted = self._last_round
+            if accepted < drafted:
+                n = min(n, self._streak_cap)
+        return max(0, n)
+
     def draft_block(self, last_bonus, hidden, cache, block_size, *args,
                     **kwargs) -> mx.array:
+        block_size = int(block_size)
+        conf, self._seed_conf = self._seed_conf, None
+        if self._ladder and conf is not None and self._seed_token is not None:
+            block_size = 1 + self._draft_count(conf, block_size)
+            if block_size == 1:
+                # No draft: the engine runs a plain step, and the accept
+                # seeds the next round from its hidden.
+                self._seed_token = self._seed_hidden = None
+                self._round_mark, self._round_appended = None, 0
+                dtype = kwargs.get("token_dtype", args[1] if len(args) > 1
+                                   else mx.int32)
+                return mx.zeros((1, 0), dtype=dtype)
         # Each draft past the first appends an update of its own, and the
         # pool's undo log holds one. The accept rewinds to this mark.
-        self._round_mark = self._mark() if int(block_size) > 2 else None
+        self._round_mark = self._mark() if block_size > 2 else None
         return super().draft_block(
             last_bonus, hidden, cache, block_size, *args, **kwargs)
 
-    def accept_verified_tokens(self, *args, **kwargs) -> None:
+    def accept_verified_tokens(self, verify_hidden, draft_tokens, accepted,
+                               *args, **kwargs) -> None:
+        self._last_round = (int(draft_tokens.shape[1]), int(accepted))
         mark, self._round_mark = self._round_mark, None
         if mark is not None and self._round_appended > 0:
             self._rewind(mark)
             self._round_appended = 0
-        super().accept_verified_tokens(*args, **kwargs)
+        super().accept_verified_tokens(
+            verify_hidden, draft_tokens, accepted, *args, **kwargs)
 
     def make_cache(self, left_padding: Optional[List[int]] = None) -> List[Any]:
         if left_padding is not None:

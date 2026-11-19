@@ -331,7 +331,9 @@ def _load_mtp_drafter(
         )
         log(
             f"[mtp] drafter: HyV4FlashMTPDrafter layer_idx={first_mtp_block} "
-            f"block_size={drafter.config.block_size}"
+            f"block_size={drafter.config.block_size} "
+            f"ladder={','.join(f'{c:g}:{d}' for c, d in drafter._ladder) or 'off'} "
+            f"streak_cap={drafter._streak_cap}"
         )
     elif model_type == "nemotron_h":
         from gmlx.models.nemotron_h.model import ModelArgs
