@@ -1048,6 +1048,10 @@ class HyV4FlashAttention(nn.Module):
                 q_pe = rope_at(q_pe, pos.rows, self.rope_theta)
                 k_pe = rope_at(k_pe, pos.rows, self.rope_theta)
             kv = mx.concatenate([latent, k_pe], axis=-1)
+            if kv.dtype != q_nope.dtype:
+                # A float32 graph: kq's matmuls hand back 16-bit rows, so
+                # the attention runs at their width.
+                kv = kv.astype(q_nope.dtype)
         # Row 0 of the fetched rows is position ``base``: 0 for a cache
         # that keeps every key, the window's first key for one that rolls.
         base = 0
