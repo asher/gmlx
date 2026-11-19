@@ -3362,6 +3362,13 @@ def _umbrella_impl(argv: list[str] | None = None) -> int:
     # transformers advises that PyTorch is missing on import - it is missing by
     # design here (all numerics run on MLX), so the advisory is pure noise.
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    # Where torch is installed, transformers imports torch.distributed, which
+    # logs a note about stream redirects on every macOS import.
+    import logging
+
+    logging.getLogger(
+        "torch.distributed.elastic.multiprocessing.redirects").setLevel(
+            logging.ERROR)
     # Set when this process was exec'd through the renamed stub (procname.py);
     # getpath already consumed it, and it must not leak into children that run
     # their own Python (MCP tool servers via uvx/npx, ...).

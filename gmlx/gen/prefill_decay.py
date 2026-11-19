@@ -569,12 +569,20 @@ def _body_cap_bytes() -> float:
     return cap
 
 
+def widest_heads(n):
+    """A head count as a config states it: a per-layer list counts its
+    widest layer."""
+    if isinstance(n, (list, tuple)):
+        return max((int(h) for h in n), default=0)
+    return n
+
+
 def score_heads(obj) -> int:
     """Attention head count that sizes the [heads, step, S] score transient.
     Accepts a model or a config; falls back conservatively."""
     cfg = getattr(obj, "config", obj)
     for c in (cfg, getattr(cfg, "text_config", None)):
-        n = getattr(c, "num_attention_heads", None)
+        n = widest_heads(getattr(c, "num_attention_heads", None))
         if n:
             return int(n)
     return 32

@@ -139,3 +139,54 @@ def test_other_stream_counts_take_the_ops_path():
 def test_a_width_the_float4_loads_cannot_cover_is_declined():
     x = mx.zeros((1, 2, HC, 12), dtype=mx.bfloat16)
     assert not ihc_kernels.eligible(x, HC)
+
+
+@pytest.mark.parametrize("length", [1, 37])
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+def test_expand_and_collapse_in_one_dispatch_give_the_two_kernels_bits(
+        hc_and_norm, length, dtype):
+    hc, norm = hc_and_norm
+    resid = mx.random.normal((2, length, HC, D)).astype(dtype)
+    y = mx.random.normal((2, length, D)).astype(dtype)
+    post = mx.random.uniform(0.0, 2.0, (2, length, HC))
+    if not ihc_kernels.eligible(resid, HC):
+        pytest.skip("no Metal device")
+    h = hc.expand(y, resid, post)
+    x, post_next = hc.pre_norm(h, norm)
+    got = hc.expand_pre_norm(y, resid, post, norm)
+    for a, b in zip(got, (h, x, post_next)):
+        assert a.dtype == b.dtype and a.shape == b.shape
+        assert mx.array_equal(a, b).item()
+
+
+@pytest.mark.parametrize("length", [1, 4, 8])
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+def test_a_few_rows_staged_match_the_one_dispatch_form(
+        monkeypatch, hc_and_norm, length, dtype):
+    """Up to 8 rows run as three dispatches spread over threadgroups. The
+    streams keep their bits; the collapse and the gates part from the
+    one-dispatch form by the order of their sums alone."""
+    hc, norm = hc_and_norm
+    resid = (mx.random.normal((1, length, HC, D)) * 0.5).astype(dtype)
+    y = (mx.random.normal((1, length, D)) * 0.5).astype(dtype)
+    post = mx.random.uniform(0.0, 2.0, (1, length, HC))
+    mx.eval(resid, y, post)
+    if not ihc_kernels.eligible(resid, HC):
+        pytest.skip("no Metal device")
+    assert ihc_kernels._staged(1, length, HC, D)
+    assert not ihc_kernels._staged(1, 9, HC, D)
+    staged = hc.expand_pre_norm(y, resid, post, norm)
+    mx.eval(*staged)
+    monkeypatch.setenv("GMLX_HY4_IHC_STAGED", "0")
+    assert not ihc_kernels._staged(1, length, HC, D)
+    single = hc.expand_pre_norm(y, resid, post, norm)
+    mx.eval(*single)
+
+    assert mx.array_equal(staged[0], single[0]).item()
+    assert np.abs(np.array(staged[2]) - np.array(single[2])).max() < 1e-5
+    ref_c, ref_p = _reference(
+        single[0], hc.fn, hc.base, hc.scale, norm.weight)
+    s_err = np.abs(np.array(staged[1].astype(mx.float32)) - ref_c).max()
+    o_err = np.abs(np.array(single[1].astype(mx.float32)) - ref_c).max()
+    assert s_err <= o_err * 1.25 + 1e-4, (s_err, o_err)
+    assert np.abs(np.array(staged[2]) - ref_p).max() < 1e-5

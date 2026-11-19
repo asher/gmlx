@@ -37,6 +37,7 @@ a model ends up with.
 | `hunyuan` | `hunyuan-moe` | temperature=0.7 top_p=0.8 top_k=20 repetition_penalty=1.05 | - |
 | `hy3` | `hy_v3` | temperature=0.9 thinking_start_token=&lt;think:opensource&gt; thinking_end_token=&lt;/think:opensource&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low |
 | `hy4` | `hyv4` | temperature=0.9 top_p=1.0 thinking_start_token=&lt;think:6124c78e&gt; thinking_end_token=&lt;/think:6124c78e&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low |
+| `hy4-flash` | `hy_v4_flash` | temperature=0.9 top_p=1.0 thinking_start_token=&lt;think:6124c78e&gt; thinking_end_token=&lt;/think:6124c78e&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-max`: reasoning_effort=max |
 | `kimi` | `kimi-k3` | temperature=1.0 top_p=0.95 thinking_start_token=&lt;\|open\|&gt;think&lt;\|sep\|&gt; thinking_end_token=&lt;\|close\|&gt;think&lt;\|sep\|&gt; | `@reasoning-high`: thinking_effort=high; `@reasoning-low`: thinking_effort=low; `@reasoning-max`: thinking_effort=max |
 | `kimi-k2` | `deepseek2 named (?i)\bkimi` | temperature=1.0 top_p=0.95 | - |
 | `muse` | `muse-glimmer` | temperature=1.0 top_p=0.95 top_k=64 thinking_start_token=&lt;\|start\|&gt;assistant to=self&lt;\|message\|&gt; thinking_end_token=&lt;\|eom\|&gt; | `@reasoning-high`: reasoning_strength=high; `@reasoning-low`: reasoning_strength=low; `@reasoning-medium`: reasoning_strength=medium; `@reasoning-xhigh`: reasoning_strength=xhigh |

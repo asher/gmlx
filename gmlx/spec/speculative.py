@@ -1433,6 +1433,8 @@ def _owned_decode_rounds(
                 # must see the actual width or rejection math trims valid
                 # tokens from the cache.
                 bs = int(draft_tokens.shape[1]) + 1
+                # A drafter that returns no draft has gated the round itself.
+                gated = bs == 1
                 # Round gate. The verify graph is built while the GPU runs the
                 # draft, over a snapshot of the cache state, so a gated round
                 # drops the graph unevaluated and restores the cache. A stack
@@ -1441,7 +1443,8 @@ def _owned_decode_rounds(
                 threshold = (gate_cost.threshold() if gate_cost is not None
                              else _ROUND_GATE)
                 estimate = (getattr(drafter, "round_estimate", None)
-                            if threshold > 0 and not copied else None)
+                            if threshold > 0 and not copied and not gated
+                            else None)
                 if estimate is not None:
                     mx.async_eval(estimate)
                     snap = _cache_snapshot(prompt_cache)
@@ -1775,10 +1778,14 @@ def stream_speculative(
             seed_kv = None
     seed_active = seed_kv is not None
     i = 0
+    from gmlx.stream.table_readahead import plan_rows_ahead
+
     with mx.stream(generation_stream):
         while i < body:
             take = min(prefill_chunk, body - i)
             last = (i + take >= n)
+            plan_rows_ahead(lm, prompt[:, i:], take, prefill_chunk,
+                            keep=n - body)
             rows = {}
             if prompt_rows is not None:
                 rows = {"inputs_embeds": prompt_rows[:, :take]}

@@ -11,14 +11,19 @@ from the GGUF instead, which is what the reference runtime does too.
 The rows a step needs are tiny next to the table: 24 rows of 264 bytes
 per token per engram table. Rows stored in a GGUF quant decode through
 ``kq.dequantize``, float rows by their bytes' dtype. MXFP8 rows (one E8M0 scale byte, then 32 E4M3 values,
-per block) decode through the engram codec's lookup tables, so reading
-them needs no kquant codec. Reads bypass the page cache and round out to
+per block) and F8_E4M3 rows (one E4M3 byte per value) decode through the
+engram codec's lookup tables, so reading them needs no kquant codec. Reads bypass the page cache and round out to
 page boundaries, per the ``decode_feeder`` rules, since a 264-byte row
 is never page-aligned and an unaligned F_NOCACHE read can wedge in the
 kernel. The cost is one host sync per gather, to read the row ids.
 
+With an mlx-kquant that has ``file_rows``, a byte-row table reads through
+it instead: the same reads as a node on the table stream, which start
+when the row ids are ready, so a decode loop builds its next step while
+the GPU runs. ``GMLX_TABLE_LAZY=0`` keeps the host read.
+
 An MXFP8 table is read the same way at any size when mlx-kquant has no
-mxfp8 codec to hold it as an array.
+mxfp8 codec to hold it as an array, and an F8_E4M3 table always is.
 
 ``GMLX_TABLE_MAX_BUFFER`` overrides the ceiling (bytes), for tests.
 ``GMLX_TABLE_PREAD_WORKERS`` sets the reader thread count.
@@ -80,6 +85,8 @@ class TableSource:
     gathers: int = field(default=0, repr=False)
     gathered_rows: int = field(default=0, repr=False)
     gather_seconds: float = field(default=0.0, repr=False)
+    # Rows a call took from the read started a chunk ahead of it.
+    ahead_rows: int = field(default=0, repr=False)
 
     @property
     def nbytes(self) -> int:
@@ -238,6 +245,7 @@ def no_array_holds(nbytes: int, type_name: str, cap: int | None) -> bool:
     ``type_name``: past the device ceiling ``cap``, or MXFP8 when
     mlx-kquant cannot hold it."""
     return ((cap is not None and nbytes > cap)
+            or type_name == "F8_E4M3"
             or (type_name == "MXFP8" and not _kq_has("mxfp8")))
 
 
@@ -310,7 +318,8 @@ def _row_codec(type_name: str) -> str | None:
 
 
 def _check_codec(name: str, src: TableSource) -> None:
-    if src.codec is None or src.codec == "mxfp8" or src.codec in _FLOAT_ROWS:
+    if (src.codec is None or src.codec in ("mxfp8", "f8_e4m3")
+            or src.codec in _FLOAT_ROWS):
         return
     if not _kq_has(src.codec):
         raise RuntimeError(
@@ -327,6 +336,7 @@ def _kq_has(codec: str) -> bool:
 _FLOAT_ROWS = {"f32": mx.float32, "f16": mx.float16, "bf16": mx.bfloat16}
 
 _MXFP8_LUTS: tuple | None = None
+_E4M3_LUT: mx.array | None = None
 
 
 def _decode_mxfp8(raw: mx.array, dims: int) -> mx.array:
@@ -343,12 +353,23 @@ def _decode_mxfp8(raw: mx.array, dims: int) -> mx.array:
     return out.reshape(*raw.shape[:-1], dims)
 
 
+def _decode_f8_e4m3(raw: mx.array) -> mx.array:
+    global _E4M3_LUT
+    if _E4M3_LUT is None:
+        from gmlx.models.deepseek_v41.engram_codec import tables
+
+        _E4M3_LUT = mx.array(tables()[0])
+    return _E4M3_LUT[raw.astype(mx.int32)]
+
+
 def _decode_rows(raw: mx.array, src: TableSource) -> mx.array:
     """``[..., row_bytes]`` uint8 rows to ``[..., dims]`` values. K-quant
     scales live in the row bytes; the scales input is the same 1-byte
     placeholder ``KQuantEmbedding`` passes."""
     if src.codec == "mxfp8":
         out = _decode_mxfp8(raw, src.dims)
+    elif src.codec == "f8_e4m3":
+        out = _decode_f8_e4m3(raw)
     elif src.codec in _FLOAT_ROWS:
         out = raw.view(_FLOAT_ROWS[src.codec])
     else:
@@ -357,6 +378,35 @@ def _decode_rows(raw: mx.array, src: TableSource) -> mx.array:
         out = kq.dequantize(raw.reshape(-1, src.row_bytes),
                             mx.zeros((1,), dtype=mx.uint8), src.codec)
     return out.reshape(*raw.shape[:-1], src.dims).astype(src.out_dtype)
+
+
+def _lazy_rows(src: TableSource) -> bool:
+    """Whether ``src`` reads through ``kq.file_rows``: the op is there,
+    and the rows decode without a codec input the load skipped."""
+    import mlx_kquant as kq
+    from gmlx.envflags import env_bool
+
+    return (hasattr(kq, "file_rows") and env_bool("GMLX_TABLE_LAZY", True)
+            and (src.codec is None or src.codec in ("mxfp8", "f8_e4m3")
+                 or src.codec in _FLOAT_ROWS))
+
+
+# kq.file_rows returns zeros for a row it cannot read and counts it; the
+# count as of the last check.
+_FAILURES_SEEN = 0
+
+
+def _check_lazy_reads(src: TableSource) -> None:
+    global _FAILURES_SEEN
+    import mlx_kquant as kq
+
+    n = kq.file_rows_failures()
+    if n != _FAILURES_SEEN:
+        bad, _FAILURES_SEEN = n - _FAILURES_SEEN, n
+        raise OSError(
+            f"{bad} table rows could not be read from "
+            f"{os.path.basename(src.path)} (row id out of range or a "
+            "failed read); the output since the last check is not valid")
 
 
 _PREAD_CACHE: dict[type, type] = {}
@@ -379,12 +429,104 @@ def _pread_class(cls):
             the input tokens, so a forward can issue every table's read
             before its first layer runs."""
             src = self._kq_table_source
+            if _lazy_rows(src):
+                return
             mx.eval(x)
             ids = np.asarray(x, dtype=np.int64).reshape(-1)
             self._kq_ahead = (ids, src.read_ahead(ids))
 
+        def _lazy_read(self, x):
+            """The raw rows of ``x``, a ``kq.file_rows`` node."""
+            import mlx_kquant as kq
+
+            from .table_stream import table_stream
+
+            src = self._kq_table_source
+            # A failed read shows up one call late: the reads of this
+            # call have not run yet.
+            _check_lazy_reads(src)
+            if src._closed:
+                raise RuntimeError(
+                    f"table source {os.path.basename(src.path)} is closed")
+            out = kq.file_rows(x, src.path, src.offset, src.row_bytes,
+                               src.rows, stream=table_stream())
+            src.gathers += 1
+            src.gathered_rows += int(x.size)
+            return out
+
+        def _lazy_decode(self, raw):
+            src = self._kq_table_source
+            if src.codec is not None:
+                return _decode_rows(raw, src)
+            decode = getattr(self, "decode_gathered", None)
+            return raw if decode is None else decode(raw)
+
+        def rows_by_slot(self, x):
+            """The rows of ``x`` [B, L, slots, cols] as one read per slot,
+            a list in slot order of [B, L, cols, dims], or None when the
+            rows are not read lazily.
+
+            For a model that reads slot by slot, layers apart. Each read
+            is started here, so the reads run one after another from the
+            moment the ids exist, under the layers ahead of their
+            readers, and a reader waits for its own slot only. Left to
+            the evaluation of the model's graph, a read is issued when
+            the encoder reaches its reader, and the GPU idles through
+            it."""
+            src = self._kq_table_source
+            if not _lazy_rows(src):
+                return None
+            raws = self._held_rows(x)
+            if raws is None:
+                raws = self._start_slots(x)
+            return [self._lazy_decode(raw)[:, :, 0] for raw in raws]
+
+        def _start_slots(self, x):
+            """One read per slot of ``x``, each started, as raw rows."""
+            from .table_stream import table_stream
+
+            # Split on the table's stream: the ids cross from the GPU once.
+            parts = mx.split(x, x.shape[2], axis=2, stream=table_stream())
+            raws = []
+            for part in parts:
+                raw = self._lazy_read(part)
+                # One evaluation per slot: its readers wait on it alone.
+                mx.async_eval(raw)
+                raws.append(raw)
+            return raws
+
+        def hold_ahead(self, x) -> None:
+            """Start the reads of ``x`` [B, L, slots, cols], the rows of
+            a call still to come, and hold them for the ``rows_by_slot``
+            whose ids open ``x``. Called after the reads of the call in
+            hand, which run first. One set is held, and the next
+            ``rows_by_slot`` takes or drops it."""
+            if _lazy_rows(self._kq_table_source):
+                object.__setattr__(
+                    self, "_kq_rows_ahead", (x, self._start_slots(x)))
+
+        def _held_rows(self, x):
+            """The raw rows held for ``x``, by slot, or None when none
+            are held or they are the rows of other ids."""
+            held = self.__dict__.pop("_kq_rows_ahead", None)
+            if held is None:
+                return None
+            ids, raws = held
+            n = x.shape[1]
+            if (x.ndim != ids.ndim or x.dtype != ids.dtype
+                    or x.shape[0] != ids.shape[0] or n > ids.shape[1]
+                    or x.shape[2:] != ids.shape[2:]):
+                return None
+            whole = n == ids.shape[1]
+            if not mx.array_equal(x, ids if whole else ids[:, :n]).item():
+                return None
+            self._kq_table_source.ahead_rows += int(x.size)
+            return raws if whole else [raw[:, :n] for raw in raws]
+
         def __call__(self, x):
             src = self._kq_table_source
+            if _lazy_rows(src):
+                return self._lazy_decode(self._lazy_read(x))
             mx.eval(x)
             ids = np.asarray(x, dtype=np.int64).reshape(-1)
             ahead = getattr(self, "_kq_ahead", None)
@@ -427,11 +569,13 @@ def _pread_class(cls):
 
 
 def gather_stats(model) -> dict:
-    """Row-gather totals over every file-backed table on ``model``. The
-    tables run one after another in a forward, so the walls add up."""
+    """Row-gather totals over every file-backed table on ``model``:
+    reads, rows read, and of those the rows a call found read a chunk
+    ahead. The tables run one after another in a forward, so the walls
+    add up."""
     from .table_stream import streamable_tables_for
 
-    out = {"tables": 0, "gathers": 0, "rows": 0, "seconds": 0.0}
+    out = {"tables": 0, "gathers": 0, "rows": 0, "ahead": 0, "seconds": 0.0}
     for _, mod in streamable_tables_for(model):
         src = getattr(mod, "_kq_table_source", None)
         if src is None:
@@ -439,6 +583,7 @@ def gather_stats(model) -> dict:
         out["tables"] += 1
         out["gathers"] += src.gathers
         out["rows"] += src.gathered_rows
+        out["ahead"] += src.ahead_rows
         out["seconds"] += src.gather_seconds
     return out
 

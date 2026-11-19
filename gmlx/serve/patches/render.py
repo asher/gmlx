@@ -78,7 +78,7 @@ _IN_PLACE_IMAGES = frozenset((
     "kimi_k25", "deepseek_v4_vl", "deepseek_v41_vl", "muse_glimmer",
     "muse_spark", "glm5_next", "mistral3", "pixtral", "nemotron_h_omni",
     "minicpmv4_6", "minicpmv4_7", "minimax_m3_vision", "lfm3_omni",
-    "lfm3_vl",
+    "lfm3_vl", "hy_v4_flash_vl",
 ))
 # The model types whose chat template renders a video item where the
 # content list holds it, and whose processor expands the video markers of

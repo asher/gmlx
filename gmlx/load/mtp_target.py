@@ -67,6 +67,13 @@ _MTP_TARGET_HOOKS_BY_TYPE = {
         "speculative_argmax_from_hidden",
         "speculative_verify_hidden",
     ),
+    # HyV4FlashSpecLM (owned class): same lean set as deepseek_v4.
+    "hy_v4_flash": (
+        "rollback_speculative_cache",
+        "speculative_logits_from_hidden",
+        "speculative_argmax_from_hidden",
+        "speculative_verify_hidden",
+    ),
     # RicursiveSpecLM (owned class): same lean set as deepseek_v4.
     "ricursive": (
         "rollback_speculative_cache",
@@ -235,6 +242,16 @@ def _mtp_target_classes(
             return glm5_next_mtp.Glm5NextSpecLM(ModelArgs.from_dict(config))
 
         return glm5_next_mtp.Glm5NextSpecLM, build
+    if model_type == "hy_v4_flash":
+        import gmlx.models.hy_v4_flash.mtp as hy_v4_flash_mtp
+        from gmlx.models.hy_v4_flash.model import ModelArgs, ensure_registered
+
+        ensure_registered()
+
+        def build(config: dict) -> nn.Module:
+            return hy_v4_flash_mtp.HyV4FlashSpecLM(ModelArgs.from_dict(config))
+
+        return hy_v4_flash_mtp.HyV4FlashSpecLM, build
     if model_type == "ricursive":
         import gmlx.models.ricursive.mtp as ricursive_mtp
         from gmlx.models.ricursive.model import ModelArgs
@@ -270,6 +287,8 @@ _VLM_SPEC_MODEL_TYPE_ALIASES = {
     # The Bolt image container's language model is NemotronHSpecLM.
     "nemotron_h_omni": "nemotron_h",
     "nemotron_h_transcribe": "nemotron_h",
+    # The vision container's language model carries HyV4FlashSpecHooks.
+    "hy_v4_flash_vl": "hy_v4_flash",
 }
 
 

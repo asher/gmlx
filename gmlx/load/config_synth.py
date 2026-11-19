@@ -125,6 +125,10 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # 78 layers, sigmoid MoE with clamped routed experts, and 4-stream
     # independent hyper-connections. Vendored gmlx.models.hy_v4.
     "hyv4": "hy_v4",
+    # Hy4-flash (llama.cpp arch 'hy_v4_flash'): the HY4 skeleton as a hybrid
+    # sparse / sliding-window stack with a pooled indexer, latent-width
+    # routed experts and engram. Owned gmlx.models.hy_v4_flash.
+    "hy_v4_flash": "hy_v4_flash",
     # DeepSeek V4 Flash (dwarfstar/antirez GGUF; not a llama.cpp arch): single
     # shared KV latent + grouped low-rank output proj, per-layer local/
     # compressed/sparse-indexed attention (compress_ratios), hyper-connections,
@@ -4234,6 +4238,155 @@ def _synth_glm5next(meta, shapes, config: dict, arch: str) -> None:
         config["vocab_size"] = vocab
 
 
+# hy_v4_flash (Hy4-flash 512x71B)
+
+def _synth_hy_v4_flash(meta, shapes, config: dict) -> None:
+    """Synthesize a hy_v4_flash config from a 'hy_v4_flash'-arch GGUF.
+
+    The HY4 skeleton (absorbed MLA, sigmoid MoE behind a leading dense
+    block, 4-stream independent hyper-connections) with per-layer head
+    counts over a hybrid sparse / sliding-window stack, a pooled indexer on
+    the sparse layers, routed experts at a latent width and engram layers
+    that share one n-gram table. Universal fields cover hidden, the trunk
+    layer count (block_count less the MTP block), eps, the sparse layers'
+    rope_theta, ctx and vocab.
+    """
+    arch = "hy_v4_flash"
+    n_layer = config["num_hidden_layers"]
+    config.pop("head_dim", None)
+
+    def need_int(key):
+        return _require(_read_int(meta, f"{arch}.{key}"),
+                        arch=arch, gguf_field=f"{arch}.{key}")
+
+    def need_float(key):
+        return _require(_read_float(meta, f"{arch}.{key}"),
+                        arch=arch, gguf_field=f"{arch}.{key}")
+
+    def per_layer(key):
+        vals = _read_int_array(meta, f"{arch}.{key}")
+        if not vals or len(vals) < n_layer:
+            raise ValueError(
+                f"hy_v4_flash synth: {arch}.{key} has {len(vals or [])} "
+                f"entries, need {n_layer}.")
+        return vals[:n_layer]
+
+    heads = [int(v) for v in per_layer("attention.head_count")]
+    config["num_attention_heads"] = heads
+    # The draft block's entry follows the trunk's.
+    all_heads = _read_int_array(meta, f"{arch}.attention.head_count")
+    if config.get("mtp_num_hidden_layers") and len(all_heads) > n_layer:
+        config["mtp_num_attention_heads"] = int(all_heads[n_layer])
+    config["q_lora_rank"] = need_int("attention.q_lora_rank")
+    config["kv_lora_rank"] = need_int("attention.kv_lora_rank")
+    qk_rope = need_int("rope.dimension_count")
+    config["qk_rope_head_dim"] = qk_rope
+
+    # nope / value widths from the per-head tensor shapes. GGUF order:
+    #   attn_q_b: [q_lora, num_heads * (nope + rope)]
+    #   attn_v_b: [kv_lora, v_head_dim, num_heads]
+    q_b = shapes.get("blk.0.attn_q_b.weight")
+    v_b = shapes.get("blk.0.attn_v_b.weight")
+    if q_b is None or v_b is None:
+        raise ValueError(
+            "hy_v4_flash synth: need blk.0.attn_q_b.weight + "
+            "blk.0.attn_v_b.weight to derive the MLA head dims.")
+    config["qk_nope_head_dim"] = q_b[1] // heads[0] - qk_rope
+    config["v_head_dim"] = v_b[1]
+
+    config["sliding_window"] = need_int("attention.sliding_window")
+    config["sliding_window_pattern"] = [
+        bool(v) for v in per_layer("attention.sliding_window_pattern")]
+    config["rope_theta_swa"] = need_float("rope.freq_base_swa")
+
+    top_k = _read_int(meta, f"{arch}.attention.indexer.top_k")
+    if top_k:
+        config["index_topk"] = top_k
+        config["index_n_heads"] = need_int("attention.indexer.head_count")
+        config["index_head_dim"] = need_int("attention.indexer.key_length")
+        config["index_kpool"] = need_int("attention.indexer.kpool")
+        tail = _read_bool(meta, f"{arch}.attention.indexer.kpool_select_tail")
+        config["index_select_tail"] = bool(tail)
+        config["index_types"] = [
+            bool(v) for v in per_layer("attention.indexer.types")]
+
+    moe = _read_v3_moe(meta, shapes, arch)
+    if not moe["sigmoid"]:
+        raise NotImplementedError(
+            "hy_v4_flash synth: expert_gating_func != 2 (sigmoid).")
+    config["scoring_func"] = "sigmoid"
+    config["n_routed_experts"] = moe["n_experts"]
+    config["num_experts_per_tok"] = moe["n_used"]
+    config["moe_intermediate_size"] = moe["moe_ffn"]
+    config["n_shared_experts"] = moe["n_shared"]
+    config["moe_latent_size"] = (
+        _read_int(meta, f"{arch}.expert_latent_length") or 0)
+    config["first_k_dense_replace"] = (
+        _read_int(meta, f"{arch}.leading_dense_block_count") or 0)
+    scale = _read_float(meta, f"{arch}.expert_weights_scale")
+    config["routed_scaling_factor"] = scale if scale is not None else 1.0
+    norm = _read_bool(meta, f"{arch}.expert_weights_norm")
+    config["norm_topk_prob"] = True if norm is None else norm
+    clamp = _read_swiglu_clamp(meta, arch, block_count=n_layer)
+    if clamp is not None:
+        config["swiglu_limit"] = clamp
+
+    config["hc_mult"] = need_int("hyper_connection.count")
+    config["hc_eps"] = need_float("hyper_connection.epsilon")
+    config["hc_magnitude"] = need_float("hyper_connection.magnitude")
+
+    vocab = _read_int(meta, f"{arch}.vocab_size")
+    if vocab is not None:
+        config["vocab_size"] = vocab
+    config["num_nextn_predict_layers"] = config.get("mtp_num_hidden_layers", 0)
+
+    # Engram: the layers, the hash constants and the token map. Offsets
+    # are already rebased into the one table every layer shares.
+    layer_ids = _read_int_array(meta, f"{arch}.ple.layers")
+    if not layer_ids:
+        return
+    layer_ids = [int(v) for v in layer_ids]
+    ngram = need_int("ple.ngram_size")
+    n_heads = need_int("ple.heads_per_ngram")
+    head_dim = need_int("embedding_length_per_layer_input")
+    cols = (ngram - 1) * n_heads
+    mult = _read_int_array(meta, f"{arch}.ple.layer_multipliers") or []
+    offsets = _read_int_array(meta, f"{arch}.ple.head_offsets") or []
+    primes = _read_int_array(meta, f"{arch}.ple.head_vocab_sizes") or []
+    n_e = len(layer_ids)
+    if (cols <= 0 or len(mult) != n_e * ngram or len(primes) != n_e * cols
+            or len(offsets) != n_e * cols):
+        raise ValueError(
+            f"hy_v4_flash synth: engram metadata is inconsistent "
+            f"({n_e} layers, ngram {ngram}, {n_heads} heads per ngram, "
+            f"{len(mult)} multipliers, {len(primes)} bucket sizes, "
+            f"{len(offsets)} offsets)")
+    if any(i >= n_layer for i in layer_ids) or sorted(set(layer_ids)) != layer_ids:
+        raise ValueError(
+            f"hy_v4_flash synth: engram layers {layer_ids} are out of range "
+            f"or out of order for {n_layer} layers")
+    n_rows = max(int(o) + int(p) for o, p in zip(offsets, primes))
+    table = shapes.get("per_layer_token_embd.weight")
+    if table is not None and (int(table[0]) != head_dim
+                              or int(table[1]) != n_rows):
+        raise ValueError(
+            f"hy_v4_flash synth: the engram table is {int(table[0])} x "
+            f"{int(table[1])} but the metadata describes {head_dim} x "
+            f"{n_rows}")
+    token_map = _read_int_array(meta, f"{arch}.engram.token_map")
+    config["engram_layer_ids"] = layer_ids
+    config["engram_max_ngram_size"] = ngram
+    config["engram_n_heads"] = n_heads
+    config["engram_head_dim"] = head_dim
+    config["engram_multipliers"] = [int(v) for v in mult]
+    config["engram_primes"] = [int(v) for v in primes]
+    config["engram_offsets"] = [int(v) for v in offsets]
+    config["engram_pad_id"] = need_int("engram.pad_token_id")
+    config["engram_token_map"] = (
+        [int(v) for v in token_map] if token_map else None)
+    config["engram_table_rows"] = n_rows
+
+
 # hyv4 (HY4-preview 256x29B)
 
 def _synth_hyv4(meta, shapes, config: dict) -> None:
@@ -4632,6 +4785,7 @@ _SYNTH = {
     "glm5-next": lambda m, s, c: _synth_glm5next(m, s, c, "glm5-next"),
     "glm5next": lambda m, s, c: _synth_glm5next(m, s, c, "glm5next"),
     "hyv4": _synth_hyv4,
+    "hy_v4_flash": _synth_hy_v4_flash,
     "kimi-k3": _synth_kimi_k3,
     "deepseek4": _synth_deepseek4,
     "deepseek41": _synth_deepseek41,

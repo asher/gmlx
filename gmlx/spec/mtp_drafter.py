@@ -82,7 +82,12 @@ def _cache_offset(caches) -> int:
     (its only consumer besides the adoption check, which is B=1)."""
     if not caches:
         return 0
-    off = getattr(caches[0], "offset", 0)
+    head = caches[0]
+    members = getattr(head, "caches", None)
+    if members:
+        # A list cache (keys with their pool) is as deep as its keys.
+        head = members[0]
+    off = getattr(head, "offset", 0)
     if isinstance(off, mx.array):
         return int(off.max()) if off.size else 0
     return int(off)

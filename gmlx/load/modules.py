@@ -821,7 +821,11 @@ def _make_fused_kquant(base_cls, caps):
 
         ``_kq_arena_rows`` (set by the streaming wrapper on multi-token
         arena calls) selects the per-row kernels at every width, see
-        ``_fused_rows``."""
+        ``_fused_rows``.
+
+        ``_kq_fused_pairs`` (set by a model whose MTP verify reaches 64
+        (row, expert) pairs) is the pair count from which a call sorts by
+        expert instead."""
 
         _kq_mix_scores = _has_mix_ns
 
@@ -830,7 +834,7 @@ def _make_fused_kquant(base_cls, caps):
             and any subclass that owns its own forward (the LoRA wrap)."""
             return (
                 _FUSED_MOE_ENABLED
-                and (indices.size < 64
+                and (indices.size < getattr(self, "_kq_fused_pairs", 64)
                      or getattr(self, "_kq_arena_rows", False))
                 and x.dtype in (mx.bfloat16, mx.float16, mx.float32)
                 and not self.training

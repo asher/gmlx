@@ -59,6 +59,8 @@ is already running does not see a variable you export later.
 | `GMLX_NEM_MTP_BLOCK=N` | Block of a Nemotron-H native head, drafts plus one: 8 on Nemotron 3.5 Transcribe, 3 on the others. `--draft-block-size` cannot go deeper. |
 | `GMLX_Q4_MTP_LADDER` | Drafts per Flash-Next round by the confidence in the first, as `conf:drafts` steps under the block size. Default `0.9:5,0.5:3,0:1`; `0` drafts a fixed three. |
 | `GMLX_Q4_MTP_STREAK_CAP=N` | After a Qwen3.8-Flash-Next round where the model rejected a draft, draft at most N tokens. The default is 3, and `0` lifts the cap. |
+| `GMLX_HY4_MTP_LADDER` | Drafts per Hy4-flash round by the confidence in the first, as `conf:drafts` steps; a step of 0 drafts runs a plain step. Default `0`: a fixed two drafts. |
+| `GMLX_HY4_MTP_STREAK_CAP=N` | With a Hy4-flash ladder, draft at most N tokens after a round where the model rejected a draft. Default `0`: no cap. |
 | `GMLX_MTP_PREEMPT=0` | Make queued requests wait for a lone speculating request to finish, instead of moving it onto the batch loop so they can join. |
 | `GMLX_MTP_RESUME=0` | Keep speculation off on a batch that grew past the width cap, instead of turning it back on when the batch shrinks within the cap. |
 | `GMLX_MTP_MIXED` | `1` runs a batch past the width cap as a [mixed batch](speculative-batching.md#mixed-batches), `auto` does except on MoE targets. Default `0`, plain decode. |
@@ -172,6 +174,19 @@ fusions.
 | `GMLX_DS4_PREFILL_BLOCK=N` | Set the DeepSeek-V4.1 prefill query-block width for the window, sparse and indexer scores. `0` scores the whole chunk. |
 | `GMLX_DSA_INDEXER=0` | Compute DeepSeek-V4 and V4.1 indexer scores and top-k on the inline fp32 op chain instead of the mlx-kquant kernels. |
 | `GMLX_DSA_INDEXER_Q=0` | Keep the indexer GEMM on fp16 operands where tensor-op hardware would run the int8 kernel. Output is bit-identical. |
+| `GMLX_HY4_SPARSE_DISABLE=1` | Make every Hy4-preview and Hy4-flash sparse layer attend all of its keys instead of the indexer's picks. The indexer still runs. |
+| `GMLX_HY4_IHC_KERNEL=0` | Run Hy4-preview and Hy4-flash hyper-connection steps op by op instead of on the fused kernels. |
+| `GMLX_HY4_IHC_FUSE=0` | Run the expand that closes a hyper-connected sublayer and the next sublayer's collapse as two dispatches instead of one. Output is bit-identical. |
+| `GMLX_HY4_IHC_STAGED=0` | Run a decode step's hyper-connection collapse as one dispatch instead of the staged form that spreads a row over many threadgroups. |
+| `GMLX_HY4_IDX_KERNEL=0` | Score the Hy4-preview indexer and pick its top-k on the op chain instead of the fused kernels. |
+| `GMLX_HY4_IDX_KQ=0` | Score the Hy4-flash pooled indexer and pick its top-k on the op chain instead of the mlx-kquant kernels. |
+| `GMLX_HY4_SPARSE_KQ=0` | Run Hy4-flash sparse attention as a gather and op chain instead of the mlx-kquant sparse kernels. |
+| `GMLX_HY4_SWA_ROLL=0` | Keep every key on Hy4-flash sliding-window layers instead of the window alone. Their memory then grows with the context. |
+| `GMLX_HY4_KEYS_DENSE=0` | Expand Hy4-flash per-head keys through the K-quant gather instead of a matmul on the dequantized stack. |
+| `GMLX_HY4_ROW_KERNEL=0` | Build a Hy4-flash decode step's key and query rows on the op chain instead of one kernel each. Output is bit-identical. |
+| `GMLX_HY4_KQ_ROUTER=0` | Run a Hy4-flash decode step's expert routing as an op chain instead of one mlx-kquant dispatch. |
+| `GMLX_HY4_ROUTER_SPLIT=0` | Compute Hy4-flash router logits at decode widths with the stock matmul instead of the split-sum kernel. |
+| `GMLX_HY4_IMAGE_POS_1D=1` | Rotate Hy4-flash image slots at their slot index, as llama.cpp does, instead of the reference's (t, h, w) positions. |
 | `GMLX_CB_PHASE=0` | Disable the per-phase command-buffer caps (same output, slower decode). `MLX_MAX_OPS_PER_BUFFER` or `MLX_MAX_MB_PER_BUFFER` set by hand holds in every phase. |
 | `GMLX_CB_FINE_DECODE=1` | Decode a model in memory on 50 ops per command buffer instead of 400, both with no size cap. Prefill and streamed models keep their caps. |
 | `GMLX_NATIVE_FP` | MXFP4 and NVFP4 layout. `auto`, the default, keeps the file bytes as `wire` does, and `packed` copies MoE experts into MLX's layout. |
@@ -234,7 +249,7 @@ other layer adds its delta on stock ops.
 | `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, as `--stream-experts` and `--stream-cpu` do. |
 | `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. The default is the device limit, and a larger table is read row by row. |
 | `GMLX_TABLE_PREAD_WORKERS` | Reader threads for each file-backed lookup table. The default is `32`. |
-| `GMLX_TABLE_READAHEAD=0` | Stop reading the rows of a lookup table mapped outside MLX's tracker into the page cache ahead of each prefill chunk. Needs a prompt cache. |
+| `GMLX_TABLE_READAHEAD=0` | Stop reading a lookup table's rows a prefill chunk ahead: into the page cache for a mapped table, held in memory for a table read from its file. |
 | `GMLX_TABLE_READAHEAD_WORKERS` | Reader threads for the table read-ahead. The default is `16`. |
 | `GMLX_DECODE_FAST_DISK` | The `stream_fast_disk` policy, `auto`, `on` or `off`, as `--stream-fast-disk` sets. |
 | `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it with the prompt's most routed experts. |

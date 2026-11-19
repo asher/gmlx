@@ -76,6 +76,7 @@ from gmlx.serve import short_rows as _short_rows
 from gmlx.serve.capacity import note_own_before_clear as _note_own_before_clear
 # gmlx: a streamed lookup table's rows for the chunk are read into the page
 # cache beside its forward.
+from gmlx.stream.table_readahead import plan_rows_ahead as _plan_rows_ahead
 from gmlx.stream.table_readahead import read_ahead as _table_read_ahead
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.generate")
@@ -548,6 +549,10 @@ def generate_step(
                         **speculative_prefill.kwargs,
                         "logits_to_keep": 1,
                     }
+                    # gmlx: a table read from its file starts the next
+                    # chunk's rows behind this chunk's.
+                    _plan_rows_ahead(
+                        model, input_ids, n_to_process, prefill_step_size)
                     chunk_output = model.language_model(
                         inputs=input_ids[:, :n_to_process],
                         inputs_embeds=inputs_embeds[:, :n_to_process],

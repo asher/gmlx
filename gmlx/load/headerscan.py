@@ -22,7 +22,7 @@ _MAGIC = b"GGUF"
 _DEFAULT_ALIGNMENT = 32
 
 # GGML type ids newer than the installed gguf-py: id -> (name, (block, type_size)).
-# Id 43 has two owners; resolve it with type_43_format, not from this table.
+# Id 43 has three owners; resolve it with type_43_format, not from this table.
 QUANT_TYPE_FALLBACK = {
     42: ("Q2_0", (64, 18)),       # llama.cpp GGML_TYPE_Q2_0
     43: ("STQ1_0", (256, 42)),    # llama.cpp PR #22836
@@ -32,12 +32,15 @@ QUANT_TYPE_FALLBACK = {
     143: ("PTQ1_0", (128, 28)),
 }
 
-# Two unmerged llama.cpp formats use type id 43: STQ1_0 (PR #22836, ternary
-# weights) and MXFP8 (PR #30817, gather-only lookup tables, one E8M0 scale
-# byte and 32 E4M3 bytes per block). Their block sizes differ 6.3x, so the
-# bytes a tensor spans in the file tell them apart.
+# Three unmerged llama.cpp formats use type id 43: STQ1_0 (PR #22836, ternary
+# weights), MXFP8 (PR #30817, gather-only lookup tables, one E8M0 scale
+# byte and 32 E4M3 bytes per block) and F8_E4M3 (the hy_v4_flash patch,
+# gather-only lookup tables, one E4M3 byte per value with no scale). The
+# bytes a tensor spans in the file tell them apart: STQ1_0 is 6.1x smaller
+# than the other two, and F8_E4M3 is read only at its exact size, because
+# an MXFP8 table is 1/32 larger.
 TYPE_43 = 43
-TYPE_43_FORMATS = {"STQ1_0": (256, 42), "MXFP8": (32, 33)}
+TYPE_43_FORMATS = {"STQ1_0": (256, 42), "MXFP8": (32, 33), "F8_E4M3": (1, 1)}
 # Bytes past an STQ1_0 tensor at the end of a file that still read as
 # STQ1_0; a longer span short of MXFP8 is a cut MXFP8 table.
 TYPE_43_END_SLACK = 1 << 20
@@ -56,26 +59,32 @@ def type_43_format(n_elems: int, span: int | None, alignment: int, *,
     ``at_end``. A span that is unknown (a header prefix with no file size)
     reads as STQ1_0, the older owner; the local scan decides again.
 
-    The format is the largest that fits in the span, as mlx-kquant reads
-    it. At the end of the file a span short of MXFP8 but more than
-    TYPE_43_END_SLACK past STQ1_0 is a cut MXFP8 table, which the size
-    check flags."""
+    MXFP8 is read when it fits in the span and STQ1_0 when it does not,
+    as mlx-kquant reads them. F8_E4M3 is read when the span is its exact
+    size, up to the alignment padding. At the end of the file a span short
+    of MXFP8 but more than TYPE_43_END_SLACK past STQ1_0 is a cut MXFP8
+    table, which the size check flags."""
     if span is None:
         return "STQ1_0"
     sizes = {name: n_elems // block * tsize
              for name, (block, tsize) in TYPE_43_FORMATS.items()}
     can = {name for name, (block, _) in TYPE_43_FORMATS.items()
            if n_elems % block == 0}
-    stq, mx = sizes["STQ1_0"], sizes["MXFP8"]
+    stq, mx, f8 = sizes["STQ1_0"], sizes["MXFP8"], sizes["F8_E4M3"]
     slack = max(alignment, TYPE_43_END_SLACK)
-    if "MXFP8" in can and (span >= mx or (
-            at_end and ("STQ1_0" not in can or span >= stq + slack))):
+    if "MXFP8" in can and span >= mx:
+        return "MXFP8"
+    if f8 <= span < f8 + alignment:
+        return "F8_E4M3"
+    if "MXFP8" in can and at_end and (
+            "STQ1_0" not in can or span >= stq + slack):
         return "MXFP8"
     if "STQ1_0" in can and (span >= stq or at_end):
         return "STQ1_0"
     raise ValueError(
         f"type-43 tensor of {n_elems} values spans {span} bytes, which is "
-        f"neither STQ1_0 ({stq} bytes) nor MXFP8 ({mx} bytes)")
+        f"neither STQ1_0 ({stq} bytes) nor MXFP8 ({mx} bytes) nor "
+        f"F8_E4M3 ({f8} bytes)")
 
 
 def type_43_spans(entries, data_end: int | None) -> dict[int, tuple[int | None, bool]]:

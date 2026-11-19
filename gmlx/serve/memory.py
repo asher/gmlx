@@ -53,8 +53,10 @@ def model_weight_bytes(path: str) -> int:
     less, in a process under the wired cap (``capacity.cap_applies``),
     the streamable tables a served load maps outside MLX's tracker
     (``table_stream.untracked_tables_supported`` and
-    ``tables_stream_for_sure``) or reads from the file, which MLX never
-    wires. A table the load writes into a buffer of its own
+    ``tables_stream_for_sure``), which MLX never wires, and, in any
+    process, the tables no array can hold
+    (``capacity.held_table_bytes``), which every load reads from the
+    file. A table the load writes into a buffer of its own
     (``table_stream.copied_table_bytes``) counts. 0 when unresolvable
     (hf: refs not yet pulled, missing files) - auto policy then treats
     the model as weightless rather than guessing."""
@@ -79,6 +81,12 @@ def model_weight_bytes(path: str) -> int:
 
             total -= (streamed_table_bytes(str(path))
                       - copied_table_bytes(str(path)))
+        else:
+            from .capacity import held_table_bytes
+
+            # A table no array can hold is read from the file in any
+            # process, and never mapped.
+            total -= held_table_bytes(str(path))
     except Exception:
         _log.debug("untracked table bytes unread; the whole file counts",
                    exc_info=True)

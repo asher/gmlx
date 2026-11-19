@@ -19,7 +19,8 @@ lengths that share one salt, longest first (``salt_windows``).
 
 An image hash covers its pixel rows and the rows the processor emits for
 it beside them (``image_grid_thw``, ``image_grid_hws``, ``image_meta``,
-``image_position_ids``, ``image_sizes``, ``pixel_attention_mask``). A
+``image_patch_grid``, ``image_position_ids``, ``image_sizes``,
+``pixel_attention_mask``). A
 grid also splits flattened patches into images. A MiniCPM-V image spans
 several runs, one per crop, which ``target_sizes`` sizes. The model and processor
 key dependencies, audio, video and the tenant stay in the text salt.
@@ -39,10 +40,10 @@ _log = logging.getLogger(__name__)
 
 _MASK = (1 << 64) - 1
 # Processor outputs that hold one row per image beside the pixel rows:
-# the Qwen and Kimi patch grids, the DeepSeek-V4 (n_vit_h, n_vit_w,
-# n_llm_h, n_llm_w) rows, and the position, size and mask rows.
+# the Qwen, Kimi and Hy4-flash patch grids, the DeepSeek-V4 (n_vit_h,
+# n_vit_w, n_llm_h, n_llm_w) rows, and the position, size and mask rows.
 _PER_IMAGE_KEYS = ("image_grid_thw", "image_grid_hws", "image_meta",
-                   "image_position_ids", "image_sizes",
+                   "image_patch_grid", "image_position_ids", "image_sizes",
                    "pixel_attention_mask")
 _INSTALLED_FLAG = "_gmlx_media_salt"
 
@@ -223,12 +224,13 @@ def _runs(row: Any, image_ids: set[int]) -> list[tuple[int, int]]:
 def _patch_counts(raw: dict) -> Any:
     """Pixel rows per image when the processor flattens every image's
     patches into one array, from the grid it emits beside them: t*h*w
-    (``image_grid_thw``), h*w (``image_grid_hws``) or n_vit_h*n_vit_w
-    (``image_meta``). None without a grid."""
+    (``image_grid_thw``), h*w (``image_grid_hws``, ``image_patch_grid``)
+    or n_vit_h*n_vit_w (``image_meta``). None without a grid."""
     import numpy as np
 
     for key, width, cols in (("image_grid_thw", 3, 3),
                              ("image_grid_hws", 2, 2),
+                             ("image_patch_grid", 2, 2),
                              ("image_meta", 4, 2)):
         grid = raw.get(key)
         if grid is not None:
@@ -328,6 +330,15 @@ def _expected_tokens(raw: dict, n: int, config: Any, processor: Any
         rows = np.asarray(meta).astype(np.int64).reshape(-1, 4)
         return [len(build_image_block(int(r[2]), int(r[3]))[0])
                 for r in rows], True
+    grid = raw.get("image_patch_grid")
+    if grid is not None:
+        # Hy4-flash: h*w patches merged merge x merge, each row of merged
+        # cells closed by a newline slot, every one an image id.
+        merge = int(_first(_cfg(ip, "merge_size"),
+                           _cfg(vc, "spatial_merge_size"), 2))
+        rows = np.asarray(grid).astype(np.int64).reshape(-1, 2)
+        return [int(h // merge) * (int(w // merge) + 1)
+                for h, w in rows], True
     patch = _first(_cfg(ip, "patch_size"), _cfg(vc, "patch_size"))
     pool = _first(_cfg(ip, "pooling_kernel_size"),
                   _cfg(vc, "pooling_kernel_size"))

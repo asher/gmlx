@@ -241,6 +241,13 @@ def build_model(config_dict: dict, *, mtp: bool = False):
 
         hy_v4_model.ensure_registered()
         hy_v4_tools.ensure_registered()
+    if mt == "hy_v4_flash":
+        # The same tool-call format as HY4-preview.
+        import gmlx.models.hy_v4.tools as hy_v4_tools
+        import gmlx.models.hy_v4_flash.model as hy_v4_flash_model
+
+        hy_v4_flash_model.ensure_registered()
+        hy_v4_tools.ensure_registered()
     if mt == "gemma3_text":
         # FunctionGemma is a gemma3 text model, and mlx-vlm 0.7.3 no longer
         # ships its tool parser. The vendored one registers with the model
@@ -547,6 +554,7 @@ _STREAMING_PREFILL_STEP = 8192
 #   it back with --prefill-step-size on a large-RAM box.
 _STREAMING_PREFILL_STEP_BY_MODEL_TYPE: dict[str, int] = {
     "hy_v4": 4096,
+    "hy_v4_flash": 4096,
 }
 
 
@@ -992,6 +1000,21 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # tests/models/test_hy_v4_model.py cross-checks against this row.
     "hy_v4": ("_hc.", "hc_head.", ".sinks", ".e_score_correction_bias",
               ".mlp.gate.weight", ".weights_proj."),
+    # hy_v4_flash: the hy_v4 set, plus the pooled indexer's positional
+    # table and the engram's raw arrays (projection bias, gate, row norm,
+    # value scale, stream offset), which the reference applies in fp32.
+    "hy_v4_flash": ("_hc.", "hc_head.", ".sinks", ".e_score_correction_bias",
+                    ".mlp.gate.weight", ".weights_proj.", ".indexer.ape",
+                    ".engram.kv_bias", ".engram.gate_weight",
+                    ".engram.lookup_norm", ".engram.pre_gamma",
+                    ".engram.hc_scale"),
+    # hy_v4_flash_vl: the same set under language_model.*; the vision
+    # tower casts normally.
+    "hy_v4_flash_vl": ("_hc.", "hc_head.", ".sinks",
+                       ".e_score_correction_bias", ".mlp.gate.weight",
+                       ".weights_proj.", ".indexer.ape", ".engram.kv_bias",
+                       ".engram.gate_weight", ".engram.lookup_norm",
+                       ".engram.pre_gamma", ".engram.hc_scale"),
     # muse_spark: sigmoid top-8-of-256 routing with a selection bias is
     # near-tie-heavy, and the residual alpha/beta scale every layer's stream.
     # Kept in step with the model class's cast_predicate.

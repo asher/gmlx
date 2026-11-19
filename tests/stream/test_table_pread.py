@@ -23,6 +23,13 @@ gguf = pytest.importorskip("gguf")
 ROWS, ROW_BYTES = 1000, 33
 
 
+@pytest.fixture(autouse=True)
+def _host_reads(monkeypatch):
+    # The reader on the host thread is under test here; the lazy read
+    # through kq.file_rows has its own tests at the end.
+    monkeypatch.setenv("GMLX_TABLE_LAZY", "0")
+
+
 @pytest.fixture
 def table_gguf(tmp_path):
     """A deepseek41 GGUF whose one engram table is raw I8 rows."""
@@ -283,7 +290,7 @@ def test_gather_stats_totals_the_row_reads(table_gguf, monkeypatch):
     install_deferred_tables(model, {"blk.1.engram_embd.weight": src})
     try:
         assert gather_stats(model) == {"tables": 1, "gathers": 0, "rows": 0,
-                                       "seconds": 0.0}
+                                       "ahead": 0, "seconds": 0.0}
         model.model.layers[1].engram.embed(mx.array([[3, 900, 3]]))
         got = gather_stats(model)
         # Duplicate ids read once.
@@ -723,5 +730,158 @@ def test_a_bf16_table_past_the_ceiling_decodes_from_the_file(tmp_path,
         ids = [[0, 15, 3]]
         got = table(mx.array(ids))
         assert mx.array_equal(got.astype(mx.bfloat16), bf16[mx.array(ids)])
+    finally:
+        s.close()
+
+
+def _lazy(monkeypatch):
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "file_rows"):
+        pytest.skip("this mlx-kquant has no file_rows")
+    monkeypatch.setenv("GMLX_TABLE_LAZY", "1")
+
+
+def test_a_lazy_read_returns_the_file_rows_without_a_host_sync(
+        table_gguf, monkeypatch):
+    path, raw = table_gguf
+    src = _sources(path, monkeypatch)
+    _lazy(monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    s = table._kq_table_source
+    try:
+        # Ids that are still a graph: the host reader would evaluate them.
+        ids = mx.array([[3, 900, 3], [0, 999, 500]]) + mx.array(0)
+        table.prefetch(ids)
+        out = table(ids)
+        assert s._fd is None  # the host reader never opened the file
+        want = table.decode_gathered(mx.array(raw[np.array(ids)]))
+        assert mx.array_equal(out, want)
+        assert s.gathers == 1 and s.gathered_rows == 6
+    finally:
+        s.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        table(mx.array([[1]]))
+
+
+def test_rows_by_slot_reads_each_slot_alone_and_matches_one_read(
+        table_gguf, monkeypatch):
+    path, raw = table_gguf
+    src = _sources(path, monkeypatch)
+    _lazy(monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    s = table._kq_table_source
+    try:
+        # [B, L, slots, cols], still a graph.
+        ids = mx.array([[[[3, 900], [0, 999], [500, 3]],
+                         [[7, 7], [1, 2], [998, 0]]]]) + mx.array(0)
+        rows = table.rows_by_slot(ids)
+        assert s._fd is None  # the host reader never opened the file
+        assert len(rows) == 3 and s.gathers == 3 and s.gathered_rows == 12
+        want = table.decode_gathered(mx.array(raw[np.array(ids)]))
+        for slot, got in enumerate(rows):
+            assert mx.array_equal(got, want[:, :, slot])
+    finally:
+        s.close()
+
+
+def test_rows_held_ahead_serve_the_call_they_were_read_for(
+        table_gguf, monkeypatch):
+    path, raw = table_gguf
+    src = _sources(path, monkeypatch)
+    _lazy(monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    s = table._kq_table_source
+    rng = np.random.default_rng(5)
+    try:
+        # [B, L, slots, cols] of the chunk to come, still a graph.
+        ahead = mx.array(rng.integers(0, ROWS, (2, 6, 3, 2))) + mx.array(0)
+        want = table.decode_gathered(mx.array(raw[np.array(ahead)]))
+
+        # The whole chunk: no second read.
+        table.hold_ahead(ahead)
+        assert s.gathers == 3 and s.gathered_rows == 72
+        rows = table.rows_by_slot(ahead + mx.array(0))
+        assert s.gathers == 3 and s.ahead_rows == 72
+        for slot, got in enumerate(rows):
+            assert mx.array_equal(got, want[:, :, slot])
+
+        # A shorter chunk takes the rows it opens with.
+        table.hold_ahead(ahead)
+        rows = table.rows_by_slot(ahead[:, :4])
+        assert s.gathers == 6
+        for slot, got in enumerate(rows):
+            assert mx.array_equal(got, want[:, :4, slot])
+
+        # Held once: the same ids read again.
+        rows = table.rows_by_slot(ahead)
+        assert s.gathers == 9
+
+        # Other ids, a longer chunk and another batch read for themselves
+        # and drop what was held.
+        other = mx.array(rng.integers(0, ROWS, (2, 6, 3, 2)))
+        for ids in (other, mx.concatenate([ahead, other], axis=1), ahead[:1]):
+            table.hold_ahead(ahead)
+            before = s.gathers
+            rows = table.rows_by_slot(ids)
+            assert s.gathers == before + 3
+            assert "_kq_rows_ahead" not in table.__dict__
+            assert s.ahead_rows == 72 + 48
+            want_ids = table.decode_gathered(mx.array(raw[np.array(ids)]))
+            for slot, got in enumerate(rows):
+                assert mx.array_equal(got, want_ids[:, :, slot])
+    finally:
+        s.close()
+
+
+def test_rows_by_slot_leaves_a_host_read_to_the_call(table_gguf, monkeypatch):
+    path, _raw = table_gguf
+    src = _sources(path, monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    try:
+        ids = mx.zeros((1, 2, 3, 2), dtype=mx.int64)
+        assert table.rows_by_slot(ids) is None
+    finally:
+        table._kq_table_source.close()
+
+
+def test_a_lazy_mxfp8_table_decodes_as_the_host_read_does(
+        mxfp8_table_gguf, monkeypatch):
+    from gmlx.models.deepseek_v41.model import EngramTable
+
+    path, _raw = mxfp8_table_gguf
+    monkeypatch.setenv("GMLX_TABLE_MAX_BUFFER", "1000")
+    ids = mx.array([[0, 7, 23, 7]])
+    outs = []
+    for lazy in ("0", "1"):
+        if lazy == "1":
+            _lazy(monkeypatch)
+        src = oversize_tables([path], "deepseek41")
+        table = EngramTable(MX_ROWS, MX_DIMS)
+        install_deferred_tables(_SharedModel(table), src)
+        try:
+            outs.append(np.array(table(ids).astype(mx.float32)))
+        finally:
+            table._kq_table_source.close()
+    assert np.array_equal(outs[0], outs[1], equal_nan=True)
+
+
+def test_a_lazy_read_of_a_row_past_the_table_raises_on_the_next_call(
+        table_gguf, monkeypatch):
+    path, _raw = table_gguf
+    src = _sources(path, monkeypatch)
+    _lazy(monkeypatch)
+    table = _engram_table()
+    install_deferred_tables(_FakeModel(table), src)
+    s = table._kq_table_source
+    try:
+        mx.eval(table(mx.array([[ROWS + 5]])))
+        with pytest.raises(OSError, match="could not be read"):
+            table(mx.array([[1]]))
+        mx.eval(table(mx.array([[1]])))  # the count is settled
     finally:
         s.close()

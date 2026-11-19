@@ -42,6 +42,7 @@ OWNED_LM_MODELS = {
     # relative and carries neither the independent hyper-connections nor
     # the sinks and the attention gate.
     "hy_v4": "gmlx.models.hy_v4.model",
+    "hy_v4_flash": "gmlx.models.hy_v4_flash.model",
     # llama.cpp LLM_ARCH_K2_HORIZON; the mlx-vlm class is a plain Llama
     # with none of the group norm, the output gate, MoE or MoVA.
     "k2_horizon": "gmlx.models.k2_horizon.model",
@@ -70,6 +71,7 @@ OWNED_VLM_MODELS = {
     "deepseek_v4_vl": "gmlx.models.deepseek_v4.vlm_model",
     "deepseek_v41_vl": "gmlx.models.deepseek_v41.vlm_model",
     "glm5_next": "gmlx.models.glm5_next.vlm_model",
+    "hy_v4_flash_vl": "gmlx.models.hy_v4_flash.vlm_model",
     "lfm3_omni": "gmlx.models.lfm3.vlm_model",
     "lfm3_vl": "gmlx.models.lfm3.vlm_model",
     "lfm3_audio": "gmlx.models.lfm3.vlm_model",

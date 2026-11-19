@@ -303,6 +303,22 @@ def test_mtp_greedy_identity_accept_path():
         "final round may be budget-clamped below the full draft width)")
 
 
+def test_decode_takes_over_the_seed_streamed_at_prefill(caplog):
+    # Prefill seeds the head a chunk at a time into a keys-and-pool list,
+    # and decode adopts that list only when it reads its depth. Without it
+    # the head starts from the last chunk alone.
+    import logging
+
+    lm = _build_lm(seed=5, scale=0.2)
+    drafter = _build_drafter(lm.args)
+    mx.random.seed(7)
+    prompt = mx.random.randint(0, lm.args.vocab_size, (1, 41)).astype(mx.int32)
+    with caplog.at_level(logging.WARNING, logger="gmlx.spec.speculative"):
+        _spec_decode(_wrap_target(lm), lm, drafter, prompt, 4)
+    assert not [r for r in caplog.records if "streamed seed" in r.message]
+    assert drafter._cache[0][0].offset >= prompt.shape[1] - 1
+
+
 def test_speclm_hooks_match_loader_contract():
     from gmlx.load.mtp_target import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
 

@@ -49,6 +49,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An image LoRA such as pDMD-2steps runs on the schedule it was trained on,
   and `--sigmas` or a request's `sigmas` set one. See
   [Adapter schedules](docs/images.md#adapter-schedules).
+- Tencent Hy4-flash GGUFs run with sparse attention and the engram table
+  read from the file, so the experts stay in memory on a 128 GB Mac. MTP
+  drafts from the file's own draft block, two tokens a round by default.
+  Its fast attention and indexer paths need mlx-kquant 0.5.12 or later.
+- Hy4-flash takes image input through an mmproj file (`--mmproj`) in the
+  layout of llama.cpp's `hy_v4_flash` projector.
 
 ### Changed
 
@@ -97,6 +103,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- gmlx commands no longer start with a torch note about redirects on
+  macOS where torch is installed.
 - An image or video request served after a chat turn no longer takes tens of
   GB more memory than the same request alone, nor wires all of it.
 - Qwen3.8-Flash-Next requests that decoded together past 2052 tokens of

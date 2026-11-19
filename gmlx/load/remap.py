@@ -129,6 +129,9 @@ ARCH_ALIAS = {
     # override block. Targets follow gmlx.models.hy_v4. The converter drops
     # the nextn layers, so there are no MTP tensors to skip.
     "hyv4": "HYV4",
+    # Hy4-flash (llama.cpp 'hy_v4_flash'): the HYV4 block with a pooled
+    # indexer, sandwich norms, latent-width routed experts and engram.
+    "hy_v4_flash": "HYV4FLASH",
     "glm4moe": "GLM4MOE",
     # OpenAI gpt-oss (llama.cpp arch 'gpt-oss' / LLM_ARCH_OPENAI_MOE): MoE with
     # attention sinks, sliding/full alternating attention, and MXFP4 experts.
@@ -2444,6 +2447,52 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.mlp.experts.down_proj.bias", "passthrough"),
     ],
 }
+
+# Hy4-flash: every HYV4 row but the per-token indexer's LayerNorm bias
+# (the flash key norm is a weight-only RMSNorm), plus the rows the flash
+# layout adds. Targets follow gmlx.models.hy_v4_flash. The MTP block's
+# standard tensors land past the trunk and the model's sanitize drops them.
+ARCH_PRIORITY_OVERRIDES["HYV4FLASH"] = [
+    row for row in ARCH_PRIORITY_OVERRIDES["HYV4"]
+    if "k_norm\\.bias" not in row[0].pattern
+] + [
+    # Sandwich norms: after the attention output and after the FFN.
+    (re.compile(r"^blk\.(\d+)\.post_attention_norm\.weight$"),
+     "model.layers.{bid}.self_attn.post_norm.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.post_ffw_norm\.weight$"),
+     "model.layers.{bid}.ffn_post_norm.weight", "passthrough"),
+    # Routed experts run at the latent width between these two.
+    (re.compile(r"^blk\.(\d+)\.ffn_routed_down\.weight$"),
+     "model.layers.{bid}.mlp.routed_down.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.ffn_routed_up\.weight$"),
+     "model.layers.{bid}.mlp.routed_up.weight", "passthrough"),
+    # Pooled indexer: value and gate projections of the normed key, the
+    # per-slot positional table (a raw array) and the pooled-key norm.
+    (re.compile(r"^blk\.(\d+)\.indexer_compressor_value\.weight$"),
+     "model.layers.{bid}.self_attn.indexer.pool_value.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.indexer_compressor_gate\.weight$"),
+     "model.layers.{bid}.self_attn.indexer.pool_gate.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.indexer_compressor_ape\.weight$"),
+     "model.layers.{bid}.self_attn.indexer.ape", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.indexer_compressor_norm\.weight$"),
+     "model.layers.{bid}.self_attn.indexer.pool_norm.weight", "passthrough"),
+    # Engram: one table for every engram layer, a fused key/value
+    # projection with a bias, and raw fp32 arrays for the rest.
+    (re.compile(r"^per_layer_token_embd\.weight$"),
+     "model.engram_embed.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.engram_kv\.weight$"),
+     "model.layers.{bid}.engram.wkv.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.engram_kv_b\.weight$"),
+     "model.layers.{bid}.engram.kv_bias", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.engram_gate\.weight$"),
+     "model.layers.{bid}.engram.gate_weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.engram_lookup_norm\.weight$"),
+     "model.layers.{bid}.engram.lookup_norm", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.engram_pre_gamma\.weight$"),
+     "model.layers.{bid}.engram.pre_gamma", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.engram_hc_scale\.weight$"),
+     "model.layers.{bid}.engram.hc_scale", "passthrough"),
+]
 
 # GGUF tensor-name prefixes that indicate vision/audio tower content. These
 # are skipped (not hard-failed); loading them into MLX needs mlx_vlm.utils

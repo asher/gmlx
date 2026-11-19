@@ -46,6 +46,12 @@ _MODELS = {
     "qwen3_5": ("qwen35_template.jinja",
                 "<|vision_start|><|image_pad|><|vision_end|>",
                 "<|im_end|>\n"),
+    "hy_v4_flash_vl": (
+        "hy4_flash_template.jinja",
+        "<\uff5chy_image\u2581start:6124c78e\uff5c>"
+        "<\uff5chy_image\u2581pad:6124c78e\uff5c>"
+        "<\uff5chy_image\u2581end:6124c78e\uff5c>",
+        "<\uff5chy_end:6124c78e\uff5c>"),
 }
 
 
@@ -297,7 +303,8 @@ def test_the_gemma4_processor_keeps_the_client_order(route, model_type):
 # message holds it and whose processor expands the image markers in prompt
 # order.
 _IN_PLACE = ("deepseek_v41_vl", "deepseek_v4_vl", "gemma4", "gemma4_unified",
-             "glm5_next", "kimi_k25", "lfm3_omni", "lfm3_vl", "minicpmv4_6",
+             "glm5_next", "hy_v4_flash_vl", "kimi_k25", "lfm3_omni",
+             "lfm3_vl", "minicpmv4_6",
              "minicpmv4_7", "minimax_m3_vision", "mistral3", "muse_glimmer",
              "muse_spark", "nemotron_h_omni", "pixtral", "qwen3_5",
              "qwen3_5_moe", "qwen3_omni_moe", "qwen3_vl", "qwen3_vl_moe",

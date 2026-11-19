@@ -110,12 +110,27 @@ STREAMABLE_TABLES: dict[str, ArchTables] = {
         reads_ahead=True,
         label="engram tables",
     ),
+    # One shared engram table, at the same module path as deepseek_v41's.
+    "hy_v4_flash": ArchTables(
+        arch="hy_v4_flash",
+        name_pattern=r"per_layer_token_embd\.weight",
+        tiers=_deepseek_v41_tiers,
+        reads_ahead=True,
+        label="engram table",
+    ),
     "deepseek_v41_vl": ArchTables(
         arch="deepseek41",
         name_pattern=_DEEPSEEK_V41_TABLES,
         tiers=_deepseek_v41_vl_tiers,
         reads_ahead=True,
         label="engram tables",
+    ),
+    "hy_v4_flash_vl": ArchTables(
+        arch="hy_v4_flash",
+        name_pattern=r"per_layer_token_embd\.weight",
+        tiers=_deepseek_v41_vl_tiers,
+        reads_ahead=True,
+        label="engram table",
     ),
 }
 

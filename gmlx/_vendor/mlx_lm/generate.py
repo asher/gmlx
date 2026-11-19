@@ -445,9 +445,16 @@ def generate_step(
             embedded_rows=total_prompt_tokens if input_embeddings is not None else 0)
         prompt_processed_tokens = 0
         prompt_progress_callback(prompt_processed_tokens, total_prompt_tokens)
+        # gmlx: a table read from its file starts the next chunk's rows
+        # behind the chunk in hand.
+        from gmlx.stream.table_readahead import plan_rows_ahead
+
         while total_prompt_tokens - prompt_processed_tokens > 1:
             remaining = (total_prompt_tokens - prompt_processed_tokens) - 1
             n_to_process = min(prefill_step_size, remaining)
+            if input_embeddings is None:
+                plan_rows_ahead(
+                    model, prompt[None], n_to_process, prefill_step_size)
             _model_call(
                 input_tokens=prompt[:n_to_process][None],
                 input_embeddings=(
@@ -595,8 +602,12 @@ def speculative_generate_step(
                 return _process_and_sample(None, logits.squeeze(0))
 
     def _prefill(model, cache, y):
+        # gmlx: see generate_step's loop.
+        from gmlx.stream.table_readahead import plan_rows_ahead
+
         while y.size > 1:
             n_to_process = min(prefill_step_size, y.size - 1)
+            plan_rows_ahead(model, y[None], n_to_process, prefill_step_size)
             model(y[:n_to_process][None], cache=cache)
             quantize_cache_fn(cache)
             mx.eval([c.state for c in cache])
@@ -1173,8 +1184,13 @@ class PromptProcessingBatch:
             tokens = mx.array(tokens)
 
         # Actual prompt processing loop
+        # gmlx: see generate_step's loop.
+        from gmlx.stream.table_readahead import plan_rows_ahead
+
         while tokens.shape[1] > 0:
             n_to_process = min(self.prefill_step_size, tokens.shape[1])
+            plan_rows_ahead(self.model, tokens, n_to_process,
+                            self.prefill_step_size, keep=0)
             self.model(tokens[:, :n_to_process], cache=self.prompt_cache)
             mx.eval([c.state for c in self.prompt_cache])
             mx.clear_cache()

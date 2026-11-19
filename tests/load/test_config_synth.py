@@ -3699,3 +3699,179 @@ def test_lfm3_synth_requires(key):
     del m[f"lfm3.{key}"]
     with pytest.raises(ValueError, match=key.replace(".", r"\.")):
         synthesize_config(m, tensor_shapes=_LFM3_SHAPES)
+
+
+# hy_v4_flash (Hy4-flash): per-layer head counts over a hybrid sparse and
+# sliding-window stack, a pooled indexer, latent routed experts, engram
+# layers on one shared table, and an in-file draft block after the trunk.
+
+_HYF_SWA = [False, False, True, True, False, True]
+_HYF_PRIMES = [11, 13, 17, 19, 23, 29, 31, 37]
+_HYF_OFFSETS = [0, 11, 24, 41, 60, 83, 112, 143]
+_HYF_ROWS = 180
+
+
+def _hy_v4_flash_meta() -> dict:
+    arch = "hy_v4_flash"
+    m = _base_meta(arch)
+    # Six trunk blocks and the draft block, which has its own head count
+    # and pattern entry but no indexer type entry.
+    m[f"{arch}.block_count"] = 7
+    m[f"{arch}.nextn_predict_layers"] = 1
+    m[f"{arch}.attention.head_count"] = [4 if s else 2 for s in _HYF_SWA] + [2]
+    m[f"{arch}.attention.head_count_kv"] = 1
+    m[f"{arch}.attention.q_lora_rank"] = 16
+    m[f"{arch}.attention.kv_lora_rank"] = 16
+    m[f"{arch}.rope.dimension_count"] = 8
+    m[f"{arch}.rope.freq_base"] = 1e7
+    m[f"{arch}.rope.freq_base_swa"] = 1e4
+    m[f"{arch}.attention.sliding_window"] = 6
+    m[f"{arch}.attention.sliding_window_pattern"] = _HYF_SWA + [False]
+    m[f"{arch}.attention.indexer.head_count"] = 2
+    m[f"{arch}.attention.indexer.key_length"] = 16
+    m[f"{arch}.attention.indexer.top_k"] = 8
+    m[f"{arch}.attention.indexer.kpool"] = 4
+    m[f"{arch}.attention.indexer.kpool_select_tail"] = True
+    m[f"{arch}.attention.indexer.types"] = [not s for s in _HYF_SWA]
+    m[f"{arch}.expert_count"] = 8
+    m[f"{arch}.expert_used_count"] = 2
+    m[f"{arch}.expert_feed_forward_length"] = 16
+    m[f"{arch}.expert_latent_length"] = 16
+    m[f"{arch}.expert_shared_count"] = 1
+    m[f"{arch}.expert_weights_scale"] = 3.998
+    m[f"{arch}.expert_weights_norm"] = True
+    m[f"{arch}.expert_gating_func"] = 2
+    m[f"{arch}.leading_dense_block_count"] = 1
+    m[f"{arch}.swiglu_clamp_exp"] = [10.0] * 7
+    m[f"{arch}.hyper_connection.count"] = 4
+    m[f"{arch}.hyper_connection.epsilon"] = 9.9999999747e-07
+    m[f"{arch}.hyper_connection.magnitude"] = 2.0
+    m[f"{arch}.vocab_size"] = VOCAB
+    # Engram: 2 layers, trigrams, 2 heads an n-gram, 8 columns in all.
+    m[f"{arch}.ple.layers"] = [1, 4]
+    m[f"{arch}.ple.ngram_size"] = 3
+    m[f"{arch}.ple.heads_per_ngram"] = 2
+    m[f"{arch}.embedding_length_per_layer_input"] = 8
+    m[f"{arch}.ple.layer_multipliers"] = [
+        (1 << 62) + 12345, 39690085502883, 24229915018165,
+        19457948045719, (1 << 63) + 99, 84779352922315]
+    m[f"{arch}.ple.head_vocab_sizes"] = _HYF_PRIMES
+    m[f"{arch}.ple.head_offsets"] = _HYF_OFFSETS
+    m[f"{arch}.engram.pad_token_id"] = VOCAB - 1
+    m[f"{arch}.engram.token_map"] = [(7 * i + 3) % VOCAB for i in range(VOCAB)]
+    return m
+
+
+# GGUF-native order: attn_q_b [q_lora, heads * (nope 8 + rope 8)], attn_v_b
+# [kv_lora, v_head_dim, heads], the engram table [head_dim, rows].
+_HYF_SHAPES = {
+    "output.weight": [64, VOCAB],
+    "blk.0.attn_q_b.weight": [16, 32],
+    "blk.0.attn_v_b.weight": [16, 8, 2],
+    "per_layer_token_embd.weight": [8, _HYF_ROWS],
+}
+
+
+def test_hy_v4_flash_synth_fields():
+    c = synthesize_config(_hy_v4_flash_meta(), tensor_shapes=_HYF_SHAPES)
+    assert c["model_type"] == "hy_v4_flash"
+    # The draft block is not a trunk layer, and keeps its own head count.
+    assert c["num_hidden_layers"] == 6
+    assert c["mtp_num_hidden_layers"] == 1
+    assert c["num_attention_heads"] == [2, 2, 4, 4, 2, 4]
+    assert c["mtp_num_attention_heads"] == 2
+    assert "head_dim" not in c
+    assert c["q_lora_rank"] == 16 and c["kv_lora_rank"] == 16
+    assert c["qk_rope_head_dim"] == 8
+    assert c["qk_nope_head_dim"] == 8              # 32 // 2 - 8
+    assert c["v_head_dim"] == 8
+    assert c["sliding_window"] == 6
+    assert c["sliding_window_pattern"] == _HYF_SWA
+    assert c["rope_theta"] == 1e7 and c["rope_theta_swa"] == 1e4
+    assert c["index_topk"] == 8 and c["index_kpool"] == 4
+    assert c["index_n_heads"] == 2 and c["index_head_dim"] == 16
+    assert c["index_select_tail"] is True
+    assert c["index_types"] == [not s for s in _HYF_SWA]
+    assert c["scoring_func"] == "sigmoid"
+    assert c["n_routed_experts"] == 8 and c["num_experts_per_tok"] == 2
+    assert c["moe_intermediate_size"] == 16 and c["moe_latent_size"] == 16
+    assert c["n_shared_experts"] == 1 and c["first_k_dense_replace"] == 1
+    assert c["routed_scaling_factor"] == 3.998
+    assert c["swiglu_limit"] == 10.0
+    assert c["hc_mult"] == 4
+    assert abs(c["hc_eps"] - 1e-6) < 1e-12
+    assert c["engram_layer_ids"] == [1, 4]
+    assert c["engram_max_ngram_size"] == 3 and c["engram_n_heads"] == 2
+    assert c["engram_head_dim"] == 8
+    assert c["engram_primes"] == _HYF_PRIMES
+    assert c["engram_offsets"] == _HYF_OFFSETS
+    assert c["engram_table_rows"] == _HYF_ROWS
+    assert c["engram_pad_id"] == VOCAB - 1
+    assert c["engram_token_map"][:3] == [3, 10, 17]
+    # A multiplier past 2**63 stays an exact integer.
+    assert c["engram_multipliers"][4] == (1 << 63) + 99
+
+
+def test_hy_v4_flash_synth_instantiates():
+    import gmlx.models.hy_v4_flash.model as hy_v4_flash_model
+    hy_v4_flash_model.ensure_registered()
+
+    c = synthesize_config(_hy_v4_flash_meta(), tensor_shapes=_HYF_SHAPES)
+    Model, ModelArgs = _get_classes(c)
+    model = Model(ModelArgs.from_dict(c))
+    mx.eval(model.parameters())
+    out = model(mx.array([[1, 2, 3, 4, 5, 6, 7, 8, 9]]))
+    mx.eval(out)
+    assert out.shape == (1, 9, VOCAB)
+    assert bool(mx.all(mx.isfinite(out)))
+    layers = model.model.layers
+    assert len(layers) == 6
+    # Head counts and the indexer follow the layer type.
+    assert [layer.self_attn.num_heads for layer in layers] == [2, 2, 4, 4, 2, 4]
+    assert [layer.self_attn.indexer is not None for layer in layers] == [
+        not s for s in _HYF_SWA]
+
+
+@pytest.mark.parametrize("key", [
+    "attention.q_lora_rank", "attention.kv_lora_rank",
+    "rope.dimension_count", "rope.freq_base_swa",
+    "attention.sliding_window", "attention.indexer.head_count",
+    "attention.indexer.key_length", "attention.indexer.kpool",
+    "hyper_connection.count", "hyper_connection.epsilon",
+    "hyper_connection.magnitude", "ple.ngram_size", "ple.heads_per_ngram",
+    "embedding_length_per_layer_input", "engram.pad_token_id",
+])
+def test_hy_v4_flash_synth_requires(key):
+    # A default for any of these loads cleanly and generates garbage.
+    m = _hy_v4_flash_meta()
+    del m[f"hy_v4_flash.{key}"]
+    with pytest.raises(ValueError, match=key.rsplit(".", 1)[-1]):
+        synthesize_config(m, tensor_shapes=_HYF_SHAPES)
+
+
+@pytest.mark.parametrize("key, value, match", [
+    # A per-layer list shorter than the trunk.
+    ("attention.head_count", [2, 2, 4], "need 6"),
+    ("attention.sliding_window_pattern", [False] * 5, "need 6"),
+    ("attention.indexer.types", [True] * 4, "need 6"),
+    ("expert_gating_func", 1, "sigmoid"),
+    ("swiglu_clamp_exp", [10.0, 7.0] + [10.0] * 5, "non-uniform"),
+    # Engram metadata that does not describe one table.
+    ("ple.head_offsets", _HYF_OFFSETS[:-1], "inconsistent"),
+    ("ple.layers", [4, 1], "out of order"),
+    ("ple.layers", [1, 6], "out of range"),
+])
+def test_hy_v4_flash_synth_refusals(key, value, match):
+    m = _hy_v4_flash_meta()
+    m[f"hy_v4_flash.{key}"] = value
+    with pytest.raises((ValueError, NotImplementedError), match=match):
+        synthesize_config(m, tensor_shapes=_HYF_SHAPES)
+
+
+def test_hy_v4_flash_synth_refuses_a_table_of_another_size():
+    # The hash addresses rows by the metadata's offsets: a table with other
+    # dimensions would be read at the wrong rows.
+    shapes = dict(_HYF_SHAPES)
+    shapes["per_layer_token_embd.weight"] = [8, _HYF_ROWS - 1]
+    with pytest.raises(ValueError, match="engram table is 8 x 179"):
+        synthesize_config(_hy_v4_flash_meta(), tensor_shapes=shapes)
