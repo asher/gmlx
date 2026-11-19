@@ -327,9 +327,6 @@ def _load_mtp_drafter(
         drafter = HyV4FlashMTPDrafter(
             HyV4FlashMTPConfig(
                 text_config=ModelArgs.from_dict(config_dict),
-                # Pinned at 2, as glm5_next: a deeper rollout needs a pool
-                # cache undo log of more than one update.
-                block_size=2,
             )
         )
         log(

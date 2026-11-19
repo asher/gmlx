@@ -8,6 +8,7 @@ import mlx.core as mx
 import pytest
 from mlx.utils import tree_flatten
 
+from gmlx.models.deepseek_v4.cache import MTP_UNDO_WIDTH
 from gmlx.models.hy_v4_flash.mtp import (
     HyV4FlashMTPConfig,
     HyV4FlashMTPDrafter,
@@ -131,22 +132,24 @@ def _greedy_reference(lm, prompt, n_gen):
     return out, gaps
 
 
-def _spec_decode(target, lm, drafter, prompt, n_gen):
+def _spec_decode(target, lm, drafter, prompt, n_gen, block=2):
     from gmlx.spec.speculative import stream_speculative
 
     drafter.reset(target)
     return list(stream_speculative(
         target, drafter, prompt, prompt_cache=lm.make_cache(),
-        max_tokens=n_gen, sampler=None, draft_block_size=2,
+        max_tokens=n_gen, sampler=None, draft_block_size=block,
         prefill_chunk=PREFILL_CHUNK))
 
 
 class _OracleDrafter(HyV4FlashMTPDrafter):
-    """Drafts a known continuation, so every draft is accepted."""
+    """Drafts a known continuation, so every draft is accepted, but for
+    the script positions in ``_miss``, which it gets wrong."""
 
     def __init__(self, config):
         super().__init__(config)
         self._script = []
+        self._miss = frozenset()
         self._pos = 0
 
     def reset(self, target_model, left_padding=None):
@@ -162,7 +165,10 @@ class _OracleDrafter(HyV4FlashMTPDrafter):
         n = int(tok.shape[1])
         window = self._script[self._pos:self._pos + n]
         if len(window) == n:
-            tok = mx.array([[int(t) for t in window]], dtype=token_dtype)
+            vocab = int(self.config.text_config.vocab_size)
+            tok = mx.array(
+                [[(int(t) + (self._pos + i in self._miss)) % vocab
+                  for i, t in enumerate(window)]], dtype=token_dtype)
         return tok
 
     def accept_verified_tokens(self, verify_hidden, draft_tokens, accepted,
@@ -180,14 +186,16 @@ def _prompt(lm):
     return mx.random.randint(0, lm.args.vocab_size, (1, 41)).astype(mx.int32)
 
 
-def test_greedy_mtp_decode_gives_the_plain_tokens_through_rejections(caplog):
+@pytest.mark.parametrize("block", [2, 4, MTP_UNDO_WIDTH])
+def test_greedy_mtp_decode_gives_the_plain_tokens_through_rejections(
+        caplog, block):
     lm = _lm(seed=5)
     drafter = _drafter(lm.args)
     prompt = _prompt(lm)
 
     ref, gaps = _greedy_reference(lm, prompt, N_GEN)
     with caplog.at_level(logging.WARNING, logger="gmlx.spec.speculative"):
-        spec = _spec_decode(_target(lm), lm, drafter, prompt, N_GEN)
+        spec = _spec_decode(_target(lm), lm, drafter, prompt, N_GEN, block)
 
     assert min(gaps) > GREEDY_TIE_TOL
     assert spec == ref
@@ -199,18 +207,71 @@ def test_greedy_mtp_decode_gives_the_plain_tokens_through_rejections(caplog):
     assert drafter._cache[0][0].offset >= prompt.shape[1] - 1
 
 
-def test_greedy_mtp_decode_gives_the_plain_tokens_when_drafts_hold():
+@pytest.mark.parametrize("block", [2, 4, MTP_UNDO_WIDTH])
+def test_greedy_mtp_decode_gives_the_plain_tokens_when_drafts_hold(block):
     lm = _lm(seed=5)
     prompt = _prompt(lm)
     ref, _ = _greedy_reference(lm, prompt, N_GEN)
     oracle = _drafter(lm.args, cls=_OracleDrafter)
     oracle._script = ref
-    spec = _spec_decode(_target(lm), lm, oracle, prompt, N_GEN)
+    spec = _spec_decode(_target(lm), lm, oracle, prompt, N_GEN, block)
 
     assert spec == ref
     accepts = list(oracle.accept_lens)
     # The last round can be cut short by the token budget.
-    assert sum(1 for a in accepts if a == 1) >= len(accepts) - 1
+    assert sum(1 for a in accepts if a == block - 1) >= len(accepts) - 1
+
+
+def test_greedy_mtp_decode_gives_the_plain_tokens_when_a_deep_block_holds_in_part():
+    lm = _lm(seed=5)
+    prompt = _prompt(lm)
+    ref, _ = _greedy_reference(lm, prompt, N_GEN)
+    oracle = _drafter(lm.args, cls=_OracleDrafter)
+    oracle._script = ref
+    oracle._miss = frozenset({2, 3, 8, 12, 17, 21})
+    spec = _spec_decode(
+        _target(lm), lm, oracle, prompt, N_GEN, MTP_UNDO_WIDTH)
+
+    assert spec == ref
+    # Rounds that keep none, some and all of their drafts.
+    assert len(set(oracle.accept_lens)) >= 4
+
+
+# 41 rows is more pools than the indexer selects. The four draft steps of
+# a block of 6 finish a pool from every remainder.
+@pytest.mark.parametrize("accepted", [0, 2, 5])
+@pytest.mark.parametrize("prompt_len", [41, 42, 43, 44])
+def test_the_accept_finds_the_block_s_cache_without_its_draft_steps(
+        prompt_len, accepted):
+    lm = _lm()
+    target = _target(lm)
+    vocab, width = lm.args.vocab_size, lm.args.hidden_size
+    mx.random.seed(2)
+    prompt = mx.random.randint(0, vocab, (1, prompt_len)).astype(mx.int32)
+    states = mx.random.normal((1, prompt_len, width))
+    drafts = mx.random.randint(0, vocab, (1, 5)).astype(mx.int32)
+    verify = mx.random.normal((1, 6, width))
+
+    def round_at(block):
+        drafter = _drafter(lm.args)
+        drafter.reset(target)
+        drafter.prefill_from_target_hidden(
+            prompt, states, 3, None, greedy=True)
+        drafter.draft_block(
+            3, states[:, -1:], None, block, None, greedy=True)
+        drafter.accept_verified_tokens(
+            verify, drafts, accepted, [5], None, greedy=True)
+        keys, pool = drafter._cache[0].caches
+        counts = keys.offset, pool._plen, pool.remainder
+        # The next round's first draft and a step past it read the cache.
+        nxt = drafter.draft_block(
+            5, verify[:, -1:], None, 3, None, greedy=True)
+        return *counts, nxt
+
+    shallow, deep = round_at(2), round_at(MTP_UNDO_WIDTH)
+    assert deep[:3] == shallow[:3]
+    assert shallow[0] == prompt_len + accepted + 1
+    assert mx.array_equal(deep[3], shallow[3]).item()
 
 
 def test_the_drafter_meets_the_engine_contract():
@@ -229,8 +290,13 @@ def test_the_drafter_meets_the_engine_contract():
     validate_drafter(drafter)
     with pytest.raises(NotImplementedError):
         drafter.make_cache(left_padding=[0])
-    with pytest.raises(ValueError, match="block_size=2"):
-        HyV4FlashMTPDrafter(HyV4FlashMTPConfig(text_config=args, block_size=3))
+    with pytest.raises(ValueError, match="block of 2 to"):
+        HyV4FlashMTPDrafter(HyV4FlashMTPConfig(
+            text_config=args, block_size=MTP_UNDO_WIDTH + 1))
+    # A deeper ask drafts the deepest block a round can undo.
+    from gmlx.spec.helpers import _resolve_block_total
+
+    assert _resolve_block_total(drafter, 9) == MTP_UNDO_WIDTH
     # The block is a sparse layer at the head count the file gives it.
     attn = drafter.layers[0].self_attn
     assert attn.num_heads == 2 and attn.indexer is not None

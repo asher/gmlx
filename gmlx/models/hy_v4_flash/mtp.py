@@ -50,10 +50,12 @@ from gmlx.spec.mtp_drafter import QwenMTPDrafter
 @dataclass
 class HyV4FlashMTPConfig:
     """``text_config`` is the target's ModelArgs. ``block_size`` is the
-    block total (drafts and the bonus token)."""
+    block total (drafts and the bonus token). ``native_block_size`` is the
+    deepest block a round can verify and undo."""
 
     text_config: Any
     block_size: int = 2
+    native_block_size: int = MTP_UNDO_WIDTH
 
 
 @dataclass
@@ -247,12 +249,12 @@ class HyV4FlashMTPDrafter(QwenMTPDrafter):
 
     def __init__(self, config: HyV4FlashMTPConfig):
         nn.Module.__init__(self)
-        if int(config.block_size) != 2:
-            # The accept trim rewinds the block's own pool cache through
-            # its one-update undo log. A deeper rollout appends one update
-            # a draft and cannot rewind past the last.
+        if not 2 <= int(config.block_size) <= MTP_UNDO_WIDTH:
+            # A verify of the whole block is one cache update, and the
+            # caches undo an update of up to MTP_UNDO_WIDTH rows.
             raise ValueError(
-                "HyV4FlashMTPDrafter supports block_size=2 only")
+                f"HyV4FlashMTPDrafter drafts a block of 2 to "
+                f"{MTP_UNDO_WIDTH}; got {config.block_size}")
         self.config = config
         self._native_block_size = (
             native_block_size(config) or int(config.block_size))
@@ -286,6 +288,9 @@ class HyV4FlashMTPDrafter(QwenMTPDrafter):
         # The image pad token's id where the target is the vision
         # container, which spells an image slot as an id past the vocab.
         self._slot_pad: Optional[int] = None
+        # The block's cache as a round found it, where the round drafts
+        # more than one step.
+        self._round_mark: Optional[list] = None
 
         self.accept_lens: List[float] = []
         self.draft_lens: List[int] = []
@@ -312,6 +317,54 @@ class HyV4FlashMTPDrafter(QwenMTPDrafter):
                                    **kwargs) -> None:
         super().prefill_from_target_hidden(
             self._prompt_ids(input_ids), hidden, *args, **kwargs)
+
+    def _mark(self) -> list:
+        """What puts the block's cache back as it stands: the key count,
+        and the pool's finished count with the raw rows of its open
+        group."""
+        marks = []
+        for entry in self._cache:
+            for leaf in getattr(entry, "caches", None) or (entry,):
+                if isinstance(leaf, DS4PoolingCache):
+                    rem = leaf.remainder
+                    marks.append((
+                        leaf, leaf._plen, rem,
+                        leaf.buf_kv[:, :rem] if rem else None,
+                        leaf.buf_gate[:, :rem] if rem else None))
+                else:
+                    marks.append((leaf, leaf.offset))
+        return marks
+
+    @staticmethod
+    def _rewind(marks: list) -> None:
+        for mark in marks:
+            leaf = mark[0]
+            if isinstance(leaf, DS4PoolingCache):
+                _, plen, rem, kv, gate = mark
+                if rem and leaf._plen != plen:
+                    # A group the steps finished wrote over the open one.
+                    leaf.buf_kv[:, :rem] = kv
+                    leaf.buf_gate[:, :rem] = gate
+                # Pooled rows past the finished count stay where they are
+                # and are written over.
+                leaf._plen, leaf.remainder, leaf._undo = plen, rem, None
+            else:
+                leaf.trim(leaf.offset - mark[1])
+
+    def draft_block(self, last_bonus, hidden, cache, block_size, *args,
+                    **kwargs) -> mx.array:
+        # Each draft past the first appends an update of its own, and the
+        # pool's undo log holds one. The accept rewinds to this mark.
+        self._round_mark = self._mark() if int(block_size) > 2 else None
+        return super().draft_block(
+            last_bonus, hidden, cache, block_size, *args, **kwargs)
+
+    def accept_verified_tokens(self, *args, **kwargs) -> None:
+        mark, self._round_mark = self._round_mark, None
+        if mark is not None and self._round_appended > 0:
+            self._rewind(mark)
+            self._round_appended = 0
+        super().accept_verified_tokens(*args, **kwargs)
 
     def make_cache(self, left_padding: Optional[List[int]] = None) -> List[Any]:
         if left_padding is not None:
