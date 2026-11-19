@@ -101,6 +101,7 @@ _HANDLERS = {
     "granite_switch_template.jinja": "autoparser",
     "granite_switch_systemone.jinja": "autoparser",
     "smollm2_template.jinja": "autoparser",
+    "hy4_flash_template.jinja": "autoparser",
 }
 
 
