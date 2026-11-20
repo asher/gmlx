@@ -109,7 +109,7 @@ These flags say where the models come from:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `model`, positional | None | Serve this GGUF, pinned, with an id derived from the filename. |
+| `model`, positional | None | Serve this GGUF, pinned, with an id derived from the filename and the [prompt cache](prompt-cache.md) on. |
 | `--config FILE` | The first default location | Serve a YAML config. |
 | `--models-dir DIR` | None | Serve a scan of this directory. Repeat the flag for more directories. |
 | `-r`, `--recursive`, `--no-recursive` | Shallow | Descend when scanning. |
@@ -160,6 +160,7 @@ the [`sampling` keys](config.md#sampling):
 | `--mmproj PATH` | None | Load this projector GGUF to make the model multimodal. |
 | `--asr PATH` | Found beside the model | Speech companion GGUF for a model that reads audio through one, such as [Granite Switch](granite-switch.md). |
 | `--no-asr` | Off | Pair no speech companion. |
+| `--no-prompt-cache` | Off | Run without the in-memory [prompt cache](prompt-cache.md), which a positional GGUF has on. A config sets [`cache.enabled`](config.md#cacheenabled). |
 | `--adapter PATH[:STRENGTH]` | None | Load this GGUF LoRA adapter, for text only, at this default strength, 1 when left out. A request can set its own. Repeat the flag for more. |
 | `--profile NAME` | None | Apply a built-in intent such as `coding` or `reasoning-high`, resolved for the model's family. |
 | `--system-prompt STR` | None | Use this system prompt when the request has none. |

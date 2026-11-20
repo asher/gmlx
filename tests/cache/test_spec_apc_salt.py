@@ -40,9 +40,11 @@ class _Out:
 class _Model:
     def __init__(self, config=None):
         self.config = config
+        self.widths = []
 
     def __call__(self, input_ids, cache=None, inputs_embeds=None, **kw):
         b, n = input_ids.shape
+        self.widths.append(n)
         kv = mx.zeros((b, 1, n, _D))
         for c in cache:
             c.update_and_fetch(kv, kv)
@@ -107,7 +109,38 @@ def test_l0_keys_on_the_cold_meta_salt(ar):
 
     assert _prefill(ar, model, _TURN1, meta=_cold_meta(_TURN1, red)) == 0
     assert _prefill(ar, model, _TURN2, meta=_cold_meta(_TURN2, blue)) == 0
-    assert _prefill(ar, model, _TURN2, meta=_cold_meta(_TURN2, red)) == 6
+    assert _prefill(ar, model, _TURN2, meta=_cold_meta(_TURN2, red)) == 5
+
+
+def test_l0_serves_the_same_prompt_sent_again(ar):
+    """An entry ends one token before its prompt. A lookup needs a column
+    left to forward, so an entry that held the whole prompt would never
+    serve that prompt sent again. The resend restores all but the last
+    token, forwards one column and stores nothing."""
+    from gmlx.cache.prefix_cache import spec_prefix_stats
+
+    model = _Model()
+    cache = SpecPrefixCache(min_prefix=2)
+    model._spec_prefix_cache = cache
+    text = [1, 5, 6, 7, 2, 3]
+
+    assert _prefill(ar, model, text) == 0
+    (entry,) = cache._entries.values()
+    assert entry.token_ids == tuple(text[:-1])
+    # The hidden ends where the KV does (the stub's hidden is its input).
+    assert entry.hidden[0, -1, 0].item() == text[-2]
+    stores = spec_prefix_stats()["spec_prefix_stores"]
+
+    for _ in range(2):
+        model.widths.clear()
+        assert _prefill(ar, model, text) == len(text) - 1
+        assert model.widths == [1]
+    assert len(cache) == 1
+    assert spec_prefix_stats()["spec_prefix_stores"] == stores
+
+    # The next turn extends the same entry and stores its own.
+    assert _prefill(ar, model, text + [4, 5]) == len(text) - 1
+    assert len(cache) == 2
 
 
 def test_l0_skips_media_prompts_without_a_stock_salt(ar):
@@ -125,7 +158,7 @@ def test_l0_skips_media_prompts_without_a_stock_salt(ar):
 
     text1 = [1, 5, 6, 7, 2, 3]
     assert _prefill(ar, model, text1) == 0
-    assert _prefill(ar, model, text1 + [4, 5]) == 6
+    assert _prefill(ar, model, text1 + [4, 5]) == 5
 
 
 def test_l0_restores_only_where_the_media_guard_allows(ar):
@@ -146,7 +179,7 @@ def test_l0_restores_only_where_the_media_guard_allows(ar):
 
     assert _prefill(ar, model, _TURN2, meta=meta(_TURN2)) == 0
     assert _prefill(ar, model, turn2, meta=meta(turn2)) == 0
-    assert _prefill(ar, model, turn3, meta=meta(turn3)) == len(turn2)
+    assert _prefill(ar, model, turn3, meta=meta(turn3)) == len(turn2) - 1
 
 
 def _gemma4_spec_config(model_type):
@@ -239,7 +272,7 @@ def test_l0_skips_image_turns_whose_config_names_no_image_id(ar, arch, keys):
     text1 = [1, 5, 6, 7, 2, 3]
     text2 = text1 + [4, 5]
     assert _prefill(ar, model, text1, kwargs=kwargs(text1)) == 0
-    assert _prefill(ar, model, text2, kwargs=kwargs(text2)) == 6
+    assert _prefill(ar, model, text2, kwargs=kwargs(text2)) == 5
 
 
 def test_expanded_media_ids_mark_a_turn_without_the_fold(monkeypatch):
@@ -283,7 +316,7 @@ def test_l0_keeps_adapted_and_bare_rows_apart(ar):
             reg.register(3, (1.0,), salt=77)
             assert _prefill(ar, model, text1, uid=1) == 0
             assert _prefill(ar, model, text1 + [4, 5], uid=2) == 0
-            assert _prefill(ar, model, text1 + [4, 5], uid=3) == 6
+            assert _prefill(ar, model, text1 + [4, 5], uid=3) == 5
     finally:
         lora_rows.configure("static", 1)
 
@@ -323,7 +356,7 @@ def test_l0_keeps_tenants_apart_without_a_manager(ar, monkeypatch):
     text1 = [1, 5, 6, 7, 2, 3]
     assert step(gen, model, text1, 21) == 0
     assert step(gen, model, text1 + [4, 5], 22) == 0
-    assert step(gen, model, text1 + [4, 5], 23) == 6
+    assert step(gen, model, text1 + [4, 5], 23) == 5
     assert step(gen, model, text1 + [4, 5], 24) == 0
 
 
@@ -342,7 +375,7 @@ def test_l0_tenant_rows_belong_to_their_generator(ar, monkeypatch):
     text1 = [1, 5, 6, 7, 2, 3]
     assert step(acme, model, text1, 0) == 0
     assert step(bare, model, text1 + [4, 5], 0) == 0
-    assert step(acme, model, text1 + [4, 5], 0) == 6
+    assert step(acme, model, text1 + [4, 5], 0) == 5
 
 
 def test_l0_skips_a_row_its_generator_no_longer_holds(ar, monkeypatch):
@@ -360,7 +393,7 @@ def test_l0_skips_a_row_its_generator_no_longer_holds(ar, monkeypatch):
     text1 = [1, 5, 6, 7, 2, 3]
     assert step(gen, model, text1, 101) == 0
     assert step(gen, model, text1 + [4, 5], 100) == 0
-    assert step(gen, model, text1 + [4, 5], 102) == 6
+    assert step(gen, model, text1 + [4, 5], 102) == 5
 
 
 def _l1_batch(model, ids, salt, **extra):

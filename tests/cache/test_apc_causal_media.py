@@ -317,8 +317,10 @@ def test_the_mtp_target_restores_the_prefix_before_its_new_image(
     warm = _run(model, m, [_request(model, turn2, [_img(1), _img(2)])],
                 head=head)
     warm_calls = pos.take()
+    # The prefix cache's entry ends one token before turn 1 does.
+    kept = len(turn1) - (tier == "l0")
     if tier == "l0":
-        assert hits == [len(turn1)]
+        assert hits == [kept]
     else:
         assert hits == [0] and _matched(m) - before == len(turn1)
     lm._spec_prefix_cache = None
@@ -329,14 +331,14 @@ def test_the_mtp_target_restores_the_prefix_before_its_new_image(
 
     # Turn 2 prefills only its new tokens, image B included, with the
     # hidden states and mrope position ids of the same tokens run cold.
-    warm_pre, warm_rest = _leading(warm_calls, len(turn2) - len(turn1))
+    warm_pre, warm_rest = _leading(warm_calls, len(turn2) - kept)
     cold_pre, cold_rest = _leading(cold_calls, len(turn2))
     hidden_w = np.concatenate([h for *_x, h in warm_pre], axis=1)
     hidden_c = np.concatenate([h for *_x, h in cold_pre], axis=1)
-    assert np.abs(hidden_w - hidden_c[:, len(turn1):]).max() < _ATOL
+    assert np.abs(hidden_w - hidden_c[:, kept:]).max() < _ATOL
     pos_w = np.concatenate([p for _n, p, _d, _h in warm_pre], axis=-1)
     pos_c = np.concatenate([p for _n, p, _d, _h in cold_pre], axis=-1)
-    assert np.array_equal(pos_w, pos_c[..., len(turn1):])
+    assert np.array_equal(pos_w, pos_c[..., kept:])
     # The verify forwards after it see the same positions and deltas.
     assert [c[0] for c in warm_rest] == [c[0] for c in cold_rest]
     assert len(warm_rest) >= 3

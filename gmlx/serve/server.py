@@ -1823,6 +1823,10 @@ def _add_serve_args(ap: argparse.ArgumentParser) -> None:
                           "reads audio through one (Granite Switch).")
     asr.add_argument("--no-asr", action="store_true",
                      help="Do not pair a speech companion with the single model.")
+    ap.add_argument("--no-prompt-cache", action="store_true",
+                    help="Serve a single positional model without the in-memory "
+                         "prompt cache, which is on for it by default (config "
+                         "mode: `server.cache.enabled`).")
     ap.add_argument("--hf-source", default=None,
                     help="Processor/config override for a single VLM model (rarely "
                          "needed; the processor is synthesized from the GGUFs).")
@@ -2204,6 +2208,8 @@ def _bg_serve_args(a, cfg_path) -> list:
         out += ["--asr", _abs(a.asr)]
     if getattr(a, "no_asr", False):
         out.append("--no-asr")
+    if getattr(a, "no_prompt_cache", False):
+        out.append("--no-prompt-cache")
     if a.hf_source:
         out += ["--hf-source", a.hf_source]
     if a.speculative:
@@ -2621,6 +2627,9 @@ def _cmd_serve(argv: list, prog: str = "gmlx serve") -> int:
     n_modes = sum(bool(x) for x in (a.config, a.models_dir, a.model))
     if n_modes > 1:
         ap.error("choose one of: --config FILE | --models-dir DIR | a positional GGUF")
+    if a.no_prompt_cache and not a.model:
+        ap.error("--no-prompt-cache applies to a positional GGUF; in a config, "
+                 "set server.cache.enabled")
     # --mmproj (VLM) + --speculative/--draft-gguf (MTP) now coexist: a resident VLM
     # speculates on text-only requests and serves image/audio requests on the VLM
     # forward (gemma4 needs --draft-gguf; qwen3.5/3.6 use the native head).
@@ -3048,6 +3057,10 @@ def _single_model_cfg(a) -> ServerCfg:
         hf_cache=a.hf_cache,
         family_defaults=not getattr(a, "no_family_defaults", False),
         defaults=ServerDefaults(model=mid),
+        # What `server.cache.enabled: true` alone gives a config: the
+        # in-memory tiers, sized after the load from the memory left then.
+        # The SSD tier needs a config. The flag wins over APC_ENABLED.
+        cache={"enabled": not getattr(a, "no_prompt_cache", False)},
         models=models,
     )
 

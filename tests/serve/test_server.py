@@ -114,6 +114,55 @@ def test_single_model_cfg_thinking_flags_ride_overrides(tmp_path):
     assert resolve_model(mid, cfg).thinking is None
 
 
+def _serve_args(*argv):
+    ap = argparse.ArgumentParser()
+    srv._add_serve_args(ap)
+    return ap.parse_args(list(argv))
+
+
+def test_a_positional_model_runs_the_in_memory_prompt_cache(tmp_path, monkeypatch):
+    """`gmlx serve model.gguf` resolves as a config whose only cache key is
+    `server.cache.enabled: true`: the in-memory tiers, no SSD tier."""
+    from gmlx.config import build_config, env_for, resolve_model
+    monkeypatch.delenv("APC_ENABLED", raising=False)
+    g = tmp_path / "Qwen3-0.6B-Q8_0.gguf"
+    g.write_bytes(b"x")
+    cfg = srv._single_model_cfg(_serve_args(str(g)))
+    assert cfg.cache == {"enabled": True}
+    (mid, _m), = cfg.models.items()
+    env = env_for(resolve_model(mid, cfg))
+    assert env["APC_ENABLED"] == "1" and "APC_DISK_PATH" not in env
+    file_cfg = build_config({"server": {"cache": {"enabled": True}},
+                             "models": {mid: {"path": str(g)}}})
+    file_env = env_for(resolve_model(mid, file_cfg))
+    apc = {k: v for k, v in env.items() if k.startswith("APC_")}
+    assert apc == {k: v for k, v in file_env.items() if k.startswith("APC_")}
+
+
+def test_no_prompt_cache_turns_a_positional_models_cache_off(tmp_path, monkeypatch):
+    """--no-prompt-cache wins over an APC_ENABLED in the environment and
+    survives the background re-exec."""
+    from gmlx.config import env_for, resolve_model
+    monkeypatch.setenv("APC_ENABLED", "1")
+    g = tmp_path / "Qwen3-0.6B-Q8_0.gguf"
+    g.write_bytes(b"x")
+    a = _serve_args(str(g), "--no-prompt-cache")
+    cfg = srv._single_model_cfg(a)
+    assert cfg.cache == {"enabled": False}
+    (mid, _m), = cfg.models.items()
+    assert env_for(resolve_model(mid, cfg))["APC_ENABLED"] == "0"
+    assert "--no-prompt-cache" in srv._bg_serve_args(a, None)
+    assert "--no-prompt-cache" not in srv._bg_serve_args(_serve_args(str(g)), None)
+
+
+@pytest.mark.parametrize("mode", [["--config", "c.yaml"], ["--models-dir", "d"], []])
+def test_no_prompt_cache_needs_a_positional_model(mode, capsys):
+    with pytest.raises(SystemExit) as e:
+        srv._cmd_serve([*mode, "--no-prompt-cache"])
+    assert e.value.code == 2
+    assert "--no-prompt-cache applies to a positional GGUF" in capsys.readouterr().err
+
+
 def test_bg_serve_args_forwards_thinking_flags():
     """--thinking / --thinking-budget must survive the background re-exec."""
     import argparse

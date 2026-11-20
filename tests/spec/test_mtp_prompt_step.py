@@ -281,10 +281,11 @@ def test_l0_restore_trims_mrope_position_ids(ar, monkeypatch):
             draft_model=object(), draft_kind="mtp")
         _run(batch)
 
-    assert batch._mtp_apc_prefix_len == 6
+    # The entry ends one token before the first prompt.
+    assert batch._mtp_apc_prefix_len == 5
     seen = [c["position_ids"] for c in model.calls]
-    assert [c["n"] for c in model.calls] == [2, 1]
-    assert mx.concatenate(seen, axis=2).tolist() == pos[:, :, 6:].tolist()
+    assert [c["n"] for c in model.calls] == [2, 1, 1]
+    assert mx.concatenate(seen, axis=2).tolist() == pos[:, :, 5:].tolist()
 
 
 def test_a_multi_row_batch_logs_the_skipped_owned_lookup(monkeypatch, caplog):
