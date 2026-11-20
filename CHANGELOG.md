@@ -6,6 +6,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `gmlx serve model.gguf` runs with the in-memory prompt cache on, so a
+  repeated prompt or the next turn skips prefill. `--no-prompt-cache` turns it off.
+
+### Fixed
+
+- With the prompt cache off, a model with a drafter read a repeated prompt
+  again in full. The repeat now reuses all but the prompt's last token.
+
 ## [0.5.6] - 2026-11-19
 
 ### Added

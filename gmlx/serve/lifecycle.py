@@ -1098,6 +1098,19 @@ def serves_default_config(argv: list) -> bool:
     return "serve" in argv and _names_nothing(argv[argv.index("serve") + 1:])
 
 
+def positional_prompt_cache(argv: list) -> bool | None:
+    """Whether the server that ``argv`` starts on one positional GGUF runs
+    the prompt cache, which is on for it unless ``--no-prompt-cache`` is
+    given. None when ``argv`` starts another kind of server."""
+    argv = [str(x) for x in argv]
+    if "serve" not in argv:
+        return None
+    args = argv[argv.index("serve") + 1:]
+    if _names_nothing(args) or "--config" in args[:-1] or "--models-dir" in args:
+        return None
+    return "--no-prompt-cache" not in args
+
+
 def first_default_config() -> str | None:
     from gmlx.config import default_config_paths
 

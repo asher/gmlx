@@ -1,7 +1,8 @@
 # Prompt cache
 
 The prompt cache lets the server skip prefill for the start of a prompt
-that it has seen before. It is off by default, reuses more or less of a
+that it has seen before. It is on for a server started on one GGUF, and a
+configuration file turns it on for the others. It reuses more or less of a
 prompt depending on the model family, and can keep entries on the SSD.
 
 Agents and long chats gain the most, because they send the same system
@@ -16,8 +17,13 @@ the first token, instead of tens of seconds of prefill.
 
 ## Turning it on
 
-The cache is off unless the configuration file turns it on, and
-`gmlx init` writes a file with it on:
+`gmlx serve model.gguf` runs with the cache on, in memory only, and
+`--no-prompt-cache` turns it off. The cache takes no memory at the start. It
+grows into what is free after the model loads, and the server takes entries
+back from it before a request goes short.
+
+With a configuration file or `--models-dir`, the cache is off unless the
+file turns it on, and `gmlx init` writes a file with it on:
 
 ```yaml
 server:
@@ -76,9 +82,10 @@ changes the text.
 ## The SSD tier
 
 The SSD tier keeps entries across model unloads and server restarts, and
-holds more entries than memory would. The `gmlx init` wizard turns it on
-unless you answer no, and `gmlx init --disk-cache` turns it on without the
-wizard. You can also add it to the file:
+holds more entries than memory would. It needs a configuration file. The
+`gmlx init` wizard turns it on unless you answer no, and
+`gmlx init --disk-cache` turns it on without the wizard. You can also add
+it to the file:
 
 ```yaml
 server:

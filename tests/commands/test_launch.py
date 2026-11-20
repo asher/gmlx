@@ -1711,6 +1711,23 @@ def test_the_claude_code_cache_note_prints_only_when_the_cache_is_off(
     assert (_CACHE_NOTE in capsys.readouterr().out) is noted
 
 
+@pytest.mark.parametrize("words, noted", [
+    (["/m/qwen.gguf"], False),                # one GGUF runs the cache
+    (["/m/qwen.gguf", "--no-prompt-cache"], True),
+    (["--models-dir", "/m"], True)])          # a folder scan does not
+def test_the_cache_note_follows_a_start_without_a_config(
+        monkeypatch, capsys, words, noted):
+    _fake_probe(monkeypatch)
+    monkeypatch.delenv("APC_ENABLED", raising=False)
+    argv = ["/app/gmlx", "serve", *words, "--host", "127.0.0.1", "--port", "8080",
+            "--foreground"]
+    monkeypatch.setattr(lifecycle, "read_run", lambda h, p: {
+        "pid": os.getpid(), "config_abspath": None, "argv": argv})
+    launch._launch_claude_code(_args(harness="claude-code", config_only=True),
+                               exec_fn=lambda *a: 0)
+    assert (_CACHE_NOTE in capsys.readouterr().out) is noted
+
+
 def test_a_start_that_names_no_config_and_records_none_is_a_config_launch_cannot_read(
         monkeypatch, capsys):
     """A start that names no config reads the default config, and a server

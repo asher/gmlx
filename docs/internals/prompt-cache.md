@@ -37,10 +37,11 @@ other four need `cache.enabled`. The prefix layer and the drafter sidecar
 exist only for speculative models, and checkpoints only for
 checkpoint-tier models.
 
-- Prefix layer: An in-memory LRU holds post-prefill KV and hidden state. A
-  request that shares a prefix with an earlier one skips that prefill. When
-  memory runs short, the governor evicts its entries, the least recently
-  used first.
+- Prefix layer: An in-memory LRU holds each prompt's KV and hidden state
+  up to the token before its last. A request that repeats an earlier
+  prompt or extends it skips that prefill and reads only what follows.
+  When memory runs short, the governor evicts its entries, the least
+  recently used first.
 - Shared pools: The block, exact and disk lookups fill the prompt cache
   before prefill, so a request can warm-start from memory or from the SSD
   tier. The longest match wins.

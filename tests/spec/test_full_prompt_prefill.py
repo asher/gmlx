@@ -709,9 +709,23 @@ def test_apc_warm_start(mtp_model):
     hit = spec_cache.lookup(mx.array([turn2_ids], dtype=mx.int32),
                             salt=(0, None, None))
     assert hit is not None, "turn-2 prompt did not hit the prefix cache"
-    assert hit[0] == len(prefix_ids), (
-        f"hit prefix_len {hit[0]} != stored prefix {len(prefix_ids)}"
+    # The entry ends one token before the prompt, so the prompt sent
+    # again finds it too.
+    assert hit[0] == len(prefix_ids) - 1, (
+        f"hit prefix_len {hit[0]} != stored prefix {len(prefix_ids) - 1}"
     )
+    resend = spec_cache.lookup(mx.array([prefix_ids], dtype=mx.int32),
+                               salt=(0, None, None))
+    assert resend is not None and resend[0] == len(prefix_ids) - 1, (
+        "the same prompt sent again did not hit the prefix cache")
+    with _capture_spec_log() as messages:
+        toks_again = _run_mtp(model, drafter, tokenizer, [prefix_ids],
+                              N_DECODE)[0]
+    assert any(m.startswith("APC hit:") and "suffix=1" in m
+               for m in messages), messages
+    assert toks_again[0] == toks_cold[0], (
+        f"resend first token {toks_again[0]} != cold {toks_cold[0]}")
+    assert len(spec_cache) == 1
 
     toks_warm = _run_mtp(model, drafter, tokenizer, [turn2_ids], N_DECODE)[0]
     assert len(toks_warm) > 0, "warm start: no tokens"

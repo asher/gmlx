@@ -302,6 +302,70 @@ def _mtp_prefill_init(batch) -> None:
         batch._mtp_apc_prefix_len = restored
 
 
+def _l0_store(batch) -> None:
+    """Store the prompt's target KV and hidden in L0, one token short.
+
+    Runs as generate() starts: prefill has forwarded every column but the
+    last, so the snapshot ends one token before the prompt does. A lookup
+    needs a column left to forward for the first token's logits, and a
+    recurrent layer's state cannot be rolled back a token, so an entry
+    that held the whole prompt could never serve the same prompt sent
+    again. A next turn reuses one token less than the prompt.
+
+    B=1 only, the same gate as the lookup. The stored single-row snapshot
+    is valid for injection into a B>1 batch: SpecPrefixCache.restore
+    writes into a fresh single-row prompt_cache, and BatchKVCache.extend
+    merges it at the correct per-row offset.
+
+    Skipped on an L1 hit: the captured hidden covers only the suffix, and
+    L0 entries pair prompt keys with hidden from the prompt's start.
+    """
+    full_ids = getattr(batch, "_mtp_full_input_ids", None)
+    chunk_hiddens = getattr(batch, "_mtp_chunk_hiddens", None)
+    l1_prefix = int(getattr(batch, "_mtp_l1_prefix_len", 0) or 0)
+    upstream_warm = getattr(batch, "_mtp_upstream_warm", False)
+    b = int(full_ids.shape[0]) if full_ids is not None else 0
+    # With streaming, the captured hidden reaches back to column 0 only
+    # when retention ran from there: after a mid-request streaming stop the
+    # retained span starts past column 0, and with no retention at all
+    # nothing is captured. Neither is ever stored as a prompt entry.
+    seed_ctx = getattr(batch, "_mtp_seed_ctx", None)
+    seed_len = int(seed_ctx["len"]) if seed_ctx else 0
+    covers_prompt = seed_len == 0 or (
+        int(seed_ctx.get("retained_from") or 0) == 0)
+    l0_salt = getattr(batch, "_mtp_l0_salt", None)
+    spec_cache = (
+        _get_spec_prefix_cache(batch.model)
+        if b == 1 and l1_prefix == 0 and covers_prompt and chunk_hiddens
+        and l0_salt is not None and not upstream_warm else None
+    )
+    if spec_cache is None:
+        _log.debug(
+            "APC store skipped: b=%d l1_prefix=%d upstream_warm=%s "
+            "full_ids=%s hidden=%s",
+            b, l1_prefix, upstream_warm,
+            "set" if full_ids is not None else "None",
+            "set" if chunk_hiddens else "None",
+        )
+        return
+    # The columns the cache holds: all but the ones generate() forwards.
+    held = int(full_ids.shape[1]) - int(batch._input_ids.shape[1])
+    if held <= 0 or held == int(getattr(batch, "_mtp_apc_prefix_len", 0) or 0):
+        # Nothing forwarded past an L0 hit: the entry it restored from is
+        # this state already.
+        return
+    hidden = (chunk_hiddens[0] if len(chunk_hiddens) == 1
+              else mx.concatenate(chunk_hiddens, axis=1))
+    # Window-limited heads only use the trailing capture window (an
+    # uncapped entry pins the whole prompt's hidden for nothing).
+    limit = getattr(batch.draft_model, "hidden_capture_limit", None)
+    if limit:
+        hidden = hidden[:, -int(limit):]
+    spec_cache.store(full_ids[:, :held], batch.prompt_cache, hidden,
+                     salt=l0_salt)
+    _log.info("APC store: tokens=%d layers=%d", held, len(batch.prompt_cache))
+
+
 def _mtp_seed_stream_init(batch) -> None:
     """Arm per-chunk drafter seeding for this request, if eligible.
 
@@ -741,6 +805,12 @@ def install_full_prompt_mtp_prefill() -> None:
             # A one-column prompt never enters prompt_step, so the APC
             # lookup/store arming runs here instead. Idempotent otherwise.
             _mtp_prefill_init(self)
+            # Before the last column runs, so the entry serves a resend of
+            # this prompt (see _l0_store).
+            try:
+                _l0_store(self)
+            except Exception:
+                _log.warning("APC store failed; continuing", exc_info=True)
         result = _orig_generate(
             self,
             sampler,
@@ -773,8 +843,7 @@ def install_full_prompt_mtp_prefill() -> None:
             # on an L1 hit), or seed streaming ran without retention and
             # result.hidden is already the residual unstreamed tail
             # (retention accompanies an armed L0 store, so none can fire
-            # then). result.hidden needs no rebuild. The L0 store below
-            # still runs for a one-column prompt.
+            # then). result.hidden needs no rebuild.
             full_hidden = result.hidden
         else:
             parts = chunk_hiddens + [result.hidden]
@@ -786,9 +855,7 @@ def install_full_prompt_mtp_prefill() -> None:
                 # Columns [0, seed_len) are already teacher-forced into
                 # the streamed head KV; hand the owned round only the
                 # residual hidden so its seed call covers exactly the
-                # unstreamed tail at the adopted offset. full_hidden (the
-                # retained span) still feeds the L0 store below, which
-                # needs the whole prompt.
+                # unstreamed tail at the adopted offset.
                 rfrom = int(seed_ctx.get("retained_from") or 0)
                 result.hidden = full_hidden[:, seed_len - rfrom:]
             else:
@@ -801,59 +868,6 @@ def install_full_prompt_mtp_prefill() -> None:
             # never correctness -- verify catches every draft.
             result.prompt_tokens = (
                 full_ids[:, l1_prefix:] if l1_prefix > 0 else full_ids
-            )
-
-        # APC L0 store: cache this request's target KV + hidden so a
-        # future request sharing this token prefix skips re-prefill.
-        # Uses result.prompt_cache (SpecBatch owns the cache now),
-        # not self.prompt_cache (empty after _orig_generate).
-        #
-        # B=1 only -- same prefill-granularity gate as the lookup.
-        # The stored single-row snapshot is valid for injection into
-        # a B>1 batch: SpecPrefixCache.restore writes into a fresh
-        # single-row prompt_cache, and BatchKVCache.extend merges
-        # it at the correct per-row offset.
-        #
-        # Skipped on an L1 hit: hidden covers only the suffix, and L0
-        # entries pair full-prompt keys with full-prompt hidden.
-        b = int(full_hidden.shape[0]) if full_ids is not None else 0
-        # With streaming, full_hidden covers the whole prompt only when
-        # retention ran from column 0: after a mid-request streaming stop
-        # the retained span starts past column 0, and with no retention at
-        # all full_hidden is just the residual tail. Neither must ever be
-        # stored as a full-prompt entry.
-        full_covers_prompt = seed_len == 0 or (
-            bool(chunk_hiddens)
-            and int(seed_ctx.get("retained_from") or 0) == 0)
-        l0_salt = getattr(self, "_mtp_l0_salt", None)
-        spec_cache = (
-            _get_spec_prefix_cache(self.model)
-            if b == 1 and l1_prefix == 0 and full_covers_prompt
-            and l0_salt is not None
-            and not getattr(self, "_mtp_upstream_warm", False) else None
-        )
-        if spec_cache is not None and full_ids is not None:
-            # Window-limited heads only use the trailing capture window.
-            # The chunk capture keeps only that window and the final
-            # generate column adds one past it, so trim to match (an
-            # uncapped entry pins the whole prompt's hidden for nothing).
-            limit = getattr(self.draft_model, "hidden_capture_limit", None)
-            store_hidden = (full_hidden if not limit
-                            else full_hidden[:, -int(limit):])
-            spec_cache.store(full_ids, result.prompt_cache, store_hidden,
-                             salt=l0_salt)
-            _log.info(
-                "APC store: tokens=%d layers=%d",
-                int(full_ids.shape[1]),
-                len(result.prompt_cache),
-            )
-        else:
-            _log.debug(
-                "APC store skipped: b=%d l1_prefix=%d upstream_warm=%s "
-                "full_ids=%s",
-                b, l1_prefix,
-                getattr(self, "_mtp_upstream_warm", False),
-                "set" if full_ids is not None else "None",
             )
 
         return result

@@ -2257,7 +2257,9 @@ def _served_config(host: str, port, *,
     the server read at its start, whose key the server keeps until it starts
     again.
 
-    A server that started without a config file gives ``(None, {})``. A
+    A server that started without a config file gives ``(None, {})``, or
+    for one positional GGUF ``(None, doc)`` with the ``server.cache.enabled``
+    that the start resolves. A
     start that names no config and records no file gives None. None also
     when no running or launchd-managed server records a full path, or when
     the file does not read. The read follows no link and never waits on a
@@ -2274,7 +2276,11 @@ def _served_config(host: str, port, *,
         # server that an older gmlx started does not record that file.
         return None
     if not path:
-        return None, {}
+        # One positional GGUF runs the prompt cache unless a flag turns it
+        # off, so its document says what that start resolves.
+        cache = lifecycle.positional_prompt_cache(run.get("argv") or [])
+        return None, ({} if cache is None
+                      else {"server": {"cache": {"enabled": cache}}})
     if not isinstance(path, str) or not os.path.isabs(path):
         return None
     if not at_start:
