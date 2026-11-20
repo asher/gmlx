@@ -339,7 +339,7 @@ def _l0_store(batch) -> None:
         if b == 1 and l1_prefix == 0 and covers_prompt and chunk_hiddens
         and l0_salt is not None and not upstream_warm else None
     )
-    if spec_cache is None:
+    if spec_cache is None or full_ids is None or not chunk_hiddens:
         _log.debug(
             "APC store skipped: b=%d l1_prefix=%d upstream_warm=%s "
             "full_ids=%s hidden=%s",
