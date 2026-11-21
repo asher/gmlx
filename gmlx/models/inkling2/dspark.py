@@ -1,0 +1,277 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Asher Feldman
+"""The Inkling 2 DSpark drafter (``dflash`` GGUFs with ``dspark_hidden_out``).
+
+Reference: llama.cpp ``src/models/dspark.cpp`` (``graph_inkling2``,
+``build_inkling2_head``) and ``common/speculative.cpp`` (the Inkling 2
+branch of the DSpark draft), ggml-org PR 32218.
+
+Context pass. The target's taps (layer-visit inputs, the last one the
+normed final hidden state) are mixed per draft layer by
+``softmax(dspark_fuse[layer])``, normed by the layer's ``dflare_norm`` and
+projected to K/V by the layer's own context projections (K normed per head
+and rotated). The last row of ``dspark_fuse`` mixes the recurrent head's
+context feature, normed by ``dspark_norm``. The draft reads the feature
+of the last committed token, the one before the anchor.
+
+Draft pass. Always the trained block: the anchor (the target's normed
+token embedding) and ``block - 1`` copies of ``mask_embd``, non-causal over
+the ring and the block. A sliding layer's block rows all see the anchor
+row's window. The base logits come from the target's head. Rows 1 on are
+then corrected by a gated recurrent head over the previous pick's
+``markov_w1`` row, the row's hidden state and the context feature; the
+correction goes through the target's head too, and the sum is softcapped.
+Each pick is the first maximum over the unpadded vocabulary.
+"""
+
+from __future__ import annotations
+
+from typing import Any, List, Optional
+
+import mlx.core as mx
+import mlx.nn as nn
+
+from gmlx.cache.kv_cache import ArraysCache
+from gmlx.spec.dflash_drafter import (
+    DFlashConfig,
+    DFlashDrafter,
+    Qwen3MLP,
+    draw_rows,
+)
+from gmlx.spec.drafter_protocol import DraftStash
+
+
+def _rms(x: mx.array, weight: mx.array, eps: float) -> mx.array:
+    return mx.fast.rms_norm(x, weight, eps)
+
+
+def first_argmax(row: mx.array) -> mx.array:
+    """Index of the first maximum of each row (last axis)."""
+    n = row.shape[-1]
+    top = mx.max(row, axis=-1, keepdims=True)
+    rank = mx.where(row == top, n - mx.arange(n), 0)
+    return mx.argmax(rank, axis=-1)
+
+
+class Inkling2DSparkAttention(nn.Module):
+    def __init__(self, config: DFlashConfig, layer_idx: int):
+        super().__init__()
+        dim = config.hidden_size
+        self.n_heads = config.num_attention_heads
+        self.n_kv_heads = config.num_key_value_heads
+        self.head_dim = config.head_dim
+        self.scale = self.head_dim ** -0.5
+        self.is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        # Context rows the anchor row's window holds.
+        self.ring_rows = (int(config.sliding_window) - 1 if self.is_sliding
+                          else None)
+        hd = self.head_dim
+        self.q_proj = nn.Linear(dim, self.n_heads * hd, bias=False)
+        self.k_proj = nn.Linear(dim, self.n_kv_heads * hd, bias=False)
+        self.v_proj = nn.Linear(dim, self.n_kv_heads * hd, bias=False)
+        self.o_proj = nn.Linear(self.n_heads * hd, dim, bias=False)
+        self.q_norm = nn.RMSNorm(hd, eps=config.rms_norm_eps)
+        self.k_norm = nn.RMSNorm(hd, eps=config.rms_norm_eps)
+        self.k_ctx_proj = nn.Linear(dim, self.n_kv_heads * hd, bias=False)
+        self.v_ctx_proj = nn.Linear(dim, self.n_kv_heads * hd, bias=False)
+        self.k_ctx_norm = nn.RMSNorm(hd, eps=config.rms_norm_eps)
+
+    def inject(self, context: mx.array, rope, cache) -> None:
+        if self.ring_rows is not None and int(context.shape[1]) > self.ring_rows:
+            context = context[:, -self.ring_rows:]
+        B, S, _ = context.shape
+        keys = self.k_ctx_norm(self.k_ctx_proj(context).reshape(
+            B, S, self.n_kv_heads, -1)).transpose(0, 2, 1, 3)
+        values = self.v_ctx_proj(context).reshape(
+            B, S, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        cache.update_and_fetch(rope(keys, offset=cache.offset), values)
+
+    def draft(self, x: mx.array, rope, cache) -> mx.array:
+        B, L, _ = x.shape
+        q = self.q_norm(self.q_proj(x).reshape(
+            B, L, self.n_heads, -1)).transpose(0, 2, 1, 3)
+        k = self.k_norm(self.k_proj(x).reshape(
+            B, L, self.n_kv_heads, -1)).transpose(0, 2, 1, 3)
+        v = self.v_proj(x).reshape(B, L, self.n_kv_heads, -1).transpose(
+            0, 2, 1, 3)
+        q = rope(q, offset=cache.offset)
+        k = rope(k, offset=cache.offset)
+        ck, cv = cache.state
+        if ck is not None:
+            if self.ring_rows is not None and int(ck.shape[2]) > self.ring_rows:
+                ck = ck[:, :, -self.ring_rows:]
+                cv = cv[:, :, -self.ring_rows:]
+            k = mx.concatenate([ck, k], axis=2)
+            v = mx.concatenate([cv, v], axis=2)
+        o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
+
+
+class Inkling2DSparkLayer(nn.Module):
+    def __init__(self, config: DFlashConfig, layer_idx: int):
+        super().__init__()
+        dim = config.hidden_size
+        self.self_attn = Inkling2DSparkAttention(config, layer_idx)
+        self.mlp = Qwen3MLP(dim, config.intermediate_size)
+        self.input_layernorm = nn.RMSNorm(dim, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = nn.RMSNorm(dim, eps=config.rms_norm_eps)
+        self.dflare_norm = nn.RMSNorm(dim, eps=config.rms_norm_eps)
+
+    def inject(self, context: mx.array, rope, cache) -> None:
+        self.self_attn.inject(context, rope, cache)
+
+    def draft(self, h: mx.array, rope, cache) -> mx.array:
+        h = h + self.self_attn.draft(self.input_layernorm(h), rope, cache)
+        return h + self.mlp(self.post_attention_layernorm(h))
+
+
+class Inkling2DSparkDrafter(DFlashDrafter):
+    """The Inkling 2 DSpark drafter on gmlx's DFlash drafter protocol."""
+
+    layer_class = Inkling2DSparkLayer
+    kind_label = "dspark"
+
+    def __init__(self, config: DFlashConfig):
+        if not config.is_dspark:
+            raise ValueError("Inkling2DSparkDrafter needs markov_rank > 0")
+        super().__init__(config)
+        # No shared encoder: each layer mixes the taps itself.
+        for name in ("fc", "hidden_norm"):
+            self.pop(name, None)
+        hidden = int(config.hidden_size)
+        rank = int(config.markov_rank)
+        n_targets = len(config.target_layer_ids)
+        self.dspark_fuse = mx.zeros((config.num_hidden_layers + 1, n_targets))
+        self.dspark_norm = nn.RMSNorm(hidden, eps=config.rms_norm_eps)
+        self.mask_embd = mx.zeros((hidden,))
+        # The markov table and the target's head cover the padded vocabulary.
+        self.markov_w1 = nn.Embedding(
+            int(config.padded_vocab_size or config.vocab_size), rank)
+        self.joint_proj = nn.Linear(2 * rank + 2 * hidden, 3 * rank, bias=True)
+        self.hidden_out = nn.Linear(rank, hidden, bias=True)
+        self.embed_norm = None
+
+    # --- lifecycle ----------------------------------------------------------
+
+    def bind(self, target_model):
+        lm = getattr(target_model, "language_model", target_model)
+        inner = getattr(lm, "model", None)
+        if inner is None or not hasattr(inner, "embed_norm"):
+            raise AttributeError(
+                f"{type(target_model).__name__} is not an Inkling 2 model")
+        super().bind(target_model)
+        self.embed_norm = inner.embed_norm
+        return self
+
+    def make_cache(self, left_padding: Optional[List[int]] = None) -> list:
+        # The layers' rings, then the context feature of the last
+        # committed token.
+        return super().make_cache(left_padding) + [ArraysCache(size=1)]
+
+    # --- context ------------------------------------------------------------
+
+    def _mix(self, features: mx.array, row: int, weight: mx.array) -> mx.array:
+        """features [B, S, T * H] -> rms(sum_t softmax(fuse[row])_t f_t)."""
+        B, S, _ = features.shape
+        f = features.reshape(B, S, len(self.config.target_layer_ids), -1)
+        w = mx.softmax(self.dspark_fuse[row].astype(mx.float32))
+        x = (f.astype(mx.float32) * w[:, None]).sum(axis=2)
+        return _rms(x.astype(features.dtype), weight,
+                    self.config.rms_norm_eps)
+
+    def append_context(self, captures: mx.array, cache=None) -> None:
+        caches = self._cache if cache is None else cache
+        for i, (layer, c) in enumerate(zip(self.layers, caches)):
+            layer.inject(self._mix(captures, i, layer.dflare_norm.weight),
+                         self.rope, c)
+        last = captures[:, -1:]
+        caches[-1][0] = self._mix(last, len(self.layers),
+                                  self.dspark_norm.weight)
+
+    # --- draft --------------------------------------------------------------
+
+    def _block_tokens(self, last_bonus, block_size: int, token_dtype) -> mx.array:
+        if block_size > self._native_block_size:
+            raise RuntimeError(
+                f"{type(self).__name__} drafts at most "
+                f"{self._native_block_size - 1} token(s)/round; got "
+                f"block_size={block_size}")
+        if not self._cache:
+            raise RuntimeError(
+                "reset(target_model) must run before draft_block()")
+        bonus = (int(last_bonus) if isinstance(last_bonus, int)
+                 else int(last_bonus.reshape(-1)[0].item()))
+        return mx.array([[bonus]], dtype=token_dtype)
+
+    def _draft_hidden(self, anchor: mx.array) -> mx.array:
+        """The trained block's normed rows [1, block, H] for ``anchor``."""
+        h0 = self.embed_norm(self.embed_tokens(anchor))
+        rows = self._native_block_size
+        masks = mx.broadcast_to(self.mask_embd.astype(h0.dtype),
+                                (1, rows - 1, h0.shape[-1]))
+        h = mx.concatenate([h0, masks], axis=1)
+        for layer, c in zip(self.layers, self._cache):
+            h = layer.draft(h, self.rope, c)
+        return self.norm(h)
+
+    def _head(self, hidden: mx.array) -> mx.array:
+        return self.lm_head(hidden).astype(mx.float32)
+
+    def chain(self, hidden: mx.array, anchor: mx.array, n: int) -> mx.array:
+        """Softcapped logits [n, vocab] of rows 1..n of one block, each
+        corrected by the recurrent head on the previous row's pick."""
+        vocab = int(self.config.vocab_size)
+        cap = float(self.config.final_logit_softcapping or 0.0)
+        context = self._cache[-1][0]
+        if context is None:
+            raise RuntimeError("the drafter has no committed context")
+        context = context.reshape(1, -1).astype(mx.float32)
+        base = self._head(hidden[0, 1:n + 1])
+        state = mx.zeros((1, int(self.config.markov_rank)), dtype=mx.float32)
+        prev = anchor.reshape(1)
+        rows = []
+        for i in range(n):
+            joint = mx.concatenate(
+                [state, self.markov_w1(prev).astype(mx.float32),
+                 hidden[0, i + 1:i + 2].astype(mx.float32), context], axis=-1)
+            gate, cand, latent = mx.split(
+                self.joint_proj(joint).astype(mx.float32), 3, axis=-1)
+            gate, cand = mx.sigmoid(gate), mx.tanh(cand)
+            state = cand + gate * (state - cand)
+            correction = self.hidden_out(mx.tanh(latent))
+            logits = base[i:i + 1] + self._head(correction)
+            if cap:
+                logits = mx.tanh(logits / cap) * cap
+            logits = logits[:, :vocab]
+            rows.append(logits[0])
+            prev = first_argmax(logits)
+        return mx.stack(rows)
+
+    def draft_block(
+        self,
+        last_bonus,
+        hidden: mx.array,
+        cache,
+        block_size: int,
+        sampler,
+        token_dtype: mx.Dtype = mx.int32,
+        greedy: bool = False,
+        stash: Optional[DraftStash] = None,
+    ) -> mx.array:
+        """One round: the trained block through the layers, then the
+        recurrent head over the first ``block_size - 1`` draft rows."""
+        del hidden, cache
+        anchor = self._block_tokens(last_bonus, block_size, token_dtype)
+        h = self._draft_hidden(anchor)
+        rows = self.chain(h, anchor[0, 0], int(block_size) - 1)
+        if greedy and stash is None:
+            # The chain's own picks.
+            return first_argmax(rows)[None].astype(token_dtype)
+        toks, _ = draw_rows(rows, None, vocab=int(self.config.vocab_size),
+                            greedy=greedy, sampler=sampler, stash=stash)
+        return toks[None]
+
+    # --- parked row contexts ------------------------------------------------
+
+    def row_context_state(self, ctx: list) -> List[Any]:
+        return [c.state for c in ctx]

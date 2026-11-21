@@ -344,3 +344,37 @@ def test_speculative_rollback_matches_a_plain_run(model, reference, accepted):
     finally:
         spec.__class__ = plain
     np.testing.assert_allclose(got, reference[keep:], atol=2e-4, rtol=2e-4)
+
+
+def test_drafter_taps_are_visit_inputs(model):
+    # Tap i is the input of visit i, and tap len(visits) the normed final
+    # hidden state. A pass start reads the prelude output, as the first
+    # core visit does.
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+
+    n = len(T.visits())
+    core = T.END - T.START
+    starts = [T.START, T.START + core, T.START + 2 * core]
+    ids = [0, *starts, n - 1, n]
+    caps: list = []
+    h = model.model(mx.array([IDS]), capture_layer_ids=ids, hidden_sink=caps)
+    assert len(caps) == len(ids)
+    first, *others = (np.array(caps[ids.index(s)]) for s in starts)
+    for other in others:
+        np.testing.assert_array_equal(first, other)
+    np.testing.assert_array_equal(np.array(caps[-1]), np.array(h))
+    assert not np.allclose(np.array(caps[-2]), np.array(caps[-1]))
+
+    plain = type(model)
+    model.__class__ = Inkling2SpecLM
+    try:
+        with pytest.raises(ValueError, match="outside"):
+            model.set_dflash_capture([1, n + 1])
+        model.set_dflash_capture(ids)
+        normed, packed = model._forward(mx.array([IDS]), None)
+        assert packed.shape[-1] == (len(ids) + 1) * normed.shape[-1]
+        np.testing.assert_array_equal(np.array(model._dflash_trunk(packed)),
+                                      np.array(normed))
+    finally:
+        object.__setattr__(model, "_dflash_capture", None)
+        model.__class__ = plain

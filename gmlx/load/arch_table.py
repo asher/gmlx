@@ -209,6 +209,8 @@ MTP_DRAFTER_ARCHES = {
     "nemotron_h": ("dflash", "nemotron_h_moe"),
     # The Ripple DFlash2 drafter, converted by scripts/convert_dflash2.py.
     "ricursive": ("dflash",),
+    # The Inkling 2 DSpark drafter.
+    "inkling2": ("dflash",),
 }
 
 
@@ -248,6 +250,7 @@ DFLASH_CONTAINER_TARGETS = {
     "dflash": ("muse_glimmer", "gemma4_text"),
     "lilicorr": ("nemotron_h",),
     "dspark": ("deepseek_v4",),
+    "dflash_dspark_inkling2": ("inkling2",),
 }
 
 
@@ -259,12 +262,16 @@ def dflash_container(names) -> str | None:
     hyper-connection head, LiLiCorr its ``lilicorr.*`` lattice head, the
     DFlash-backbone DSpark the markov head on plain ``attn_q`` layers,
     DFlash 2 the candidate selector, plain DFlash ``attn_q`` with per-head
-    QK-norms and no hyper-connections."""
+    QK-norms and no hyper-connections. The Inkling 2 DSpark adds a
+    recurrent head whose correction runs through the target's head
+    (``dspark_hidden_out``)."""
     names = list(names)
     if any(n.startswith("output_hc_") or ".attn_q_a" in n for n in names):
         return "dspark"
     if any(n.startswith("lilicorr.") for n in names):
         return "lilicorr"
+    if any(n.startswith("dspark_hidden_out") for n in names):
+        return "dflash_dspark_inkling2"
     if any(n.startswith("markov_w1") for n in names):
         return "dflash_dspark"
     if any(n.startswith("selector_hidden") for n in names):
