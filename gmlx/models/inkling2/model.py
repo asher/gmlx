@@ -56,6 +56,9 @@ PREFILL_EVAL_ROWS = 64
 # The bias tensor of one attention call stays under this many elements;
 # wider calls split the queries.
 _BIAS_ELEMENTS = 1 << 25
+# Mask elements per banded call: its mask is built in the query dtype with
+# no gather index, so it holds more elements in fewer bytes.
+_BANDED_ELEMENTS = 1 << 26
 
 # The epsilon of the unweighted norms in the depth mix and the controllers.
 _MIX_EPS = 1e-6
@@ -125,14 +128,20 @@ def clip(x: mx.array, scale: Optional[mx.array], threshold: float) -> mx.array:
 
 def depth_mix(blocks: List[mx.array], cur: mx.array,
               query: mx.array) -> mx.array:
-    """Attention over depth: a softmax over the rms-normed ``blocks`` and
-    ``cur`` with ``query`` rows [nq, D]. Returns [B, L, nq, D] float32."""
-    states = mx.stack([*blocks, cur], axis=-2)        # [B, L, n, D]
-    states = _rms(states)
+    """Attention over depth: a softmax over ``blocks`` (already rms-normed,
+    see ``push_block``) and the rms-normed ``cur``, with ``query`` rows
+    [nq, D]. Returns [B, L, nq, D] float32."""
+    states = mx.stack([*blocks, _rms(cur)], axis=-2)  # [B, L, n, D]
     q = query.astype(mx.float32).reshape(-1, states.shape[-1])
     scores = (states @ q.T) * (states.shape[-1] ** -0.5)   # [B, L, n, nq]
     p = mx.softmax(scores, axis=-2)
     return mx.swapaxes(p, -1, -2) @ states             # [B, L, nq, D]
+
+
+def push_block(blocks: List[mx.array], state: mx.array) -> None:
+    """Add a block checkpoint. It is stored rms-normed, as every depth mix
+    reads it, so the norm runs once per block, not once per mix."""
+    blocks.append(_rms(state))
 
 
 def log_scale(positions: mx.array, floor: int, alpha: float) -> mx.array:
@@ -209,6 +218,10 @@ def _key_distances(cache, n_queries: int, n_keys: int, rows=None) -> mx.array:
         f"inkling2: attention does not support cache type {kind.__name__}")
 
 
+# Caches whose keys come back in time order, newest last.
+_TIME_ORDERED = (KVCache, BatchKVCache, BufferedRotatingKVCache)
+
+
 def _refuse_quantized(cache) -> None:
     """The relative bias and the sink need full-precision keys."""
     if cache is None:
@@ -278,6 +291,60 @@ class Attention(nn.Module):
     def attend(self, q, k, v, r, sink, cache, pad_mask) -> mx.array:
         """Attention with the folded bias and a zero sink logit. ``q`` is
         [B, H, L, D]; returns [B, H, L, D]."""
+        if cache is None or type(cache) in _TIME_ORDERED:
+            return self._attend_banded(q, k, v, r, sink, cache, pad_mask)
+        return self._attend_dense(q, k, v, r, sink, cache, pad_mask)
+
+    def _attend_banded(self, q, k, v, r, sink, cache, pad_mask) -> mx.array:
+        """``attend`` for keys in time order, newest last. Query row i of
+        this update sits at key slot K - L + i. A key at least ``extent``
+        slots behind every query of a sub-chunk takes the bias ``-sink``,
+        so that region is filled with the constant, and only the near band
+        gathers from the bias table. Keys outside the window are dropped.
+        The mask values equal those of ``_attend_dense``."""
+        B, H, L, _ = q.shape
+        K = k.shape[2]
+        _key_distances(cache, L, K, (0, 1))  # refuses unsupported rows
+        sinks = mx.zeros((H,), dtype=q.dtype)
+        outs = []
+        i0 = 0
+        while i0 < L:
+            # First key any query of the sub-chunk can see.
+            start = 0
+            if self.window is not None:
+                start = max(0, K - L + i0 - self.window + 1)
+            step = max(1, _BANDED_ELEMENTS // max(1, B * H * (K - start)))
+            i1 = min(L, i0 + step)
+            # Keys before ``near`` are far for every query of the sub-chunk.
+            near = min(K, max(start, K - L + i0 - self.extent + 1))
+            dist = _key_distances(cache, L, K, (i0, i1))[:, near:]
+            valid = dist >= 0
+            if self.window is not None:
+                valid = valid & (dist < self.window)
+            pm = None if pad_mask is None else pad_mask[..., i0:i1, :]
+            if pm is not None:
+                valid = valid & pm[..., near:]
+            bias = self._bias(r[:, i0:i1], sink[:, i0:i1], dist)
+            parts = [mx.where(valid, bias, -mx.inf).astype(q.dtype)]
+            if near > start:
+                far = (-sink[:, i0:i1]).astype(q.dtype).transpose(0, 2, 1)
+                far = mx.broadcast_to(far[..., None],
+                                      (B, H, i1 - i0, near - start))
+                if pm is not None:
+                    far = mx.where(pm[..., start:near], far,
+                                   mx.array(-mx.inf, dtype=q.dtype))
+                parts.insert(0, far)
+            mask = parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
+            kk, vv = (k, v) if start == 0 else (k[:, :, start:], v[:, :, start:])
+            outs.append(mx.fast.scaled_dot_product_attention(
+                q[:, :, i0:i1], kk, vv, scale=self.scale, mask=mask,
+                sinks=sinks))
+            i0 = i1
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+
+    def _attend_dense(self, q, k, v, r, sink, cache, pad_mask) -> mx.array:
+        """``attend`` for any supported cache: the bias of every key slot
+        from its distance."""
         B, H, L, _ = q.shape
         K = k.shape[2]
         sinks = mx.zeros((H,), dtype=q.dtype)
@@ -445,7 +512,7 @@ class Layer(nn.Module):
                              conv_cache, 2, pad_mask, conv_sink)
 
         if ip % self.block_size == 0:
-            blocks.append(inp_sa)
+            push_block(blocks, inp_sa)
             h = out
         else:
             h = (inp_sa.astype(mx.float32) + out.astype(mx.float32)).astype(

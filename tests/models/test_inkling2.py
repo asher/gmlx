@@ -378,3 +378,36 @@ def test_drafter_taps_are_visit_inputs(model):
     finally:
         object.__setattr__(model, "_dflash_capture", None)
         model.__class__ = plain
+
+
+@pytest.mark.parametrize("n_queries,n_keys,padded", [
+    (40, 40, False), (40, 40, True), (5, 60, False), (1, 70, True)])
+def test_the_banded_mask_matches_the_dense_one(model, n_queries, n_keys,
+                                                padded):
+    # Full and sliding layers, a fresh prefill, a chunk at depth and a
+    # decode step; the banded route must give the dense route's output.
+    rng = np.random.default_rng(n_keys)
+    B, H, D = 2, T.HEADS, T.HD
+    q = mx.array(rng.standard_normal((B, H, n_queries, D)), dtype=mx.float32)
+    k = mx.array(rng.standard_normal((B, T.KV, n_keys, D)), dtype=mx.float32)
+    v = mx.array(rng.standard_normal((B, T.KV, n_keys, D)), dtype=mx.float32)
+    pad = None
+    if padded:
+        keep = np.ones((B, 1, n_queries, n_keys), dtype=bool)
+        keep[1, ..., :3] = False  # row 1 is left-padded by three keys
+        pad = mx.array(keep)
+    for lyr in model.model.layers[:2]:  # one sliding, one full layer
+        attn = lyr.self_attn
+        r = mx.array(rng.standard_normal((B, n_queries, H, attn.rel_length)),
+                     dtype=mx.float32)
+        sink = mx.array(rng.standard_normal((B, n_queries, H)),
+                        dtype=mx.float32)
+        got = attn._attend_banded(q, k, v, r, sink, None, pad)
+        want = attn._attend_dense(q, k, v, r, sink, None, pad)
+        if attn.window is None:
+            np.testing.assert_array_equal(np.array(got), np.array(want))
+        else:
+            # The sliding layer drops the keys outside its window, so the
+            # kernel sums fewer terms; the values agree to rounding.
+            np.testing.assert_allclose(np.array(got), np.array(want),
+                                       atol=1e-6, rtol=1e-5)
