@@ -1060,3 +1060,9 @@ def test_inkling_drafter_fit_counts_the_folded_head():
     assert d.derived_bytes == 256 * 201024 * 2 + 201024 * 4
     assert (catalog.addon_bytes(m, False, True)
             == d.bytes + d.derived_bytes + (m.asr.bytes if m.asr else 0))
+
+
+def test_inkling_offers_no_untimed_fastest_pick():
+    m = catalog.model("inkling-2-mini")
+    assert "fastest" not in {r.tier for r in m.rungs}
+    assert {"balanced", "high", "xhigh"} <= {r.tier for r in m.rungs}

@@ -289,6 +289,8 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     chosen: list = []                 # (quant, tier, first shard path)
     if tiered:
         for tier in TIERS:
+            if tier in seed.skip_tiers:
+                continue
             first, quant, note = resolve_tier(
                 groups, tier, moe, dict(seed.tier_quants).get(tier))
             if note:

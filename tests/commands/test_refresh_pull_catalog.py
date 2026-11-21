@@ -244,6 +244,16 @@ def test_the_f16_twin_of_a_projector_is_checked(refresh, dense_repo, monkeypatch
         "dense: mmproj-Other-F16.gguf and mmproj-BF16.gguf hold different tensors"]
 
 
+def test_an_entry_can_leave_a_tier_empty(refresh, dense_repo):
+    """A skipped tier gets no rung, so the catalog offers no pick it has
+    not checked."""
+    facts, problems, _ = refresh.record_entry(
+        _seed(mmproj="mmproj-F16.gguf", skip_tiers=("fastest",)), None, None)
+    assert problems == []
+    tiers = {t for _q, t, *_ in facts["rungs"]}
+    assert "fastest" not in tiers and {"balanced", "high", "xhigh"} <= tiers
+
+
 def test_an_entry_can_name_the_file_of_a_tier(refresh):
     groups = {"m-Q4_K_M.gguf": ("Q4_K_M",), "m-UD-Q4_K_XL.gguf": ("UD-Q4_K_XL",)}
     groups = {k: (v[0], False, 1, 1) for k, v in groups.items()}

@@ -193,6 +193,7 @@ class Seed:
     hears: bool = False       # the mmproj is a speech encoder: every pull takes it
     head_from_class: int = 0  # the smallest memory class that keeps the native head on
     tier_quants: tuple = ()   # (tier, quant) pairs over the quant-name rule, when names mislead
+    skip_tiers: tuple = ()    # tiers the entry leaves empty until a timed run picks them
 
 
 _LFM_LICENSE = dict(
@@ -321,6 +322,9 @@ _SEED = (
          # The experts are NVFP4 in every file from IQ4_XS up; the names
          # describe the other layers. Q4_K_XL keeps those at Q8_0.
          tier_quants=(("high", "Q4_K_XL"),),
+         # IQ4_XS and Q4_K_M differ only outside the experts; no fastest
+         # pick until they are timed against each other.
+         skip_tiers=("fastest",),
          use="reasoning chat with images"),
     Seed("qwen3.8-27b", "Qwen3.8-27B", "unsloth/Qwen3.8-27B-GGUF", "high",
          "Strong at long documents, code and tool calls.",
