@@ -54,6 +54,7 @@ OWNED_LM_MODELS = {
     # llama.cpp LLM_ARCH_RICURSIVE; the HF class is remote code with no
     # mlx-lm port.
     "ricursive": "gmlx.models.ricursive.model",
+    "inkling2": "gmlx.models.inkling2.model",
     # llama.cpp LLM_ARCH_GRANITE_SWITCH; the upstream class is built for the
     # HF checkpoint (separate projections, a learned switch layer).
     "granite_switch": "gmlx.models.granite_switch.model",

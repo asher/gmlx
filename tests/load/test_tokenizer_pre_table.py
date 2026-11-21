@@ -69,6 +69,8 @@ UNLISTED_PRES = {
     "mmbert": "SPM-style vocab, not byte-level",
     "soprano": "raw UTF-8 vocab, not byte-level",
     "whitespace": "raw UTF-8 vocab, not byte-level",
+    "domyn-edge": "no gmlx architecture uses it",
+    "zonos3": "regex set with no gmlx spelling",
 }
 # Table names llama.cpp does not list, with the name whose entry they share.
 ALIASES = {"qwen3": "qwen2", "qwen35moe": "qwen35", "hyv4": "hy_v4"}
@@ -92,7 +94,8 @@ _GROUPS = [
      (r"\p{N}", GPT2_PATTERN), False, None),
     ("tekken pixtral", (TEKKEN_PATTERN,), True, True),
     ("tekken-num3", (TEKKEN_NUM3_PATTERN,), True, True),
-    ("gpt-4o llama4 kanana2 talkie minimax-m2", (O200K_PATTERN,), False, None),
+    ("gpt-4o llama4 kanana2 talkie minimax-m2 inkling2", (O200K_PATTERN,), False,
+     None),
 ]
 
 

@@ -394,6 +394,26 @@ FAMILIES: dict[str, dict] = {
         "base": {"sampling": {"temperature": 0.15}},
         "intents": {},
     },
+    # https://huggingface.co/thinkingmachines/Inkling-2-Mini, 2026-11:
+    # temperature 1.0 with no truncation. The chat template's
+    # reasoning_effort takes none, minimal, low, medium, high, xhigh, max or
+    # a number from 0 to 0.99, defaults to 0.9 and raises on anything else.
+    "inkling": {
+        "label": "Inkling",
+        "arches": ("inkling2", "inkling2_loop"),
+        "base": {"sampling": {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "min_p": 0.0,
+        }},
+        "intents": {
+            "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
+            "reasoning-medium": {"chat_template_kwargs": {"reasoning_effort": "medium"}},
+            "reasoning-high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+            "reasoning-max": {"chat_template_kwargs": {"reasoning_effort": "max"}},
+        },
+    },
     # Unknown architectures: the historic scaffold defaults, plus generic
     # intent deltas so @coding/@creative still mean something.
     "default": {

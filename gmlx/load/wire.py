@@ -456,6 +456,15 @@ def remap_arrays(
             hf_weights[hf_name] = arr.reshape(-1)
             stats["mapped"] += 1
 
+        elif transform == "moe_split_gate_up_scale":
+            # The per-expert scale of a fused gate/up weight that
+            # moe_split_gate_up split in two: both halves take it.
+            base = hf_name[: -len("gate_up_proj.out_scale")].rstrip(".")
+            flat = arr.reshape(-1)
+            hf_weights[f"{base}.gate_proj.out_scale"] = flat
+            hf_weights[f"{base}.up_proj.out_scale"] = flat
+            stats["mapped"] += 2
+
         elif transform == "gate_1d_unsqueeze":
             # Shared expert gate: GGUF stores 1D [hidden_size], but
             # nn.Linear(hidden_size, 1, bias=False) has weight [1, hidden_size].
