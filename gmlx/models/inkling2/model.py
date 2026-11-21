@@ -313,11 +313,9 @@ def _key_distances(cache, n_queries: int, n_keys: int, rows=None) -> mx.array:
 
 @lru_cache(maxsize=None)
 def _zero_sinks(n_heads: int, dtype) -> mx.array:
-    """The zero sink logit per head. Built and evaluated once, so a step
-    does not launch a fill for it."""
-    out = mx.zeros((n_heads,), dtype=dtype)
-    mx.eval(out)
-    return out
+    """The zero sink logit per head, built once from host data, so a step
+    launches no fill for it and nothing evaluates inside a transform."""
+    return mx.array([0.0] * n_heads, dtype=dtype)
 
 
 @lru_cache(maxsize=None)
@@ -411,19 +409,8 @@ class Attention(nn.Module):
         """[B, H, L, K] additive mask in ``dtype``: the bias
         ``R . B[d] - sink`` where ``valid``, with the zero pad row for
         distances outside [0, extent), and -inf elsewhere."""
-        return _masker(self.extent, dtype)(r, sink, self._table(), dist,
-                                           valid)
-
-    def _table(self) -> mx.array:
-        """The bias table with its zero pad row, built once per table."""
-        src, padded = getattr(self, "_padded", (None, None))
-        if src is not self.rel_bias:
-            src = self.rel_bias
-            padded = mx.pad(src.astype(mx.float32), [(0, 1), (0, 0)])
-            # Evaluated here, so no stream of this thread stays in it.
-            mx.eval(padded)
-            object.__setattr__(self, "_padded", (src, padded))
-        return padded
+        table = mx.pad(self.rel_bias.astype(mx.float32), [(0, 1), (0, 0)])
+        return _masker(self.extent, dtype)(r, sink, table, dist, valid)
 
     def attend(self, q, k, v, r, sink, cache, pad_mask) -> mx.array:
         """Attention with the folded bias and a zero sink logit. ``q`` is
