@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-11-21
+
 ### Added
 
 - Inkling-2-Mini GGUFs run in both the Unsloth layout and the mainline
