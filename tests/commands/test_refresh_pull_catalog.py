@@ -229,10 +229,19 @@ def test_the_f16_twin_of_a_projector_is_checked(refresh, dense_repo, monkeypatch
     gone = _seed(mmproj="mmproj-BF16.gguf", mmproj_f16="mmproj-Other-F16.gguf")
     assert refresh.record_entry(gone, None, None)[1] == [
         "dense: mmproj-Other-F16.gguf is not in the listing"]
-    # A twin of another size is another projector.
+    clip = {"general.architecture": "clip", "clip.has_llava_projector": True,
+            "general.type": "mmproj"}
+    # A twin with the same tensors is the same projector, whatever its size
+    # (a converter may keep one tensor in F32 in one file only).
     files["mmproj-Big-F16.gguf"] = files["mmproj-F16.gguf"] + b"\0" * (2 << 20)
     big = _seed(mmproj="mmproj-BF16.gguf", mmproj_f16="mmproj-Big-F16.gguf")
-    assert len(refresh.record_entry(big, None, None)[1]) == 1
+    assert refresh.record_entry(big, None, None)[1] == []
+    # A twin with other tensors is another projector.
+    files["mmproj-Other-F16.gguf"] = _gguf(
+        tmp_path, "mmproj-Other-F16.gguf", clip, {"mm.0.weight": (8, 16)})
+    other = _seed(mmproj="mmproj-BF16.gguf", mmproj_f16="mmproj-Other-F16.gguf")
+    assert refresh.record_entry(other, None, None)[1] == [
+        "dense: mmproj-Other-F16.gguf and mmproj-BF16.gguf hold different tensors"]
 
 
 def test_the_header_cache_is_per_revision(refresh, dense_repo, tmp_path):

@@ -383,15 +383,19 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                 ("audio", "clip.has_audio_encoder"),
                 ("speech", "clip.has_gen_audio_encoder")) if mm.kv.get(key))
             if seed.mmproj_f16:
-                # The F16 twin a pull takes on M1 and M2: the same tensors,
-                # so the same size to within its header.
+                # The F16 twin a pull takes on M1 and M2: the same tensors.
+                # Sizes can differ, as a converter may keep a tensor in F32
+                # in one file only.
                 twin = files.get(seed.mmproj_f16)
                 if twin is None:
                     problems.append(f"{seed.name}: {seed.mmproj_f16} is not in the listing")
-                elif abs(twin - mmproj_bytes) > 1 << 20:
-                    problems.append(
-                        f"{seed.name}: {seed.mmproj_f16} is {twin} bytes and "
-                        f"{seed.mmproj} is {mmproj_bytes}")
+                else:
+                    tw = header(seed.repo, seed.mmproj_f16, revision, cache)
+                    if ({(t.name, tuple(t.shape)) for t in tw.tensors}
+                            != {(t.name, tuple(t.shape)) for t in mm.tensors}):
+                        problems.append(
+                            f"{seed.name}: {seed.mmproj_f16} and {seed.mmproj} "
+                            "hold different tensors")
     else:
         towers = [p for p in files if os.path.basename(p).lower().startswith("mmproj")
                   and p not in seed.ignored_files]
