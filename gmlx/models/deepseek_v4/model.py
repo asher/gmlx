@@ -199,53 +199,16 @@ def _pair_split(fused_call, n_a: int, x: mx.array):
 
 def _fuse_kquant_pair(a, b, in_dims: int):
     """One KQuantLinear serving a's rows then b's; None when ineligible."""
-    try:
-        from mlx_kquant.nn import KQuantLinear
-    except Exception:
-        return None
-    from gmlx.load.out_scale import cat_out_scale, set_out_scale
+    from gmlx.load.row_fusion import fuse_kquant_rows
 
-    # Exact type: a subclass (HadamardKQuantLinear) transforms its input,
-    # which a plain fused KQuantLinear would drop.
-    if type(a) is not KQuantLinear or type(b) is not KQuantLinear:
-        return None
-    if (
-        a.kquant_type != b.kquant_type
-        or "bias" in a
-        or "bias" in b
-        or a.weight.ndim != 2
-        or b.weight.ndim != 2
-        or a.weight.shape[1] != b.weight.shape[1]
-    ):
-        return None
-    n_a, n_b = a.weight.shape[0], b.weight.shape[0]
-    fused = KQuantLinear(in_dims, n_a + n_b, bias=False, codec=a.kquant_type)
-    fused.weight = mx.concatenate([a.weight, b.weight], axis=0)
-    fused.scales = a.scales
-    set_out_scale(fused, cat_out_scale((a, b)))
-    mx.eval(fused.parameters())
-    # Rebind the pair as views of the fused buffer; the originals release.
-    a.weight = fused.weight[:n_a]
-    b.weight = fused.weight[n_a:]
-    return fused
+    return fuse_kquant_rows((a, b), in_dims)
 
 
 def _fuse_float_pair(a, b):
     """One nn.Linear serving a's rows then b's; None when ineligible."""
-    if type(a) is not nn.Linear or type(b) is not nn.Linear:
-        return None
-    if "bias" in a or "bias" in b:
-        return None
-    wa, wb = a.weight, b.weight
-    if wa.dtype != wb.dtype or wa.ndim != 2 or wa.shape[1] != wb.shape[1]:
-        return None
-    n_a = wa.shape[0]
-    fused = nn.Linear(wa.shape[1], n_a + wb.shape[0], bias=False)
-    fused.weight = mx.concatenate([wa, wb], axis=0)
-    mx.eval(fused.weight)
-    a.weight = fused.weight[:n_a]
-    b.weight = fused.weight[n_a:]
-    return fused
+    from gmlx.load.row_fusion import fuse_float_rows
+
+    return fuse_float_rows((a, b))
 
 
 def install_gemv_row_fusion(model, max_float_rows: int = 1024) -> int:

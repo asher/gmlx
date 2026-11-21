@@ -745,17 +745,24 @@ def _verify_zero_copy_views(model, no_alias, log) -> None:
 # VL containers that hold one as language_model.
 _ROW_FUSION_TYPES = ("deepseek_v4", "deepseek_v41",
                      "deepseek_v4_vl", "deepseek_v41_vl")
+_INKLING2_TYPES = ("inkling2", "inkling2_vl")
 
 
 def install_row_fusion(model, model_type: str | None) -> int:
-    """deepseek_v4.install_gemv_row_fusion on the text tower of a loaded
-    model, a VL container's language_model included. Returns the pairs
-    fused; 0 for any other model type."""
+    """The same-input projection fusion of deepseek_v4
+    (install_gemv_row_fusion) or inkling2 (install_row_fusion) on the text
+    tower of a loaded model, a VL container's language_model included.
+    Returns the groups fused; 0 for any other model type."""
+    text = getattr(model, "language_model", model)
+    if model_type in _INKLING2_TYPES:
+        from gmlx.models.inkling2.model import install_row_fusion as ink
+
+        return ink(text)
     if model_type not in _ROW_FUSION_TYPES:
         return 0
     from gmlx.models.deepseek_v4.model import install_gemv_row_fusion
 
-    return install_gemv_row_fusion(getattr(model, "language_model", model))
+    return install_gemv_row_fusion(text)
 
 
 def install_view_rebinds(model, model_type: str | None) -> tuple[dict | None, int]:

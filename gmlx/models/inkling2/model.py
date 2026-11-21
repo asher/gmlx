@@ -42,6 +42,7 @@ from gmlx.cache.kv_cache import (
     KVCache,
     RotatingKVCache,
 )
+from gmlx.load.row_fusion import fuse_float_rows, fuse_kquant_rows, split_rows
 from gmlx.models.kimi_k3 import SituActivation
 
 SLIDING = "sliding_attention"
@@ -367,6 +368,10 @@ class Attention(nn.Module):
         q_dim = self.n_heads * self.head_dim
         kv_dim = self.n_kv_heads * self.head_dim
 
+        # Row-fused projection groups (install_row_fusion): slot ->
+        # (member names, member rows). Kept out of the parameter tree.
+        object.__setattr__(self, "_row_groups", {})
+        self.hidden_size = dim
         self.q_proj = nn.Linear(dim, q_dim, bias=False)
         self.k_proj = nn.Linear(dim, kv_dim, bias=False)
         self.v_proj = nn.Linear(dim, kv_dim, bias=False)
@@ -388,6 +393,18 @@ class Attention(nn.Module):
         self.k_conv = mx.zeros((kv_dim, self.width), dtype=mx.float32)
         self.v_conv = mx.zeros((kv_dim, self.width), dtype=mx.float32)
         self.post_conv = mx.zeros((dim, self.width), dtype=mx.float32)
+
+    def project(self, x: mx.array, names: tuple) -> list:
+        """The projections ``names`` of ``x``, in order. A fused group
+        whose members are all asked for runs as one matmul; the rest run
+        alone."""
+        out = {}
+        for slot, (members, sizes) in self._row_groups.items():
+            fused = self.get(slot)
+            if fused is None or not all(n in names for n in members):
+                continue
+            out.update(zip(members, split_rows(fused, sizes, x)))
+        return [out[n] if n in out else self[n](x) for n in names]
 
     def _mask(self, r: mx.array, sink: mx.array, dist: mx.array,
               valid: mx.array, dtype) -> mx.array:
@@ -573,18 +590,20 @@ class Layer(nn.Module):
             inputs = [self.q_inp_norm(inputs[0]), self.k_inp_norm(inputs[1]),
                       self.v_inp_norm(inputs[2])]
 
-        q = attn.q_proj(inputs[0])
-        k = attn.k_proj(inputs[1])
-        v = attn.v_proj(inputs[2])
-        k = self._convolve(
-            k, attn.k_conv,
-            None if self.is_sliding else attn.k_conv_proj(inputs[1]),
-            conv_cache, 0, pad_mask, conv_sink)
-        v = self._convolve(
-            v, attn.v_conv,
-            None if self.is_sliding else attn.v_conv_proj(inputs[2]),
-            conv_cache, 1, pad_mask, conv_sink)
-        r = attn.rel_proj(inputs[0])
+        q, r, sink, gate = attn.project(
+            inputs[0], ("q_proj", "rel_proj", "sink_proj", "gate_proj"))
+        k_dyn = v_dyn = None
+        if not self.is_sliding:
+            k, k_dyn = attn.project(inputs[1], ("k_proj", "k_conv_proj"))
+            v, v_dyn = attn.project(inputs[2], ("v_proj", "v_conv_proj"))
+        elif inputs[1] is inputs[2]:
+            k, v = attn.project(inputs[1], ("k_proj", "v_proj"))
+        else:
+            k, v = attn.k_proj(inputs[1]), attn.v_proj(inputs[2])
+        k = self._convolve(k, attn.k_conv, k_dyn, conv_cache, 0, pad_mask,
+                           conv_sink)
+        v = self._convolve(v, attn.v_conv, v_dyn, conv_cache, 1, pad_mask,
+                           conv_sink)
 
         dtype = h.dtype
         tau = None if self.is_sliding else positions[..., None, None]
@@ -595,7 +614,7 @@ class Layer(nn.Module):
         v = _rms(v.reshape(B, L, self.n_kv_heads, self.head_dim), attn.eps)
         r = clip(r.reshape(B, L, self.n_heads, attn.rel_length),
                  attn.rel_clip, attn.rel_clip_threshold, tau)
-        sink = attn.sink_proj(inputs[0]).astype(mx.float32)
+        sink = sink.astype(mx.float32)
 
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
@@ -609,7 +628,7 @@ class Layer(nn.Module):
             k, v = kv_cache.update_and_fetch(k, v)
         out = attn.attend(q, k, v, r, sink, kv_cache, key_mask)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        out = _gate(out, attn.gate_proj(inputs[0]))
+        out = _gate(out, gate)
         out = self._convolve(attn.o_proj(out), attn.post_conv, None,
                              conv_cache, 2, pad_mask, conv_sink)
 
@@ -924,3 +943,71 @@ FP32_KEEP = (
     ".msg_query", ".q_clip", ".rel_clip", ".rel_bias", "_conv",
     ".loop.", "norm.weight",
 )
+
+
+# Projection groups that read one input, tried in order; the first group
+# that fuses claims its members. Float groups past the row cap stay split:
+# MLX's float mat-vec loses to two launches there (deepseek_v4 note).
+_ROW_GROUPS = (
+    ("_q_fused", ("q_proj", "gate_proj", "rel_proj", "sink_proj")),
+    ("_q_fused", ("q_proj", "gate_proj", "rel_proj")),
+    ("_q_fused", ("rel_proj", "sink_proj")),
+    ("_kv_fused", ("k_proj", "v_proj")),
+    ("_kc_fused", ("k_proj", "k_conv_proj")),
+    ("_vc_fused", ("v_proj", "v_conv_proj")),
+)
+_MAX_FLOAT_ROWS = 1024
+# k and v read one input on sliding layers only; the conv projections exist
+# on full layers only.
+_SLIDING_ONLY = ("_kv_fused",)
+_FULL_ONLY = ("_kc_fused", "_vc_fused")
+
+
+def install_row_fusion(model) -> int:
+    """Fuse each attention's same-input projections into one matmul per
+    group (gmlx.load.row_fusion). k and v share an input only on sliding
+    layers, and only outside loop passes, where ``Layer`` checks it.
+    Idempotent: an attention that already has groups is left alone.
+    Returns the number of groups fused. GMLX_GEMV_FUSE=0 disables."""
+    import os
+
+    if os.environ.get("GMLX_GEMV_FUSE", "1") == "0":
+        return 0
+    inner = getattr(model, "model", model)
+    root = "model." if inner is not model else ""
+    members: set = set()
+    n = 0
+    for li, layer in enumerate(getattr(inner, "layers", ())):
+        attn = layer.self_attn
+        if attn._row_groups:
+            continue
+        taken: set = set()
+        for slot, names in _ROW_GROUPS:
+            if slot in attn._row_groups or taken & set(names):
+                continue
+            if slot in _SLIDING_ONLY and not attn.is_sliding or (
+                    slot in _FULL_ONLY and attn.is_sliding):
+                continue
+            mods = [attn.get(name) for name in names]
+            if any(m is None for m in mods):
+                continue
+            fused = fuse_kquant_rows(mods, attn.hidden_size)
+            if fused is None and sum(
+                    m.weight.shape[0] for m in mods) <= _MAX_FLOAT_ROWS:
+                fused = fuse_float_rows(mods)
+            if fused is None:
+                continue
+            mx.eval([m.weight for m in mods])
+            setattr(attn, slot, fused)
+            attn._row_groups[slot] = (
+                names, tuple(m.weight.shape[0] for m in mods))
+            taken |= set(names)
+            path = f"{root}layers.{li}.self_attn"
+            members |= {f"{path}.{name}.weight" for name in names}
+            n += 1
+    if members:
+        from gmlx.stream.pin_weights import FUSED_MEMBERS_ATTR
+
+        prev = getattr(model, FUSED_MEMBERS_ATTR, None) or frozenset()
+        object.__setattr__(model, FUSED_MEMBERS_ATTR, prev | members)
+    return n

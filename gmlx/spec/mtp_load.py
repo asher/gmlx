@@ -2419,6 +2419,7 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
       applies to a base-built tree too.
     - qwen4_exp: prepare_runtime (idempotent; load_vlm_model may have run
       it already on the VLM path).
+    - inkling2: the same-input projection fusion.
     - gemma4 family: nothing to arm. Dense-head verify is categorically
       inapplicable (head tied to the quantized embedding, no lm_head; the
       q6_k head already runs kq's fast verify path) and the qwen verify
@@ -2437,6 +2438,14 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
         log(f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
             f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
             f"{counts['gdn_ba_cat']}")
+    elif mt == "inkling2":
+        # The text MTP load skips install_view_rebinds; idempotent after
+        # the VLM load ran it.
+        from gmlx.load.loader import install_row_fusion
+
+        n = install_row_fusion(model, mt)
+        if n:
+            log(f"[install] gemv row fusion on {n} projection groups")
 
 
 @loadlog.seeds

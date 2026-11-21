@@ -191,9 +191,10 @@ def shapes(layout: str, v: dict) -> dict[str, list[int]]:
 
 
 def write(path, layout: str, v: dict, *, experts_q8: bool = True,
-          meta: dict | None = None) -> None:
+          meta: dict | None = None, q8: tuple = ()) -> None:
     """Write ``v`` as a ``layout`` GGUF, with header ``meta`` (default
-    ``metadata(layout)``)."""
+    ``metadata(layout)``). Tensors whose names end with a suffix in ``q8``
+    are written as Q8_0."""
     from gguf import GGMLQuantizationType, GGUFWriter
     from gguf.quants import quantize
 
@@ -218,7 +219,8 @@ def write(path, layout: str, v: dict, *, experts_q8: bool = True,
             bits = (a.astype(np.float32).view(np.uint32) >> 16).astype(np.uint16)
             w.add_tensor(name, bits, raw_shape=a.shape,
                          raw_dtype=GGMLQuantizationType.BF16)
-        elif experts_q8 and name.endswith("_exps.weight"):
+        elif (experts_q8 and name.endswith("_exps.weight")) or (
+                q8 and name.endswith(q8)):
             q = quantize(a, GGMLQuantizationType.Q8_0)
             w.add_tensor(name, q, raw_dtype=GGMLQuantizationType.Q8_0)
         else:

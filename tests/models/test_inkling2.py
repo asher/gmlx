@@ -448,3 +448,72 @@ def test_the_compiled_mask_follows_changing_shapes():
                                                             valid)
         assert got.shape == want.shape == (B, n_heads, L, K)
         assert mx.array_equal(got, want, equal_nan=True).item()
+
+
+# The attention projections as the 4-bit files hold them: Q8_0, with the
+# sink and the conv projections left float.
+_Q8_ATTN = ("attn_q.weight", "attn_gate.weight", "attn_rel.weight",
+            "attn_k.weight", "attn_v.weight")
+
+
+def _load_tiny(tmp_path, name, monkeypatch, fuse, **write_args):
+    import gmlx
+
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float32")
+    monkeypatch.setenv("GMLX_GEMV_FUSE", "1" if fuse else "0")
+    path = tmp_path / f"{name}.gguf"
+    T.write(path, "root", T.values(seed=3), experts_q8=False, **write_args)
+    return gmlx.load_model(str(path), verbose=False)[0]
+
+
+def _groups(model):
+    return [{slot: names for slot, (names, _) in
+             layer.self_attn._row_groups.items()
+             if layer.self_attn.get(slot) is not None}
+            for layer in model.model.layers]
+
+
+def test_row_fusion_joins_same_codec_projections(tmp_path, monkeypatch):
+    """On a Q8_0 layout, q, gate and rel run as one mat-vec on every layer
+    and k with v on sliding layers. The float sink and conv projections
+    stay alone. Decode steps match an unfused load exactly; a prefill
+    chunk may round differently, since its kernel follows the row count."""
+    fused = _load_tiny(tmp_path, "fused", monkeypatch, True, q8=_Q8_ATTN)
+    plain = _load_tiny(tmp_path, "plain", monkeypatch, False, q8=_Q8_ATTN)
+    q = ("q_proj", "gate_proj", "rel_proj")
+    want = [{"_q_fused": q, "_kv_fused": ("k_proj", "v_proj")} if swa
+            else {"_q_fused": q} for swa in T.SWA]
+    assert _groups(fused) == want
+    assert _groups(plain) == [{}] * T.LAYERS
+
+    import gmlx.models.inkling2.model as im
+
+    calls = []
+    split = im.split_rows
+    monkeypatch.setattr(im, "split_rows",
+                        lambda *a: calls.append(1) or split(*a))
+    caches = fused.make_cache(), plain.make_cache()
+    a, b = (_logits(m, IDS[:20], c) for m, c in zip((fused, plain), caches))
+    # q splits on every visit. k and v split on sliding layers outside the
+    # loop passes, where each physical layer runs once; the passes give k
+    # and v separate inputs.
+    assert len(calls) == len(T.visits()) + sum(T.SWA)
+    np.testing.assert_allclose(a, b, atol=1e-5, rtol=1e-5)
+    for t in IDS[20:]:
+        a, b = (_logits(m, [t], c) for m, c in zip((fused, plain), caches))
+        np.testing.assert_array_equal(a, b)
+
+
+def test_clearing_the_fused_slots_falls_back_to_the_members(
+        tmp_path, monkeypatch):
+    """An adapter install clears the fused slots (drop_fused_children), and
+    the members, which are views of the fused rows, serve alone."""
+    from gmlx.load.modules import drop_fused_children
+
+    model = _load_tiny(tmp_path, "float", monkeypatch, True)
+    assert all(g.get("_q_fused") for g in _groups(model))
+    before = _logits(model, IDS)
+    assert drop_fused_children(model) > 0
+    assert _groups(model) == [{}] * T.LAYERS
+    np.testing.assert_allclose(_logits(model, IDS), before, atol=1e-5,
+                               rtol=1e-5)

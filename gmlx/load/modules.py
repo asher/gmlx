@@ -3137,12 +3137,18 @@ _FUSED_CAT_SLOTS = {
     "_gdn_ba_kq": ("in_proj_b", "in_proj_a"),
 }
 # Row-fused projection pairs the model holds as child modules and calls in
-# place of their members (deepseek_v4 install_gemv_row_fusion, run at every
+# place of their members (deepseek_v4 install_gemv_row_fusion and inkling2
+# install_row_fusion, run at every
 # load). A cleared slot sends the forward back to the members, which then
 # serve their adapters. Nothing rebuilds a slot once cleared.
 _FUSED_CHILD_SLOTS = {
     "_qa_kv_fused": ("wq_a", "wkv"),
     "_kv_gate_fused": ("wkv", "wgate"),
+    # inkling2 install_row_fusion.
+    "_q_fused": ("q_proj", "gate_proj", "rel_proj", "sink_proj"),
+    "_kv_fused": ("k_proj", "v_proj"),
+    "_kc_fused": ("k_proj", "k_conv_proj"),
+    "_vc_fused": ("v_proj", "v_conv_proj"),
 }
 
 
