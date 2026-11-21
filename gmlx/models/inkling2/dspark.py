@@ -77,8 +77,7 @@ class Inkling2DSparkAttention(nn.Module):
         self.k_ctx_norm = nn.RMSNorm(hd, eps=config.rms_norm_eps)
 
     def inject(self, context: mx.array, rope, cache) -> None:
-        if self.ring_rows is not None and int(context.shape[1]) > self.ring_rows:
-            context = context[:, -self.ring_rows:]
+        # Every row goes in, so the cache offset counts the whole context.
         B, S, _ = context.shape
         keys = self.k_ctx_norm(self.k_ctx_proj(context).reshape(
             B, S, self.n_kv_heads, -1)).transpose(0, 2, 1, 3)
@@ -150,6 +149,10 @@ class Inkling2DSparkDrafter(DFlashDrafter):
         self.joint_proj = nn.Linear(2 * rank + 2 * hidden, 3 * rank, bias=True)
         self.hidden_out = nn.Linear(rank, hidden, bias=True)
         self.embed_norm = None
+        if "full_attention" in config.layer_types:
+            # A full layer reads every committed row, so the prompt capture
+            # has no row limit; prefill streams it in chunks (seed_chunk).
+            self.hidden_capture_limit = None
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -176,8 +179,8 @@ class Inkling2DSparkDrafter(DFlashDrafter):
         f = features.reshape(B, S, len(self.config.target_layer_ids), -1)
         w = mx.softmax(self.dspark_fuse[row].astype(mx.float32))
         x = (f.astype(mx.float32) * w[:, None]).sum(axis=2)
-        return _rms(x.astype(features.dtype), weight,
-                    self.config.rms_norm_eps)
+        return _rms(x, weight.astype(mx.float32),
+                    self.config.rms_norm_eps).astype(features.dtype)
 
     def append_context(self, captures: mx.array, cache=None) -> None:
         caches = self._cache if cache is None else cache
@@ -187,6 +190,16 @@ class Inkling2DSparkDrafter(DFlashDrafter):
         last = captures[:, -1:]
         caches[-1][0] = self._mix(last, len(self.layers),
                                   self.dspark_norm.weight)
+
+    def seed_chunk(self, shifted_tokens, hidden: mx.array, cache) -> None:
+        """Inject one prefill chunk's taps into a request's cache."""
+        del shifted_tokens
+        if int(hidden.shape[1]):
+            self.append_context(self._captures(hidden), cache)
+
+    def restore_kv(self, caches: list) -> None:
+        """Adopt a cache that prefill seeded."""
+        self._cache = list(caches)
 
     # --- draft --------------------------------------------------------------
 
@@ -217,9 +230,11 @@ class Inkling2DSparkDrafter(DFlashDrafter):
     def _head(self, hidden: mx.array) -> mx.array:
         return self.lm_head(hidden).astype(mx.float32)
 
-    def chain(self, hidden: mx.array, anchor: mx.array, n: int) -> mx.array:
-        """Softcapped logits [n, vocab] of rows 1..n of one block, each
-        corrected by the recurrent head on the previous row's pick."""
+    def chain(self, hidden: mx.array, anchor: mx.array, n: int,
+              pick=first_argmax) -> tuple[mx.array, mx.array]:
+        """Softcapped logits [n, vocab] of rows 1..n of one block and the
+        tokens [n] that ``pick`` draws from them. Each row is corrected by
+        the recurrent head on the token drawn from the row before."""
         vocab = int(self.config.vocab_size)
         cap = float(self.config.final_logit_softcapping or 0.0)
         context = self._cache[-1][0]
@@ -229,7 +244,7 @@ class Inkling2DSparkDrafter(DFlashDrafter):
         base = self._head(hidden[0, 1:n + 1])
         state = mx.zeros((1, int(self.config.markov_rank)), dtype=mx.float32)
         prev = anchor.reshape(1)
-        rows = []
+        rows, toks = [], []
         for i in range(n):
             joint = mx.concatenate(
                 [state, self.markov_w1(prev).astype(mx.float32),
@@ -244,8 +259,9 @@ class Inkling2DSparkDrafter(DFlashDrafter):
                 logits = mx.tanh(logits / cap) * cap
             logits = logits[:, :vocab]
             rows.append(logits[0])
-            prev = first_argmax(logits)
-        return mx.stack(rows)
+            prev = pick(logits).reshape(1)
+            toks.append(prev)
+        return mx.stack(rows), mx.concatenate(toks)
 
     def draft_block(
         self,
@@ -259,17 +275,26 @@ class Inkling2DSparkDrafter(DFlashDrafter):
         stash: Optional[DraftStash] = None,
     ) -> mx.array:
         """One round: the trained block through the layers, then the
-        recurrent head over the first ``block_size - 1`` draft rows."""
+        recurrent head over the first ``block_size - 1`` draft rows. Each
+        row's draft is the token the next row is conditioned on."""
         del hidden, cache
         anchor = self._block_tokens(last_bonus, block_size, token_dtype)
         h = self._draft_hidden(anchor)
-        rows = self.chain(h, anchor[0, 0], int(block_size) - 1)
-        if greedy and stash is None:
-            # The chain's own picks.
-            return first_argmax(rows)[None].astype(token_dtype)
-        toks, _ = draw_rows(rows, None, vocab=int(self.config.vocab_size),
-                            greedy=greedy, sampler=sampler, stash=stash)
-        return toks[None]
+        vocab = int(self.config.vocab_size)
+        n = int(block_size) - 1
+        if greedy:
+            rows, toks = self.chain(h, anchor[0, 0], n)
+            if stash is not None:
+                # Records the instrument rows; the picks stay first-max.
+                draw_rows(rows, None, vocab=vocab, greedy=True,
+                          sampler=sampler, stash=stash)
+        else:
+            def draw(row):
+                return draw_rows(row, None, vocab=vocab, greedy=False,
+                                 sampler=sampler, stash=stash)[0]
+
+            _, toks = self.chain(h, anchor[0, 0], n, pick=draw)
+        return toks[None].astype(token_dtype)
 
     # --- parked row contexts ------------------------------------------------
 

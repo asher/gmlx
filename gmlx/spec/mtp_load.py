@@ -1414,11 +1414,14 @@ def _dflash_config_from_meta(
     if inkling2:
         markov_rank, confidence, snr_range, anchor = _dspark_head_keys(
             draft_gguf_path, meta, arrays, shapes)
-        if anchor or confidence or snr_range or causal or not window:
+        if (anchor or confidence or snr_range or causal or not window
+                or int(block_size) != 8 or not softcap or softcap <= 0
+                or layer_ids[-1] != n_target_layers):
             raise ValueError(
                 f"{draft_gguf_path}: the Inkling 2 DSpark drafter needs a "
-                "non-causal block with a non-drafting anchor, a sliding "
-                "window and no confidence or log-SNR head")
+                "non-causal block of 8 with a non-drafting anchor, a sliding "
+                "window, a logit softcap, the final hidden state as its last "
+                "tap and no confidence or log-SNR head")
         # The anchor row sees the window before it as well.
         window += 1
     config = DFlashConfig(

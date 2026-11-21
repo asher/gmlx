@@ -142,6 +142,9 @@ def test_the_tap_bound_is_the_visit_count_here_and_unchanged_elsewhere():
     {"dflash.attention.causal": True},
     {"dflash.sample_from_anchor": True},
     {"dflash.attention.sliding_window": 0},
+    {"dflash.block_size": 4},
+    {"dflash.final_logit_softcapping": 0.0},
+    {"dflash.target_layers": [1, 3, 5]},
 ])
 def test_config_refuses_a_block_the_drafter_was_not_trained_with(over):
     with pytest.raises(ValueError, match="Inkling 2 DSpark"):
@@ -198,9 +201,10 @@ def _rms(x, w, eps=1e-6):
     return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + eps) * w
 
 
-def _reference_chain(d, hidden, anchor, context, n):
+def _reference_chain(d, hidden, anchor, context, n, picks=None):
     """build_inkling2_head, row by row, with the first-maximum pick over
-    the unpadded vocabulary (dspark.cpp graph_inkling2)."""
+    the unpadded vocabulary (dspark.cpp graph_inkling2). ``picks`` forces
+    the token each row feeds the next."""
     out = _np(d.lm_head.weight)
     w1 = _np(d.markov_w1.weight)
     jw, jb = _np(d.joint_proj.weight), _np(d.joint_proj.bias)
@@ -216,7 +220,8 @@ def _reference_chain(d, hidden, anchor, context, n):
         logits = hidden[i] @ out.T + correction @ out.T
         logits = (np.tanh(logits / 30.0) * 30.0)[:VOCAB]
         rows.append(logits)
-        prev = int(np.argmax(logits))  # numpy takes the first maximum
+        prev = (int(np.argmax(logits)) if picks is None  # first maximum
+                else picks[i - 1])
     return np.stack(rows)
 
 
@@ -226,12 +231,34 @@ def test_the_recurrent_head_matches_the_reference():
     hidden = rng.standard_normal((1, BLOCK, HIDDEN)).astype(np.float32)
     context = rng.standard_normal(HIDDEN).astype(np.float32)
     d._cache[-1][0] = mx.array(context[None, None])
-    got = _np(d.chain(mx.array(hidden), mx.array(9), BLOCK - 1))
+    rows, toks = d.chain(mx.array(hidden), mx.array(9), BLOCK - 1)
+    got = _np(rows)
     want = _reference_chain(d, hidden[0], 9, context, BLOCK - 1)
     assert got.shape == (BLOCK - 1, VOCAB)
     np.testing.assert_allclose(got, want, atol=2e-4, rtol=2e-4)
     # Each row's pick feeds the next row.
-    assert np.array_equal(got.argmax(-1), want.argmax(-1))
+    assert np.array_equal(np.array(toks), want.argmax(-1))
+
+
+def test_a_sampled_draft_is_the_token_the_next_row_reads():
+    d = _drafter()
+    d.append_context(mx.ones((1, 3, 4 * HIDDEN)))
+    drawn, seen = [], []
+
+    def sampler(logits):
+        # The lowest-scored token: never the first maximum.
+        seen.append(_np(logits)[0])
+        tok = mx.argmin(logits, axis=-1)
+        drawn.append(int(tok.reshape(-1)[0]))
+        return tok
+
+    toks = d.draft_block(3, None, None, 4, sampler=sampler, greedy=False)
+    assert toks.reshape(-1).tolist() == drawn and len(drawn) == 3
+    hidden = _np(d._draft_hidden(mx.array([[3]])))[0]
+    context = _np(d._cache[-1][0]).reshape(-1)
+    # Row i + 1 is conditioned on the drawn token of row i.
+    want = _reference_chain(d, hidden, 3, context, 3, picks=drawn)
+    np.testing.assert_allclose(np.stack(seen), want, atol=2e-4, rtol=2e-4)
 
 
 def test_drafts_never_pick_a_padded_row():
@@ -242,7 +269,7 @@ def test_drafts_never_pick_a_padded_row():
     d.lm_head.weight = mx.array(w)
     hidden = mx.ones((1, BLOCK, HIDDEN))
     d._cache[-1][0] = mx.ones((1, 1, HIDDEN))
-    rows = d.chain(hidden, mx.array(3), BLOCK - 1)
+    rows, _ = d.chain(hidden, mx.array(3), BLOCK - 1)
     assert rows.shape[-1] == VOCAB
     toks = d.draft_block(3, None, None, 4, sampler=None, greedy=True)
     assert toks.shape == (1, 3) and int(mx.max(toks)) < VOCAB
@@ -281,3 +308,30 @@ def test_sliding_layers_see_the_anchor_rows_window(monkeypatch):
     # Sliding layers: the anchor row's WINDOW context rows for every row,
     # plus the block. The full layer: all 20 context rows plus the block.
     assert seen == [WINDOW + BLOCK, 20 + BLOCK, WINDOW + BLOCK]
+
+
+def test_chunked_seeding_matches_one_shot_and_counts_every_row():
+    from gmlx.spec.mtp_drafter import _cache_offset
+
+    # A full layer reads the whole prompt, so nothing caps the capture.
+    assert _drafter().hidden_capture_limit is None
+    rng = np.random.default_rng(4)
+    rows = 13
+    packed = mx.array(rng.standard_normal((1, rows, 5 * HIDDEN)),
+                      dtype=mx.float32)
+    one = _drafter()
+    one.prefill_from_target_hidden(None, packed, None, None, None)
+    seeded = _drafter()
+    seed = seeded.make_cache()
+    seeded.seed_chunk(None, packed[:, :6], seed)
+    seeded.seed_chunk(None, packed[:, 6:10], seed)
+    # The engine adopts a seed whose offset is the streamed length.
+    assert _cache_offset(seed) == 10
+    seeded.restore_kv(seed)
+    seeded.prefill_from_target_hidden(None, packed[:, 10:], None, None, None)
+    anchor = mx.array([[5]])
+    np.testing.assert_allclose(_np(seeded._draft_hidden(anchor)),
+                               _np(one._draft_hidden(anchor)),
+                               atol=1e-5, rtol=1e-5)
+    np.testing.assert_array_equal(_np(seeded._cache[-1][0]),
+                                  _np(one._cache[-1][0]))
