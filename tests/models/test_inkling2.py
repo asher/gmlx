@@ -238,6 +238,15 @@ def test_prefill_matches_the_reference(model, reference):
     np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
 
 
+def test_split_queries_match_the_reference(model, reference, monkeypatch):
+    # A small bias budget splits each attention call into query blocks.
+    import gmlx.models.inkling2.model as im
+
+    monkeypatch.setattr(im, "_BIAS_ELEMENTS", 3 * T.HEADS * L)
+    got = _logits(model, IDS)
+    np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
+
+
 def test_chunked_prefill_and_decode_match_the_reference(model, reference):
     # Chunks of 7, then one token at a time: the sliding caches wrap, and
     # the distances come from the ring order.
@@ -249,3 +258,89 @@ def test_chunked_prefill_and_decode_match_the_reference(model, reference):
         rows.append(_logits(model, IDS[i:i + 1], cache))
     got = np.concatenate(rows)
     np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
+
+
+def test_a_ragged_batch_matches_each_row_alone(model):
+    # Left padding shifts the batch rows: the relative distances, the
+    # query scale of the full layers and the convolution tails must all
+    # ignore it.
+    from gmlx._vendor.mlx_lm.generate import BatchGenerator, generate_step
+    from gmlx._vendor.mlx_lm.models.cache import make_prompt_cache
+
+    def greedy(x):
+        return mx.argmax(x, axis=-1)
+
+    rng = np.random.default_rng(0)
+    prompts = [rng.integers(2, len(T.tokens()), n).tolist() for n in (5, 23, 37)]
+    alone = []
+    for ids in prompts:
+        steps = generate_step(mx.array(ids), model, max_tokens=8, sampler=greedy,
+                              prompt_cache=make_prompt_cache(model))
+        alone.append([(int(t), np.array(lp)) for t, lp in steps])
+
+    gen = BatchGenerator(model, sampler=greedy)
+    uids = gen.insert(prompts, [8] * len(prompts))
+    batched = {u: [] for u in uids}
+    while responses := gen.next_generated():
+        for r in responses:
+            batched[r.uid].append((int(r.token), np.array(r.logprobs)))
+    gen.close()
+
+    for want, uid in zip(alone, uids):
+        got = batched[uid]
+        assert [t for t, _ in got] == [t for t, _ in want]
+        for (_, a), (_, b) in zip(got, want):
+            np.testing.assert_allclose(a, b, atol=1e-4)
+
+
+def test_the_prompt_cache_checkpoint_round_trips(model, reference):
+    # The model takes the checkpoint tier: whole convolution states and
+    # sliding windows beside the block chain of the full layers.
+    from gmlx._vendor.mlx_vlm.apc import APCManager
+    from gmlx.cache.snapshot import ckpt_layout, ckpt_lookup, ckpt_store
+    from gmlx.spec.engine import _ckpt_active
+
+    assert _ckpt_active(model, "exact", 16)
+    manager = APCManager(num_blocks=256, block_size=16)
+    try:
+        cache = model.make_cache()
+        _logits(model, IDS[:32], cache)
+        assert ckpt_store(manager, IDS[:32], cache, skeleton_disk=False) == 32
+        layout = tuple(ckpt_layout(model.make_cache(), 16))
+        warm, prefix = ckpt_lookup(manager, IDS, layout=layout)
+        assert prefix == 32
+        got = _logits(model, IDS[prefix:], warm)
+    finally:
+        manager.close()
+    np.testing.assert_allclose(got, reference[prefix:], atol=2e-4, rtol=2e-4)
+
+
+@pytest.mark.parametrize("accepted", [0, 1, 2, 3])
+def test_speculative_rollback_matches_a_plain_run(model, reference, accepted):
+    # Verify a 4-token block past the sliding window, keep accepted + 1
+    # of its tokens, then continue: the logits must match a run that never
+    # saw the rejected tokens.
+    from types import SimpleNamespace
+
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    def run(ids, cache):
+        h = spec.model(mx.array([ids]), cache)
+        return np.array(spec.head(h)[0].astype(mx.float32))
+
+    spec, plain = model, type(model)
+    spec.__class__ = Inkling2SpecLM
+    try:
+        cache = spec.make_cache()
+        run(IDS[:30], cache)
+        drafter = SimpleNamespace(config=SimpleNamespace(block_size=4))
+        _buffer_mtp_target_cache(cache, drafter, 4)
+        _, _, sink = spec.speculative_verify_hidden(mx.array([IDS[30:34]]),
+                                                    cache)
+        spec.rollback_speculative_cache(cache, sink, accepted, 4)
+        keep = 31 + accepted
+        got = run(IDS[keep:], cache)
+    finally:
+        spec.__class__ = plain
+    np.testing.assert_allclose(got, reference[keep:], atol=2e-4, rtol=2e-4)

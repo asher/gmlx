@@ -69,6 +69,8 @@ CANDIDATE_ARCHES = [
     "graniteswitch",
     "gemma3n",
     "lfm3",
+    "inkling2",
+    "inkling2_loop",
 ]
 
 # Deliberately varying lengths -> a ragged batch -> exercises the left-padding /

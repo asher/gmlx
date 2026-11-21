@@ -37,6 +37,7 @@ from gmlx.cache.kv_cache import (
     ArraysCache,
     BatchKVCache,
     BatchRotatingKVCache,
+    BufferedRotatingKVCache,
     KVCache,
     RotatingKVCache,
 )
@@ -54,7 +55,7 @@ PREFILL_EVAL_ROWS = 64
 
 # The bias tensor of one attention call stays under this many elements;
 # wider calls split the queries.
-_BIAS_ELEMENTS = 1 << 26
+_BIAS_ELEMENTS = 1 << 25
 
 # The epsilon of the unweighted norms in the depth mix and the controllers.
 _MIX_EPS = 1e-6
@@ -181,16 +182,20 @@ class LoopControl(nn.Module):
         self.ffn = Controller(dim, rank)
 
 
-def _key_distances(cache, n_queries: int, n_keys: int) -> mx.array:
+def _key_distances(cache, n_queries: int, n_keys: int, rows=None) -> mx.array:
     """[L, K] distances pos_q - pos_k from the queries of this update to
-    every key slot the cache returned. Left padding shifts queries and keys
-    alike, so buffer coordinates give the distance."""
-    i = mx.arange(n_queries, dtype=mx.int32)[:, None]
+    every key slot the cache returned; ``rows`` (start, stop) selects some
+    of the queries. Left padding shifts queries and keys alike, so buffer
+    coordinates give the distance."""
+    r0, r1 = rows if rows is not None else (0, n_queries)
+    i = mx.arange(r0, r1, dtype=mx.int32)[:, None]
     s = mx.arange(n_keys, dtype=mx.int32)[None, :]
     # Query i sits n_queries - 1 - i positions before the newest key.
     back = n_queries - 1 - i
     kind = type(cache)
-    if cache is None or kind in (KVCache, BatchKVCache):
+    # A buffered sliding cache returns its keys in time order, newest last.
+    if cache is None or kind in (KVCache, BatchKVCache,
+                                 BufferedRotatingKVCache):
         if kind is BatchKVCache and getattr(cache, "_row_ends", None) is not None:
             raise NotImplementedError(
                 "inkling2: rows with different ends are not supported")
@@ -275,20 +280,19 @@ class Attention(nn.Module):
         [B, H, L, D]; returns [B, H, L, D]."""
         B, H, L, _ = q.shape
         K = k.shape[2]
-        dist = _key_distances(cache, L, K)
-        valid = dist >= 0
-        if self.window is not None:
-            valid = valid & (dist < self.window)
-        if pad_mask is not None:
-            valid = valid & pad_mask
         sinks = mx.zeros((H,), dtype=q.dtype)
         step = max(1, _BIAS_ELEMENTS // max(1, B * H * K))
         outs = []
         for i0 in range(0, L, step):
             i1 = min(L, i0 + step)
-            bias = self._bias(r[:, i0:i1], sink[:, i0:i1], dist[i0:i1])
-            mask = mx.where(valid[..., i0:i1, :], bias, -mx.inf).astype(
-                q.dtype)
+            dist = _key_distances(cache, L, K, (i0, i1))
+            valid = dist >= 0
+            if self.window is not None:
+                valid = valid & (dist < self.window)
+            if pad_mask is not None:
+                valid = valid & pad_mask[..., i0:i1, :]
+            bias = self._bias(r[:, i0:i1], sink[:, i0:i1], dist)
+            mask = mx.where(valid, bias, -mx.inf).astype(q.dtype)
             outs.append(mx.fast.scaled_dot_product_attention(
                 q[:, :, i0:i1], k, v, scale=self.scale, mask=mask,
                 sinks=sinks))
@@ -326,10 +330,12 @@ class Layer(nn.Module):
         if loop and loop["start"] <= layer_idx < loop["end"]:
             self.loop = LoopControl(dim, loop["gate_rank"])
 
-    def _convolve(self, x, weight, dynamic, cache, slot, pad_mask):
+    def _convolve(self, x, weight, dynamic, cache, slot, pad_mask,
+                  sink=None):
         """Causal short convolution with a residual. ``dynamic`` adds
         per-head input-dependent taps. ``cache`` slot ``slot`` keeps the
-        last ``width - 1`` inputs."""
+        last ``width - 1`` inputs. ``sink`` receives (cache, slot, window)
+        for a speculative rollback."""
         B, L, C = x.shape
         n_keep = self.width - 1
         xf = x.astype(mx.float32)
@@ -341,6 +347,8 @@ class Layer(nn.Module):
                 state = mx.zeros((B, n_keep, C), dtype=mx.float32)
             window = mx.concatenate([state.astype(mx.float32), xf], axis=1)
             cache.update_window(slot, window, n_keep, lengths=cache.lengths)
+            if sink is not None:
+                sink.append((cache, slot, window))
         else:
             window = mx.pad(xf, [(0, 0), (n_keep, 0), (0, 0)])
         w = weight.astype(mx.float32)
@@ -360,7 +368,7 @@ class Layer(nn.Module):
         return ((xf + out) * (n * self.width + 1) ** -0.5).astype(x.dtype)
 
     def __call__(self, h, ip, blocks, cache, pad_mask, positions,
-                 messages=None):
+                 messages=None, conv_sink=None):
         """Run this layer as physical layer ``ip`` of the block schedule.
         ``cache`` is (conv ArraysCache, attention cache) for this visit."""
         conv_cache, kv_cache = cache if cache is not None else (None, None)
@@ -398,11 +406,11 @@ class Layer(nn.Module):
         k = self._convolve(
             k, attn.k_conv,
             None if self.is_sliding else attn.k_conv_proj(inputs[1]),
-            conv_cache, 0, pad_mask)
+            conv_cache, 0, pad_mask, conv_sink)
         v = self._convolve(
             v, attn.v_conv,
             None if self.is_sliding else attn.v_conv_proj(inputs[2]),
-            conv_cache, 1, pad_mask)
+            conv_cache, 1, pad_mask, conv_sink)
         r = attn.rel_proj(inputs[0])
 
         q = clip(q.reshape(B, L, self.n_heads, self.head_dim), attn.q_clip,
@@ -423,17 +431,18 @@ class Layer(nn.Module):
         k = k.astype(dtype).transpose(0, 2, 1, 3)
         v = v.astype(dtype).transpose(0, 2, 1, 3)
         _refuse_quantized(kv_cache)
+        key_mask = None
         if kv_cache is not None:
+            # A batch cache's mask covers the keys the update returns, so
+            # it is built before the update.
+            key_mask = _pad_key_mask(kv_cache, L)
             k, v = kv_cache.update_and_fetch(k, v)
-            key_mask = _pad_key_mask(kv_cache, L, k.shape[2])
-        else:
-            key_mask = None
         out = attn.attend(q, k, v, r, sink, kv_cache, key_mask)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
         out = out * mx.sigmoid(attn.gate_proj(inputs[0]).astype(mx.float32)
                                ).astype(dtype)
         out = self._convolve(attn.o_proj(out), attn.post_conv, None,
-                             conv_cache, 2, pad_mask)
+                             conv_cache, 2, pad_mask, conv_sink)
 
         if ip % self.block_size == 0:
             blocks.append(inp_sa)
@@ -449,15 +458,16 @@ class Layer(nn.Module):
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
         x = self._convolve(x, self.ffn_post_conv, None, conv_cache, 3,
-                           pad_mask)
+                           pad_mask, conv_sink)
         if conv_cache is not None:
             conv_cache.advance(L)
         return (ffn_inp.astype(mx.float32) + x.astype(mx.float32)).astype(
             dtype)
 
 
-def _pad_key_mask(cache, n_queries: int, n_keys: int):
-    """[B, 1, L, K] key validity of a batch cache's left padding, or None."""
+def _pad_key_mask(cache, n_queries: int):
+    """[B, 1, L, K] key validity of a batch cache's left padding, or None.
+    Call it before the cache update."""
     if type(cache) not in (BatchKVCache, BatchRotatingKVCache):
         return None
     mask = cache.make_mask(n_queries, return_array=True)
@@ -557,6 +567,7 @@ class Inkling2Model(nn.Module):
         hidden_sink: Optional[list] = None,
         embed_mask: Optional[mx.array] = None,
         trunk_sink: Optional[list] = None,
+        conv_sink: Optional[list] = None,
     ):
         if input_embeddings is None:
             h = self.embed_norm(self.embed_tokens(inputs))
@@ -606,7 +617,8 @@ class Inkling2Model(nn.Module):
                 messages = depth_mix(bank, bank_out, layer.loop.msg_query)
             c = None if cache is None else (conv_caches[visit],
                                             kv_caches[visit])
-            h = layer(h, ip, blocks, c, pad_mask, positions, messages)
+            h = layer(h, ip, blocks, c, pad_mask, positions, messages,
+                      conv_sink)
             if per_visit:
                 mx.eval(h)
 
