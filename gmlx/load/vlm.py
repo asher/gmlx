@@ -1408,18 +1408,21 @@ def _remap_inkling2_vision(arrays, out, skipped) -> None:
             out[hit] = arr
             continue
         m = _VISION_BLK_RE.match(name)
-        if m is None:
-            skipped.append(name)
-            continue
-        sub, _, leaf = m.group(2).rpartition(".")  # leaf = weight | bias
-        if sub in ("ls1", "ls2") and leaf == "weight":
-            out[f"vision_tower.blocks.{m.group(1)}.{sub}"] = arr
-            continue
-        tgt = _INKLING2_V_BLK_SUBMAP.get(sub)
-        if tgt is None:
-            skipped.append(name)
-            continue
-        out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
+        if m is not None:
+            sub, _, leaf = m.group(2).rpartition(".")  # leaf = weight | bias
+            base = f"vision_tower.blocks.{m.group(1)}"
+            if sub in ("ls1", "ls2") and leaf == "weight":
+                out[f"{base}.{sub}"] = arr
+                continue
+            tgt = _INKLING2_V_BLK_SUBMAP.get(sub)
+            if tgt is not None:
+                out[f"{base}.{tgt}.{leaf}"] = arr
+                continue
+        # A tensor the tower has no place for (a projector bias, a final
+        # norm) changes the output, so refuse the file.
+        raise UnsupportedVLMError(
+            f"inkling2v mmproj: tensor {name!r} has no place in the vision "
+            "tower")
 
 
 def _remap_deepseek41v_clip(arrays, out, skipped) -> None:
@@ -6058,7 +6061,8 @@ class _Inkling2GgufImageProcessor(ImageProcessingMixin):
 
     def resized(self, width: int, height: int) -> tuple[int, int] | None:
         """The (width, height) an image is resized to, or None to keep it.
-        ``calc_size_preserved_ratio`` with the cap and no floor."""
+        ``calc_size_preserved_ratio`` with the cap and no floor. Unlike
+        llama.cpp, a very thin image also keeps the cap."""
         if self._aligned(width) * self._aligned(height) <= self.max_pixels:
             return None
         cell = self.cell
@@ -6071,6 +6075,13 @@ class _Inkling2GgufImageProcessor(ImageProcessingMixin):
             beta = math.sqrt(height * width / self.max_pixels)
             h_bar = max(cell, math.floor(height / beta / cell) * cell)
             w_bar = max(cell, math.floor(width / beta / cell) * cell)
+        # A very thin image keeps a one-cell short edge, so its long edge
+        # alone can pass the cap. Cut the long edge to keep the cap.
+        if w_bar * h_bar > self.max_pixels:
+            if w_bar >= h_bar:
+                w_bar = self.max_pixels // h_bar // cell * cell
+            else:
+                h_bar = self.max_pixels // w_bar // cell * cell
         return w_bar, h_bar
 
     def _one(self, img):

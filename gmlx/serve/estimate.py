@@ -413,7 +413,8 @@ def estimate_request(body: dict, *, tenant_id=None) -> tuple:
 # 1024-token budget, so there is nothing to reserve. minimax_m3_vision: at
 # most 576 merged tokens plus the start and end markers. hy_v4_flash_vl:
 # at most 4096 merged cells and a newline per row, and the 200:1 aspect
-# cap leaves at most 1024 rows. inkling2_vl: at most 4096 merged cells.
+# cap leaves at most 1024 rows. inkling2_vl: the processor caps each
+# image at 4096 merged cells.
 _MEDIA_TOKENS_PER_IMAGE = {"deepseek_v4_vl": 384, "deepseek_v41_vl": 1024,
                            "minimax_m3_vision": 578, "hy_v4_flash_vl": 5120,
                            "inkling2_vl": 4096}

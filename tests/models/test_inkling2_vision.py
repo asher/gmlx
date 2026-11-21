@@ -324,10 +324,13 @@ def test_the_serve_estimate_bounds_the_largest_image():
 
     ip = _Inkling2GgufImageProcessor([0.5] * 3, [0.5] * 3)
     most = 0
-    for w in (39, 640, 2559, 2600, 4032, 9000):
-        for h in (w, 3 * w, 40 * w):
-            size = ip.resized(w, h) or (ip._aligned(w), ip._aligned(h))
-            most = max(most, ip.soft_tokens(size[1], size[0]))
+    sizes = [(w, h) for w in (39, 640, 2559, 2600, 4032, 9000)
+             for h in (w, 3 * w, 40 * w)]
+    # Very thin images: the short edge stays one cell.
+    sizes += [(1, 1_000_000), (1_000_000, 1), (41, 200_000), (200_000, 79)]
+    for w, h in sizes:
+        size = ip.resized(w, h) or (ip._aligned(w), ip._aligned(h))
+        most = max(most, ip.soft_tokens(size[1], size[0]))
     assert most <= _MEDIA_TOKENS_PER_IMAGE[INKLING2_VISION]
 
 
@@ -382,6 +385,15 @@ def test_remap_covers_the_whole_tower_and_nothing_else():
     assert sorted(out) == vision
     for k in vision:
         assert tuple(out[k].shape) == tuple(params[k].shape), k
+
+
+@pytest.mark.parametrize("extra", ["mm.1.bias", "v.post_ln.weight",
+                                   "v.blk.0.attn_unknown.weight"])
+def test_remap_refuses_a_tensor_the_tower_has_no_place_for(extra):
+    arrays = {k: mx.array(v) for k, v in _mmproj_arrays().items()}
+    arrays[extra] = mx.zeros((4,))
+    with pytest.raises(UnsupportedVLMError, match="no place"):
+        remap_vision_arrays(arrays, INKLING2_VISION)
 
 
 def test_the_container_feeds_normed_text_rows_and_raw_image_rows():

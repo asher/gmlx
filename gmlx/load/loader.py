@@ -1068,8 +1068,8 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "inkling2": (".mlp.gate.weight", ".e_score_correction_bias",
                  "_res_query", ".msg_query", ".q_clip", ".rel_clip",
                  ".rel_bias", "_conv", ".loop.", "norm.weight"),
-    # inkling2_vl: the same set under language_model.*. No vision tower
-    # name holds one of these.
+    # inkling2_vl: the same set under language_model.*. The vision norms
+    # also match norm.weight; the tower runs in fp32, so that is harmless.
     "inkling2_vl": (".mlp.gate.weight", ".e_score_correction_bias",
                     "_res_query", ".msg_query", ".q_clip", ".rel_clip",
                     ".rel_bias", "_conv", ".loop.", "norm.weight"),
