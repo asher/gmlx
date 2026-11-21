@@ -18,6 +18,7 @@ import mlx.core as mx
 
 sys.path.insert(0, os.path.dirname(__file__))
 import inkling2_tiny as T  # noqa: E402
+from f32_exact import f32_exact  # noqa: E402
 
 L = 40
 IDS = np.random.default_rng(7).integers(2, len(T.tokens()), L).tolist()
@@ -233,11 +234,13 @@ def _logits(model, ids, cache=None):
     return np.array(model(mx.array([ids]), cache=cache)[0].astype(mx.float32))
 
 
+@f32_exact
 def test_prefill_matches_the_reference(model, reference):
     got = _logits(model, IDS)
     np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
 
 
+@f32_exact
 def test_split_queries_match_the_reference(model, reference, monkeypatch):
     # A small bias budget splits each attention call into query blocks.
     import gmlx.models.inkling2.model as im
@@ -247,6 +250,7 @@ def test_split_queries_match_the_reference(model, reference, monkeypatch):
     np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
 
 
+@f32_exact
 def test_chunked_prefill_and_decode_match_the_reference(model, reference):
     # Chunks of 7, then one token at a time: the sliding caches wrap, and
     # the distances come from the ring order.
@@ -260,6 +264,7 @@ def test_chunked_prefill_and_decode_match_the_reference(model, reference):
     np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
 
 
+@f32_exact
 def test_a_ragged_batch_matches_each_row_alone(model):
     # Left padding shifts the batch rows: the relative distances, the
     # query scale of the full layers and the convolution tails must all
@@ -293,6 +298,7 @@ def test_a_ragged_batch_matches_each_row_alone(model):
             np.testing.assert_allclose(a, b, atol=1e-4)
 
 
+@f32_exact
 def test_the_prompt_cache_checkpoint_round_trips(model, reference):
     # The model takes the checkpoint tier: whole convolution states and
     # sliding windows beside the block chain of the full layers.
@@ -316,6 +322,7 @@ def test_the_prompt_cache_checkpoint_round_trips(model, reference):
 
 
 @pytest.mark.parametrize("accepted", [0, 1, 2, 3])
+@f32_exact
 def test_speculative_rollback_matches_a_plain_run(model, reference, accepted):
     # Verify a 4-token block past the sliding window, keep accepted + 1
     # of its tokens, then continue: the logits must match a run that never

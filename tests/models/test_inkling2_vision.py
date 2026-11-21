@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 
 import inkling2_tiny as T  # noqa: E402
+from f32_exact import f32_exact  # noqa: E402
 
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
 from gmlx.load.vlm import (  # noqa: E402
@@ -215,6 +216,7 @@ def _tower(arrays):
 
 
 @pytest.mark.parametrize("n_h,n_w", [(4, 4), (2, 6), (6, 2)])
+@f32_exact
 def test_the_tower_matches_the_reference(_on_cpu, n_h, n_w):
     # 4 x 4 keeps the position grid as it is; the others resample it.
     arrays = _mmproj_arrays()

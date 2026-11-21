@@ -128,6 +128,13 @@ reason.
 
 Mark a costly test that rarely breaks as [nightly](ci.md#nightly-tests).
 
+M5-class GPUs multiply float32 matrices at TF32 precision, which keeps 10
+of the 23 mantissa bits. A test that compares float32 output with a
+float32 reference at a tight tolerance passes on an M3 and fails on an M5.
+Decorate it with `@f32_exact` from `tests/f32_exact.py`. On a GPU with
+TF32 it reruns in a child process with `MLX_ENABLE_TF32=0`; elsewhere it
+runs in place.
+
 To find tests whose coverage a neighbour already has:
 
 ```sh

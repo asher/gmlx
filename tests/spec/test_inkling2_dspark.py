@@ -9,6 +9,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import pytest
 from mlx.utils import tree_flatten
+from f32_exact import f32_exact  # noqa: E402
 
 from gmlx.models.inkling2.dspark import Inkling2DSparkDrafter, first_argmax
 from gmlx.spec.mtp_load import (
@@ -225,6 +226,7 @@ def _reference_chain(d, hidden, anchor, context, n, picks=None):
     return np.stack(rows)
 
 
+@f32_exact
 def test_the_recurrent_head_matches_the_reference():
     d = _drafter()
     rng = np.random.default_rng(1)
@@ -240,6 +242,7 @@ def test_the_recurrent_head_matches_the_reference():
     assert np.array_equal(np.array(toks), want.argmax(-1))
 
 
+@f32_exact
 def test_a_sampled_draft_is_the_token_the_next_row_reads():
     d = _drafter()
     d.append_context(mx.ones((1, 3, 4 * HIDDEN)))
