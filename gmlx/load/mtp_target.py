@@ -307,6 +307,8 @@ _VLM_SPEC_MODEL_TYPE_ALIASES = {
     "nemotron_h_transcribe": "nemotron_h",
     # The vision container's language model carries HyV4FlashSpecHooks.
     "hy_v4_flash_vl": "hy_v4_flash",
+    # The vision container's language model is Inkling2SpecLM.
+    "inkling2_vl": "inkling2",
 }
 
 

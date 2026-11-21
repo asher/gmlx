@@ -312,9 +312,11 @@ _VISION = {
                      "]<]image[>["),
     "lfm3-omni": ("lfm3_omni", "lfm3-stand-in", "<|image|>"),
     "lfm3-vl": ("lfm3_vl", "lfm3-stand-in", "<|image|>"),
+    "inkling2": ("inkling2_vl", "inkling2_template.jinja",
+                 "<|content_image|><|unused_200054|>"),
 }
 # The templates that show an image in a tool turn.
-_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "kimi-k2.5", "lfm3-omni",
+_IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "inkling2", "kimi-k2.5", "lfm3-omni",
                  "lfm3-vl", "minicpm-v-4.6", "minicpm-v-4.7", "minimax-m3.1",
                  "muse", "muse-spark", "nemotron-bolt", "qwen3.5", "qwen3.6",
                  "qwen3.8")

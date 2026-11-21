@@ -1068,6 +1068,11 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     "inkling2": (".mlp.gate.weight", ".e_score_correction_bias",
                  "_res_query", ".msg_query", ".q_clip", ".rel_clip",
                  ".rel_bias", "_conv", ".loop.", "norm.weight"),
+    # inkling2_vl: the same set under language_model.*. No vision tower
+    # name holds one of these.
+    "inkling2_vl": (".mlp.gate.weight", ".e_score_correction_bias",
+                    "_res_query", ".msg_query", ".q_clip", ".rel_clip",
+                    ".rel_bias", "_conv", ".loop.", "norm.weight"),
     # nemotron_h: llama.cpp routes in fp32 (F32 wire router and selection
     # bias; Bolt picks top-9 of up to 496), and A_log feeds the fp32 scan.
     # Kept in step with the model class's cast_predicate.
@@ -1169,6 +1174,7 @@ _FP32_CAST_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # looped GGUF layout stores them BF16 and llama.cpp mainline F32; the
     # cast makes both load the same values.
     "inkling2": (".loop.",),
+    "inkling2_vl": (".loop.",),
 }
 
 # The same cast behind an environment switch that is off by default: model

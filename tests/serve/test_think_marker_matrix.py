@@ -172,7 +172,8 @@ ROWS: dict[str, Row] = {
     "fixtures/image/z_image_turbo_chat_template.jinja": Row(exclude=_IMAGE),
     "fixtures/inkling2_template.jinja": Row(
         "inkling2", _INKLING, ({}, HEADER),
-        ({"reasoning_effort": "none"}, HEADER), HEADER, _INKLING_SINGLES),
+        ({"reasoning_effort": "none"}, HEADER), HEADER, _INKLING_SINGLES,
+        vlm="inkling2_vl"),
     "fixtures/k2_horizon_template.jinja": Row(
         "k2_horizon", ("<ifm|think>", "</ifm|think>"), ({}, WAIT),
         ({"reasoning_effort": "low"}, WAIT), WAIT, _K2_SINGLES),

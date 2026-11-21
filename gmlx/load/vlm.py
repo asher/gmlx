@@ -185,6 +185,16 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
                 "not supported (only Hy4-flash text GGUFs, arch "
                 "'hy_v4_flash')")
         return HY4FLASH_VISION
+    if proj == "inkling2v":
+        # Inkling 2: a 20 px patch ViT with a class token and 2D rope, a 2x2
+        # merge and a GELU MLP onto the inkling2 text model
+        # (gmlx.models.inkling2.vlm_model). Both GGUF layouts take it.
+        if llm_arch not in ("inkling2", "inkling2_loop"):
+            raise UnsupportedVLMError(
+                f"mmproj projector 'inkling2v' on LLM arch {llm_arch!r} is "
+                "not supported (only Inkling 2 text GGUFs, arch 'inkling2' "
+                "or 'inkling2_loop')")
+        return INKLING2_VISION
     if proj in ("minicpmv4_6", "minicpmv4_7"):
         # OpenBMB MiniCPM-V 4.6 / 4.7: a SigLIP ViT with a window-attention
         # merger and a 2x2 downsample MLP onto the qwen3.5 dense or MoE text
@@ -1358,6 +1368,60 @@ def _remap_hy4flash_vision(arrays, out, skipped) -> None:
         out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
 
 
+INKLING2_VISION = "inkling2_vl"
+# The template's image placeholder (the processor_config image_token).
+INKLING2_IMAGE_TOKEN = "<|unused_200054|>"
+_INKLING2_V_BLK_SUBMAP = {
+    "attn_q": "attn.q_proj",
+    "attn_k": "attn.k_proj",
+    "attn_v": "attn.v_proj",
+    "attn_out": "attn.out_proj",
+    "ln1": "norm1",
+    "ln2": "norm2",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+}
+_INKLING2_V_TOP_MAP = {
+    "v.class_embd": "vision_tower.class_embedding",
+    "v.class_position_embd.weight": "vision_tower.class_position_embedding",
+    "v.position_embd.weight": "vision_tower.position_embedding",
+    "v.pre_ln.weight": "vision_tower.pre_norm.weight",
+    "v.pre_ln.bias": "vision_tower.pre_norm.bias",
+    "mm.1.weight": "vision_tower.projector.fc1.weight",
+    "mm.2.weight": "vision_tower.projector.fc2.weight",
+}
+
+
+def _remap_inkling2_vision(arrays, out, skipped) -> None:
+    """The Inkling 2 mmproj (projector inkling2v): clip names onto
+    gmlx.models.inkling2.vision."""
+    for name, arr in arrays.items():
+        if name.endswith(".scales") or name.endswith(".biases"):
+            continue
+        if name == "v.patch_embd.weight":
+            # Conv [out, c, kh, kw] -> Linear [out, c*kh*kw].
+            out["vision_tower.patch_embed.weight"] = arr.reshape(
+                arr.shape[0], -1)
+            continue
+        hit = _INKLING2_V_TOP_MAP.get(name)
+        if hit is not None:
+            out[hit] = arr
+            continue
+        m = _VISION_BLK_RE.match(name)
+        if m is None:
+            skipped.append(name)
+            continue
+        sub, _, leaf = m.group(2).rpartition(".")  # leaf = weight | bias
+        if sub in ("ls1", "ls2") and leaf == "weight":
+            out[f"vision_tower.blocks.{m.group(1)}.{sub}"] = arr
+            continue
+        tgt = _INKLING2_V_BLK_SUBMAP.get(sub)
+        if tgt is None:
+            skipped.append(name)
+            continue
+        out[f"vision_tower.blocks.{m.group(1)}.{tgt}.{leaf}"] = arr
+
+
 def _remap_deepseek41v_clip(arrays, out, skipped) -> None:
     """The llama.cpp conversion of the V4.1 encoder (projector deepseek41v):
     the V4 clip names, with wqkv kept fused as attn_qkv and no image_pad."""
@@ -1829,6 +1893,10 @@ def _remap_float_arrays(
 
     if model_type == HY4FLASH_VISION:
         _remap_hy4flash_vision(arrays, out, skipped)
+        return out, skipped
+
+    if model_type == INKLING2_VISION:
+        _remap_inkling2_vision(arrays, out, skipped)
         return out, skipped
 
     if model_type == "deepseek_v41_vl" and any(
@@ -3341,6 +3409,59 @@ def _synthesize_hy4flash_vlm_config(
     }
 
 
+def _synthesize_inkling2_vlm_config(
+    text_config: dict, mm_meta: dict, llm_meta: dict, mm_shapes: dict | None,
+) -> dict:
+    """Inkling 2 VLM config: the inkling2 text synth plus the vision tower,
+    read from ``clip.vision.*``. The merge width and the position grid
+    come from the tensors."""
+    from gmlx.models.inkling2.vlm_model import IMAGE_TOKEN, IMAGE_TOKEN_ID
+
+    image_id = _gguf_token_id(llm_meta, IMAGE_TOKEN)
+    if image_id is None:
+        image_id = IMAGE_TOKEN_ID
+    shapes = mm_shapes or {}
+    merge = shapes.get("mm.1.weight")
+    grid = shapes.get("v.position_embd.weight")
+    if not merge or not grid:
+        raise ValueError(
+            "inkling2v mmproj: mm.1.weight or v.position_embd.weight is "
+            "missing")
+    hidden = _mm_int(mm_meta, "clip.vision.embedding_length")
+    merge_size = _mm_int(mm_meta, "clip.vision.spatial_merge_size")
+    n_pos = _other_dim(grid, hidden)
+    edge = math.isqrt(n_pos)
+    if edge * edge != n_pos:
+        raise ValueError(
+            f"inkling2v mmproj: {n_pos} position embeddings do not make a "
+            "square grid")
+    vision_config: dict = {
+        "model_type": INKLING2_VISION,
+        "depth": _mm_int(mm_meta, "clip.vision.block_count"),
+        "hidden_size": hidden,
+        "intermediate_size": _mm_int(
+            mm_meta, "clip.vision.feed_forward_length"),
+        "num_heads": _mm_int(mm_meta, "clip.vision.attention.head_count"),
+        "patch_size": _mm_int(mm_meta, "clip.vision.patch_size"),
+        "in_channels": 3,
+        "spatial_merge_size": merge_size,
+        "merge_hidden_size": _other_dim(merge, hidden * merge_size ** 2),
+        "out_hidden_size": _mm_int(mm_meta, "clip.vision.projection_dim"),
+        "position_grid": edge,
+    }
+    eps = _mm(mm_meta, "clip.vision.attention.layer_norm_epsilon")
+    if eps is not None:
+        vision_config["layer_norm_eps"] = float(eps)
+    return {
+        "model_type": INKLING2_VISION,
+        "text_config": text_config,
+        "vision_config": vision_config,
+        "vocab_size": int(text_config["vocab_size"]),
+        "image_token_id": image_id,
+        "image_token_index": image_id,
+    }
+
+
 def scale_text_rope(model, config: dict) -> int:
     """Give the text tower of a built VLM the rope scaling its text config
     carries (gmlx.load.rope_swap). Qwen3-Omni nests the tower and its config
@@ -3412,6 +3533,10 @@ def synthesize_vlm_config(
 
     if model_type == HY4FLASH_VISION:
         return _synthesize_hy4flash_vlm_config(
+            text_config, mm_meta, llm_meta, mm_shapes)
+
+    if model_type == INKLING2_VISION:
+        return _synthesize_inkling2_vlm_config(
             text_config, mm_meta, llm_meta, mm_shapes)
 
     if model_type == "gemma4":
@@ -3631,6 +3756,7 @@ _OWNED_VLM_REGISTRARS = {
     "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
     "deepseek_v41_vl": ("gmlx.models.deepseek_v41.vlm_model",),
     HY4FLASH_VISION: ("gmlx.models.hy_v4_flash.vlm_model",),
+    INKLING2_VISION: ("gmlx.models.inkling2.vlm_model",),
     MINIMAX_M3_VISION: ("gmlx.models.minimax_m3",),
 }
 
@@ -3747,6 +3873,8 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     if model_type == HY4FLASH_VISION:
         return _synthesize_hy4flash_processor(
             tokenizer, mm_meta, config or {})
+    if model_type == INKLING2_VISION:
+        return _synthesize_inkling2_processor(tokenizer, mm_meta)
     if model_type == "kimi_k25":
         return _synthesize_kimi_k25_processor(tokenizer, mm_meta)
     if model_type != "gemma4":
@@ -5894,6 +6022,188 @@ def _synthesize_hy4flash_processor(tokenizer, mm_meta: dict, config: dict):
     return _attach_streaming_helpers(processor, tokenizer)
 
 
+class _Inkling2GgufImageProcessor(ImageProcessingMixin):
+    """Torch-free Inkling 2 image preprocessing (numpy and PIL), after
+    ``mtmd_image_preprocessor_inkling2v`` (llama.cpp ``mtmd-image.cpp``).
+
+    An image keeps its size unless its edges, rounded up to whole cells of
+    patch_size * merge_size pixels, pass the token cap. Then it is resized
+    (bicubic, aspect kept) to fit. The bottom and right edges are padded to
+    whole cells with the raw value -1, and every pixel is normalized after
+    the padding, so the padding is not zero.
+
+    Returns ``pixel_values`` [n_img, C, H, W], each image at the top left
+    of the batch's largest size, and ``image_sizes`` (h, w) per image."""
+
+    model_input_names = ["pixel_values", "image_sizes"]
+
+    def __init__(self, image_mean, image_std, patch_size=20,
+                 spatial_merge_size=2, max_image_tokens=4096):
+        super().__init__()
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
+        self.patch_size = int(patch_size)
+        self.spatial_merge_size = int(spatial_merge_size)
+        self.max_image_tokens = int(max_image_tokens)
+        self.cell = self.patch_size * self.spatial_merge_size
+        self.max_pixels = self.max_image_tokens * self.cell * self.cell
+        self.size = {"height": self.cell, "width": self.cell}
+
+    def soft_tokens(self, height: int, width: int) -> int:
+        """Image rows a preprocessed ``height`` x ``width`` image takes."""
+        return (height // self.cell) * (width // self.cell)
+
+    def _aligned(self, n: int) -> int:
+        return -(-n // self.cell) * self.cell
+
+    def resized(self, width: int, height: int) -> tuple[int, int] | None:
+        """The (width, height) an image is resized to, or None to keep it.
+        ``calc_size_preserved_ratio`` with the cap and no floor."""
+        if self._aligned(width) * self._aligned(height) <= self.max_pixels:
+            return None
+        cell = self.cell
+
+        def rounded(x: float) -> int:
+            return max(cell, int(math.floor(x / cell + 0.5)) * cell)
+
+        w_bar, h_bar = rounded(width), rounded(height)
+        if w_bar * h_bar > self.max_pixels:
+            beta = math.sqrt(height * width / self.max_pixels)
+            h_bar = max(cell, math.floor(height / beta / cell) * cell)
+            w_bar = max(cell, math.floor(width / beta / cell) * cell)
+        return w_bar, h_bar
+
+    def _one(self, img):
+        import numpy as np
+        from PIL import Image
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(np.asarray(img))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        size = self.resized(img.width, img.height)
+        if size is not None:
+            img = img.resize(size, Image.Resampling.BICUBIC)
+        w, h = img.width, img.height
+        hp, wp = self._aligned(h), self._aligned(w)
+        raw = np.full((hp, wp, 3), -1.0, dtype=np.float32)
+        raw[:h, :w] = np.asarray(img, dtype=np.float32)
+        mean = np.array(self.image_mean, dtype=np.float32) * 255.0
+        std = np.array(self.image_std, dtype=np.float32) * 255.0
+        return np.transpose((raw - mean) / std, (2, 0, 1)), (hp, wp)
+
+    def __call__(self, images, **kwargs):
+        import numpy as np
+        processed, sizes = [], []
+        for img in _PixtralGgufImageProcessor._flatten(images):
+            chw, hw = self._one(img)
+            processed.append(chw)
+            sizes.append(hw)
+        max_h = max(s[0] for s in sizes)
+        max_w = max(s[1] for s in sizes)
+        batch = np.zeros((len(processed), 3, max_h, max_w), dtype=np.float32)
+        for i, (chw, (h, w)) in enumerate(zip(processed, sizes)):
+            batch[i, :, :h, :w] = chw
+        return {"pixel_values": batch, "image_sizes": sizes}
+
+
+def _synthesize_inkling2_processor(tokenizer, mm_meta: dict):
+    """Build the Inkling 2 processor from the GGUFs alone.
+
+    The chat template writes ``<|content_image|><|unused_200054|>`` per
+    image. The processor repeats the placeholder once per image row, and
+    the container puts the tower's rows there. The 4096-token cap is a
+    clip.cpp arch constant (``set_limit_image_tokens(1, 4096)``)."""
+    from transformers.feature_extraction_utils import BatchFeature
+    from transformers.processing_utils import ProcessorMixin
+
+    from gmlx._vendor.mlx_vlm.models.base import to_mlx
+
+    from gmlx.upstream.single_bos_fix import (
+        KWARGS_REACH_TOKENIZER,
+        drops_duplicate_bos,
+    )
+
+    image_processor = _Inkling2GgufImageProcessor(
+        image_mean=_mm_floats(mm_meta, "clip.vision.image_mean")
+        or [0.5, 0.5, 0.5],
+        image_std=_mm_floats(mm_meta, "clip.vision.image_std")
+        or [0.5, 0.5, 0.5],
+        patch_size=_mm_int(mm_meta, "clip.vision.patch_size"),
+        spatial_merge_size=_mm_int(mm_meta, "clip.vision.spatial_merge_size"),
+        max_image_tokens=4096)
+
+    class Inkling2Processor(ProcessorMixin):
+        attributes = ["image_processor", "tokenizer"]
+        image_processor_class = "AutoImageProcessor"
+        tokenizer_class = "AutoTokenizer"
+
+        image_token = INKLING2_IMAGE_TOKEN
+
+        # Images and text only; the base signature also names videos and
+        # audio, which reach the tokenizer through kwargs here.
+        def __call__(  # pyright: ignore[reportIncompatibleMethodOverride]
+                self, images=None, text=None, **kwargs):
+            if text is None and images is None:
+                raise ValueError("You must provide either text or images.")
+            if isinstance(text, str):
+                text = [text]
+            image_inputs = {}
+            if images is not None:
+                if not isinstance(images, (list, tuple)):
+                    images = [images]
+                image_inputs = self.image_processor(images)
+                if text is not None:
+                    text = self._expand(text, image_inputs["image_sizes"])
+            kwargs.pop("return_tensors", None)
+            data = dict(image_inputs)
+            if text is not None:
+                if drops_duplicate_bos(self, text):
+                    kwargs.setdefault("add_special_tokens", False)
+                data = {**self.tokenizer(text, **kwargs), **data}
+            return BatchFeature(data=to_mlx(data))
+
+        def _expand(self, texts, sizes):
+            """Repeat each placeholder once per row of its image. Sizes are
+            taken in order across the batch, as the images were."""
+            out, index = [], 0
+            for sample in texts:
+                parts = sample.split(self.image_token)
+                rebuilt = parts[0]
+                for part in parts[1:]:
+                    if index >= len(sizes):
+                        raise ValueError(
+                            f"{index + 1} image placeholders but "
+                            f"{len(sizes)} images")
+                    h, w = sizes[index]
+                    index += 1
+                    rebuilt += (self.image_token
+                                * self.image_processor.soft_tokens(h, w))
+                    rebuilt += part
+                out.append(rebuilt)
+            if index != len(sizes):
+                raise ValueError(
+                    f"{index} image placeholders but {len(sizes)} images")
+            return out
+
+        def batch_decode(self, *args, **kwargs):
+            return self.tokenizer.batch_decode(*args, **kwargs)
+
+        def decode(self, *args, **kwargs):
+            return self.tokenizer.decode(*args, **kwargs)
+
+        @property
+        def model_input_names(self):
+            return list(dict.fromkeys(
+                list(self.tokenizer.model_input_names)
+                + list(self.image_processor.model_input_names)))
+
+    setattr(Inkling2Processor, KWARGS_REACH_TOKENIZER, True)
+    processor = Inkling2Processor(
+        image_processor=image_processor, tokenizer=tokenizer,
+        chat_template=getattr(tokenizer, "chat_template", None))
+    return _attach_streaming_helpers(processor, tokenizer)
+
+
 def _swap_spec_language_model(model, model_type: str, *, log) -> None:
     """Replace ``model.language_model`` with the spec-capable class the text
     MTP path builds (``_vlm_spec_language_model``), constructed from the
@@ -6096,10 +6406,12 @@ def load_vlm_model(
     # language_model.*, which the text path gets from sanitize=True.
     # minimax_m3_vision: the same, for the indexer gating and narrowing.
     # hy_v4_flash_vl: the same, to drop the draft block past the trunk.
+    # inkling2_vl: the same, to split the packed loop message queries.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log,
                       sanitize=(model_type in ("deepseek_v4_vl",
                                                  "deepseek_v41_vl",
                                                  HY4FLASH_VISION,
+                                                 INKLING2_VISION,
                                                  MINIMAX_M3_VISION)),
                       no_alias=owned_names,
                       **float_dtype_rules(model_type),
