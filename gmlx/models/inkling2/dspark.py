@@ -149,6 +149,9 @@ class Inkling2DSparkDrafter(DFlashDrafter):
         self.joint_proj = nn.Linear(2 * rank + 2 * hidden, 3 * rank, bias=True)
         self.hidden_out = nn.Linear(rank, hidden, bias=True)
         self.embed_norm = None
+        # The target's head folded into hidden_out (_folded_head). Kept
+        # out of the module tree: it is derived, never loaded or saved.
+        object.__setattr__(self, "_fold", None)
         if "full_attention" in config.layer_types:
             # A full layer reads every committed row, so the prompt capture
             # has no row limit; prefill streams it in chunks (seed_chunk).
@@ -163,6 +166,7 @@ class Inkling2DSparkDrafter(DFlashDrafter):
             raise AttributeError(
                 f"{type(target_model).__name__} is not an Inkling 2 model")
         super().bind(target_model)
+        object.__setattr__(self, "_fold", None)
         self.embed_norm = inner.embed_norm
         return self
 
@@ -230,6 +234,21 @@ class Inkling2DSparkDrafter(DFlashDrafter):
     def _head(self, hidden: mx.array) -> mx.array:
         return self.lm_head(hidden).astype(mx.float32)
 
+    def _folded_head(self) -> tuple[mx.array, mx.array]:
+        """The head of ``hidden_out``'s output, as one rank-wide map:
+        ``lm_head(hidden_out(z)) = z @ W + b`` with W = lm_head of each
+        column of hidden_out [rank, vocab] and b = lm_head of its bias.
+        Built once per bind, so a draft row reads rank columns of the
+        head instead of all hidden_size."""
+        if self._fold is None:
+            w = mx.contiguous(self.hidden_out.weight.T)
+            fold_w = self.lm_head(w)
+            fold_b = self.lm_head(self.hidden_out.bias[None])[0]
+            mx.eval(fold_w, fold_b)
+            object.__setattr__(self, "_fold",
+                               (fold_w, fold_b.astype(mx.float32)))
+        return self._fold
+
     def chain(self, hidden: mx.array, anchor: mx.array, n: int,
               pick=first_argmax) -> tuple[mx.array, mx.array]:
         """Softcapped logits [n, vocab] of rows 1..n of one block and the
@@ -242,6 +261,7 @@ class Inkling2DSparkDrafter(DFlashDrafter):
             raise RuntimeError("the drafter has no committed context")
         context = context.reshape(1, -1).astype(mx.float32)
         base = self._head(hidden[0, 1:n + 1])
+        fold_w, fold_b = self._folded_head()
         state = mx.zeros((1, int(self.config.markov_rank)), dtype=mx.float32)
         prev = anchor.reshape(1)
         rows, toks = [], []
@@ -253,8 +273,9 @@ class Inkling2DSparkDrafter(DFlashDrafter):
                 self.joint_proj(joint).astype(mx.float32), 3, axis=-1)
             gate, cand = mx.sigmoid(gate), mx.tanh(cand)
             state = cand + gate * (state - cand)
-            correction = self.hidden_out(mx.tanh(latent))
-            logits = base[i:i + 1] + self._head(correction)
+            logits = (base[i:i + 1]
+                      + (mx.tanh(latent).astype(fold_w.dtype) @ fold_w
+                         ).astype(mx.float32) + fold_b)
             if cap:
                 logits = mx.tanh(logits / cap) * cap
             logits = logits[:, :vocab]
