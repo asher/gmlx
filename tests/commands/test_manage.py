@@ -295,6 +295,21 @@ def test_resolve_folder_no_gguf_lists_subdirs(monkeypatch):
     assert "hf:org/repo/UD-Q5_K_M" in msg
 
 
+@pytest.mark.parametrize("path,named", [
+    ("Mainline_Support/m-UD-Q4_K_XL.gguf_file", True),
+    ("missing-folder", False),
+])
+def test_a_ref_to_another_file_type_says_so(monkeypatch, path, named):
+    def gone(repo, path, revision="main", **kw):
+        raise remote.RemoteError(f"not found on Hugging Face: {repo}/{path}")
+
+    monkeypatch.setattr(remote, "hf_list_dir", gone)
+    with pytest.raises(remote.RemoteError) as ei:
+        manage._resolve_to_file(remote.parse_ref(f"hf:org/repo/{path}"))
+    assert ("is not a .gguf file" in str(ei.value)) is named
+    assert "not found on Hugging Face" in str(ei.value)
+
+
 def test_validate_folder_resolves_and_checks(tmp_path, monkeypatch, capsys):
     _list(monkeypatch, [("d/m-00001-of-00001.gguf", "file", 8)])
     _serve(monkeypatch, _mint(tmp_path / "m.gguf", codec=GT.Q4_0))
