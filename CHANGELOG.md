@@ -6,6 +6,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Inkling-2-Mini GGUFs run in both the Unsloth layout and the mainline
+  llama.cpp layout, with tool calls and `reasoning_effort` from `none` to
+  `max`. Its DSpark drafter (`--draft-gguf`) drafts three tokens a round.
+- Inkling-2-Mini takes image input through its mmproj file (`--mmproj`).
+
 ### Changed
 
 - `gmlx serve model.gguf` runs with the in-memory prompt cache on, so a
@@ -13,6 +20,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `gmlx pull` on a Hugging Face file that does not end in `.gguf` said the
+  file was not found. It now says that gmlx pulls `.gguf` files only.
 - With the prompt cache off, a model with a drafter read a repeated prompt
   again in full. The repeat now reuses all but the prompt's last token.
 
