@@ -2872,7 +2872,11 @@ def _drafter_bytes(args, path: str) -> int:
     if not draft:
         draft = _companion_drafter(path)
     draft = os.path.expanduser(draft) if draft else ""
-    return os.path.getsize(draft) if draft and os.path.isfile(draft) else 0
+    if not draft:
+        return 0
+    from gmlx.load.discovery import drafter_resident_bytes
+
+    return drafter_resident_bytes(draft)
 
 
 def _mtp_auto(args) -> bool:

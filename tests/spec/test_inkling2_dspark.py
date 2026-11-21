@@ -335,3 +335,49 @@ def test_chunked_seeding_matches_one_shot_and_counts_every_row():
                                atol=1e-5, rtol=1e-5)
     np.testing.assert_array_equal(_np(seeded._cache[-1][0]),
                                   _np(one._cache[-1][0]))
+
+
+def _write_header_only(path, names):
+    """A drafter GGUF with the released header keys and tiny tensors."""
+    from gguf import GGUFWriter
+
+    w = GGUFWriter(str(path), "dflash")
+    for key, val in _meta().items():
+        if key == "general.architecture":
+            continue
+        if isinstance(val, bool):
+            w.add_bool(key, val)
+        elif isinstance(val, int):
+            w.add_uint32(key, val)
+        elif isinstance(val, float):
+            w.add_float32(key, val)
+        else:
+            w.add_array(key, val)
+    for name in names:
+        w.add_tensor(name, np.zeros((2, 4), np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+
+
+def test_pricing_counts_the_folded_head(tmp_path):
+    """A loaded drafter holds its file plus the folded head it builds on
+    the first draft: [markov_rank, padded vocab] in bf16 and a float32
+    bias row. Other drafters hold their file only."""
+    import os
+
+    from gmlx.load.discovery import drafter_resident_bytes
+
+    d = _drafter()
+    fold_w, fold_b = d._folded_head()
+    assert fold_w.shape == (RANK, PADDED) and fold_b.shape == (PADDED,)
+    assert fold_b.dtype == mx.float32
+
+    path = tmp_path / "dspark.gguf"
+    _write_header_only(path, ("dspark_hidden_out.weight", "markov_w1.weight"))
+    assert (drafter_resident_bytes(str(path)) - os.path.getsize(path)
+            == RANK * PADDED * 2 + PADDED * 4)
+    other = tmp_path / "plain.gguf"
+    _write_header_only(other, ("markov_w1.weight",))
+    assert drafter_resident_bytes(str(other)) == os.path.getsize(other)

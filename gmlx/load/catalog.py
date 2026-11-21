@@ -61,6 +61,7 @@ class Drafter:
     file: str
     bytes: int
     cross_base: bool = False         # trained for another checkpoint than the entry's
+    derived_bytes: int = 0           # built at bind beyond the file (drafter_derived_bytes)
 
 
 @dataclass(frozen=True)
@@ -493,9 +494,10 @@ def _build(seed: Seed, facts: dict) -> Model:
                          key=lambda r: r.bytes))
     drafter = None
     if seed.drafter_file:
-        kind, nbytes = facts.get("drafter") or ("", 0)
+        kind, nbytes, *derived = facts.get("drafter") or ("", 0)
         drafter = Drafter(kind=kind, repo=seed.drafter_repo, file=seed.drafter_file,
-                          bytes=nbytes, cross_base=seed.cross_base)
+                          bytes=nbytes, cross_base=seed.cross_base,
+                          derived_bytes=derived[0] if derived else 0)
     asr = None
     if seed.asr_file:
         asr = Asr(repo=seed.asr_repo, file=seed.asr_file, bytes=facts.get("asr") or 0)
@@ -731,7 +733,7 @@ def addon_bytes(m: Model, mmproj: bool, drafter: bool) -> int:
     if mmproj and m.mmproj:
         n += m.mmproj_bytes
     if drafter and m.drafter is not None:
-        n += m.drafter.bytes
+        n += m.drafter.bytes + m.drafter.derived_bytes
     if m.asr is not None:
         n += m.asr.bytes
     return n

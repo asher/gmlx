@@ -1402,6 +1402,32 @@ def text_tensor_bytes(path: str) -> int | None:
     return total or None
 
 
+def drafter_derived_bytes(scan) -> int:
+    """Bytes a drafter builds at bind beyond its file: the Inkling 2
+    DSpark drafter folds the target's head into its recurrent head, a
+    [markov_rank, vocab] bf16 map plus a float32 bias row
+    (``Inkling2DSparkDrafter._folded_head``). 0 for every other drafter."""
+    if not any(t.name == "dspark_hidden_out.weight" for t in scan.tensors):
+        return 0
+    rank = read_int(scan.kv, "dflash.dspark.markov_rank") or 0
+    vocab = read_int(scan.kv, "dflash.vocab_size") or 0
+    return rank * vocab * 2 + vocab * 4
+
+
+def drafter_resident_bytes(path: str) -> int:
+    """The bytes a drafter file holds once loaded: its size plus what it
+    builds at bind (``drafter_derived_bytes``). 0 for a missing file."""
+    from .headerscan import scan_gguf
+
+    if not os.path.isfile(path):
+        return 0
+    try:
+        derived = drafter_derived_bytes(scan_gguf(path))
+    except Exception:
+        derived = 0
+    return os.path.getsize(path) + derived
+
+
 def mtp_block_bytes(path: str) -> int:
     """Bytes of the NextN/MTP blocks of the split set at ``path``, the
     tensors ``text_tensor_bytes`` leaves out, which an MTP drafter built

@@ -357,7 +357,7 @@ FACTS: dict = {
         'license_url': 'https://huggingface.co/thinkingmachines/Inkling-2-Mini',
         'license_name': '',
         'mmproj_bytes': 641805760,
-        'drafter': ('dflash', 402278560),
+        'drafter': ('dflash', 402278560, 103728384),
         'heads': 24,
         'trained_ctx': 1048576,
         'kv_cost': (('rows', 1, 79872.0, 48), ('window', 1024, 4096.0, 40), ('full', 0, 4096.0, 8)),
