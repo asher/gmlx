@@ -411,3 +411,40 @@ def test_the_banded_mask_matches_the_dense_one(model, n_queries, n_keys,
             # kernel sums fewer terms; the values agree to rounding.
             np.testing.assert_allclose(np.array(got), np.array(want),
                                        atol=1e-6, rtol=1e-5)
+
+
+def test_the_compiled_mask_follows_changing_shapes():
+    """The mask build is compiled shapeless, so its first trace serves
+    every later shape: batch, query rows, key count and a padding mask that
+    adds axes. Each call must equal the eager build."""
+    from gmlx.models.inkling2.model import _masker
+
+    extent, n_heads, rank = 6, 3, 4
+    rng = np.random.default_rng(0)
+    table = mx.array(rng.standard_normal((extent + 1, rank)), mx.float32)
+
+    def eager(r, sink, dist, valid):
+        scores = r @ table.T - sink[..., None]
+        index = mx.where((dist >= 0) & (dist < extent), dist, extent)
+        B, L, H, _ = r.shape
+        index = mx.broadcast_to(index[None, :, None, :],
+                                (B, L, H, dist.shape[1]))
+        bias = mx.take_along_axis(scores, index, axis=-1)
+        return mx.where(valid, bias.transpose(0, 2, 1, 3),
+                        -mx.inf).astype(mx.bfloat16)
+
+    run = _masker(extent, mx.bfloat16)
+    for B, L, K, padded in [(1, 1, 5, False), (2, 3, 9, True),
+                            (1, 4, 12, False), (3, 1, 2, True)]:
+        r = mx.array(rng.standard_normal((B, L, n_heads, rank)), mx.float32)
+        sink = mx.array(rng.standard_normal((B, L, n_heads)), mx.float32)
+        dist = (mx.arange(K)[None, :] * -1 + K - L
+                + mx.arange(L)[:, None]).astype(mx.int32)
+        valid = dist >= 0
+        if padded:
+            pad = mx.array(rng.random((B, 1, L, K)) > 0.3)
+            valid = valid & pad
+        got, want = run(r, sink, table, dist, valid), eager(r, sink, dist,
+                                                            valid)
+        assert got.shape == want.shape == (B, n_heads, L, K)
+        assert mx.array_equal(got, want, equal_nan=True).item()
