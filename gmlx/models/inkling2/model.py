@@ -571,12 +571,14 @@ class Inkling2Model(nn.Module):
     ):
         if input_embeddings is None:
             h = self.embed_norm(self.embed_tokens(inputs))
+        elif embed_mask is None:
+            # Token embeddings, as embed_tokens gives them.
+            h = self.embed_norm(input_embeddings)
         else:
-            # Raw embeddings (image features) skip the norm; embed_mask
-            # marks the token rows that take it.
+            # embed_mask marks the rows that take the norm. Image rows go in
+            # as the vision tower made them.
             h = input_embeddings
-            if embed_mask is not None:
-                h = mx.where(embed_mask[..., None], self.embed_norm(h), h)
+            h = mx.where(embed_mask[..., None], self.embed_norm(h), h)
         B, L, _ = h.shape
         n_visits = len(self.visits)
         per_visit = cache is not None and L >= PREFILL_EVAL_ROWS
