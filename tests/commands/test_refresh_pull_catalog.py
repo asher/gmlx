@@ -244,6 +244,15 @@ def test_the_f16_twin_of_a_projector_is_checked(refresh, dense_repo, monkeypatch
         "dense: mmproj-Other-F16.gguf and mmproj-BF16.gguf hold different tensors"]
 
 
+def test_an_entry_can_name_the_file_of_a_tier(refresh):
+    groups = {"m-Q4_K_M.gguf": ("Q4_K_M",), "m-UD-Q4_K_XL.gguf": ("UD-Q4_K_XL",)}
+    groups = {k: (v[0], False, 1, 1) for k, v in groups.items()}
+    # No Q6 file: the name rule leaves high empty.
+    assert refresh.resolve_tier(groups, "high", True)[0] is None
+    first, quant, _ = refresh.resolve_tier(groups, "high", True, "Q4_K_XL")
+    assert (first, quant) == ("m-UD-Q4_K_XL.gguf", "UD-Q4_K_XL")
+
+
 def test_the_header_cache_is_per_revision(refresh, dense_repo, tmp_path):
     cache = str(tmp_path / "cache")
     a = refresh.header("org/dense", "Model-Q4_0.gguf", "aaaa", cache)

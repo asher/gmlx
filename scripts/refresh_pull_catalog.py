@@ -184,12 +184,16 @@ def reads_as_drafter(scan) -> bool:
             and not any(n.startswith("blk.0.") for n in names))
 
 
-def resolve_tier(groups: dict, tier: str, moe: bool) -> tuple:
+def resolve_tier(groups: dict, tier: str, moe: bool,
+                 override: str | None = None) -> tuple:
     """``(first shard path, quant, note)`` for a tier, or ``(None, None,
-    note)`` when the repo ships no file for it."""
+    note)`` when the repo ships no file for it. ``override`` is the quant
+    the entry names for the tier (``Seed.tier_quants``)."""
     quants = TIER_QUANTS[tier]
     if isinstance(quants, dict):
         quants = quants["moe" if moe else "dense"]
+    if override:
+        quants = (override,)
     for q in quants:
         for candidate in (q, "UD-" + q):
             first = file_for_quant(groups, candidate)
@@ -285,7 +289,8 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     chosen: list = []                 # (quant, tier, first shard path)
     if tiered:
         for tier in TIERS:
-            first, quant, note = resolve_tier(groups, tier, moe)
+            first, quant, note = resolve_tier(
+                groups, tier, moe, dict(seed.tier_quants).get(tier))
             if note:
                 notes.append(f"{seed.name}: {note}")
             if first is not None:
