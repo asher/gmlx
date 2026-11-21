@@ -83,6 +83,8 @@ _THINK = ("<think>", "</think>")
 _GEMMA = ("<|channel>thought", "<channel|>")
 _XTML = ("<|open|>think<|sep|>", "<|close|>think<|sep|>")
 _MM = ("<mm:think>", "</mm:think>")
+_INKLING = ("<|message_model|><|content_thinking|>", "<|end_message|>")
+_INKLING_ANSWER = "<|message_model|><|content_text|>"
 _HY4 = ("<think:6124c78e>", "</think:6124c78e>")
 
 _HARMONY_SINGLES = ("<|start|>", "<|end|>", "<|message|>", "<|channel|>",
@@ -92,6 +94,10 @@ _IM = ("<|im_start|>", "<|im_end|>")
 _THINK_SINGLES = _THINK + _IM
 _GEMMA_SINGLES = ("<|channel>", "<channel|>", "<|think|>", "<|turn>",
                   "<turn|>")
+_INKLING_SINGLES = ("<|message_user|>", "<|message_model|>",
+                    "<|message_system|>", "<|content_text|>",
+                    "<|content_thinking|>", "<|end_message|>",
+                    "<|content_model_end_sampling|>")
 _XTML_SINGLES = ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>")
 _DS_SINGLES = _THINK + ("<\uff5cUser\uff5c>", "<\uff5cAssistant\uff5c>")
 _HY4_SINGLES = _HY4 + ("<\uff5chy_start:6124c78e\uff5c>",
@@ -164,6 +170,9 @@ ROWS: dict[str, Row] = {
     "fixtures/image/flux3_klein_chat_template.jinja": Row(exclude=_IMAGE),
     "fixtures/image/moss_image_chat_template.jinja": Row(exclude=_IMAGE),
     "fixtures/image/z_image_turbo_chat_template.jinja": Row(exclude=_IMAGE),
+    "fixtures/inkling2_template.jinja": Row(
+        "inkling2", _INKLING, ({}, HEADER),
+        ({"reasoning_effort": "none"}, HEADER), HEADER, _INKLING_SINGLES),
     "fixtures/k2_horizon_template.jinja": Row(
         "k2_horizon", ("<ifm|think>", "</ifm|think>"), ({}, WAIT),
         ({"reasoning_effort": "low"}, WAIT), WAIT, _K2_SINGLES),
@@ -421,6 +430,8 @@ def _reply_parts(row, pair, kind):
         if pair == _HARMONY:
             return (pair[0] + REASON + pair[1]
                     + "<|start|>assistant<|channel|>final<|message|>", ANSWER)
+        if pair == _INKLING:
+            return pair[0] + REASON + pair[1] + _INKLING_ANSWER, ANSWER
         return (" to=self<|message|>" + REASON + pair[1]
                 + "<|start|>assistant to=user<|message|>", ANSWER)
     if kind == WAIT:
@@ -766,6 +777,7 @@ FAMILY_ROWS = {
     "muse": FamilyRow(_ATEM_SINGLES, header=True),
     "muse-spark": FamilyRow(_ATEM_SINGLES, header=True),
     "kimi": FamilyRow(_XTML_SINGLES, header=True),
+    "inkling": FamilyRow(_INKLING_SINGLES, header=True),
     "minimax-m3": FamilyRow(_MM),
     "hy3": FamilyRow(("<think:opensource>", "</think:opensource>")),
     "hy4": FamilyRow(("<think:6124c78e>", "</think:6124c78e>")),
@@ -794,7 +806,10 @@ def _family_prompts(family):
             "answer": ("Q" + _XTML_ANSWER, BARE, BARE, ""),
         }
     if FAMILY_ROWS[family].header:
-        if "channel" in start:
+        if start == _INKLING[0]:
+            prompt = "Q<|end_message|>"
+            prefix = start + REASON + end + _INKLING_ANSWER
+        elif "channel" in start:
             prompt = "Q<|end|><|start|>assistant"
             prefix = ("<|channel|>analysis<|message|>" + REASON + end
                       + "<|start|>assistant<|channel|>final<|message|>")

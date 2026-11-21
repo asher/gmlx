@@ -107,7 +107,8 @@ _TOOL_IMAGES = frozenset((
 # ``tool_calls[*].function.arguments``.
 _DICT_TOOL_ARGUMENTS = frozenset(("muse_glimmer", "muse_spark", "k2_horizon",
                                   "beam", "flint", "ricursive", "lfm3",
-                                  "lfm3_omni", "lfm3_vl", "lfm3_audio"))
+                                  "lfm3_omni", "lfm3_vl", "lfm3_audio",
+                                  "inkling2", "inkling2_vl"))
 
 
 def _tool_images(message) -> int:

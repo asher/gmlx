@@ -230,6 +230,10 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
+    if mt == "inkling2":
+        import gmlx.models.inkling2.tools as inkling2_tools
+
+        inkling2_tools.ensure_registered()
     if mt in ("muse_glimmer", "muse_spark"):
         # Muse Spark calls tools in the same ATEM format.
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools

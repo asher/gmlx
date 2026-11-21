@@ -269,7 +269,10 @@ def _mtp_target_classes(
         return ricursive_mtp.RicursiveSpecLM, build
     if model_type == "inkling2":
         import gmlx.models.inkling2.mtp as inkling2_mtp
+        import gmlx.models.inkling2.tools as inkling2_tools
         from gmlx.models.inkling2.model import ModelArgs
+
+        inkling2_tools.ensure_registered()
 
         def build(config: dict) -> nn.Module:
             return inkling2_mtp.Inkling2SpecLM(ModelArgs.from_dict(config))

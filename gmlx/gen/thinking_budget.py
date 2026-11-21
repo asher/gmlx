@@ -46,6 +46,8 @@ _START_ONLY_PAIRS = (_HARMONY_PAIR,)
 # Gemma 4's channel pair. Its start marker is always two tokens, so the
 # single-token vocab probe takes the whole encoded start.
 _GEMMA_PAIR = ("<|channel>thought", "<channel|>")
+# Inkling's thinking block. The model writes the whole start itself.
+_INKLING_PAIR = ("<|message_model|><|content_thinking|>", "<|end_message|>")
 
 # Think-tag spellings scanned when the caller relies on the defaults. The
 # suffixed pair is Hy3's (every control tag carries ':opensource'; its chat
@@ -73,6 +75,9 @@ _THINK_PAIRS = (("<think>", "</think>"),
                 ("<ifm|think>", "</ifm|think>"),
                 ("<ifm|think_fast>", "</ifm|think_fast>"),
                 ("<ifm|think_faster>", "</ifm|think_faster>"),
+                # Inkling: "<|end_message|>" closes every block of a turn,
+                # and the answer opens with a header of its own.
+                _INKLING_PAIR,
                 # Gemma 4: a channel named "thought". Neither literal is a
                 # substring of Harmony's <|channel|> spellings.
                 _GEMMA_PAIR,
@@ -138,6 +143,7 @@ def soft_end_seqs(tokenizer, start_seq) -> tuple:
 _ANSWER_STEER = {
     _HARMONY_PAIR[0]: "<|start|>assistant<|channel|>final<|message|>",
     "<|open|>think<|sep|>": "<|open|>response<|sep|>",
+    _INKLING_PAIR[0]: "<|message_model|><|content_text|>",
 }
 
 
@@ -680,6 +686,7 @@ _ANSWER_HEADERS = {
         "<|channel|>final<|message|>",
         "<|channel|>final <|constrain|>json<|message|>"),
     "<|open|>think<|sep|>": ("<|open|>response<|sep|>",),
+    _INKLING_PAIR[0]: ("<|message_model|><|content_text|>",),
 }
 # Harmony's template pair, which a request with no family markers resolves.
 _ANSWER_HEADERS[_HARMONY_PAIR[0]] = _ANSWER_HEADERS[

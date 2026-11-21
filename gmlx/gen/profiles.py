@@ -406,6 +406,8 @@ FAMILIES: dict[str, dict] = {
             "top_p": 1.0,
             "top_k": 0,
             "min_p": 0.0,
+            "thinking_start_token": "<|message_model|><|content_thinking|>",
+            "thinking_end_token": "<|end_message|>",
         }},
         "intents": {
             "reasoning-low": {"chat_template_kwargs": {"reasoning_effort": "low"}},
