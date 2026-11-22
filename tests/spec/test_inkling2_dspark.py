@@ -278,6 +278,24 @@ def test_drafts_never_pick_a_padded_row():
     assert toks.shape == (1, 3) and int(mx.max(toks)) < VOCAB
 
 
+def test_the_block_rows_commit_once_and_leave_the_drafts_unchanged(
+        monkeypatch):
+    def drafts():
+        d = _drafter()
+        d.append_context(mx.ones((1, 3, 4 * HIDDEN)))
+        return d.draft_block(3, None, None, 4, sampler=None,
+                             greedy=True).tolist()
+
+    real = mx.async_eval
+    monkeypatch.setattr(mx, "async_eval", lambda *a: None)
+    want = drafts()
+    committed = []
+    monkeypatch.setattr(mx, "async_eval",
+                        lambda *a: (committed.append(a), real(*a)))
+    assert drafts() == want
+    assert len(committed) == 1
+
+
 def test_first_argmax_takes_the_first_of_a_tie():
     assert first_argmax(mx.array([[1.0, 3.0, 3.0, 2.0]])).tolist() == [1]
     assert first_argmax(mx.array([5.0, 1.0, 5.0])).item() == 0

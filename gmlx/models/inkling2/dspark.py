@@ -301,6 +301,8 @@ class Inkling2DSparkDrafter(DFlashDrafter):
         del hidden, cache
         anchor = self._block_tokens(last_bonus, block_size, token_dtype)
         h = self._draft_hidden(anchor)
+        # The layers run while the head and the verify graph build.
+        mx.async_eval(h)
         vocab = int(self.config.vocab_size)
         n = int(block_size) - 1
         if greedy:
