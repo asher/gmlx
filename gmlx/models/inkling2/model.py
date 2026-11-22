@@ -169,9 +169,18 @@ def depth_mix(blocks: List[mx.array], cur: mx.array,
     """Attention over depth: a softmax over ``blocks`` (already rms-normed,
     see ``push_block``) and the rms-normed ``cur``, with ``query`` rows
     [nq, D]. Returns [B, L, nq, D] float32."""
+    return mix_rows(blocks, cur, query, mx.float32).transpose(1, 2, 0, 3)
+
+
+def mix_rows(blocks: List[mx.array], cur: mx.array, query: mx.array,
+             dtype) -> mx.array:
+    """``depth_mix`` query-major in ``dtype``: [nq, B, L, D], so each
+    query's rows are contiguous and ready for a projection."""
     if row_kernels.mix_eligible(blocks, cur, query):
-        return row_kernels.depth_mix(blocks, cur, query, _MIX_EPS, _depth_mix)
-    return _depth_mix(tuple(blocks), cur, query)
+        return row_kernels.depth_mix(blocks, cur, query, _MIX_EPS, _depth_mix,
+                                     dtype)
+    out = _depth_mix(tuple(blocks), cur, query).transpose(2, 0, 1, 3)
+    return out.astype(dtype)
 
 
 @mx.compile
@@ -640,18 +649,17 @@ class Layer(nn.Module):
         inp_sa = h
 
         if hasattr(self, "attn_res_query"):
-            mixed = depth_mix(blocks, h, self.attn_res_query)
+            mixed = mix_rows(blocks, h, self.attn_res_query, h.dtype)
             if self.is_sliding:
-                inputs = [mixed[:, :, 0]] * 3
+                inputs = [mixed[0]] * 3
             else:
-                inputs = [mixed[:, :, j] for j in range(3)]
-            inputs = [x.astype(h.dtype) for x in inputs]
+                inputs = [mixed[j] for j in range(3)]
         else:
             inputs = [h, h, h]
 
         if messages is not None:
             ctrl = (self.loop.q, self.loop.k, self.loop.v)
-            inputs = [c(x, messages[:, :, j]) for j, (c, x) in
+            inputs = [c(x, messages[j]) for j, (c, x) in
                       enumerate(zip(ctrl, inputs))]
 
         if self.is_sliding:
@@ -700,8 +708,10 @@ class Layer(nn.Module):
             key_mask = _pad_key_mask(kv_cache, L)
             k, v = kv_cache.update_and_fetch(k, v)
         out = attn.attend(q, k, v, r, sink, kv_cache, key_mask)
-        out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        out = _gate(out, gate)
+        if row_kernels.gate_eligible(out, gate):
+            out = row_kernels.gate(out, gate, _gate)
+        else:
+            out = _gate(out.transpose(0, 2, 1, 3).reshape(B, L, -1), gate)
         out = self._convolve(attn.o_proj(out), attn.post_conv, None,
                              conv_cache, 2, pad_mask, conv_sink)
 
@@ -712,9 +722,9 @@ class Layer(nn.Module):
             h = _residual(inp_sa, out)
         ffn_inp = h
 
-        x = depth_mix(blocks, h, self.ffn_res_query)[:, :, 0].astype(dtype)
+        x = mix_rows(blocks, h, self.ffn_res_query, dtype)[0]
         if messages is not None:
-            x = self.loop.ffn(x, messages[:, :, 3])
+            x = self.loop.ffn(x, messages[3])
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
         x = self._convolve(x, self.ffn_post_conv, None, conv_cache, 3,
@@ -903,7 +913,8 @@ class Inkling2Model(nn.Module):
             layer = self.layers[ip]
             messages = None
             if pass_idx > 0:
-                messages = depth_mix(bank, bank_out, layer.loop.msg_query)
+                messages = mix_rows(bank, bank_out, layer.loop.msg_query,
+                                    mx.float32)
             c = None if cache is None else (conv_caches[visit],
                                             kv_caches[visit])
             h = layer(h, ip, blocks, c, pad_mask, positions, messages,
@@ -911,8 +922,7 @@ class Inkling2Model(nn.Module):
             if per_visit:
                 mx.eval(h)
 
-        h = depth_mix(blocks, h, self.output_res_query)[:, :, 0].astype(
-            h.dtype)
+        h = mix_rows(blocks, h, self.output_res_query, h.dtype)[0]
         if trunk_sink is not None:
             trunk_sink.append(h)
         h = self.norm(h)

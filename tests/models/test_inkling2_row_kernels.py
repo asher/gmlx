@@ -284,3 +284,18 @@ def test_the_bias_mask_gradient_comes_from_the_ops_path():
     for g, w in zip(got, want):
         np.testing.assert_allclose(np.array(g), np.array(w), rtol=1e-5,
                                    atol=1e-6)
+
+
+@pytest.mark.parametrize("L", [1, 4])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
+def test_the_output_gate_matches_the_ops_path(L, dtype):
+    mx.random.seed(14)
+    B, H, D = 1, 4, 16
+    attn = mx.random.normal((B, H, L, D)).astype(dtype)
+    # The gate is a slice of a row-fused projection, as the model has it.
+    wide = mx.random.normal((B, L, H * D + 24)).astype(dtype)
+    g = wide[..., 8:8 + H * D]
+    assert row_kernels.gate_eligible(attn, g)
+    got = row_kernels.gate(attn, g, M._gate)
+    want = M._gate(attn.transpose(0, 2, 1, 3).reshape(B, L, -1), g)
+    np.testing.assert_array_equal(_f32(got), _f32(want))

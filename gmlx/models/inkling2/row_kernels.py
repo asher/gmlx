@@ -7,10 +7,13 @@ Per decode step, the ops path runs these chains many times:
 - the L2 row clip, about 144 times, four dispatches each;
 - the float32 RMS norm, about 154 times, three each (the casts);
 - the router, 48 times, six each;
-- the depth mix, about 120 times, four each;
+- the depth mix, about 120 times, four each, plus a cast and a copy of
+  each query's strided slice (the kernel writes query-major rows in the
+  caller's dtype);
 - a loop controller, 96 times, seven each;
 - the short convolution, 192 times, about four each with its cache copy;
-- the attention bias mask, 48 times, about twelve each.
+- the attention bias mask, 48 times, about twelve each;
+- the output gate, 48 times, two each with the copy of its transposed input.
 
 Here each is one dispatch, and a controller two. The arithmetic follows
 the ops path; only the order of a row sum differs, so results match it to
@@ -462,7 +465,7 @@ _MIX = """
                 p[j][b] = p[j][b] / z;
             }
         }
-        device float* o = out + row * NQ * D;
+        // Query-major output: query j's rows are one contiguous block.
         for (uint d = tid; d < D; d += threads_per_threadgroup.x) {
             float cv = static_cast<float>(c[d]) * inv;
             for (int j = 0; j < NQ; j++) {
@@ -470,7 +473,7 @@ _MIX = """
                 for (int b = 0; b < NB; b++) {
                     v += p[j][b] * s[b][d];
                 }
-                o[j * D + d] = v;
+                out[(j * ROWS + row) * D + d] = static_cast<O>(v);
             }
         }
 """
@@ -504,32 +507,33 @@ def mix_eligible(blocks, cur: mx.array, query: mx.array) -> bool:
             and enabled())
 
 
-def _mix_kernel(blocks, cur, query, eps):
+def _mix_kernel(blocks, cur, query, eps, dtype):
     B, L, D = cur.shape
     nq = query.shape[0]
     return _mix_kernel_for(len(blocks))(
         inputs=[*blocks, cur, query.astype(mx.float32), _scalar(float(eps))],
-        template=[("T", cur.dtype), ("D", D), ("NB", len(blocks)),
-                  ("NQ", nq)],
+        template=[("T", cur.dtype), ("O", dtype), ("D", D),
+                  ("NB", len(blocks)), ("NQ", nq), ("ROWS", B * L)],
         grid=(B * L * MIX_THREADS, 1, 1),
         threadgroup=(MIX_THREADS, 1, 1),
-        output_shapes=[(B, L, nq, D)],
-        output_dtypes=[mx.float32],
+        output_shapes=[(nq, B, L, D)],
+        output_dtypes=[dtype],
     )[0]
 
 
 @functools.lru_cache(maxsize=None)
-def _mix_fn(ops, eps: float, n_blocks: int):
+def _mix_fn(ops, eps: float, n_blocks: int, dtype):
     @mx.custom_function
     def run(*args):
         *blocks, cur, query = args
-        return _mix_kernel(blocks, cur, query, eps)
+        return _mix_kernel(blocks, cur, query, eps, dtype)
 
     @run.vjp
     def run_vjp(primals, cotangent, _output):
         def f(*args):
             *blocks, cur, query = args
-            return ops(tuple(blocks), cur, query)
+            return ops(tuple(blocks), cur, query).transpose(
+                2, 0, 1, 3).astype(dtype)
 
         _, grads = mx.vjp(f, list(primals), [cotangent])
         return tuple(grads)
@@ -537,12 +541,13 @@ def _mix_fn(ops, eps: float, n_blocks: int):
     return run
 
 
-def depth_mix(blocks, cur: mx.array, query: mx.array, eps: float, ops):
-    """``model.depth_mix`` in one dispatch: ``blocks`` rms-normed float32
+def depth_mix(blocks, cur: mx.array, query: mx.array, eps: float, ops,
+              dtype=mx.float32):
+    """``model.mix_rows`` in one dispatch: ``blocks`` rms-normed float32
     [B, L, D] states, ``cur`` [B, L, D] (normed here), ``query`` [nq, D].
-    Returns [B, L, nq, D] float32. ``ops(blocks, cur, query)`` is the ops
-    path, which gives the gradient."""
-    return _mix_fn(ops, float(eps), len(blocks))(*blocks, cur, query)
+    Returns [nq, B, L, D] in ``dtype``. ``ops(blocks, cur, query)`` is the
+    ops path ([B, L, nq, D] float32), which gives the gradient."""
+    return _mix_fn(ops, float(eps), len(blocks), dtype)(*blocks, cur, query)
 
 
 # Loop controller: kernel one runs one threadgroup per rank row r and
@@ -962,3 +967,80 @@ def bias_mask(r, sink, table, keys, window, ring_idx, dtype):
                       dtype=mx.int32)
     return _mask_fn(int(window or 0), ring, dtype)(r, sink, table, params,
                                                    keys)
+
+
+# Output gate: reads the attention output [B, H, L, D] and the gate through
+# their strides and writes the gated rows [B, L, H * D] contiguous, so the
+# output projection needs no copy.
+_GATE = """
+        uint i = thread_position_in_grid.x;
+        if (i >= uint(B * L * H * D)) {
+            return;
+        }
+        uint dd = i % D;
+        uint h = (i / D) % H;
+        uint l = (i / (D * H)) % L;
+        uint b = i / (D * H * L);
+        float o = static_cast<float>(attn[b * attn_strides[0] + h * attn_strides[1]
+                                          + l * attn_strides[2] + dd * attn_strides[3]]);
+        float x = static_cast<float>(
+            g[b * g_strides[0] + l * g_strides[1] + (h * D + dd) * g_strides[2]]);
+        // mx.sigmoid, as MLX's Metal unary op computes it.
+        float y = 1 / (1 + metal::precise::exp(metal::abs(x)));
+        float s = static_cast<float>(static_cast<T>((x < 0) ? y : 1 - y));
+        out[i] = static_cast<T>(o * s);
+"""
+
+
+@functools.cache
+def _gate_kernel():
+    return mx.fast.metal_kernel(
+        name="inkling2_out_gate",
+        input_names=["attn", "g"],
+        output_names=["out"],
+        source=_GATE,
+        ensure_row_contiguous=False,
+    )
+
+
+def gate_eligible(attn: mx.array, g: mx.array) -> bool:
+    if attn.ndim != 4 or g.ndim != 3:
+        return False
+    B, H, L, D = attn.shape
+    return (g.shape == (B, L, H * D)
+            and attn.dtype in (mx.float16, mx.bfloat16, mx.float32)
+            and enabled())
+
+
+@functools.lru_cache(maxsize=None)
+def _gate_fn(ops):
+    @mx.custom_function
+    def run(attn, g):
+        B, H, L, D = attn.shape
+        n = B * L * H * D
+        return _gate_kernel()(
+            inputs=[attn, g],
+            template=[("T", attn.dtype), ("B", B), ("H", H), ("L", L),
+                      ("D", D)],
+            grid=(-(-n // 256) * 256, 1, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[(B, L, H * D)],
+            output_dtypes=[attn.dtype],
+        )[0]
+
+    @run.vjp
+    def run_vjp(primals, cotangent, _output):
+        def f(attn, g):
+            B, H, L, D = attn.shape
+            return ops(attn.transpose(0, 2, 1, 3).reshape(B, L, -1), g)
+
+        _, grads = mx.vjp(f, list(primals), [cotangent])
+        return tuple(grads)
+
+    return run
+
+
+def gate(attn: mx.array, g: mx.array, ops) -> mx.array:
+    """``ops(attn as [B, L, H * D], g)``, the sigmoid output gate, in one
+    dispatch with a contiguous result. ``ops`` gives the gradient."""
+    return _gate_fn(ops)(attn, g)
