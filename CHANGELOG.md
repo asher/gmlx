@@ -12,7 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Inkling-2-Mini GGUFs run in both the Unsloth layout and the mainline
   llama.cpp layout, with tool calls and `reasoning_effort` from `none` to
-  `max`. Its DSpark drafter (`--draft-gguf`) drafts three tokens a round.
+  `max`. Its DSpark drafter (`--draft-gguf`) drafts three tokens a round,
+  and copies from the prompt where the reply repeats it.
 - Inkling-2-Mini takes image input through its mmproj file (`--mmproj`).
   `gmlx run --image` drafts with its drafter, as text prompts do.
 

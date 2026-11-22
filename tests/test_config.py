@@ -902,15 +902,13 @@ def test_context_copy_key_parses_and_reaches_the_load_env():
         if value is not None:
             raw["context_copy"] = value
         cfg = cfgmod.build_config({"models": {"m": raw}})
-        assert cfg.models["m"].context_copy is bool(value)
-        r = cfgmod.ResolvedModel(
-            id="m", path="/p", sampling={}, load={}, cache={}, system=None,
-            speculative=True, mmproj=None, draft_gguf=None, pin=False,
-            ttl_s=None, context_copy=bool(value))
+        assert cfg.models["m"].context_copy is value
+        r = cfgmod.resolve_model("m", cfg)
+        assert r.context_copy is value
         return cfgmod.env_for(r)["MLX_VLM_GGUF_CONTEXT_COPY"]
 
     assert resolved(None) == ""
-    assert resolved(False) == ""
+    assert resolved(False) == "0"
     assert resolved(True) == "1"
 
 

@@ -149,6 +149,17 @@ def test_load_stamps_the_config_key(monkeypatch):
     assert d.context_copy is True
 
 
+@pytest.mark.parametrize("key,want", [("", True), ("1", True), ("0", False)])
+def test_inkling2_copies_unless_its_config_key_turns_it_off(
+        monkeypatch, key, want):
+    from gmlx.spec.mtp_load import _stamp_mtp_width_cap
+
+    monkeypatch.setenv("MLX_VLM_GGUF_CONTEXT_COPY", key)
+    d = _stamp_mtp_width_cap(SimpleNamespace(), "inkling2", hard_limit=1,
+                             log=lambda *a, **k: None)
+    assert d.context_copy is want
+
+
 # -- acceptance law -------------------------------------------------------
 
 

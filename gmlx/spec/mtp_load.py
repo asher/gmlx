@@ -109,6 +109,9 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
 # Unknown arch: cap conservatively rather than opting a new family into the
 # losing regime. Uncapped is earned by measurement, not inherited by default.
 _MTP_WIDTH_CAP_FALLBACK = 2
+# Families that copy from the prompt unless the model's context_copy key
+# says otherwise. Inkling 2 gains on verbatim text and holds even elsewhere.
+_CONTEXT_COPY_BY_MODEL_TYPE = frozenset({"inkling2"})
 
 # Drafted depth per DFlash round: the GGUF's trained block, capped at 16.
 # Verify cost on the 30B target is flat from 8 to 16 rows (the kquant split-K
@@ -159,7 +162,8 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     drafters) that replaces the family's table row.
     MLX_VLM_GGUF_SPEC_WIDTH_CAP (per-model config, load-window env) overrides
     both and is itself clamped by the hard limit. MLX_VLM_GGUF_CONTEXT_COPY
-    (same window) stamps the model's context_copy key.
+    (same window) stamps the model's context_copy key: ``1`` on, ``0`` off,
+    empty for the family default.
     """
     if hard_limit is not None:
         limit = int(hard_limit)
@@ -197,8 +201,9 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
         drafter.mtp_target_moe = bool(target_moe)
         # The model's context_copy config key (load-window env), read by
         # context_copy.context_copy_enabled.
-        drafter.context_copy = (
-            os.environ.get("MLX_VLM_GGUF_CONTEXT_COPY", "") == "1")
+        copy = os.environ.get("MLX_VLM_GGUF_CONTEXT_COPY", "")
+        drafter.context_copy = (copy == "1" if copy in ("0", "1")
+                                else model_type in _CONTEXT_COPY_BY_MODEL_TYPE)
     except AttributeError:
         pass  # slotted/frozen drafter forbids ad-hoc attrs
     log(f"[mtp] width cap: {cap or 'uncapped'}"
