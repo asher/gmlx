@@ -19,6 +19,9 @@ import numpy as np
 
 KINDS = ("gate", "up", "down")
 ATTRS = {k: f"{k}_proj" for k in KINDS}
+# A layer's stacks are gate/up/down (SwitchGLU) or up/down with no gate
+# (SwitchMLP: nemotron_h, phixtral). Callers loop over a layer's own kinds.
+KIND_SETS = (tuple(sorted(KINDS)), ("down", "up"))
 
 
 class FeederRange(NamedTuple):
@@ -62,9 +65,9 @@ def ranges_or_reason(ranges) -> tuple[list[FeederRange] | None, str | None]:
         else:
             out.append(FeederRange(path, off, step, step, n_exp, kind,
                                    off, None))
-    if sorted(r.kind for r in out) != sorted(KINDS):
+    if tuple(sorted(r.kind for r in out)) not in KIND_SETS:
         kinds = "/".join(sorted(r[4] for r in ranges))
-        return None, f"expert stacks {kinds}, not gate/up/down"
+        return None, f"expert stacks {kinds}, not gate/up/down or up/down"
     if len({r.n_exp for r in out}) != 1:
         return None, "expert stacks with different expert counts"
     return out, None
@@ -93,7 +96,7 @@ def kind_bytes(ranges) -> dict[str, int] | None:
             if k in out:
                 return None
             out[k] = nb
-    return out if sorted(out) == sorted(KINDS) else None
+    return out if tuple(sorted(out)) in KIND_SETS else None
 
 
 def read_range(fd, mv, off: int) -> None:

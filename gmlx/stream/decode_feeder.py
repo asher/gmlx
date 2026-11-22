@@ -58,7 +58,6 @@ import gmlx.load.loadlog as loadlog
 from gmlx.envflags import env_bool, env_choice, env_float, env_int
 from .feeder_common import (
     ATTRS,
-    KINDS,
     DaemonPool,
     lock_pages,
     copy_experts,
@@ -1318,7 +1317,7 @@ class DecodeFeeder:
                 futs.append([
                     self._read_pool.submit(
                         self._read_expert, li, kind, int(e), int(s))
-                    for kind in KINDS
+                    for kind in self._layers[li]
                 ])
             timeout = self._read_timeout if self._read_timeout > 0 else None
             t0 = time.monotonic()
@@ -1398,8 +1397,9 @@ class DecodeFeeder:
             entries = [(li, e) for li, e in self._layers.items()]
             for i in range(_FAST_DISK_PROBE_READS):
                 li, entry = entries[i % len(entries)]
+                kinds = tuple(entry)
                 _, path, off, stride, shape, step = entry[
-                    KINDS[i % len(KINDS)]]
+                    kinds[i % len(kinds)]]
                 e = int(rng.integers(0, max(1, shape[0])))
                 picks.append((path, off + e * step, stride))
             if not picks:
@@ -1679,7 +1679,7 @@ class DecodeFeeder:
             futs = [
                 pool.submit(self._read_expert, li, kind, e, s,
                             self._la_bounce)
-                for kind in KINDS
+                for kind in self._layers[li]
             ]
             pending[e] = (s, futs, time.monotonic())
             self._la_submitted += 1

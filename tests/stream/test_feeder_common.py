@@ -40,16 +40,27 @@ def test_layers_the_feeders_cannot_cover():
     # A fused stack beside a separate gate, and a layer missing a kind.
     both = [("p", 100, 1600, E, "gate_up"), ("p", 0, 800, E, "gate"), down]
     assert feeder_ranges(both) is None and kind_bytes(both) is None
-    up_down = [("p", 0, 800, E, "up"), down]
-    assert feeder_ranges(up_down) is None and kind_bytes(up_down) is None
+    gate_down = [("p", 0, 800, E, "gate"), down]
+    assert feeder_ranges(gate_down) is None
+    assert kind_bytes(gate_down) is None
+
+
+def test_up_down_stacks_with_no_gate_pass_through():
+    # SwitchMLP layers (nemotron_h): fc1 is the up stack, fc2 the down.
+    raw = [("p", 0, 800, E, "up"), ("p", 900, 400, E, "down")]
+    assert feeder_ranges(raw) == [
+        FeederRange("p", 0, 100, 100, E, "up", 0, None),
+        FeederRange("p", 900, 50, 50, E, "down", 900, None),
+    ]
+    assert kind_bytes(raw) == {"up": 800, "down": 400}
 
 
 def test_the_refusal_names_why_each_layer_was_skipped():
     from gmlx.stream.feeder_common import no_layers_error, ranges_or_reason
 
-    up_down = [("p", 0, 800, E, "up"), ("p", 900, 400, E, "down")]
-    assert ranges_or_reason(up_down) == (
-        None, "expert stacks down/up, not gate/up/down")
+    gate_down = [("p", 0, 800, E, "gate"), ("p", 900, 400, E, "down")]
+    assert ranges_or_reason(gate_down) == (
+        None, "expert stacks down/gate, not gate/up/down or up/down")
     flat = [("p", 0, 1600, 0, "gate_up"), ("p", 1700, 400, 0, "down")]
     assert ranges_or_reason(flat)[1] == (
         "an expert stack with no per-expert layout")
