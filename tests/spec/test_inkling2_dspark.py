@@ -402,3 +402,43 @@ def test_pricing_counts_the_folded_head(tmp_path):
     other = tmp_path / "plain.gguf"
     _write_header_only(other, ("markov_w1.weight",))
     assert drafter_resident_bytes(str(other)) == os.path.getsize(other)
+
+
+def test_the_full_layer_reads_the_block_rows_in_place(monkeypatch):
+    """The full layer writes the block rows into its cache buffer past the
+    offset instead of copying the context. Over several rounds the drafts,
+    and the context rows the next round writes over them, match the
+    copying path."""
+    import gmlx.models.inkling2.dspark as D
+    from gmlx.cache import kv_append
+
+    if not kv_append.INPLACE:
+        pytest.skip("needs mlx_kquant.kv_append")
+    rng = np.random.default_rng(4)
+    rounds = [rng.standard_normal((1, n, 4 * HIDDEN)).astype(np.float32)
+              for n in (5, 1, 3, 2)]
+
+    def run():
+        d = _drafter()
+        drafts = []
+        for ctx in rounds:
+            d.append_context(mx.array(ctx))
+            drafts.append(d.draft_block(3, None, None, 4, sampler=None,
+                                        greedy=True).tolist())
+        full = [c for c, kind in zip(d._cache, d.config.layer_types)
+                if kind != "sliding_attention"]
+        assert full
+        return drafts, [np.array(a) for c in full for a in c.state]
+
+    monkeypatch.setattr(kv_append, "INPLACE", False)
+    want_drafts, want_kv = run()
+    monkeypatch.setattr(kv_append, "INPLACE", True)
+    used = []
+    real = D._block_in_place
+    monkeypatch.setattr(D, "_block_in_place",
+                        lambda *a: used.append(real(*a)) or used[-1])
+    got_drafts, got_kv = run()
+    assert len(used) == len(rounds) and all(r is not None for r in used)
+    assert got_drafts == want_drafts
+    for g, w in zip(got_kv, want_kv):
+        np.testing.assert_array_equal(g, w)

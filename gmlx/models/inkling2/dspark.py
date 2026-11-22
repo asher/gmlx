@@ -31,7 +31,8 @@ from typing import Any, List, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
-from gmlx.cache.kv_cache import ArraysCache
+from gmlx.cache import kv_append
+from gmlx.cache.kv_cache import ArraysCache, KVCache
 from gmlx.spec.dflash_drafter import (
     DFlashConfig,
     DFlashDrafter,
@@ -43,6 +44,40 @@ from gmlx.spec.drafter_protocol import DraftStash
 
 def _rms(x: mx.array, weight: mx.array, eps: float) -> mx.array:
     return mx.fast.rms_norm(x, weight, eps)
+
+
+def _block_in_place(cache, k: mx.array, v: mx.array):
+    """The block rows written into ``cache``'s buffer past its offset, with
+    views of the context and block rows, or None where they cannot go in
+    place. The next append starts at the offset and writes over them; it
+    waits for the draft that reads them (``_wait_for_draft``)."""
+    if not kv_append.INPLACE or type(cache) is not KVCache:
+        return None
+    ks, vs = cache.keys, cache.values
+    own = getattr(cache, "_kv_own", None)
+    off = cache.offset
+    end = off + k.shape[2]
+    if (own is None or own[0] != id(cache) or own[1] is not ks
+            or own[2] is not vs or getattr(cache, "_kv_hw", None) != off
+            or end > ks.shape[2]):
+        return None
+    kk = kv_append._kq.kv_append(ks, k.astype(ks.dtype), off)
+    vv = kv_append._kq.kv_append(vs, v.astype(vs.dtype), off)
+    return kk[..., :end, :], vv[..., :end, :]
+
+
+def _wait_for_draft(cache) -> None:
+    """Order the next append after the draft that read its block rows in
+    the cache buffer, and keep that append in place."""
+    read = cache.__dict__.pop("_draft_read", None)
+    if read is None:
+        return
+    own = getattr(cache, "_kv_own", None)
+    held = (own is not None and own[1] is cache.keys
+            and own[2] is cache.values)
+    cache.keys, cache.values = mx.depends([cache.keys, cache.values], read)
+    if held:
+        cache._kv_own = (own[0], cache.keys, cache.values)
 
 
 def first_argmax(row: mx.array) -> mx.array:
@@ -83,6 +118,7 @@ class Inkling2DSparkAttention(nn.Module):
             B, S, self.n_kv_heads, -1)).transpose(0, 2, 1, 3)
         values = self.v_ctx_proj(context).reshape(
             B, S, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        _wait_for_draft(cache)
         cache.update_and_fetch(rope(keys, offset=cache.offset), values)
 
     def draft(self, x: mx.array, rope, cache) -> mx.array:
@@ -96,13 +132,22 @@ class Inkling2DSparkAttention(nn.Module):
         q = rope(q, offset=cache.offset)
         k = rope(k, offset=cache.offset)
         ck, cv = cache.state
+        rows = None
         if ck is not None:
-            if self.ring_rows is not None and int(ck.shape[2]) > self.ring_rows:
+            if self.ring_rows is None:
+                # The full layer's context is not copied for each draft.
+                rows = _block_in_place(cache, k, v)
+            elif int(ck.shape[2]) > self.ring_rows:
                 ck = ck[:, :, -self.ring_rows:]
                 cv = cv[:, :, -self.ring_rows:]
-            k = mx.concatenate([ck, k], axis=2)
-            v = mx.concatenate([cv, v], axis=2)
+            if rows is None:
+                k = mx.concatenate([ck, k], axis=2)
+                v = mx.concatenate([cv, v], axis=2)
+            else:
+                k, v = rows
         o = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
+        if rows is not None:
+            cache._draft_read = o
         return self.o_proj(o.transpose(0, 2, 1, 3).reshape(B, L, -1))
 
 
