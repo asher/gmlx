@@ -56,6 +56,9 @@ CONTROLLERS = ("q", "k", "v", "ffn")
 # A prefill chunk at least this wide evaluates each visit as it finishes,
 # so one chunk does not hold every visit's intermediates at once.
 PREFILL_EVAL_ROWS = 64
+# Below that width a forward with a cache commits its hidden state every
+# this many visits, so the GPU runs the first visits while the rest build.
+_COMMIT_VISITS = 4
 
 # The bias tensor of one attention call stays under this many elements;
 # wider calls split the queries.
@@ -924,6 +927,7 @@ class Inkling2Model(nn.Module):
         B, L, _ = h.shape
         n_visits = len(self.visits)
         per_visit = cache is not None and L >= PREFILL_EVAL_ROWS
+        commit = _COMMIT_VISITS if cache is not None and not per_visit else 0
         conv_caches = cache[:n_visits] if cache is not None else None
         kv_caches = cache[n_visits:] if cache is not None else None
         # Positions for the log scale come from the attention caches.
@@ -966,6 +970,8 @@ class Inkling2Model(nn.Module):
                       conv_sink)
             if per_visit:
                 mx.eval(h)
+            elif commit and visit % commit == commit - 1:
+                mx.async_eval(h)
 
         h = mix_rows(blocks, h, self.output_res_query, h.dtype)[0]
         if trunk_sink is not None:

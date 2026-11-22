@@ -264,14 +264,38 @@ def test_chunked_prefill_and_decode_match_the_reference(model, reference):
     np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
 
 
+def test_visit_commits_leave_the_logits_unchanged(model, monkeypatch):
+    # Decode and verify widths commit every few visits; the GPU then runs
+    # those visits early, and the logits must not move.
+    from gmlx.models.inkling2 import model as M
+
+    def run(commit):
+        monkeypatch.setattr(M, "_COMMIT_VISITS", commit)
+        cache = model.make_cache()
+        rows = [_logits(model, IDS[:7], cache)]
+        rows += [_logits(model, IDS[i:i + 4], cache) for i in (7, 11)]
+        rows += [_logits(model, IDS[i:i + 1], cache) for i in (15, 16)]
+        return np.concatenate(rows)
+
+    calls = []
+    real = mx.async_eval
+    monkeypatch.setattr(mx, "async_eval", lambda *a: calls.append(1) or real(*a))
+    on = run(3)
+    assert len(calls) == 5 * (len(T.visits()) // 3)
+    np.testing.assert_array_equal(on, run(0))
+
+
 def test_route_counts_name_each_visit_kind(model):
     # A route check at depth reads these tags: the model builds its own
     # bias, so the wrapper alone counts every call as stock.
     from gmlx.upstream import attn_hd512
 
     def tags():
-        return {k[0]: n for k, n in attn_hd512.route_counts().items()
-                if k[0].startswith("inkling2_")}
+        out = {}
+        for k, n in attn_hd512.route_counts().items():
+            if k[0].startswith("inkling2_"):
+                out[k[0]] = out.get(k[0], 0) + n
+        return out
 
     before = tags()
     cache = model.make_cache()
