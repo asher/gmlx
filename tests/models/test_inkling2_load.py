@@ -142,10 +142,14 @@ def test_controllers_and_norms_load_float32(tiny):
     assert {str(params[k].dtype) for k in loop + norms} == {"mlx.core.float32"}
 
 
-def test_expert_scale_applies_before_the_activation_on_every_pass(tiny):
+def test_expert_scale_applies_before_the_activation_on_every_pass(
+        tiny, monkeypatch):
     # Power-of-two scales fold into Q8_0 weights exactly. A scale that is
     # dropped, applied after the activation or missing on a later loop
     # pass of a core layer breaks the match with the folded file.
+    # Scaled Q8_0 experts run unfused, so the folded file must too: the
+    # tiny model amplifies rounding differences between the paths.
+    monkeypatch.setenv("GMLX_FUSED_MOE_SITU", "0")
     rng = np.random.default_rng(1)
     scales = {i: rng.choice([0.5, 2.0, 4.0], T.EXPERTS)
               for i in range(T.LAYERS)}
