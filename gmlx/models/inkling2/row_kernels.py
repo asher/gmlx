@@ -39,6 +39,8 @@ _CLIP = """
         uint lane = thread_index_in_simdgroup;
         uint row = threadgroup_position_in_grid.x * (threads_per_threadgroup.x / 32)
                    + simdgroup_index_in_threadgroup;
+        const uint L = x_shape[1];
+        const uint N = x_shape[0] * L * H;
         if (row >= N) {
             return;
         }
@@ -124,6 +126,7 @@ _ROUTER = """
         uint lane = thread_index_in_simdgroup;
         uint row = threadgroup_position_in_grid.x * (threads_per_threadgroup.x / 32)
                    + simdgroup_index_in_threadgroup;
+        const uint N = logits_shape[0];
         if (row >= N) {
             return;
         }
@@ -253,8 +256,7 @@ def _clip_kernel(x, scale, threshold, tau, dtype, scaled, tb):
     return _kernels()[0](
         inputs=[x, scale, _scalar(float(threshold)), tau.reshape(-1)],
         template=[("T", x.dtype), ("O", dtype), ("D", D), ("H", H),
-                  ("L", L), ("N", n), ("TB", tb), ("SCALED", scaled),
-                  ("TAU", tb > 0)],
+                  ("TB", tb), ("SCALED", scaled), ("TAU", tb > 0)],
         grid=(-(-n // rows_per_group) * rows_per_group * 32, 1, 1),
         threadgroup=(rows_per_group * 32, 1, 1),
         output_shapes=[x.shape],
@@ -353,9 +355,9 @@ def _router_kernel(logits, bias, k, scale, dtype, biased):
     rows_per_group = 4
     shape = (*logits.shape[:-1], k)
     return _kernels()[2](
-        inputs=[logits.astype(mx.float32), bias, _scalar(float(scale))],
-        template=[("O", dtype), ("E", E), ("K", k), ("N", n),
-                  ("BIASED", biased)],
+        inputs=[logits.astype(mx.float32).reshape(n, E), bias,
+                _scalar(float(scale))],
+        template=[("O", dtype), ("E", E), ("K", k), ("BIASED", biased)],
         grid=(-(-n // rows_per_group) * rows_per_group * 32, 1, 1),
         threadgroup=(rows_per_group * 32, 1, 1),
         output_shapes=[shape, shape],
@@ -410,6 +412,7 @@ _MIX = """
         uint n_sg = threads_per_threadgroup.x / 32;
         constexpr int NS = NB + 1;
         constexpr int NA = NQ * NS + 1;
+        const uint ROWS = cur_shape[0] * cur_shape[1];
         STATES
         const device T* c = cur + row * D;
         threadgroup float part[8][NA];
@@ -514,7 +517,7 @@ def _mix_kernel(blocks, cur, query, eps, dtype):
     return _mix_kernel_for(len(blocks))(
         inputs=[*blocks, cur, query.astype(mx.float32), _scalar(float(eps))],
         template=[("T", cur.dtype), ("O", dtype), ("D", D),
-                  ("NB", len(blocks)), ("NQ", nq), ("ROWS", B * L)],
+                  ("NB", len(blocks)), ("NQ", nq)],
         grid=(B * L * MIX_THREADS, 1, 1),
         threadgroup=(MIX_THREADS, 1, 1),
         output_shapes=[(nq, B, L, D)],
@@ -714,8 +717,10 @@ def control(cur, msg, down, gain, forget, eps: float, ops):
 _CONV = """
         uint i = thread_position_in_grid.x;
         constexpr int NK = WIDTH - 1;
-        constexpr int S = NK + L;
-        if (i >= B * S * C) {
+        const int B = x_shape[0];
+        const int L = x_shape[1];
+        const int S = NK + L;
+        if (i >= uint(B * S * C)) {
             return;
         }
         uint c = i % C;
@@ -805,8 +810,7 @@ def _conv_kernel(state, x, w, dynamic, with_window: bool):
     return _conv_kernel_for(dyn, with_window)(
         inputs=[state, x, w, _scalar(float(scale))]
         + ([dynamic] if dyn else []),
-        template=[("T", x.dtype), ("B", B), ("L", L), ("C", C),
-                  ("WIDTH", width), ("NH", nh)],
+        template=[("T", x.dtype), ("C", C), ("WIDTH", width), ("NH", nh)],
         grid=(-(-n // 256) * 256, 1, 1),
         threadgroup=(256, 1, 1),
         output_shapes=shapes,
@@ -854,6 +858,7 @@ MASK_MAX_ROWS = 16
 _MASK = """
         int s = thread_position_in_grid.x;
         uint q = thread_position_in_grid.y;
+        const int L = r_shape[1];
         int K = params[0];
         if (s >= K) {
             return;
@@ -910,7 +915,7 @@ def _mask_kernel(r, sink, table, params, n_keys, window, ring, dtype):
     B, L, H, RL = r.shape
     return _mask_kernel_for(ring)(
         inputs=[r, sink, table, params],
-        template=[("O", dtype), ("B", B), ("L", L), ("H", H), ("RL", RL),
+        template=[("O", dtype), ("H", H), ("RL", RL),
                   ("EXT", table.shape[0] - 1), ("WIN", int(window or 0)),
                   ("RING", ring)],
         grid=(-(-n_keys // 256) * 256, B * H * L, 1),
@@ -1371,7 +1376,9 @@ def attend(q, k, v, r, sink, table, window, ring_idx, scale: float):
 # output projection needs no copy.
 _GATE = """
         uint i = thread_position_in_grid.x;
-        if (i >= uint(B * L * H * D)) {
+        const uint B = attn_shape[0];
+        const uint L = attn_shape[2];
+        if (i >= B * L * H * D) {
             return;
         }
         uint dd = i % D;
@@ -1417,8 +1424,7 @@ def _gate_fn(ops):
         n = B * L * H * D
         return _gate_kernel()(
             inputs=[attn, g],
-            template=[("T", attn.dtype), ("B", B), ("H", H), ("L", L),
-                      ("D", D)],
+            template=[("T", attn.dtype), ("H", H), ("D", D)],
             grid=(-(-n // 256) * 256, 1, 1),
             threadgroup=(256, 1, 1),
             output_shapes=[(B, L, H * D)],
