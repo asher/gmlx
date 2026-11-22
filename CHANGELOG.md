@@ -6,11 +6,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-
-- `gmlx run` with `--image` on Inkling-2-Mini uses its drafter, as text
-  prompts do.
-
 ## [0.5.7] - 2026-11-21
 
 ### Added
@@ -19,6 +14,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   llama.cpp layout, with tool calls and `reasoning_effort` from `none` to
   `max`. Its DSpark drafter (`--draft-gguf`) drafts three tokens a round.
 - Inkling-2-Mini takes image input through its mmproj file (`--mmproj`).
+  `gmlx run --image` drafts with its drafter, as text prompts do.
 
 ### Changed
 
