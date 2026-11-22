@@ -534,7 +534,7 @@ _ROUTE_SRC = r"""
     // simd_max; ties resolved to the lowest lane (deterministic).
     uint lane = thread_position_in_grid.x;   // 0..31, simd lane
     uint n = thread_position_in_grid.y;      // token
-    if (n >= N) return;
+    if (n >= uint(logits_shape[0])) return;
     const device T* lg = logits + (size_t)n * (R + SH);
     float ws = wscale[0];
     constexpr int PER = (R + 31) / 32;
@@ -748,11 +748,12 @@ class InklingSparseMoE(nn.Module):
                 [self.route_scale], dtype=mx.float32
             ) * self.global_scale.astype(mx.float32)
         if mx.default_device() == mx.gpu:
+            # gmlx: the kernel reads the row count from logits_shape, so one
+            # compile serves every prompt length.
             return _route_kernel(
                 inputs=[logits, self.e_score_correction_bias, self._wscale],
                 template=[
                     ("T", logits.dtype),
-                    ("N", N),
                     ("R", self.n_routed),
                     ("SH", self.n_shared),
                     ("K", self.top_k),
