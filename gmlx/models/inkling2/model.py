@@ -43,6 +43,7 @@ from gmlx.cache.kv_cache import (
     RotatingKVCache,
 )
 from gmlx.load.row_fusion import fuse_float_rows, fuse_kquant_rows, split_rows
+from gmlx.models.inkling2 import row_kernels
 from gmlx.models.kimi_k3 import SituActivation
 from gmlx.upstream.attn_hd512 import note_route
 
@@ -116,6 +117,8 @@ class ModelArgs(BaseModelArgs):
 
 def _rms(x: mx.array, eps: float = _MIX_EPS) -> mx.array:
     """Unweighted RMS norm in float32."""
+    if row_kernels.norm_eligible(x, None):
+        return row_kernels.rms_norm(x, None, eps, mx.float32)
     return mx.fast.rms_norm(x.astype(mx.float32), None, eps)
 
 
@@ -143,9 +146,22 @@ def clip(x: mx.array, scale: Optional[mx.array], threshold: float,
     """Scale each row (last axis) down to an L2 norm of at most
     ``threshold``, after the optional per-channel ``scale``. ``tau`` then
     multiplies the float32 result, which is cast to ``dtype``."""
+    if row_kernels.clip_eligible(x, scale, tau):
+        return row_kernels.clip(x, scale, threshold, tau, dtype,
+                                _clip_ops(float(threshold), dtype))
     t = mx.array(threshold, dtype=mx.float32)
     run = _clipper(scale is not None, tau is not None, dtype)
     return run(x, scale, t, tau)
+
+
+@lru_cache(maxsize=None)
+def _clip_ops(threshold: float, dtype):
+    def ops(x, scale, tau):
+        t = mx.array(threshold, dtype=mx.float32)
+        return _clipper(scale is not None, tau is not None, dtype)(
+            x, scale, t, tau)
+
+    return ops
 
 
 def depth_mix(blocks: List[mx.array], cur: mx.array,
@@ -182,6 +198,8 @@ class _Norm(nn.RMSNorm):
     """RMSNorm with a float32 weight; the output keeps the input dtype."""
 
     def __call__(self, x):
+        if row_kernels.norm_eligible(x, self.weight):
+            return row_kernels.rms_norm(x, self.weight, self.eps, x.dtype)
         return mx.fast.rms_norm(
             x.astype(mx.float32), self.weight.astype(mx.float32),
             self.eps).astype(x.dtype)
