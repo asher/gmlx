@@ -65,6 +65,7 @@ from .feeder_common import (
     ranges_or_reason,
     read_range,
     swapped_weights,
+    typed_view,
     unlock_pages,
     unshare_on_fork,
     verify_zero_copy,
@@ -607,11 +608,13 @@ class DecodeFeeder:
         self.arena_bytes = 0
         for li, entry in self._layers.items():
             s = self._slots[li]
-            for kind, (_, _, _, stride, shape, _) in entry.items():
+            for kind, (mod, _, _, stride, shape, _) in entry.items():
                 a = kq.arena_alloc([s * stride])
                 unshare_on_fork(a[1])
                 self._arena[(li, kind)] = a
-                self._views[(li, kind)] = a[0].reshape((s,) + shape[1:])
+                self._views[(li, kind)] = typed_view(
+                    a[0], (s,) + shape[1:],
+                    getattr(mod, ATTRS[kind]).weight.dtype)
                 self.arena_bytes += s * stride
         self._locked: dict[tuple[int, str], tuple[int, int]] = {}
         self.locked_bytes = 0
@@ -2219,7 +2222,7 @@ class DecodeFeeder:
         if resident and rw is not None and rw.held + old_s * row > new_s * row:
             rw.drain()  # at most one grown layer of old buffers waits
         swaps = []
-        for kind, (_, _, _, stride, shape, _) in entry.items():
+        for kind, (mod, _, _, stride, shape, _) in entry.items():
             key = (li, kind)
             a = kq.arena_alloc([new_s * stride])
             unshare_on_fork(a[1])
@@ -2233,7 +2236,9 @@ class DecodeFeeder:
                     # a freed buffer must not stay in the residency set
                     swaps.append((self._arena[key][0], a[0]))
                 self._arena[key] = a
-            self._views[key] = a[0].reshape((new_s,) + shape[1:])
+            self._views[key] = typed_view(
+                a[0], (new_s,) + shape[1:],
+                getattr(mod, ATTRS[kind]).weight.dtype)
             self.arena_bytes += (new_s - old_s) * stride
             if not self._mlock_deferred:
                 wire.append(key)
