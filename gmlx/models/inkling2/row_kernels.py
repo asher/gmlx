@@ -844,24 +844,28 @@ def conv(state, x, w, dynamic, with_window: bool, ops):
 
 
 # Attention bias mask at decode and verify widths: one thread per mask
-# element. The key distance comes from the slot (time order, or the ring
-# order of a rotating cache), and the bias from a dot with the table row.
+# element, the key slot on x and the (batch, head, query) row on y, so no
+# thread divides by the run-time key count. The key distance comes from the
+# slot (time order, or the ring order of a rotating cache), and the bias
+# from a dot with the table row.
 MASK_MAX_ROWS = 16
 
 _MASK = """
-        uint i = thread_position_in_grid.x;
+        int s = thread_position_in_grid.x;
+        uint q = thread_position_in_grid.y;
         int K = params[0];
-        if (i >= uint(B * H * L * K)) {
+        if (s >= K) {
             return;
         }
-        int s = i % K;
-        int l = (i / K) % L;
-        int h = (i / (K * L)) % H;
-        int b = i / (K * L * H);
+        uint i = q * uint(K) + uint(s);
+        int l = q % L;
+        int h = (q / L) % H;
+        int b = q / (L * H);
         int back = L - 1 - l;
         int d;
         if (RING) {
-            int t = (params[1] - 1 - s) % K;
+            // s < K and 1 <= params[1] <= K, so t > -K.
+            int t = params[1] - 1 - s;
             d = (t < 0 ? t + K : t) - back;
         } else {
             d = (K - 1 - s) - back;
@@ -903,13 +907,12 @@ def mask_eligible(r: mx.array, n_keys: int) -> bool:
 
 def _mask_kernel(r, sink, table, params, n_keys, window, ring, dtype):
     B, L, H, RL = r.shape
-    n = B * H * L * n_keys
     return _mask_kernel_for(ring)(
         inputs=[r, sink, table, params],
         template=[("O", dtype), ("B", B), ("L", L), ("H", H), ("RL", RL),
                   ("EXT", table.shape[0] - 1), ("WIN", int(window or 0)),
                   ("RING", ring)],
-        grid=(-(-n // 256) * 256, 1, 1),
+        grid=(-(-n_keys // 256) * 256, B * H * L, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[(B, H, L, n_keys)],
         output_dtypes=[dtype],

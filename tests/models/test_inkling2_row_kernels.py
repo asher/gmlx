@@ -239,17 +239,20 @@ def test_the_short_conv_gradient_comes_from_the_ops_path():
                                    atol=1e-6)
 
 
-@pytest.mark.parametrize("ring", [False, True])
+@pytest.mark.parametrize("ring", [None, "mid", "start", "end"])
 @pytest.mark.parametrize("L", [1, 4])
 @pytest.mark.parametrize("window", [None, 6])
-def test_the_bias_mask_matches_the_ops_path(ring, L, window):
+@pytest.mark.parametrize("B,K", [(1, 13), (2, 300)])
+def test_the_bias_mask_matches_the_ops_path(ring, L, window, B, K):
     mx.random.seed(12)
-    B, H, RL, extent, K = 1, 4, 16, 8, 13
+    H, RL, extent = 4, 16, 8
     r = mx.random.normal((B, L, H, RL))
     sink = mx.random.normal((B, L, H))
     table = mx.pad(mx.random.normal((extent, RL)), [(0, 1), (0, 0)])
     keys = mx.zeros((B, 2, K, 8))
-    idx = 5 if ring else None
+    # The ring's newest key: mid-buffer, the first slot, the last slot.
+    idx = {None: None, "mid": 5, "start": 1, "end": K}[ring]
+    ring = ring is not None
     got = row_kernels.bias_mask(r, sink, table, keys, window, idx,
                                 mx.float32)
     want = row_kernels._mask_ops(r, sink, table, mx.array([K, idx or 0]),
