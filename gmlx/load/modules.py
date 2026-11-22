@@ -84,6 +84,22 @@ def _glu_block_call(glu, x, indices):
     return SwitchGLU.__call__(glu, x, indices)
 
 
+_SWITCH_MLP_TYPES = None
+
+
+def switch_mlp_types() -> tuple[type, ...]:
+    """SwitchMLP origins (mlx-lm and mlx-vlm): the two-projection
+    ``fc1 -> act -> fc2`` expert stacks of nemotron_h and phixtral. Expert
+    streaming treats them as up/down stacks with no gate."""
+    global _SWITCH_MLP_TYPES
+    if _SWITCH_MLP_TYPES is None:
+        from gmlx._vendor.mlx_lm.models.switch_layers import SwitchMLP
+        from gmlx._vendor.mlx_vlm.models import switch_layers as _vlm_sl
+
+        _SWITCH_MLP_TYPES = (SwitchMLP, _vlm_sl.SwitchMLP)
+    return _SWITCH_MLP_TYPES
+
+
 def stock_glu_calls() -> tuple:
     """The SwitchGLU forwards that ``glu_unsorted_call`` reproduces."""
     from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU

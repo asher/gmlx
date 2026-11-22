@@ -656,9 +656,14 @@ def install_expert_streaming(
         glu_unsorted_call,
         stock_glu_calls,
         switch_layer_types,
+        switch_mlp_types,
     )
 
     _, glu_types = switch_layer_types()
+    # SwitchMLP (fc1/fc2, no gate) stacks stream too; the wrapper below
+    # aliases fc1/fc2 as up_proj/down_proj for the feeders.
+    mlp_types = switch_mlp_types()
+    glu_types = tuple(glu_types) + tuple(mlp_types)
 
     layers = getattr(model, "layers", None)
     if layers is None:
@@ -1418,6 +1423,12 @@ def install_expert_streaming(
                             return super().__call__(
                                 x, indices, *args, **kwargs)
 
+            if issubclass(cls, mlp_types):
+                # The feeders, residency skip and expert-count helpers
+                # address stacks as <kind>_proj. A SwitchMLP's fc1 is the
+                # GGUF ffn_up_exps stack and fc2 is ffn_down_exps.
+                _CPUOffload.up_proj = property(lambda self: self.fc1)
+                _CPUOffload.down_proj = property(lambda self: self.fc2)
             _CPUOffload.__name__ = cls.__name__ + "_CPUOffload"
             _CPU_OFFLOAD_CLASS_CACHE[cls] = sub = _CPUOffload
         return sub
