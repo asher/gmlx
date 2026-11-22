@@ -464,6 +464,46 @@ def test_the_banded_mask_matches_the_dense_one(model, n_queries, n_keys,
                                        atol=1e-6, rtol=1e-5)
 
 
+@pytest.mark.parametrize("filled", [3, 30])
+def test_the_fused_attention_matches_the_dense_route(model, filled,
+                                                     monkeypatch):
+    # At verify width, attention over the real caches runs one fused
+    # kernel: a full layer's growing cache, and a sliding layer's ring
+    # before and after it wraps. It must give the dense route's output.
+    from gmlx.cache.kv_cache import KVCache, RotatingKVCache
+    from gmlx.models.inkling2 import row_kernels
+
+    if not row_kernels.enabled():
+        pytest.skip("the fused kernel runs on the GPU")
+    calls = []
+    real = row_kernels.attend
+    monkeypatch.setattr(row_kernels, "attend",
+                        lambda *a: calls.append(a) or real(*a))
+    rng = np.random.default_rng(filled)
+    B, L, D = 1, 4, 128
+
+    def rows(*shape, dtype=mx.bfloat16):
+        return mx.array(rng.standard_normal(shape), dtype=dtype)
+
+    for lyr in model.model.layers[:2]:  # one sliding, one full layer
+        attn = lyr.self_attn
+        cache = (RotatingKVCache(max_size=attn.window) if attn.window
+                 else KVCache())
+        cache.update_and_fetch(rows(B, T.KV, filled, D),
+                               rows(B, T.KV, filled, D))
+        k, v = cache.update_and_fetch(rows(B, T.KV, L, D),
+                                      rows(B, T.KV, L, D))
+        q = rows(B, T.HEADS, L, D)
+        r = rows(B, L, T.HEADS, attn.rel_length, dtype=mx.float32)
+        sink = rows(B, L, T.HEADS, dtype=mx.float32)
+        got = attn.attend(q, k, v, r, sink, cache, None)
+        f32 = [a.astype(mx.float32) for a in (q, k, v)]
+        want = attn._attend_dense(*f32, r, sink, cache, None)
+        np.testing.assert_allclose(np.array(got.astype(mx.float32)),
+                                   np.array(want), atol=2e-2, rtol=2e-2)
+    assert len(calls) == 2
+
+
 def test_the_compiled_mask_follows_changing_shapes():
     """The mask build is compiled shapeless, so its first trace serves
     every later shape: batch, query rows, key count and a padding mask that

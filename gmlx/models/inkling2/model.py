@@ -498,9 +498,17 @@ class Attention(nn.Module):
         return self._attend_dense(q, k, v, r, sink, cache, pad_mask)
 
     def _attend_one_mask(self, q, k, v, r, sink, cache) -> mx.array:
-        """``attend`` at decode and verify widths: the whole mask from one
-        kernel. Values equal those of ``_attend_dense``."""
+        """``attend`` at decode and verify widths: one row through the mask
+        kernel and SDPA, several rows through the fused kernel. Values equal
+        those of ``_attend_dense`` to rounding."""
         ring = type(cache) is RotatingKVCache
+        # At one row the mask path is as fast. The fused kernel reads each
+        # key once for all rows and keeps the bias in float32.
+        if q.shape[2] > 1 and row_kernels.attend_eligible(q, k, v, r):
+            note_route(self._route_tags[1 if ring else 0], q, k)
+            return row_kernels.attend(
+                q, k, v, r, sink, self._padded_table(), self.window,
+                int(cache._idx) if ring else None, self.scale)
         mask = row_kernels.bias_mask(
             r, sink, self._padded_table(), k, self.window,
             int(cache._idx) if ring else None, q.dtype)

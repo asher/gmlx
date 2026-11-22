@@ -25,6 +25,7 @@ where the ops path returns argpartition's order.
 
 import contextlib
 import functools
+import struct
 
 import mlx.core as mx
 
@@ -970,6 +971,399 @@ def bias_mask(r, sink, table, keys, window, ring_idx, dtype):
                       dtype=mx.int32)
     return _mask_fn(int(window or 0), ring, dtype)(r, sink, table, params,
                                                    keys)
+
+
+# Attention at decode and verify widths, with the bias built in: pass one
+# runs a threadgroup per (batch, KV head, key chunk) over every query row of
+# the KV head, so each key and value row is read once. Four key blocks of 32
+# are in flight, each on one simdgroup, or on two that split the rows. Lanes
+# run over keys for the scores and the bias ``R . table[d] - sink``, over
+# the head dim for the value sum, with an online softmax per row. Pass two
+# merges the chunks and adds the zero sink logit; one chunk merges in pass
+# one. Keys and values are read through their strides, so a cache view is
+# not copied.
+ATTN_MAX_ROWS = 12
+_ATTN_BLOCKS = 4
+# Masked scores: finite, so fast math keeps the comparisons.
+_ATTN_HEAD = """
+constant constexpr float KQ_NEG = -1.0e30f;
+
+// Eight or four 16-bit elements, loaded as one word group, to float.
+template <typename T> inline void kq_unpack8(uint4 w, thread float4& a,
+                                             thread float4& b);
+template <> inline void kq_unpack8<bfloat16_t>(uint4 w, thread float4& a,
+                                               thread float4& b) {
+    a = float4(as_type<float>(w.x << 16), as_type<float>(w.x & 0xFFFF0000u),
+               as_type<float>(w.y << 16), as_type<float>(w.y & 0xFFFF0000u));
+    b = float4(as_type<float>(w.z << 16), as_type<float>(w.z & 0xFFFF0000u),
+               as_type<float>(w.w << 16), as_type<float>(w.w & 0xFFFF0000u));
+}
+template <> inline void kq_unpack8<half>(uint4 w, thread float4& a,
+                                         thread float4& b) {
+    a = float4(float2(as_type<half2>(w.x)), float2(as_type<half2>(w.y)));
+    b = float4(float2(as_type<half2>(w.z)), float2(as_type<half2>(w.w)));
+}
+template <typename T> inline float4 kq_unpack4(uint2 w);
+template <> inline float4 kq_unpack4<bfloat16_t>(uint2 w) {
+    return float4(as_type<float>(w.x << 16), as_type<float>(w.x & 0xFFFF0000u),
+                  as_type<float>(w.y << 16), as_type<float>(w.y & 0xFFFF0000u));
+}
+template <> inline float4 kq_unpack4<half>(uint2 w) {
+    return float4(float2(as_type<half2>(w.x)), float2(as_type<half2>(w.y)));
+}
+"""
+
+_ATTN = """
+        constexpr int NT = 32 * NSG;
+        constexpr int D4 = D / 4;
+        constexpr int RR = R / RG;
+        constexpr int NKB = NSG / RG;
+        int lane = thread_position_in_threadgroup.x;
+        int sg = thread_position_in_threadgroup.y;
+        int tid = sg * 32 + lane;
+        int rg = sg % RG;
+        int kbi = sg / RG;
+        int split = threadgroup_position_in_grid.y;
+        int bk = threadgroup_position_in_grid.z;
+        int b = bk / KVH;
+        int kvh = bk % KVH;
+        const int K = params[0];
+        const int idx = params[1];
+        const int chunk = params[2];
+        const int splits = params[3];
+        const int c0 = split * chunk;
+        const device T* kb = k + b * k_strides[0] + kvh * k_strides[1];
+        const device T* vb = v + b * v_strides[0] + kvh * v_strides[1];
+        const int64_t ks = k_strides[2];
+        const int64_t vs = v_strides[2];
+        // Keys and values are read in words: a unit head-dim stride and
+        // aligned rows, as cache views have. Other views read nothing and
+        // give NaN.
+        const bool words = k_strides[3] == 1 && v_strides[3] == 1
+            && ks % 8 == 0 && vs % 4 == 0
+            && (reinterpret_cast<ulong>(kb) & 15) == 0
+            && (reinterpret_cast<ulong>(vb) & 7) == 0;
+        const int c1 = words ? min(K, c0 + chunk) : c0;
+        const float scale = as_type<float>(params[4]);
+
+        threadgroup float tg[TGN];
+        threadgroup float* qs = tg;
+        threadgroup float* rs = tg + R * D;
+        threadgroup float* ss = rs + R * RL;
+        // Row l * G + g is query l of head kvh * G + g.
+        for (int i = tid; i < R * D; i += NT) {
+            int rr = i / D;
+            int dd = i % D;
+            int h = kvh * G + rr % G;
+            int l = rr / G;
+            qs[i] = static_cast<float>(q[b * q_strides[0] + h * q_strides[1]
+                                         + l * q_strides[2]
+                                         + dd * q_strides[3]]) * scale;
+        }
+        for (int i = tid; i < R * RL; i += NT) {
+            int rr = i / RL;
+            int h = kvh * G + rr % G;
+            int l = rr / G;
+            rs[i] = r[((b * L + l) * H + h) * RL + i % RL];
+        }
+        for (int i = tid; i < R; i += NT) {
+            ss[i] = sink[(b * L + i / G) * H + kvh * G + i % G];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const int r0 = rg * RR;
+        float m[RR];
+        float den[RR];
+        float4 o[RR];
+        for (int j = 0; j < RR; j++) {
+            m[j] = KQ_NEG;
+            den[j] = 0.0f;
+            o[j] = float4(0.0f);
+        }
+        threadgroup float* ps = tg + PSO + sg * RR * 32;
+        for (int blk = c0 + kbi * 32; blk < c1; blk += NKB * 32) {
+            int s = blk + lane;
+            bool in = s < c1;
+            float sc[RR];
+            for (int j = 0; j < RR; j++) {
+                sc[j] = 0.0f;
+            }
+            if (in) {
+                for (int e = 0; e < D4 / 2; e++) {
+                    float4 ka, kc;
+                    kq_unpack8<T>(
+                        ((const device uint4*)(kb + s * ks))[e], ka, kc);
+                    for (int j = 0; j < RR; j++) {
+                        const threadgroup float4* qr =
+                            (const threadgroup float4*)(qs + (r0 + j) * D);
+                        sc[j] += dot(qr[2 * e], ka) + dot(qr[2 * e + 1], kc);
+                    }
+                }
+            }
+            // Distance of key s back from the newest key, in time or ring order.
+            int back0;
+            if (RING) {
+                int t = idx - 1 - s;
+                back0 = t < 0 ? t + K : t;
+            } else {
+                back0 = K - 1 - s;
+            }
+            for (int j0 = 0; j0 < RR; j0 += G) {
+                int l = (r0 + j0) / G;
+                int d = back0 - (L - 1 - l);
+                bool ok = in && d >= 0 && (WIN == 0 || d < WIN);
+                bool near = ok && d < EXT;
+                float tb[RL];
+                for (int e = 0; e < RL; e++) {
+                    tb[e] = near ? table[d * RL + e] : 0.0f;
+                }
+                for (int g = 0; g < G; g++) {
+                    int j = j0 + g;
+                    float bias = 0.0f;
+                    for (int e = 0; e < RL; e++) {
+                        bias += rs[(r0 + j) * RL + e] * tb[e];
+                    }
+                    sc[j] = ok ? sc[j] + bias - ss[r0 + j] : KQ_NEG;
+                }
+            }
+            for (int j = 0; j < RR; j++) {
+                bool ok = sc[j] > 0.5f * KQ_NEG;
+                float mn = max(m[j], simd_max(sc[j]));
+                float p = ok ? metal::exp(sc[j] - mn) : 0.0f;
+                float corr = metal::exp(m[j] - mn);
+                den[j] = den[j] * corr + simd_sum(p);
+                o[j] *= corr;
+                m[j] = mn;
+                ps[j * 32 + lane] = p;
+            }
+            // The weights go through threadgroup memory, four keys a read;
+            // past the last key they are zero and the value row repeats.
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            const int last = c1 - 1;
+            for (int t = 0; t < 32 && blk + t <= last; t += 4) {
+                float4 v0 = kq_unpack4<T>(((const device uint2*)(
+                    vb + min(blk + t, last) * vs))[lane]);
+                float4 v1 = kq_unpack4<T>(((const device uint2*)(
+                    vb + min(blk + t + 1, last) * vs))[lane]);
+                float4 v2 = kq_unpack4<T>(((const device uint2*)(
+                    vb + min(blk + t + 2, last) * vs))[lane]);
+                float4 v3 = kq_unpack4<T>(((const device uint2*)(
+                    vb + min(blk + t + 3, last) * vs))[lane]);
+                for (int j = 0; j < RR; j++) {
+                    float4 p4 = ((const threadgroup float4*)(ps + j * 32))[t / 4];
+                    o[j] += p4.x * v0 + p4.y * v1 + p4.z * v2 + p4.w * v3;
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+
+        // Merge the key blocks: rows of [NKB][R][DP], the value sum, then
+        // the running max and the denominator.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int j = 0; j < RR; j++) {
+            threadgroup float* row = tg + (kbi * R + r0 + j) * DP;
+            ((threadgroup float4*)row)[lane] = o[j];
+            if (lane == 0) {
+                row[D] = m[j];
+                row[D + 1] = den[j];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int i = tid; i < R * D; i += NT) {
+            int rr = i / D;
+            int dd = i % D;
+            float mx_ = KQ_NEG;
+            for (int j = 0; j < NKB; j++) {
+                mx_ = max(mx_, tg[(j * R + rr) * DP + D]);
+            }
+            float num = 0.0f;
+            float dsum = 0.0f;
+            for (int j = 0; j < NKB; j++) {
+                const threadgroup float* row = tg + (j * R + rr) * DP;
+                float w = metal::exp(row[D] - mx_);
+                num += w * row[dd];
+                dsum += w * row[D + 1];
+            }
+            num = words ? num : NAN;
+            if (FINAL) {
+                // The zero sink logit joins the denominator.
+                float top = max(mx_, 0.0f);
+                float w = metal::exp(mx_ - top);
+                int h = kvh * G + rr % G;
+                int l = rr / G;
+                out[((b * H + h) * L + l) * D + dd] = static_cast<OT>(
+                    num * w / (dsum * w + metal::exp(-top)));
+            } else {
+                device float* pr = (device float*)out
+                    + ((bk * splits + split) * R + rr) * DP;
+                pr[dd] = num;
+                if (dd == 0) {
+                    pr[D] = mx_;
+                    pr[D + 1] = dsum;
+                }
+            }
+        }
+"""
+
+_ATTN_MERGE = """
+        int dd = thread_position_in_grid.x;
+        int rr = thread_position_in_grid.y;
+        int bk = thread_position_in_grid.z;
+        const int splits = params[3];
+        int b = bk / KVH;
+        int kvh = bk % KVH;
+        const device float* base = part + (bk * splits * R + rr) * DP;
+        float mx_ = KQ_NEG;
+        for (int s = 0; s < splits; s++) {
+            mx_ = max(mx_, base[s * R * DP + D]);
+        }
+        // The zero sink logit joins the denominator.
+        float top = max(mx_, 0.0f);
+        float num = 0.0f;
+        float dsum = metal::exp(-top);
+        for (int s = 0; s < splits; s++) {
+            const device float* pr = base + s * R * DP;
+            float w = metal::exp(pr[D] - top);
+            num += w * pr[dd];
+            dsum += w * pr[D + 1];
+        }
+        int h = kvh * G + rr % G;
+        int l = rr / G;
+        out[((b * H + h) * L + l) * D + dd] = static_cast<OT>(num / dsum);
+"""
+
+
+@functools.cache
+def _attn_kernels():
+    one = mx.fast.metal_kernel(
+        name="inkling2_attend",
+        input_names=["q", "k", "v", "r", "sink", "table", "params"],
+        output_names=["out"],
+        source=_ATTN,
+        header=_ATTN_HEAD,
+        ensure_row_contiguous=False,
+    )
+    merge = mx.fast.metal_kernel(
+        name="inkling2_attend_merge",
+        input_names=["part", "params"],
+        output_names=["out"],
+        source=_ATTN_MERGE,
+        header=_ATTN_HEAD,
+        ensure_row_contiguous=True,
+    )
+    return one, merge
+
+
+def attend_eligible(q: mx.array, k: mx.array, v: mx.array,
+                    r: mx.array) -> bool:
+    if q.ndim != 4 or k.ndim != 4 or r.ndim != 4:
+        return False
+    B, H, L, D = q.shape
+    KVH = k.shape[1]
+    return (D == 128 and k.shape[0] == B and k.shape[3] == D
+            and v.shape == k.shape and KVH > 0 and H % KVH == 0
+            and (H // KVH) * L <= ATTN_MAX_ROWS and k.shape[2] > 0
+            and q.dtype in (mx.float16, mx.bfloat16)
+            and k.dtype == q.dtype and v.dtype == q.dtype
+            and r.shape[:3] == (B, L, H) and r.dtype == mx.float32
+            and enabled())
+
+
+def _attn_split(n_keys: int, rows: int) -> tuple:
+    """(chunk, splits): chunks of one key block per simdgroup pass, at most
+    8 passes, and about 80 threadgroups where the keys allow it."""
+    unit = 32 * _ATTN_BLOCKS
+    want = max(1, -(-80 // rows))
+    passes = min(8, max(1, -(-n_keys // (unit * want))))
+    chunk = unit * passes
+    return chunk, -(-n_keys // chunk)
+
+
+def _attend_kernel(q, k, v, r, sink, table, params, window, ring):
+    B, H, L, D = q.shape
+    KVH = k.shape[1]
+    _, splits = _attn_split(k.shape[2], B * KVH)
+    G = H // KVH
+    R = G * L
+    RL = r.shape[-1]
+    DP = D + 4
+    # Two simdgroups share a key block from 8 rows, each with whole query
+    # rows of the G heads.
+    rg = 2 if R >= 8 and (R // 2) % G == 0 else 1
+    nsg = _ATTN_BLOCKS * rg
+    pso = -(-(R * D + R * RL + R) // 4) * 4
+    tgn = max(pso + R * 32 * _ATTN_BLOCKS, _ATTN_BLOCKS * R * DP)
+    one, merge = _attn_kernels()
+    final = splits == 1
+    common = [("H", H), ("KVH", KVH), ("G", G), ("L", L), ("R", R),
+              ("D", D), ("DP", DP)]
+    out = one(
+        inputs=[q, k, v, r, sink, table, params],
+        template=[("T", q.dtype), ("OT", q.dtype if final else mx.float32),
+                  *common, ("RL", RL), ("EXT", table.shape[0] - 1),
+                  ("WIN", window), ("RING", ring), ("FINAL", final),
+                  ("NSG", nsg), ("RG", rg), ("TGN", tgn), ("PSO", pso)],
+        grid=(32, nsg * splits, B * KVH),
+        threadgroup=(32, nsg, 1),
+        output_shapes=[(B, H, L, D) if final
+                       else (B * KVH, splits, R, DP)],
+        output_dtypes=[q.dtype if final else mx.float32],
+    )[0]
+    if final:
+        return out
+    return merge(
+        inputs=[out, params],
+        template=[("OT", q.dtype), *common],
+        grid=(D, R, B * KVH),
+        threadgroup=(D, 1, 1),
+        output_shapes=[(B, H, L, D)],
+        output_dtypes=[q.dtype],
+    )[0]
+
+
+def _attend_ops(q, k, v, r, sink, table, params, window, ring, scale):
+    """The kernel's attention from ops, for the gradient."""
+    mask = _mask_ops(r, sink, table, params, k.shape[2], window, ring,
+                     q.dtype)
+    return mx.fast.scaled_dot_product_attention(
+        q, k, v, scale=scale, mask=mask,
+        sinks=mx.zeros((q.shape[1],), dtype=q.dtype))
+
+
+@functools.lru_cache(maxsize=None)
+def _attend_fn(window: int, ring: bool, scale: float):
+    @mx.custom_function
+    def run(q, k, v, r, sink, table, params):
+        return _attend_kernel(q, k, v, r, sink, table, params, window, ring)
+
+    @run.vjp
+    def run_vjp(primals, cotangent, _output):
+        q, k, v, r, sink, table, params = primals
+        _, grads = mx.vjp(
+            lambda *a: _attend_ops(*a, params, window, ring, scale),
+            [q, k, v, r, sink, table], [cotangent])
+        return (*grads, mx.zeros_like(params))
+
+    return run
+
+
+def attend(q, k, v, r, sink, table, window, ring_idx, scale: float):
+    """Attention at decode and verify widths with the folded bias and the
+    zero sink logit, in one or two dispatches and no mask: ``q`` [B, H, L,
+    D], ``k`` and ``v`` [B, H_kv, K, D] (strided views read in place),
+    ``r`` [B, L, H, RL] and ``sink`` [B, L, H] in float32, ``table`` the
+    padded bias table. Distances run back from the newest key in time
+    order, or in ring order from ``ring_idx``. Returns [B, H, L, D]."""
+    ring = ring_idx is not None
+    n_keys = k.shape[2]
+    chunk, splits = _attn_split(n_keys, q.shape[0] * k.shape[1])
+    scale = float(scale)
+    bits = struct.unpack("<i", struct.pack("<f", scale))[0]
+    params = mx.array([n_keys, int(ring_idx) if ring else 0, chunk, splits,
+                       bits], dtype=mx.int32)
+    return _attend_fn(int(window or 0), ring, scale)(
+        q, k, v, mx.contiguous(r), mx.contiguous(sink), table, params)
 
 
 # Output gate: reads the attention output [B, H, L, D] and the gate through

@@ -302,3 +302,81 @@ def test_the_output_gate_matches_the_ops_path(L, dtype):
     got = row_kernels.gate(attn, g, M._gate)
     want = M._gate(attn.transpose(0, 2, 1, 3).reshape(B, L, -1), g)
     np.testing.assert_array_equal(_f32(got), _f32(want))
+
+
+@pytest.mark.parametrize("ring", [None, "mid", "start", "end"])
+@pytest.mark.parametrize("L", [2, 4])
+@pytest.mark.parametrize("window", [None, 6])
+@pytest.mark.parametrize("B,H,KVH,K", [(1, 24, 8, 13), (2, 4, 2, 300),
+                                       (1, 24, 8, 3000)])
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
+def test_the_fused_attention_matches_the_masked_path(ring, L, window, B, H,
+                                                     KVH, K, dtype):
+    # One chunk, chunks merged in a second pass, and every ring position.
+    mx.random.seed(15)
+    D, RL, extent = 128, 16, 8
+    q = (mx.random.normal((B, L, H, D)) * 0.5).astype(dtype).transpose(
+        0, 2, 1, 3)
+    # Cache views: the buffer holds more slots than the keys in use.
+    kbuf = (mx.random.normal((B, KVH, K + 7, D)) * 0.5).astype(dtype)
+    vbuf = mx.random.normal((B, KVH, K + 7, D)).astype(dtype)
+    k, v = kbuf[:, :, :K], vbuf[:, :, :K]
+    r = mx.random.normal((B, L, H, RL))
+    sink = mx.random.normal((B, L, H))
+    table = mx.pad(mx.random.normal((extent, RL)), [(0, 1), (0, 0)])
+    idx = {None: None, "mid": K // 2 + 1, "start": 1, "end": K}[ring]
+    assert row_kernels.attend_eligible(q, k, v, r)
+    got = row_kernels.attend(q, k, v, r, sink, table, window, idx, D ** -0.5)
+    f32 = [a.astype(mx.float32) for a in (q, k, v)]
+    want = row_kernels._attend_ops(*f32, r, sink, table,
+                                   mx.array([K, idx or 0]), window or 0,
+                                   ring is not None, D ** -0.5)
+    np.testing.assert_allclose(_f32(got), np.array(want), atol=1e-2,
+                               rtol=1e-2)
+
+
+@pytest.mark.parametrize("layout", ["transposed", "odd_rows"])
+def test_the_fused_attention_refuses_views_it_cannot_read(layout):
+    # Keys and values are read in words, as cache views allow. A strided
+    # head dim, or rows off a word boundary, must not give plausible
+    # numbers.
+    mx.random.seed(17)
+    B, H, KVH, L, K, D = 1, 24, 8, 4, 300, 128
+    q = (mx.random.normal((B, H, L, D)) * 0.5).astype(mx.bfloat16)
+    if layout == "transposed":
+        kbuf = mx.random.normal((B, KVH, D, K)).astype(mx.bfloat16)
+        vbuf = mx.random.normal((B, KVH, D, K)).astype(mx.bfloat16)
+        k, v = kbuf.transpose(0, 1, 3, 2), vbuf.transpose(0, 1, 3, 2)
+    else:
+        kbuf = mx.random.normal((B, KVH, K, D + 1)).astype(mx.bfloat16)
+        vbuf = mx.random.normal((B, KVH, K, D + 1)).astype(mx.bfloat16)
+        k, v = kbuf[..., 1:], vbuf[..., 1:]
+    r = mx.random.normal((B, L, H, 16))
+    sink = mx.random.normal((B, L, H))
+    table = mx.pad(mx.random.normal((8, 16)), [(0, 1), (0, 0)])
+    got = row_kernels.attend(q, k, v, r, sink, table, None, None, D ** -0.5)
+    assert np.isnan(_f32(got)).all()
+
+
+def test_the_fused_attention_gradient_comes_from_the_ops_path():
+    mx.random.seed(16)
+    B, H, KVH, L, K, D = 1, 4, 2, 2, 10, 128
+    q = mx.random.normal((B, H, L, D)).astype(mx.bfloat16)
+    k = mx.random.normal((B, KVH, K, D)).astype(mx.bfloat16)
+    v = mx.random.normal((B, KVH, K, D)).astype(mx.bfloat16)
+    r = mx.random.normal((B, L, H, 16))
+    sink = mx.random.normal((B, L, H))
+    table = mx.pad(mx.random.normal((8, 16)), [(0, 1), (0, 0)])
+    probe = mx.random.normal((B, H, L, D))
+    params = mx.array([K, 3])
+
+    def grads(fn):
+        def run(q, k, v, r, s):
+            return (fn(q, k, v, r, s).astype(mx.float32) * probe).sum()
+        return mx.grad(run, argnums=(0, 1, 2, 3, 4))(q, k, v, r, sink)
+
+    got = grads(lambda *a: row_kernels.attend(*a, table, 6, 3, D ** -0.5))
+    want = grads(lambda *a: row_kernels._attend_ops(*a, table, params, 6,
+                                                    True, D ** -0.5))
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(_f32(g), _f32(w), rtol=1e-5, atol=1e-6)
