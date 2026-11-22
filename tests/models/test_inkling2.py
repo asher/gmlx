@@ -477,6 +477,23 @@ def test_the_compiled_mask_follows_changing_shapes():
         assert mx.array_equal(got, want, equal_nan=True).item()
 
 
+def test_a_new_bias_table_reaches_the_mask(model):
+    # The padded table is cached per weight array: a replaced weight (a
+    # training step, a load) must not read the old one.
+    attn = next(layer.self_attn for layer in model.model.layers)
+    first = attn._padded_table()
+    assert attn._padded_table() is first
+    old = attn.rel_bias
+    try:
+        attn.rel_bias = old + 1.0
+        np.testing.assert_array_equal(np.array(attn._padded_table()[:-1]),
+                                      np.array(old + 1.0))
+    finally:
+        attn.rel_bias = old
+    np.testing.assert_array_equal(np.array(attn._padded_table()[:-1]),
+                                  np.array(old))
+
+
 # The attention projections as the 4-bit files hold them: Q8_0, with the
 # sink and the conv projections left float.
 _Q8_ATTN = ("attn_q.weight", "attn_gate.weight", "attn_rel.weight",

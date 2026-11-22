@@ -303,14 +303,28 @@ def _gate(out: mx.array, g: mx.array) -> mx.array:
     return out * mx.sigmoid(g.astype(mx.float32)).astype(out.dtype)
 
 
+def _iota(n: int) -> mx.array:
+    """A cached int32 arange of at least ``n``; slice it to length. A
+    slice is a view, so a decode step builds no index arrays."""
+    size = 1 << max(10, (n - 1).bit_length())
+    return _iota_of(size)
+
+
+@lru_cache(maxsize=None)
+def _iota_of(size: int) -> mx.array:
+    # Not evaluated here: training builds this under a transform, where an
+    # eval raises. The first step that reads it evaluates it.
+    return mx.arange(size, dtype=mx.int32)
+
+
 def _key_distances(cache, n_queries: int, n_keys: int, rows=None) -> mx.array:
     """[L, K] distances pos_q - pos_k from the queries of this update to
     every key slot the cache returned; ``rows`` (start, stop) selects some
     of the queries. Left padding shifts queries and keys alike, so buffer
     coordinates give the distance."""
     r0, r1 = rows if rows is not None else (0, n_queries)
-    i = mx.arange(r0, r1, dtype=mx.int32)[:, None]
-    s = mx.arange(n_keys, dtype=mx.int32)[None, :]
+    i = _iota(r1)[r0:r1, None]
+    s = _iota(n_keys)[None, :n_keys]
     # Query i sits n_queries - 1 - i positions before the newest key.
     back = n_queries - 1 - i
     kind = type(cache)
@@ -388,6 +402,7 @@ class Attention(nn.Module):
         # Row-fused projection groups (install_row_fusion): slot ->
         # (member names, member rows). Kept out of the parameter tree.
         object.__setattr__(self, "_row_groups", {})
+        object.__setattr__(self, "_table_cache", None)
         kind = "sliding" if self.is_sliding else "full"
         object.__setattr__(self, "_route_tags", (
             f"inkling2_banded_{kind}", f"inkling2_dense_{kind}"))
@@ -431,8 +446,20 @@ class Attention(nn.Module):
         """[B, H, L, K] additive mask in ``dtype``: the bias
         ``R . B[d] - sink`` where ``valid``, with the zero pad row for
         distances outside [0, extent), and -inf elsewhere."""
-        table = mx.pad(self.rel_bias.astype(mx.float32), [(0, 1), (0, 0)])
-        return _masker(self.extent, dtype)(r, sink, table, dist, valid)
+        return _masker(self.extent, dtype)(r, sink, self._padded_table(),
+                                           dist, valid)
+
+    def _padded_table(self) -> mx.array:
+        """``rel_bias`` in float32 with the zero pad row, built once per
+        weight array. The entry holds the array it came from, so a new
+        weight (training, a load) misses; it is not evaluated here, since
+        an eval under a transform raises."""
+        held = self._table_cache
+        if held is None or held[0] is not self.rel_bias:
+            table = mx.pad(self.rel_bias.astype(mx.float32), [(0, 1), (0, 0)])
+            held = (self.rel_bias, table)
+            object.__setattr__(self, "_table_cache", held)
+        return held[1]
 
     def attend(self, q, k, v, r, sink, cache, pad_mask) -> mx.array:
         """Attention with the folded bias and a zero sink logit. ``q`` is
@@ -767,9 +794,9 @@ class Inkling2Model(nn.Module):
                     offset = c.offset
                     break
         if isinstance(offset, mx.array):
-            pos = offset.reshape(-1, 1) + mx.arange(L)[None, :]
+            pos = offset.reshape(-1, 1) + _iota(L)[None, :L]
         else:
-            pos = (offset + mx.arange(L))[None, :]
+            pos = (offset + _iota(L)[:L])[None, :]
         return log_scale(pos, self.args.log_scale_floor,
                          self.args.log_scale_alpha)
 
