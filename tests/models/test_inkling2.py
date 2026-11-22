@@ -264,6 +264,26 @@ def test_chunked_prefill_and_decode_match_the_reference(model, reference):
     np.testing.assert_allclose(got, reference, atol=2e-4, rtol=2e-4)
 
 
+def test_route_counts_name_each_visit_kind(model):
+    # A route check at depth reads these tags: the model builds its own
+    # bias, so the wrapper alone counts every call as stock.
+    from gmlx.upstream import attn_hd512
+
+    def tags():
+        return {k[0]: n for k, n in attn_hd512.route_counts().items()
+                if k[0].startswith("inkling2_")}
+
+    before = tags()
+    cache = model.make_cache()
+    model(mx.array([IDS[:7]]), cache=cache)
+    model(mx.array([IDS[7:8]]), cache=cache)
+    grown = {k: n - before.get(k, 0) for k, n in tags().items()
+             if n > before.get(k, 0)}
+    # Ring caches are not in time order, so sliding layers take the dense
+    # route; full layers take the banded one.
+    assert set(grown) == {"inkling2_banded_full", "inkling2_dense_sliding"}
+
+
 @f32_exact
 def test_a_ragged_batch_matches_each_row_alone(model):
     # Left padding shifts the batch rows: the relative distances, the

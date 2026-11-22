@@ -44,6 +44,7 @@ from gmlx.cache.kv_cache import (
 )
 from gmlx.load.row_fusion import fuse_float_rows, fuse_kquant_rows, split_rows
 from gmlx.models.kimi_k3 import SituActivation
+from gmlx.upstream.attn_hd512 import note_route
 
 SLIDING = "sliding_attention"
 FULL = "full_attention"
@@ -369,6 +370,9 @@ class Attention(nn.Module):
         # Row-fused projection groups (install_row_fusion): slot ->
         # (member names, member rows). Kept out of the parameter tree.
         object.__setattr__(self, "_row_groups", {})
+        kind = "sliding" if self.is_sliding else "full"
+        object.__setattr__(self, "_route_tags", (
+            f"inkling2_banded_{kind}", f"inkling2_dense_{kind}"))
         self.hidden_size = dim
         self.q_proj = nn.Linear(dim, q_dim, bias=False)
         self.k_proj = nn.Linear(dim, kv_dim, bias=False)
@@ -460,8 +464,10 @@ class Attention(nn.Module):
                 parts.insert(0, far)
             mask = parts[0] if len(parts) == 1 else mx.concatenate(parts, -1)
             kk, vv = (k, v) if start == 0 else (k[:, :, start:], v[:, :, start:])
+            qq = q[:, :, i0:i1]
+            note_route(self._route_tags[0], qq, kk, mask)
             outs.append(mx.fast.scaled_dot_product_attention(
-                q[:, :, i0:i1], kk, vv, scale=self.scale, mask=mask,
+                qq, kk, vv, scale=self.scale, mask=mask,
                 sinks=sinks))
             i0 = i1
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
@@ -484,8 +490,10 @@ class Attention(nn.Module):
                 valid = valid & pad_mask[..., i0:i1, :]
             mask = self._mask(r[:, i0:i1], sink[:, i0:i1], dist, valid,
                               q.dtype)
+            qq = q[:, :, i0:i1]
+            note_route(self._route_tags[1], qq, k, mask)
             outs.append(mx.fast.scaled_dot_product_attention(
-                q[:, :, i0:i1], k, v, scale=self.scale, mask=mask,
+                qq, k, v, scale=self.scale, mask=mask,
                 sinks=sinks))
         return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
 
