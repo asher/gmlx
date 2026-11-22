@@ -2125,7 +2125,7 @@ def _run_vlm_mtp(args) -> int:
                                         images)
         else:
             prompt, rows = speech_prompt(model, cast(Any, processor), prompt,
-                                         clips)
+                                         clips or [])
     print(
         f"[generate] VLM {kind} MTP: "
         f"max_tokens={max_tokens_label(args)} temp={args.temp}\n"
