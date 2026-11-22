@@ -19,6 +19,7 @@ where the ops path returns argpartition's order.
 ``GMLX_INKLING2_ROW_KERNEL=0`` restores the ops path.
 """
 
+import contextlib
 import functools
 
 import mlx.core as mx
@@ -203,10 +204,31 @@ def _scalar(value: float) -> mx.array:
     return out
 
 
-def enabled() -> bool:
-    """The kernels run: on the GPU, unless the switch turns them off."""
+_held: list = [None]
+
+
+def _live() -> bool:
     return (mx.default_device() == mx.gpu and mx.metal.is_available()
             and env_bool("GMLX_INKLING2_ROW_KERNEL", True))
+
+
+def enabled() -> bool:
+    """The kernels run: on the GPU, unless the switch turns them off.
+    Inside :func:`held` the answer is the one read when it began."""
+    on = _held[0]
+    return _live() if on is None else on
+
+
+@contextlib.contextmanager
+def held():
+    """Read the switch and device once for a forward, which asks
+    ``enabled`` several hundred times."""
+    saved = _held[0]
+    _held[0] = _live()
+    try:
+        yield
+    finally:
+        _held[0] = saved
 
 
 def clip_eligible(x: mx.array, scale, tau) -> bool:

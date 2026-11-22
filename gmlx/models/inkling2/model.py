@@ -831,6 +831,13 @@ class Inkling2Model(nn.Module):
         trunk_sink: Optional[list] = None,
         conv_sink: Optional[list] = None,
     ):
+        with row_kernels.held():
+            return self._forward(inputs, cache, input_embeddings,
+                                 capture_layer_ids, hidden_sink, embed_mask,
+                                 trunk_sink, conv_sink)
+
+    def _forward(self, inputs, cache, input_embeddings, capture_layer_ids,
+                 hidden_sink, embed_mask, trunk_sink, conv_sink):
         if input_embeddings is None:
             h = self.embed_norm(self.embed_tokens(inputs))
         elif embed_mask is None:
