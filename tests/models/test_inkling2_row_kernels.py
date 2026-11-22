@@ -193,3 +193,47 @@ def test_the_controller_gradient_comes_from_the_ops_path(ops_path):
     for got, want in zip(grads(), ops_path(grads)):
         np.testing.assert_allclose(np.array(got), np.array(want),
                                    rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("L", [1, 4])
+@pytest.mark.parametrize("dynamic", [False, True])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
+def test_the_short_conv_matches_the_ops_path(L, dynamic, dtype):
+    mx.random.seed(10)
+    B, C, width, heads = 2, 64, 4, 8
+    state = mx.random.normal((B, width - 1, C))
+    x = mx.random.normal((B, L, C)).astype(dtype)
+    w = mx.random.normal((C, width))
+    dyn = (mx.random.normal((B, L, heads * width)).astype(dtype)
+           if dynamic else None)
+    assert row_kernels.conv_eligible(state, x, w, dyn)
+    ops = M._conv_dynamic if dynamic else M._conv_static
+    out, kept, window = row_kernels.conv(state, x, w, dyn, True, ops)
+    want_window, want = ops(state, x, w, *([dyn] if dynamic else []))
+    tol = 1e-5 if dtype == mx.float32 else 1e-2
+    np.testing.assert_allclose(_f32(out), _f32(want), rtol=tol, atol=tol)
+    np.testing.assert_array_equal(np.array(window), np.array(want_window))
+    np.testing.assert_array_equal(np.array(kept),
+                                  np.array(want_window[:, L:]))
+
+
+def test_the_short_conv_gradient_comes_from_the_ops_path():
+    mx.random.seed(11)
+    state = mx.random.normal((1, 3, 32))
+    x = mx.random.normal((1, 2, 32))
+    w = mx.random.normal((32, 4))
+    dyn = mx.random.normal((1, 2, 16))
+
+    def loss(x, d):
+        out, kept = row_kernels.conv(state, x, w, d, False, M._conv_dynamic)
+        return out.sum() + kept.sum()
+
+    def ref(x, d):
+        window, out = M._conv_dynamic(state, x, w, d)
+        return out.sum() + window[:, 2:].sum()
+
+    got = mx.grad(loss, argnums=(0, 1))(x, dyn)
+    want = mx.grad(ref, argnums=(0, 1))(x, dyn)
+    for g, r in zip(got, want):
+        np.testing.assert_allclose(np.array(g), np.array(r), rtol=1e-5,
+                                   atol=1e-6)

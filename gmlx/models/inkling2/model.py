@@ -591,6 +591,17 @@ class Layer(nn.Module):
         state = None if cache is None else cache[slot]
         if state is None:
             state = mx.zeros((B, n_keep, C), dtype=mx.float32)
+        direct = cache is None or (cache.lengths is None
+                                   and not cache.history_capacity)
+        if direct and row_kernels.conv_eligible(state, x, weight, dynamic):
+            ops = _conv_static if dynamic is None else _conv_dynamic
+            outs = row_kernels.conv(state, x, weight, dynamic,
+                                    sink is not None, ops)
+            if cache is not None:
+                cache[slot] = outs[1]
+                if sink is not None:
+                    sink.append((cache, slot, outs[2]))
+            return outs[0]
         if dynamic is None:
             window, out = _conv_static(state, x, weight)
         else:

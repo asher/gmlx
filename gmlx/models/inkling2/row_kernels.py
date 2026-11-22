@@ -8,7 +8,8 @@ Per decode step, the ops path runs these chains many times:
 - the float32 RMS norm, about 154 times, three each (the casts);
 - the router, 48 times, six each;
 - the depth mix, about 120 times, four each;
-- a loop controller, 96 times, seven each.
+- a loop controller, 96 times, seven each;
+- the short convolution, 192 times, about four each with its cache copy.
 
 Here each is one dispatch, and a controller two. The arithmetic follows
 the ops path; only the order of a row sum differs, so results match it to
@@ -676,3 +677,139 @@ def control(cur, msg, down, gain, forget, eps: float, ops):
     ``h = D [rms(cur); rms(msg)]``, in ``cur``'s dtype. ``ops`` is the ops
     path, which gives the gradient."""
     return _control_fn(ops, float(eps))(cur, msg, down, gain, forget)
+
+
+# Short convolution: one thread per (row, window slot, channel). A slot
+# copies its input to the window and the kept state, and a slot past the
+# kept inputs also writes its output row.
+_CONV = """
+        uint i = thread_position_in_grid.x;
+        constexpr int NK = WIDTH - 1;
+        constexpr int S = NK + L;
+        if (i >= B * S * C) {
+            return;
+        }
+        uint c = i % C;
+        uint j = (i / C) % S;
+        uint b = i / (C * S);
+        const device float* st = state + b * NK * C;
+        const device T* xr = x + b * L * C;
+        float v = (j < NK) ? st[j * C + c] : static_cast<float>(xr[(j - NK) * C + c]);
+        WINDOW_STORE
+        if (int(j) >= L) {
+            kept[(b * NK + (j - L)) * C + c] = v;
+        }
+        if (j < NK) {
+            return;
+        }
+        int l = j - NK;
+        // Window slot t + k feeds tap k of output row l; t = l here.
+        float out = 0.0f;
+        for (int k = 0; k < WIDTH; k++) {
+            int s = l + k;
+            float wv = (s < NK) ? st[s * C + c] : static_cast<float>(xr[(s - NK) * C + c]);
+            float term = wv * w[c * WIDTH + k];
+            out = (k == 0) ? term : out + term;
+        }
+        float scale = sc[0];
+        DYN_BEGIN {
+            constexpr int HC = C / NH;
+            const device auto* tr = dyn + (b * L + l) * NH * WIDTH + (c / HC) * WIDTH;
+            for (int lag = 0; lag < WIDTH; lag++) {
+                int s = NK - lag + l;
+                float pv = (s < NK) ? st[s * C + c] : static_cast<float>(xr[(s - NK) * C + c]);
+                out = out + pv * static_cast<float>(tr[lag]);
+            }
+        }
+        out_y[(b * L + l) * C + c] = static_cast<T>((v + out) * scale);
+"""
+
+
+def _strip_dyn(src: str) -> str:
+    """``src`` without the dynamic-tap block, which names an input the
+    static kernel lacks."""
+    start = src.index("        DYN_BEGIN {")
+    end = src.index("        out_y[")
+    return src[:start] + src[end:]
+
+
+@functools.lru_cache(maxsize=None)
+def _conv_kernel_for(dyn: bool, with_window: bool):
+    names = ["state", "x", "w", "sc"] + (["dyn"] if dyn else [])
+    outs = ["out_y", "kept"] + (["window"] if with_window else [])
+    src = _CONV.replace("DYN_BEGIN", "if (true)") if dyn else _strip_dyn(_CONV)
+    return mx.fast.metal_kernel(
+        name=f"inkling2_conv_{int(dyn)}{int(with_window)}",
+        input_names=names,
+        output_names=outs,
+        source=src.replace("WINDOW_STORE",
+                           "window[i] = v;" if with_window else ""),
+        ensure_row_contiguous=True,
+    )
+
+
+def conv_eligible(state, x: mx.array, w: mx.array, dynamic) -> bool:
+    if x.ndim != 3 or w.ndim != 2:
+        return False
+    B, L, C = x.shape
+    width = w.shape[1]
+    return (state is not None and state.shape == (B, width - 1, C)
+            and state.dtype == mx.float32 and w.shape[0] == C
+            and w.dtype == mx.float32
+            and x.dtype in (mx.float32, mx.float16, mx.bfloat16)
+            and (dynamic is None
+                 or (dynamic.ndim == 3 and dynamic.shape[:2] == (B, L)
+                     and dynamic.shape[-1] % width == 0
+                     and C % (dynamic.shape[-1] // width) == 0))
+            and enabled())
+
+
+def _conv_kernel(state, x, w, dynamic, with_window: bool):
+    B, L, C = x.shape
+    width = w.shape[1]
+    dyn = dynamic is not None
+    nh = dynamic.shape[-1] // width if dyn else 1
+    scale = (2 * width + 1) ** -0.5 if dyn else (width + 1) ** -0.5
+    n = B * (width - 1 + L) * C
+    shapes = [x.shape, state.shape] + ([(B, width - 1 + L, C)]
+                                        if with_window else [])
+    return _conv_kernel_for(dyn, with_window)(
+        inputs=[state, x, w, _scalar(float(scale))]
+        + ([dynamic] if dyn else []),
+        template=[("T", x.dtype), ("B", B), ("L", L), ("C", C),
+                  ("WIDTH", width), ("NH", nh)],
+        grid=(-(-n // 256) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=shapes,
+        output_dtypes=[x.dtype, mx.float32] + ([mx.float32]
+                                               if with_window else []),
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _conv_fn(ops, dyn: bool, with_window: bool):
+    def from_ops(state, x, w, *dynamic):
+        window, out = ops(state, x, w, *dynamic)
+        kept = window[:, x.shape[1]:]
+        return (out, kept, window) if with_window else (out, kept)
+
+    @mx.custom_function
+    def run(state, x, w, *dynamic):
+        return tuple(_conv_kernel(state, x, w, dynamic[0] if dyn else None,
+                                  with_window))
+
+    @run.vjp
+    def run_vjp(primals, cotangents, _outputs):
+        _, grads = mx.vjp(from_ops, list(primals), list(cotangents))
+        return tuple(grads)
+
+    return run
+
+
+def conv(state, x, w, dynamic, with_window: bool, ops):
+    """The short convolution plus its residual, scaled, in ``x``'s dtype;
+    the kept state (the last ``width - 1`` window rows, float32); and with
+    ``with_window`` the whole float32 window, in one dispatch. ``ops`` is
+    ``_conv_static`` or ``_conv_dynamic``, which gives the gradient."""
+    args = (state, x, w) + (() if dynamic is None else (dynamic,))
+    return _conv_fn(ops, dynamic is not None, with_window)(*args)
