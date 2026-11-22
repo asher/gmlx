@@ -371,6 +371,8 @@ def _masker(extent: int, dtype):
 
 # Caches whose keys come back in time order, newest last.
 _TIME_ORDERED = (KVCache, BatchKVCache, BufferedRotatingKVCache)
+# Single-row caches whose key distances the mask kernel derives itself.
+_ONE_MASK = (KVCache, BufferedRotatingKVCache, RotatingKVCache)
 
 
 def _refuse_quantized(cache) -> None:
@@ -468,9 +470,25 @@ class Attention(nn.Module):
     def attend(self, q, k, v, r, sink, cache, pad_mask) -> mx.array:
         """Attention with the folded bias and a zero sink logit. ``q`` is
         [B, H, L, D]; returns [B, H, L, D]."""
-        if cache is None or type(cache) in _TIME_ORDERED:
+        kind = type(cache)
+        if (pad_mask is None and kind in _ONE_MASK
+                and row_kernels.mask_eligible(r, k.shape[2])):
+            return self._attend_one_mask(q, k, v, r, sink, cache)
+        if cache is None or kind in _TIME_ORDERED:
             return self._attend_banded(q, k, v, r, sink, cache, pad_mask)
         return self._attend_dense(q, k, v, r, sink, cache, pad_mask)
+
+    def _attend_one_mask(self, q, k, v, r, sink, cache) -> mx.array:
+        """``attend`` at decode and verify widths: the whole mask from one
+        kernel. Values equal those of ``_attend_dense``."""
+        ring = type(cache) is RotatingKVCache
+        mask = row_kernels.bias_mask(
+            r, sink, self._padded_table(), k, self.window,
+            int(cache._idx) if ring else None, q.dtype)
+        note_route(self._route_tags[1 if ring else 0], q, k, mask)
+        return mx.fast.scaled_dot_product_attention(
+            q, k, v, scale=self.scale, mask=mask,
+            sinks=_zero_sinks(q.shape[1], q.dtype))
 
     def _attend_banded(self, q, k, v, r, sink, cache, pad_mask) -> mx.array:
         """``attend`` for keys in time order, newest last. Query row i of

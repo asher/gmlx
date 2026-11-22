@@ -237,3 +237,50 @@ def test_the_short_conv_gradient_comes_from_the_ops_path():
     for g, r in zip(got, want):
         np.testing.assert_allclose(np.array(g), np.array(r), rtol=1e-5,
                                    atol=1e-6)
+
+
+@pytest.mark.parametrize("ring", [False, True])
+@pytest.mark.parametrize("L", [1, 4])
+@pytest.mark.parametrize("window", [None, 6])
+def test_the_bias_mask_matches_the_ops_path(ring, L, window):
+    mx.random.seed(12)
+    B, H, RL, extent, K = 1, 4, 16, 8, 13
+    r = mx.random.normal((B, L, H, RL))
+    sink = mx.random.normal((B, L, H))
+    table = mx.pad(mx.random.normal((extent, RL)), [(0, 1), (0, 0)])
+    keys = mx.zeros((B, 2, K, 8))
+    idx = 5 if ring else None
+    got = row_kernels.bias_mask(r, sink, table, keys, window, idx,
+                                mx.float32)
+    want = row_kernels._mask_ops(r, sink, table, mx.array([K, idx or 0]),
+                                 K, window or 0, ring, mx.float32)
+    g, w = np.array(got), np.array(want)
+    np.testing.assert_array_equal(np.isinf(g), np.isinf(w))
+    fin = ~np.isinf(w)
+    np.testing.assert_allclose(g[fin], w[fin], rtol=1e-5, atol=1e-5)
+    # Distances past the table take the pad row: the bias is -sink alone.
+    assert fin.any()
+
+
+def test_the_bias_mask_gradient_comes_from_the_ops_path():
+    mx.random.seed(13)
+    r = mx.random.normal((1, 2, 2, 16))
+    sink = mx.random.normal((1, 2, 2))
+    table = mx.pad(mx.random.normal((8, 16)), [(0, 1), (0, 0)])
+    keys = mx.zeros((1, 1, 10, 8))
+    probe = mx.random.normal((1, 2, 2, 10))
+    params = mx.array([10, 0])
+
+    def loss(fn):
+        def run(r, s):
+            m = fn(r, s)
+            return mx.where(mx.isinf(m), 0, m * probe).sum()
+        return mx.grad(run, argnums=(0, 1))(r, sink)
+
+    got = loss(lambda r, s: row_kernels.bias_mask(r, s, table, keys, None,
+                                                  None, mx.float32))
+    want = loss(lambda r, s: row_kernels._mask_ops(r, s, table, params, 10, 0,
+                                                   False, mx.float32))
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(np.array(g), np.array(w), rtol=1e-5,
+                                   atol=1e-6)

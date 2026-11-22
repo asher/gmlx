@@ -9,7 +9,8 @@ Per decode step, the ops path runs these chains many times:
 - the router, 48 times, six each;
 - the depth mix, about 120 times, four each;
 - a loop controller, 96 times, seven each;
-- the short convolution, 192 times, about four each with its cache copy.
+- the short convolution, 192 times, about four each with its cache copy;
+- the attention bias mask, 48 times, about twelve each.
 
 Here each is one dispatch, and a controller two. The arithmetic follows
 the ops path; only the order of a row sum differs, so results match it to
@@ -835,3 +836,129 @@ def conv(state, x, w, dynamic, with_window: bool, ops):
     ``_conv_static`` or ``_conv_dynamic``, which gives the gradient."""
     args = (state, x, w) + (() if dynamic is None else (dynamic,))
     return _conv_fn(ops, dynamic is not None, with_window)(*args)
+
+
+# Attention bias mask at decode and verify widths: one thread per mask
+# element. The key distance comes from the slot (time order, or the ring
+# order of a rotating cache), and the bias from a dot with the table row.
+MASK_MAX_ROWS = 16
+
+_MASK = """
+        uint i = thread_position_in_grid.x;
+        int K = params[0];
+        if (i >= uint(B * H * L * K)) {
+            return;
+        }
+        int s = i % K;
+        int l = (i / K) % L;
+        int h = (i / (K * L)) % H;
+        int b = i / (K * L * H);
+        int back = L - 1 - l;
+        int d;
+        if (RING) {
+            int t = (params[1] - 1 - s) % K;
+            d = (t < 0 ? t + K : t) - back;
+        } else {
+            d = (K - 1 - s) - back;
+        }
+        bool ok = d >= 0 && (WIN == 0 || d < WIN);
+        if (!ok) {
+            out[i] = static_cast<O>(-INFINITY);
+            return;
+        }
+        int row = (b * L + l) * H + h;
+        float e = 0.0f;
+        if (d < EXT) {
+            const device auto* rr = r + row * RL;
+            const device float* tr = table + d * RL;
+            for (int k = 0; k < RL; k++) {
+                e += static_cast<float>(rr[k]) * tr[k];
+            }
+        }
+        out[i] = static_cast<O>(e - static_cast<float>(sink[row]));
+"""
+
+
+@functools.lru_cache(maxsize=None)
+def _mask_kernel_for(ring: bool):
+    return mx.fast.metal_kernel(
+        name=f"inkling2_bias_mask_{int(ring)}",
+        input_names=["r", "sink", "table", "params"],
+        output_names=["out"],
+        source=_MASK,
+        ensure_row_contiguous=True,
+    )
+
+
+def mask_eligible(r: mx.array, n_keys: int) -> bool:
+    return (r.ndim == 4 and r.shape[1] <= MASK_MAX_ROWS
+            and r.shape[0] * r.shape[1] * r.shape[2] * n_keys < (1 << 31)
+            and enabled())
+
+
+def _mask_kernel(r, sink, table, params, n_keys, window, ring, dtype):
+    B, L, H, RL = r.shape
+    n = B * H * L * n_keys
+    return _mask_kernel_for(ring)(
+        inputs=[r, sink, table, params],
+        template=[("O", dtype), ("B", B), ("L", L), ("H", H), ("RL", RL),
+                  ("EXT", table.shape[0] - 1), ("WIN", int(window or 0)),
+                  ("RING", ring)],
+        grid=(-(-n // 256) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(B, H, L, n_keys)],
+        output_dtypes=[dtype],
+    )[0]
+
+
+def _mask_ops(r, sink, table, params, n_keys, window, ring, dtype):
+    """The kernel's mask from ops, for the gradient."""
+    L = r.shape[1]
+    extent = table.shape[0] - 1
+    s = mx.arange(n_keys)[None, :]
+    back = (L - 1 - mx.arange(L))[:, None]
+    if ring:
+        d = mx.remainder(params[1] - 1 - s, n_keys) - back
+    else:
+        d = (n_keys - 1 - s) - back
+    valid = d >= 0
+    if window:
+        valid = valid & (d < window)
+    scores = r.astype(mx.float32) @ table.T - sink[..., None]
+    index = mx.where((d >= 0) & (d < extent), d, extent)
+    bias = mx.take_along_axis(scores, index[None, :, None, :], axis=-1)
+    return mx.where(valid, bias.transpose(0, 2, 1, 3), -mx.inf).astype(dtype)
+
+
+@functools.lru_cache(maxsize=None)
+def _mask_fn(window: int, ring: bool, dtype):
+    # ``keys`` only carries the key count, which grows every step; reading
+    # it from a shape keeps one function for every length.
+    @mx.custom_function
+    def run(r, sink, table, params, keys):
+        return _mask_kernel(r, sink, table, params, keys.shape[2], window,
+                            ring, dtype)
+
+    @run.vjp
+    def run_vjp(primals, cotangent, _output):
+        r, sink, table, params, keys = primals
+        _, grads = mx.vjp(
+            lambda r, s, t: _mask_ops(r, s, t, params, keys.shape[2], window,
+                                      ring, dtype),
+            [r, sink, table], [cotangent])
+        return (*grads, mx.zeros_like(params), mx.zeros_like(keys))
+
+    return run
+
+
+def bias_mask(r, sink, table, keys, window, ring_idx, dtype):
+    """[B, H, L, K] additive mask in one dispatch, K the key count of
+    ``keys`` [B, H_kv, K, D]: ``R . table[d] - sink`` where the key is
+    visible, with the zero pad row past the table, and -inf elsewhere.
+    ``d`` runs back from the newest key in time order, or in ring order
+    from ``ring_idx`` for a rotating cache."""
+    ring = ring_idx is not None
+    params = mx.array([keys.shape[2], int(ring_idx) if ring else 0],
+                      dtype=mx.int32)
+    return _mask_fn(int(window or 0), ring, dtype)(r, sink, table, params,
+                                                   keys)
