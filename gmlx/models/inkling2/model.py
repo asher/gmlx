@@ -809,11 +809,49 @@ class MoE(nn.Module):
         if (getattr(self.switch_mlp, "_kq_mix_scores", False)
                 or getattr(self.switch_mlp, "_kq_scores_sink", False)):
             y = self.switch_mlp(x, inds, weights)
+        elif (fused := self._fused_down(x, inds)) is not None:
+            return fused(weights)
         else:
             y = self.switch_mlp(x, inds)
         if y.ndim == weights.ndim + 1:
             y = (y * weights[..., None]).sum(axis=-2)
         return y
+
+
+    def _fused_down(self, x: mx.array, inds: mx.array):
+        """At decode and verify widths, the expert outputs and their
+        weighted sum through one kq gather (``gather_qmv_mix_ns_kq``), as
+        a function of the routing weights; None where it does not apply
+        (training, adapters, other codecs, CPU placement)."""
+        import mlx_kquant as kq
+
+        from gmlx.load import modules as kqm
+
+        sw = self.switch_mlp
+        d = x.shape[-1]
+        t = x.size // d
+        k = inds.shape[-1]
+        if (self.training or t * k >= 64
+                or x.dtype not in (mx.bfloat16, mx.float16)
+                or not kqm._FUSED_MOE_ENABLED
+                or not kqm._FUSED_MOE_BLOCK_ENABLED
+                or kqm._kq_member_projs(sw) is None
+                or "bias" in sw.down_proj
+                or not hasattr(kq, "gather_qmv_mix_ns_kq")
+                or not kqm._kq_fused_device_ok(sw)):
+            return None
+        idx = inds.reshape(t, k)
+        xe = mx.expand_dims(x.reshape(t, d), (-2, -3))
+        h = sw.activation(sw.up_proj(xe, idx), sw.gate_proj(xe, idx))
+        h = h.squeeze(-2)
+
+        def mix(weights):
+            y = kq.gather_qmv_mix_ns_kq(
+                h, sw.down_proj.weight, sw.down_proj.kquant_type, idx,
+                weights.reshape(t, k), **kqm._down_scale_kw(sw.down_proj))
+            return y.reshape(*x.shape[:-1], y.shape[-1])
+
+        return mix
 
 
 class Inkling2Model(nn.Module):
