@@ -2651,6 +2651,13 @@ def pair_speech_encoder(args, *, always: bool) -> None:
     has --audio, in chat (``always``) for audio staged at any turn. An
     explicit --mmproj or --no-mmproj wins. Raises ValueError for --asr on
     such a model, and for --audio when no encoder is found."""
+    audios = _media_inputs(args)[1]
+    no_pair = (getattr(args, "mmproj", None) or getattr(args, "no_mmproj", False)
+               or not (always or audios))
+    # Before the header read, which imports the loader stack: the pre-load
+    # path checks run first.
+    if no_pair and not getattr(args, "asr", None):
+        return
     from gmlx.load.discovery import find_speech_encoder, header_meta
 
     meta = header_meta(args.gguf)
@@ -2660,9 +2667,7 @@ def pair_speech_encoder(args, *, always: bool) -> None:
         raise ValueError(
             "this model hears audio through its own speech encoder: pass "
             "that GGUF as --mmproj, not --asr")
-    audios = _media_inputs(args)[1]
-    if (getattr(args, "mmproj", None) or getattr(args, "no_mmproj", False)
-            or not (always or audios)):
+    if no_pair:
         return
     path = find_speech_encoder(args.gguf)
     if path is None:
