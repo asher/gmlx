@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""One-dispatch Metal kernels for small Inkling 2 row ops.
+"""Metal kernels for small Inkling 2 row ops.
 
-A decode step runs the L2 row clip about 144 times, the float32 RMS norm
-about 154 times, the router 48 times and the depth mix about 120 times. The compiled ops path takes four
-dispatches per clip (the reduction splits the chain), three per norm (the
-casts on either side) six per routing and four per depth mix. Each is one dispatch here. The
-arithmetic follows the ops path; only the order of a row sum differs, so
-results match it to float32 rounding. The router returns the same experts
-in score order, where the ops path returns argpartition's order.
+Per decode step, the ops path runs these chains many times:
+
+- the L2 row clip, about 144 times, four dispatches each;
+- the float32 RMS norm, about 154 times, three each (the casts);
+- the router, 48 times, six each;
+- the depth mix, about 120 times, four each;
+- a loop controller, 96 times, seven each.
+
+Here each is one dispatch, and a controller two. The arithmetic follows
+the ops path; only the order of a row sum differs, so results match it to
+float32 rounding. The router returns the same experts in score order,
+where the ops path returns argpartition's order.
 
 ``GMLX_INKLING2_ROW_KERNEL=0`` restores the ops path.
 """
@@ -514,3 +519,160 @@ def depth_mix(blocks, cur: mx.array, query: mx.array, eps: float, ops):
     Returns [B, L, nq, D] float32. ``ops(blocks, cur, query)`` is the ops
     path, which gives the gradient."""
     return _mix_fn(ops, float(eps), len(blocks))(*blocks, cur, query)
+
+
+# Loop controller: kernel one runs one threadgroup per rank row r and
+# returns h = down [rms(cur); rms(msg)] for every input row; kernel two
+# runs one thread per output element and blends.
+CTRL_MAX_ROWS = 8
+
+_CTRL_DOWN = """
+        uint r = threadgroup_position_in_grid.x;
+        uint tid = thread_position_in_threadgroup.x;
+        uint lane = thread_index_in_simdgroup;
+        uint sg = simdgroup_index_in_threadgroup;
+        uint n_sg = threads_per_threadgroup.x / 32;
+        constexpr int NA = 4 * MR;
+        threadgroup float part[8][NA];
+        threadgroup float total[NA];
+        float acc[NA];
+        for (int i = 0; i < NA; i++) {
+            acc[i] = 0.0f;
+        }
+        const device float* wc = down + r * 2 * D;
+        const device float* wm = wc + D;
+        for (uint d = tid; d < D; d += threads_per_threadgroup.x) {
+            float a = wc[d];
+            float b = wm[d];
+            for (int m = 0; m < MR; m++) {
+                float c = static_cast<float>(cur[m * D + d]);
+                float g = static_cast<float>(msg[m * D + d]);
+                acc[4 * m] += c * c;
+                acc[4 * m + 1] += g * g;
+                acc[4 * m + 2] += a * c;
+                acc[4 * m + 3] += b * g;
+            }
+        }
+        for (int i = 0; i < NA; i++) {
+            float v = simd_sum(acc[i]);
+            if (lane == 0) {
+                part[sg][i] = v;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < NA) {
+            float v = 0.0f;
+            for (uint s = 0; s < n_sg; s++) {
+                v += part[s][tid];
+            }
+            total[tid] = v;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < MR) {
+            int m = tid;
+            float ic = metal::precise::rsqrt(total[4 * m] / float(D) + eps[0]);
+            float im = metal::precise::rsqrt(total[4 * m + 1] / float(D) + eps[0]);
+            h[m * R + r] = total[4 * m + 2] * ic + total[4 * m + 3] * im;
+        }
+"""
+
+_CTRL_BLEND = """
+        uint i = thread_position_in_grid.x;
+        if (i >= MR * D) {
+            return;
+        }
+        uint m = i / D;
+        uint d = i % D;
+        const device float* hr = h + m * R;
+        const device float* gr = gain + d * R;
+        const device float* fr = forget + d * R;
+        float g = 0.0f;
+        float f = 0.0f;
+        for (int k = 0; k < R; k++) {
+            g += gr[k] * hr[k];
+            f += fr[k] * hr[k];
+        }
+        g = metal::precise::tanh(g);
+        f = metal::precise::tanh(f);
+        float c = static_cast<float>(cur[i]);
+        out[i] = static_cast<T>(c - f * c + g * static_cast<float>(msg[i]));
+"""
+
+
+@functools.cache
+def _ctrl_kernels():
+    down = mx.fast.metal_kernel(
+        name="inkling2_ctrl_down",
+        input_names=["cur", "msg", "down", "eps"],
+        output_names=["h"],
+        source=_CTRL_DOWN,
+        ensure_row_contiguous=True,
+    )
+    blend = mx.fast.metal_kernel(
+        name="inkling2_ctrl_blend",
+        input_names=["cur", "msg", "h", "gain", "forget"],
+        output_names=["out"],
+        source=_CTRL_BLEND,
+        ensure_row_contiguous=True,
+    )
+    return down, blend
+
+
+def control_eligible(cur: mx.array, msg: mx.array, down: mx.array,
+                     gain: mx.array, forget: mx.array) -> bool:
+    D = cur.shape[-1]
+    R = down.shape[0]
+    rows = cur.size // max(D, 1)
+    return (cur.shape == msg.shape and 0 < rows <= CTRL_MAX_ROWS
+            and down.shape == (R, 2 * D) and gain.shape == (D, R)
+            and forget.shape == (D, R) and R <= 256
+            and all(w.dtype == mx.float32 for w in (down, gain, forget))
+            and cur.dtype in (mx.float32, mx.float16, mx.bfloat16)
+            and msg.dtype in (mx.float32, mx.float16, mx.bfloat16)
+            and enabled())
+
+
+def _control_kernel(cur, msg, down, gain, forget, eps):
+    D = cur.shape[-1]
+    R = down.shape[0]
+    rows = cur.size // D
+    k_down, k_blend = _ctrl_kernels()
+    h = k_down(
+        inputs=[cur, msg, down, _scalar(float(eps))],
+        template=[("D", D), ("R", R), ("MR", rows)],
+        grid=(R * NORM_THREADS, 1, 1),
+        threadgroup=(NORM_THREADS, 1, 1),
+        output_shapes=[(rows, R)],
+        output_dtypes=[mx.float32],
+    )[0]
+    n = rows * D
+    return k_blend(
+        inputs=[cur, msg, h, gain, forget],
+        template=[("T", cur.dtype), ("D", D), ("R", R), ("MR", rows)],
+        grid=(-(-n // 256) * 256, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[cur.shape],
+        output_dtypes=[cur.dtype],
+    )[0]
+
+
+@functools.lru_cache(maxsize=None)
+def _control_fn(ops, eps: float):
+    @mx.custom_function
+    def run(cur, msg, down, gain, forget):
+        return _control_kernel(cur, msg, down, gain, forget, eps)
+
+    @run.vjp
+    def run_vjp(primals, cotangent, _output):
+        _, grads = mx.vjp(ops, list(primals), [cotangent])
+        return tuple(grads)
+
+    return run
+
+
+def control(cur, msg, down, gain, forget, eps: float, ops):
+    """A loop controller in two dispatches:
+    ``(1 - tanh(F h)) * cur + tanh(G h) * msg`` with
+    ``h = D [rms(cur); rms(msg)]``, in ``cur``'s dtype. ``ops`` is the ops
+    path, which gives the gradient."""
+    return _control_fn(ops, float(eps))(cur, msg, down, gain, forget)

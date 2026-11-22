@@ -221,8 +221,10 @@ class Controller(nn.Module):
     def __call__(self, cur: mx.array, msg: mx.array) -> mx.array:
         mods = (self.down, self.gain, self.forget)
         if all(type(m) is nn.Linear and "bias" not in m for m in mods):
-            return _control(cur, msg, self.down.weight, self.gain.weight,
-                            self.forget.weight)
+            w = (self.down.weight, self.gain.weight, self.forget.weight)
+            if row_kernels.control_eligible(cur, msg, *w):
+                return row_kernels.control(cur, msg, *w, _MIX_EPS, _control)
+            return _control(cur, msg, *w)
         h = self.down(mx.concatenate([_rms(cur), _rms(msg)], axis=-1))
         return _blend(cur, msg, self.gain(h), self.forget(h))
 

@@ -158,3 +158,38 @@ def test_the_depth_mix_gradient_comes_from_the_ops_path(ops_path):
     for got, want in zip(grads(), ops_path(grads)):
         np.testing.assert_allclose(np.array(got), np.array(want),
                                    rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.parametrize("rows", [1, 4])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
+def test_the_controller_matches_the_ops_path(rows, dtype, ops_path):
+    mx.random.seed(8)
+    ctrl = M.Controller(512, 64)
+    ctrl.update({"down": {"weight": mx.random.normal((64, 1024)) * 0.05},
+                 "gain": {"weight": mx.random.normal((512, 64)) * 0.1},
+                 "forget": {"weight": mx.random.normal((512, 64)) * 0.1}})
+    cur = (mx.random.normal((1, rows, 512)) * 2).astype(dtype)
+    msg = mx.random.normal((1, rows, 512))
+    w = (ctrl.down.weight, ctrl.gain.weight, ctrl.forget.weight)
+    assert row_kernels.control_eligible(cur, msg, *w)
+    got, want = ctrl(cur, msg), ops_path(ctrl, cur, msg)
+    assert got.dtype == dtype
+    tol = 1e-5 if dtype == mx.float32 else 1e-2
+    np.testing.assert_allclose(_f32(got), _f32(want), rtol=tol, atol=tol)
+
+
+def test_the_controller_gradient_comes_from_the_ops_path(ops_path):
+    mx.random.seed(9)
+    ctrl = M.Controller(256, 32)
+    ctrl.update({"down": {"weight": mx.random.normal((32, 512)) * 0.05},
+                 "gain": {"weight": mx.random.normal((256, 32)) * 0.1},
+                 "forget": {"weight": mx.random.normal((256, 32)) * 0.1}})
+    cur = mx.random.normal((1, 2, 256))
+    msg = mx.random.normal((1, 2, 256))
+
+    def grads():
+        return mx.grad(lambda c, m: ctrl(c, m).sum(), argnums=(0, 1))(cur, msg)
+
+    for got, want in zip(grads(), ops_path(grads)):
+        np.testing.assert_allclose(np.array(got), np.array(want),
+                                   rtol=1e-4, atol=1e-5)
