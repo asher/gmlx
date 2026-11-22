@@ -169,6 +169,8 @@ def depth_mix(blocks: List[mx.array], cur: mx.array,
     """Attention over depth: a softmax over ``blocks`` (already rms-normed,
     see ``push_block``) and the rms-normed ``cur``, with ``query`` rows
     [nq, D]. Returns [B, L, nq, D] float32."""
+    if row_kernels.mix_eligible(blocks, cur, query):
+        return row_kernels.depth_mix(blocks, cur, query, _MIX_EPS, _depth_mix)
     return _depth_mix(tuple(blocks), cur, query)
 
 

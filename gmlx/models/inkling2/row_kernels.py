@@ -3,9 +3,9 @@
 """One-dispatch Metal kernels for small Inkling 2 row ops.
 
 A decode step runs the L2 row clip about 144 times, the float32 RMS norm
-about 154 times and the router 48 times. The compiled ops path takes four
+about 154 times, the router 48 times and the depth mix about 120 times. The compiled ops path takes four
 dispatches per clip (the reduction splits the chain), three per norm (the
-casts on either side) and six per routing. Each is one dispatch here. The
+casts on either side) six per routing and four per depth mix. Each is one dispatch here. The
 arithmetic follows the ops path; only the order of a row sum differs, so
 results match it to float32 rounding. The router returns the same experts
 in score order, where the ops path returns argpartition's order.
@@ -361,3 +361,156 @@ def router(logits: mx.array, bias, k: int, scale: float, dtype):
     run = _router_fn(k, float(scale), dtype, bias is not None)
     inds, weights = run(logits, _scalar(0.0) if bias is None else bias)
     return mx.stop_gradient(inds), weights
+
+
+# Depth mix: one threadgroup per row. Pass one sums cur^2 and every query
+# dot; pass two writes the softmax-weighted states.
+MIX_THREADS = 256
+MIX_MAX_STATES = 16
+MIX_MAX_QUERIES = 4
+
+_MIX = """
+        uint row = threadgroup_position_in_grid.x;
+        uint tid = thread_position_in_threadgroup.x;
+        uint lane = thread_index_in_simdgroup;
+        uint sg = simdgroup_index_in_threadgroup;
+        uint n_sg = threads_per_threadgroup.x / 32;
+        constexpr int NS = NB + 1;
+        constexpr int NA = NQ * NS + 1;
+        STATES
+        const device T* c = cur + row * D;
+        threadgroup float part[8][NA];
+        threadgroup float total[NA];
+        float acc[NA];
+        for (int i = 0; i < NA; i++) {
+            acc[i] = 0.0f;
+        }
+        for (uint d = tid; d < D; d += threads_per_threadgroup.x) {
+            float cv = static_cast<float>(c[d]);
+            acc[NA - 1] += cv * cv;
+            for (int j = 0; j < NQ; j++) {
+                float qv = query[j * D + d];
+                for (int b = 0; b < NB; b++) {
+                    acc[j * NS + b] += qv * s[b][d];
+                }
+                acc[j * NS + NB] += qv * cv;
+            }
+        }
+        for (int i = 0; i < NA; i++) {
+            float v = simd_sum(acc[i]);
+            if (lane == 0) {
+                part[sg][i] = v;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid < NA) {
+            float v = 0.0f;
+            for (uint g = 0; g < n_sg; g++) {
+                v += part[g][tid];
+            }
+            total[tid] = v;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float inv = metal::precise::rsqrt(total[NA - 1] / float(D) + eps[0]);
+        float scale = metal::precise::rsqrt(float(D));
+        float p[NQ][NS];
+        for (int j = 0; j < NQ; j++) {
+            float top = -INFINITY;
+            for (int b = 0; b < NS; b++) {
+                float v = total[j * NS + b] * scale;
+                if (b == NB) {
+                    v = v * inv;
+                }
+                p[j][b] = v;
+                top = metal::max(top, v);
+            }
+            float z = 0.0f;
+            for (int b = 0; b < NS; b++) {
+                p[j][b] = metal::precise::exp(p[j][b] - top);
+                z += p[j][b];
+            }
+            for (int b = 0; b < NS; b++) {
+                p[j][b] = p[j][b] / z;
+            }
+        }
+        device float* o = out + row * NQ * D;
+        for (uint d = tid; d < D; d += threads_per_threadgroup.x) {
+            float cv = static_cast<float>(c[d]) * inv;
+            for (int j = 0; j < NQ; j++) {
+                float v = p[j][NB] * cv;
+                for (int b = 0; b < NB; b++) {
+                    v += p[j][b] * s[b][d];
+                }
+                o[j * D + d] = v;
+            }
+        }
+"""
+
+
+@functools.lru_cache(maxsize=None)
+def _mix_kernel_for(n_blocks: int):
+    names = [f"b{i}" for i in range(n_blocks)]
+    if n_blocks:
+        states = ("const device float* s[NB] = {"
+                  + ", ".join(f"{n} + row * D" for n in names) + "};")
+    else:
+        states = "const device float* const* s = nullptr;"
+    return mx.fast.metal_kernel(
+        name=f"inkling2_depth_mix_{n_blocks}",
+        input_names=[*names, "cur", "query", "eps"],
+        output_names=["out"],
+        source=_MIX.replace("STATES", states),
+        ensure_row_contiguous=True,
+    )
+
+
+def mix_eligible(blocks, cur: mx.array, query: mx.array) -> bool:
+    D = cur.shape[-1]
+    return (cur.ndim == 3 and len(blocks) < MIX_MAX_STATES
+            and query.ndim == 2 and query.shape[-1] == D
+            and 0 < query.shape[0] <= MIX_MAX_QUERIES
+            and cur.dtype in (mx.float32, mx.float16, mx.bfloat16)
+            and all(b.dtype == mx.float32 and b.shape == cur.shape
+                    for b in blocks)
+            and enabled())
+
+
+def _mix_kernel(blocks, cur, query, eps):
+    B, L, D = cur.shape
+    nq = query.shape[0]
+    return _mix_kernel_for(len(blocks))(
+        inputs=[*blocks, cur, query.astype(mx.float32), _scalar(float(eps))],
+        template=[("T", cur.dtype), ("D", D), ("NB", len(blocks)),
+                  ("NQ", nq)],
+        grid=(B * L * MIX_THREADS, 1, 1),
+        threadgroup=(MIX_THREADS, 1, 1),
+        output_shapes=[(B, L, nq, D)],
+        output_dtypes=[mx.float32],
+    )[0]
+
+
+@functools.lru_cache(maxsize=None)
+def _mix_fn(ops, eps: float, n_blocks: int):
+    @mx.custom_function
+    def run(*args):
+        *blocks, cur, query = args
+        return _mix_kernel(blocks, cur, query, eps)
+
+    @run.vjp
+    def run_vjp(primals, cotangent, _output):
+        def f(*args):
+            *blocks, cur, query = args
+            return ops(tuple(blocks), cur, query)
+
+        _, grads = mx.vjp(f, list(primals), [cotangent])
+        return tuple(grads)
+
+    return run
+
+
+def depth_mix(blocks, cur: mx.array, query: mx.array, eps: float, ops):
+    """``model.depth_mix`` in one dispatch: ``blocks`` rms-normed float32
+    [B, L, D] states, ``cur`` [B, L, D] (normed here), ``query`` [nq, D].
+    Returns [B, L, nq, D] float32. ``ops(blocks, cur, query)`` is the ops
+    path, which gives the gradient."""
+    return _mix_fn(ops, float(eps), len(blocks))(*blocks, cur, query)

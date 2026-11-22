@@ -127,3 +127,34 @@ def test_the_router_gradient_comes_from_the_ops_path():
     want = loss(lambda x: M._router(8, 8.0, False, mx.float32)(x, None))
     np.testing.assert_allclose(np.array(got), np.array(want), rtol=1e-5,
                                atol=1e-6)
+
+
+@pytest.mark.parametrize("n_blocks", [0, 1, 7])
+@pytest.mark.parametrize("nq", [1, 3])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
+def test_the_depth_mix_matches_the_ops_path(n_blocks, nq, dtype, ops_path):
+    mx.random.seed(6)
+    shape = (2, 3, 512)
+    blocks = [M._rms(mx.random.normal(shape) * 2) for _ in range(n_blocks)]
+    cur = (mx.random.normal(shape) * 3).astype(dtype)
+    query = mx.random.normal((nq, 512))
+    assert row_kernels.mix_eligible(blocks, cur, query)
+    got = M.depth_mix(blocks, cur, query)
+    want = ops_path(M.depth_mix, blocks, cur, query)
+    assert got.shape == (2, 3, nq, 512) and got.dtype == mx.float32
+    np.testing.assert_allclose(_f32(got), _f32(want), rtol=1e-5, atol=1e-5)
+
+
+def test_the_depth_mix_gradient_comes_from_the_ops_path(ops_path):
+    mx.random.seed(7)
+    blocks = [M._rms(mx.random.normal((1, 2, 256))) for _ in range(3)]
+    cur = mx.random.normal((1, 2, 256))
+    query = mx.random.normal((2, 256))
+
+    def grads():
+        return mx.grad(lambda c, q: M.depth_mix(blocks, c, q).sum(),
+                       argnums=(0, 1))(cur, query)
+
+    for got, want in zip(grads(), ops_path(grads)):
+        np.testing.assert_allclose(np.array(got), np.array(want),
+                                   rtol=1e-4, atol=1e-5)
