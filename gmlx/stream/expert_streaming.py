@@ -561,6 +561,28 @@ def _note_unshed() -> None:
               "top expert run in full")
 
 
+def _switch_mlp_cpu(module, x, indices):
+    """A SwitchMLP forward the CPU stream can run on a BF16/F16 stack.
+    MLX's CPU gather_mm is float32-only, and an unquantized stack has no
+    kquant kernel to route through, so take the routed experts' slices
+    from the (file-backed) stacks, upcast just those, and gather over
+    local slice ids. Output in x's dtype."""
+    ids, indices = _valid_expert_ids(module, indices)
+    uniq, local = np.unique(ids, return_inverse=True)
+    sel = mx.array(uniq.astype(np.uint32))
+    local = mx.array(local.reshape(ids.shape).astype(np.uint32))
+    h = mx.expand_dims(x, (-2, -3)).astype(mx.float32)
+    for i, lin in enumerate((module.fc1, module.fc2)):
+        w = mx.take(lin["weight"], sel, axis=0).astype(mx.float32)
+        h = mx.gather_mm(h, w.swapaxes(-1, -2), rhs_indices=local)
+        if "bias" in lin:
+            b = mx.take(lin["bias"], sel, axis=0).astype(mx.float32)
+            h = h + mx.expand_dims(b[local], -2)
+        if i == 0:
+            h = module.activation(h)
+    return h.squeeze(-2).astype(x.dtype)
+
+
 def _valid_expert_ids(module, indices):
     """Router ids as a host array, with out-of-range entries replaced in
     both the host copy and the device array. The kq router kernel wrote
@@ -1420,6 +1442,10 @@ def install_expert_streaming(
                             return super().__call__(
                                 x, indices, *args, **kwargs)
                         with mx.stream(mx.cpu):
+                            if (isinstance(self, mlp_types)
+                                    and self.fc1.weight.dtype
+                                    in (mx.bfloat16, mx.float16)):
+                                return _switch_mlp_cpu(self, x, indices)
                             return super().__call__(
                                 x, indices, *args, **kwargs)
 
