@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Asher Feldman
-"""One-dispatch Metal kernels for two small Inkling 2 row ops.
+"""One-dispatch Metal kernels for small Inkling 2 row ops.
 
-A decode step runs the L2 row clip about 144 times and the float32 RMS norm
-about 154 times. The compiled ops path takes four dispatches per clip (the
-reduction splits the chain) and three per norm (the casts on either side).
-Each is one dispatch here. The arithmetic follows the ops path; only the
-order of the row sum differs, so results match it to float32 rounding.
+A decode step runs the L2 row clip about 144 times, the float32 RMS norm
+about 154 times and the router 48 times. The compiled ops path takes four
+dispatches per clip (the reduction splits the chain), three per norm (the
+casts on either side) and six per routing. Each is one dispatch here. The
+arithmetic follows the ops path; only the order of a row sum differs, so
+results match it to float32 rounding. The router returns the same experts
+in score order, where the ops path returns argpartition's order.
 
 ``GMLX_INKLING2_ROW_KERNEL=0`` restores the ops path.
 """
@@ -106,6 +108,62 @@ _NORM = """
 """
 
 
+_ROUTER = """
+        uint lane = thread_index_in_simdgroup;
+        uint row = threadgroup_position_in_grid.x * (threads_per_threadgroup.x / 32)
+                   + simdgroup_index_in_threadgroup;
+        if (row >= N) {
+            return;
+        }
+        constexpr int PER = E / 32;
+        const device float* lr = logits + row * E;
+        float score[PER];
+        float sel[PER];
+        for (int i = 0; i < PER; i++) {
+            int e = lane + i * 32;
+            float x = lr[e];
+            // mx.sigmoid, as MLX's Metal unary op computes it.
+            float y = 1 / (1 + metal::precise::exp(metal::abs(x)));
+            score[i] = (x < 0) ? y : 1 - y;
+            sel[i] = BIASED ? score[i] + bias[e] : score[i];
+        }
+        float w[K];
+        uint picked[K];
+        float total = 0.0f;
+        for (int r = 0; r < K; r++) {
+            float best = -INFINITY;
+            uint best_e = E;
+            for (int i = 0; i < PER; i++) {
+                uint e = lane + i * 32;
+                if (sel[i] > best || (sel[i] == best && e < best_e)) {
+                    best = sel[i];
+                    best_e = e;
+                }
+            }
+            float top = simd_max(best);
+            uint chosen = simd_min(best == top ? best_e : uint(E));
+            float s = -INFINITY;
+            for (int i = 0; i < PER; i++) {
+                if (lane + i * 32 == chosen) {
+                    s = score[i];
+                    sel[i] = -INFINITY;
+                }
+            }
+            s = simd_max(s);
+            picked[r] = chosen;
+            w[r] = s;
+            total += s;
+        }
+        if (lane == 0) {
+            float denom = total + 1e-20f;
+            for (int r = 0; r < K; r++) {
+                inds[row * K + r] = picked[r];
+                weights[row * K + r] = static_cast<O>((w[r] / denom) * scale[0]);
+            }
+        }
+"""
+
+
 @functools.cache
 def _kernels():
     clip = mx.fast.metal_kernel(
@@ -122,7 +180,14 @@ def _kernels():
         source=_NORM,
         ensure_row_contiguous=True,
     )
-    return clip, norm
+    router = mx.fast.metal_kernel(
+        name="inkling2_router",
+        input_names=["logits", "bias", "scale"],
+        output_names=["inds", "weights"],
+        source=_ROUTER,
+        ensure_row_contiguous=True,
+    )
+    return clip, norm, router
 
 
 @functools.cache
@@ -241,3 +306,58 @@ def rms_norm(x: mx.array, weight, eps: float, dtype) -> mx.array:
     ``weight``, cast to ``dtype``, in one dispatch."""
     run = _norm_fn(float(eps), dtype, weight is not None)
     return run(x, _scalar(1.0) if weight is None else weight)
+
+
+def router_eligible(logits: mx.array, k: int) -> bool:
+    E = logits.shape[-1]
+    return (E % 32 == 0 and E <= 1024 and 0 < k <= 32 and k <= E
+            and enabled())
+
+
+def _router_kernel(logits, bias, k, scale, dtype, biased):
+    E = logits.shape[-1]
+    n = logits.size // E
+    rows_per_group = 4
+    shape = (*logits.shape[:-1], k)
+    return _kernels()[2](
+        inputs=[logits.astype(mx.float32), bias, _scalar(float(scale))],
+        template=[("O", dtype), ("E", E), ("K", k), ("N", n),
+                  ("BIASED", biased)],
+        grid=(-(-n // rows_per_group) * rows_per_group * 32, 1, 1),
+        threadgroup=(rows_per_group * 32, 1, 1),
+        output_shapes=[shape, shape],
+        output_dtypes=[mx.uint32, dtype],
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def _router_fn(k: int, scale: float, dtype, biased: bool):
+    @mx.custom_function
+    def run(logits, bias):
+        return tuple(_router_kernel(logits, bias, k, scale, dtype, biased))
+
+    @run.vjp
+    def run_vjp(primals, cotangents, outputs):
+        # The ops path's weights at the kernel's picks give the gradient.
+        logits, bias = primals
+        inds = outputs[0]
+
+        def weights(logits):
+            scores = mx.sigmoid(logits.astype(mx.float32))
+            w = mx.take_along_axis(scores, inds, axis=-1)
+            w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
+            return (w * scale).astype(dtype)
+
+        _, (g,) = mx.vjp(weights, [logits], [cotangents[1]])
+        return g, mx.zeros_like(bias)
+
+    return run
+
+
+def router(logits: mx.array, bias, k: int, scale: float, dtype):
+    """The top-``k`` expert ids of sigmoid routing (selected on score plus
+    ``bias``) and their normalized weights times ``scale``, in one
+    dispatch. Ids within a row come in score order, not argpartition's."""
+    run = _router_fn(k, float(scale), dtype, bias is not None)
+    inds, weights = run(logits, _scalar(0.0) if bias is None else bias)
+    return mx.stop_gradient(inds), weights

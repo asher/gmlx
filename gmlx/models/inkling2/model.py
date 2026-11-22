@@ -743,7 +743,12 @@ class MoE(nn.Module):
         bias = self.e_score_correction_bias if args.use_gate_bias else None
         route = _router(args.num_experts_per_tok, args.expert_weights_scale,
                         bias is not None, x.dtype)
-        inds, weights = route(logits, bias)
+        if row_kernels.router_eligible(logits, args.num_experts_per_tok):
+            inds, weights = row_kernels.router(
+                logits, bias, args.num_experts_per_tok,
+                args.expert_weights_scale, x.dtype)
+        else:
+            inds, weights = route(logits, bias)
 
         if expert_controls_active(self):
             from gmlx.stream.moe_experts import _apply_expert_controls

@@ -184,7 +184,7 @@ fusions.
 | `GMLX_HY4_SWA_ROLL=0` | Keep every key on Hy4-flash sliding-window layers instead of the window alone. Their memory then grows with the context. |
 | `GMLX_HY4_KEYS_DENSE=0` | Expand Hy4-flash per-head keys through the K-quant gather instead of a matmul on the dequantized stack. |
 | `GMLX_HY4_ROW_KERNEL=0` | Build a Hy4-flash decode step's key and query rows on the op chain instead of one kernel each. Output is bit-identical. |
-| `GMLX_INKLING2_ROW_KERNEL=0` | Run Inkling 2's row clips and float32 norms on the op chain instead of one kernel each. Output matches to float32 rounding. |
+| `GMLX_INKLING2_ROW_KERNEL=0` | Run Inkling 2's row clips, float32 norms and routing on the op chain instead of one kernel each. Output matches to float32 rounding. |
 | `GMLX_HY4_KQ_ROUTER=0` | Run a Hy4-flash decode step's expert routing as an op chain instead of one mlx-kquant dispatch. |
 | `GMLX_HY4_ROUTER_SPLIT=0` | Compute Hy4-flash router logits at decode widths with the stock matmul instead of the split-sum kernel. |
 | `GMLX_HY4_IMAGE_POS_1D=1` | Rotate Hy4-flash image slots at their slot index, as llama.cpp does, instead of the reference's (t, h, w) positions. |

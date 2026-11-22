@@ -85,3 +85,45 @@ def test_gradients_come_from_the_ops_path(ops_path):
     for got, want in zip(grads(), ops_path(grads)):
         np.testing.assert_allclose(np.array(got), np.array(want),
                                    rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("biased", [False, True])
+@pytest.mark.parametrize("rows", [1, 7])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16])
+def test_the_router_picks_the_ops_paths_experts(biased, rows, dtype):
+    mx.random.seed(4)
+    E, k, scale = 128, 8, 8.0
+    logits = mx.random.normal((1, rows, E)) * 3
+    bias = mx.random.normal((E,)) * 0.1 if biased else None
+    inds, weights = row_kernels.router(logits, bias, k, scale, dtype)
+    want_i, want_w = M._router(k, scale, biased, dtype)(logits, bias)
+    got_i, got_w = np.array(inds), _f32(weights)
+    want_i, want_w = np.array(want_i), _f32(want_w)
+    # Same experts and the weight of each; the kernel lists them by score.
+    for r in range(rows):
+        go, wo = np.argsort(got_i[0, r]), np.argsort(want_i[0, r])
+        np.testing.assert_array_equal(got_i[0, r][go], want_i[0, r][wo])
+        tol = 1e-6 if dtype == mx.float32 else 1e-2
+        np.testing.assert_allclose(got_w[0, r][go], want_w[0, r][wo],
+                                   rtol=tol, atol=tol)
+    sel = np.array(mx.sigmoid(logits)) + (np.array(bias) if biased else 0)
+    picked = np.take_along_axis(sel, got_i.astype(np.int64), -1)
+    assert (np.diff(picked, axis=-1) <= 0).all()
+
+
+def test_the_router_gradient_comes_from_the_ops_path():
+    mx.random.seed(5)
+    logits = mx.random.normal((1, 3, 128))
+    probe = mx.random.normal((1, 3, 8))
+
+    def loss(fn):
+        def run(x):
+            inds, w = fn(x)
+            order = mx.argsort(inds, axis=-1)  # compare in id order
+            return (mx.take_along_axis(w, order, axis=-1) * probe).sum()
+        return mx.grad(run)(logits)
+
+    got = loss(lambda x: row_kernels.router(x, None, 8, 8.0, mx.float32))
+    want = loss(lambda x: M._router(8, 8.0, False, mx.float32)(x, None))
+    np.testing.assert_allclose(np.array(got), np.array(want), rtol=1e-5,
+                               atol=1e-6)
