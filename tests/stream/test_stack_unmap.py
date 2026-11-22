@@ -9,6 +9,7 @@ from gmlx.load.transforms import split_fused_gate_up_kquant
 from gmlx.stream.feeder_common import FeederRange, feeder_ranges
 from gmlx.stream.prefetch import expert_offset_map
 from gmlx.stream.stack_unmap import (
+    SKIP_STAMP,
     STAMP,
     placeholder,
     stacks_remapped,
@@ -94,6 +95,40 @@ def test_unmap_and_remap_for_a_call(stack_gguf):
     # A module whose stacks were never unmapped: a no-op.
     with stacks_remapped(object()):
         pass
+
+
+def test_a_remap_maps_only_its_stacks_with_no_header_scan(
+        stack_gguf, monkeypatch):
+    # A fallback call runs once per MoE layer per token: a header scan per
+    # call re-parsed the whole tokenizer vocab each time.
+    path, raw = stack_gguf
+    mod = _Mod(kq.load_gguf(path, True)[0])
+    unmap_stacks(_layer(mod, path))
+    assert getattr(mod, SKIP_STAMP) == {path: ()}  # the file is all stacks
+
+    import gmlx.load.headerscan as headerscan
+
+    def no_scan(*a, **k):
+        raise AssertionError("header scanned per call")
+
+    monkeypatch.setattr(headerscan, "scan_gguf", no_scan)
+    real_load = kq.load_gguf
+    loads = []
+
+    def spy(p, zero_copy=True, skip=(), **kw):
+        loads.append(tuple(skip))
+        return real_load(p, zero_copy, list(skip), **kw)
+
+    monkeypatch.setattr(kq, "load_gguf", spy)
+    object.__setattr__(mod, SKIP_STAMP, {path: ("blk.0.ffn_gate_exps.weight",)})
+    files = dict(getattr(mod, STAMP))
+    del files["gate"]
+    object.__setattr__(mod, STAMP, files)
+    for _ in range(2):
+        with stacks_remapped(mod):
+            for k in ("up", "down"):
+                assert np.array_equal(np.array(_weights(mod)[k]), raw[k])
+    assert loads == [("blk.0.ffn_gate_exps.weight",)] * 2
 
 
 def test_unmap_refuses_an_offset_with_no_tensor(stack_gguf):

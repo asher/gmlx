@@ -28,6 +28,10 @@ from .feeder_common import ATTRS, swapped_weights
 # module attr: {kind: (path, name, shape, half)}, half 0 or 1 for a cut
 # of a fused gate_up tensor, else None.
 STAMP = "_kq_stacks_unmapped"
+# module attr: {path: tensor names a remap skips}, every tensor of the file
+# but the module's own stacks, so a fallback call maps only those and needs
+# no header scan of its own.
+SKIP_STAMP = "_kq_stacks_skip"
 
 
 def placeholder(w):
@@ -71,17 +75,27 @@ def unmap_stacks(layers: dict) -> tuple[int, int]:
             nbytes += nb
         for mod, files in stamps.values():
             object.__setattr__(mod, STAMP, files)
+            own: dict[str, set[str]] = {}
+            for path, name, _, _ in files.values():
+                own.setdefault(path, set()).add(name)
+            object.__setattr__(mod, SKIP_STAMP, {
+                path: tuple(n for n in names[path].values() if n not in mine)
+                for path, mine in own.items()})
         n_layers += 1
     return n_layers, nbytes
 
 
-def _remap(files: dict) -> dict:
+def _remap(files: dict, skips: dict | None = None) -> dict:
     import mlx_kquant as kq
 
     by_path: dict[str, dict] = {}
     views = {}
     for kind, (path, name, shape, half) in files.items():
         arrays = by_path.get(path)
+        if arrays is None and skips and path in skips:
+            # Skipping every other tensor also skips any table no array
+            # can hold, without a header scan per call.
+            arrays = by_path[path] = kq.load_gguf(path, True, skips[path])[0]
         if arrays is None:
             from .table_pread import oversize_names
 
@@ -115,5 +129,5 @@ def stacks_remapped(mod):
         yield
         return
     entry = {kind: (mod,) for kind in files}
-    with swapped_weights(entry, _remap(files)):
+    with swapped_weights(entry, _remap(files, getattr(mod, SKIP_STAMP, None))):
         yield
