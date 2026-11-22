@@ -543,7 +543,7 @@ def _mix_fn(ops, eps: float, n_blocks: int, dtype):
 
 def depth_mix(blocks, cur: mx.array, query: mx.array, eps: float, ops,
               dtype=mx.float32):
-    """``model.mix_rows`` in one dispatch: ``blocks`` rms-normed float32
+    """``model._mix_slab`` in one dispatch: ``blocks`` rms-normed float32
     [B, L, D] states, ``cur`` [B, L, D] (normed here), ``query`` [nq, D].
     Returns [nq, B, L, D] in ``dtype``. ``ops(blocks, cur, query)`` is the
     ops path ([B, L, nq, D] float32), which gives the gradient."""

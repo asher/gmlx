@@ -169,13 +169,20 @@ def depth_mix(blocks: List[mx.array], cur: mx.array,
     """Attention over depth: a softmax over ``blocks`` (already rms-normed,
     see ``push_block``) and the rms-normed ``cur``, with ``query`` rows
     [nq, D]. Returns [B, L, nq, D] float32."""
-    return mix_rows(blocks, cur, query, mx.float32).transpose(1, 2, 0, 3)
+    return _mix_slab(blocks, cur, query, mx.float32).transpose(1, 2, 0, 3)
 
 
 def mix_rows(blocks: List[mx.array], cur: mx.array, query: mx.array,
-             dtype) -> mx.array:
-    """``depth_mix`` query-major in ``dtype``: [nq, B, L, D], so each
-    query's rows are contiguous and ready for a projection."""
+             dtype) -> List[mx.array]:
+    """``depth_mix`` in ``dtype``, one contiguous [B, L, D] per query."""
+    slab = _mix_slab(blocks, cur, query, dtype)
+    # split views; an integer index would copy through a gather
+    return [r.squeeze(0) for r in mx.split(slab, slab.shape[0], axis=0)]
+
+
+def _mix_slab(blocks: List[mx.array], cur: mx.array, query: mx.array,
+              dtype) -> mx.array:
+    """``depth_mix`` query-major in ``dtype``: [nq, B, L, D]."""
     if row_kernels.mix_eligible(blocks, cur, query):
         return row_kernels.depth_mix(blocks, cur, query, _MIX_EPS, _depth_mix,
                                      dtype)
