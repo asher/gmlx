@@ -322,8 +322,8 @@ _SEED = (
          # The experts are NVFP4 in every file from IQ4_XS up; the names
          # describe the other layers. Q4_K_XL keeps those at Q8_0.
          tier_quants=(("high", "Q4_K_XL"),),
-         # IQ4_XS and Q4_K_M differ only outside the experts; no fastest
-         # pick until they are timed against each other.
+         # IQ4_XS decodes no faster than the balanced Q4_K_M: both keep
+         # the experts NVFP4. No fastest tier.
          skip_tiers=("fastest",),
          use="reasoning chat with images"),
     Seed("qwen3.8-27b", "Qwen3.8-27B", "unsloth/Qwen3.8-27B-GGUF", "high",
