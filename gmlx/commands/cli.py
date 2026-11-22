@@ -881,6 +881,24 @@ def _companion_drafter(gguf_path: str) -> str | None:
         return None
 
 
+def _images_draft(args) -> bool:
+    """Whether a drafted run takes this run's images as prompt rows: the
+    family places image rows at plain positions
+    (``IMAGE_ROW_DRAFT_MODEL_TYPES``) and no resize is asked for."""
+    if getattr(args, "resize_shape", None):
+        return False
+    try:
+        import gmlx.load.arch_table as arch_table
+        import gmlx.load.config_synth as config_synth
+        from gmlx.load.discovery import header_meta
+
+        arch = (header_meta(args.gguf) or {}).get("arch") or ""
+    except Exception:
+        return False
+    return (config_synth.GGUF_ARCH_TO_MODEL_TYPE.get(arch)
+            in arch_table.IMAGE_ROW_DRAFT_MODEL_TYPES)
+
+
 def _vlm_mtp_drafter_available(args) -> bool:
     """Whether a ``--mmproj`` (VLM) load should also build an MTP drafter so
     text-only requests take the fast path (image/audio requests stay on plain VLM).
@@ -2028,12 +2046,13 @@ def _run_vlm(args) -> int:
 
 
 def _run_vlm_mtp(args) -> int:
-    """Text-only MTP speculative decoding on a loaded VLM (gemma4 + assistant drafter).
+    """MTP speculative decoding on a loaded VLM (gemma4 + assistant drafter).
 
     A ``--mmproj`` VLM serves text-only requests in place: the request runs through
     mlx-vlm's MTP rounds (which only touch ``.language_model`` + caches), so it gets
-    the speculative speedup. Image/audio requests are routed to ``_run_vlm`` upstream;
-    the drafter is simply unused for those.
+    the speculative speedup. Speech clips, and images on families with plain image
+    positions (``_images_draft``), reach it as prompt rows. Other media requests are
+    routed to ``_run_vlm`` upstream; the drafter is unused for those.
     """
     from gmlx.tui.chat import (
         fold_thinking_flag,
@@ -2054,8 +2073,9 @@ def _run_vlm_mtp(args) -> int:
     template_kwargs = fold_thinking_flag(
         args, parse_template_config(args.chat_template_config))
     clips = speech_clips(args)
-    print("[mtp] VLM loaded, " + ("speech" if clips else "text-only")
-          + " request -> MTP speculative decoding")
+    images = _media_inputs(args)[0]
+    kind = "image" if images else "speech" if clips else "text-only"
+    print(f"[mtp] VLM loaded, {kind} request -> MTP speculative decoding")
     dropped = mtp_dropped_run_flags(args)
     if dropped:
         print(
@@ -2080,7 +2100,7 @@ def _run_vlm_mtp(args) -> int:
     _apply_placement(args, getattr(model, "language_model", model))
     print_family_note(args)
     prompt, rows = args.prompt, None
-    if clips:
+    if clips or images:
         from typing import Any, cast
 
         from gmlx._vendor.mlx_vlm.prompt_utils import apply_chat_template
@@ -2098,11 +2118,16 @@ def _run_vlm_mtp(args) -> int:
                         if args.system_prompt else [])
             messages.append({"role": "user", "content": prompt})
             prompt = cast(str, apply_chat_template(
-                processor, config, messages, num_audios=len(clips),
-                **template_kwargs))
-        prompt, rows = speech_prompt(model, cast(Any, processor), prompt, clips)
+                processor, config, messages, num_images=len(images),
+                num_audios=len(clips or ()), **template_kwargs))
+        if images:
+            prompt, rows = image_prompt(model, cast(Any, processor), prompt,
+                                        images)
+        else:
+            prompt, rows = speech_prompt(model, cast(Any, processor), prompt,
+                                         clips)
     print(
-        f"[generate] VLM {'speech' if clips else 'text-only'} MTP: "
+        f"[generate] VLM {kind} MTP: "
         f"max_tokens={max_tokens_label(args)} temp={args.temp}\n"
     )
     stats = generate_speculative(
@@ -2715,6 +2740,20 @@ def speech_prompt(model, processor, prompt: str, clips: list):
     return input_ids[0].tolist(), rows
 
 
+def image_prompt(model, processor, prompt: str, images: list):
+    """``(token ids, prompt rows)`` of a rendered prompt and its images:
+    the placeholders expanded and the vision rows placed in them."""
+    from gmlx._vendor.mlx_vlm.utils import prepare_inputs
+
+    inputs = prepare_inputs(processor, images=images, prompts=prompt)
+    input_ids = inputs["input_ids"]
+    data = {k: v for k, v in inputs.items()
+            if k not in ("input_ids", "pixel_values", "attention_mask")}
+    rows = model.get_input_embeddings(input_ids, inputs["pixel_values"],
+                                      **data).inputs_embeds
+    return input_ids[0].tolist(), rows
+
+
 def speech_audio(args) -> tuple[float, int] | None:
     """Seconds and audio tokens of a run's speech clips (``speech_clips``),
     else None."""
@@ -2829,8 +2868,9 @@ def _audio_prompt_ids(args, tok, companion: str, template_kwargs) -> list[int]:
 def _run_mode(args) -> str:
     """The path ``gmlx run`` dispatches to: ``speech`` (--speech-out),
     ``vlm_mtp`` (a --mmproj load
-    with no image, and no audio unless a speech encoder hears it, when a
-    drafter is available), ``vlm``,
+    with no image unless the family drafts on images (``_images_draft``),
+    and no audio unless a speech encoder hears it, when a drafter is
+    available), ``vlm``,
     ``bench_depths``, ``bench`` or ``generate``. ``gmlx chat`` without
     --mmproj is ``generate``."""
     if getattr(args, "mmproj", None):
@@ -2840,7 +2880,8 @@ def _run_mode(args) -> str:
         # A speech encoder's clips become prompt rows the drafted path
         # prefills too (speech_prompt).
         hears = not audios or is_speech_encoder(args.mmproj)
-        if not images and hears and _vlm_mtp_drafter_available(args):
+        if (hears and (not images or _images_draft(args))
+                and _vlm_mtp_drafter_available(args)):
             return "vlm_mtp"
         return "vlm"
     if getattr(args, "bench_depths", ""):
@@ -3204,7 +3245,7 @@ def _main(argv: list[str] | None, prog: str | None) -> int:
         # request through the MTP path when a drafter is available
         # (--draft-gguf companion, a native head, or an autodetected
         # companion for a companion-only family), else plain VLM
-        # generation. Image/audio -> VLM (the drafter idles that request).
+        # generation. Other media -> VLM (the drafter idles that request).
         # The pre-load wire check prices the drafter by the same rule.
         mode = _run_mode(args)
         if mode == "vlm_mtp":

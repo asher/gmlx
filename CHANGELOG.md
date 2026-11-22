@@ -6,6 +6,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `gmlx run` with `--image` on Inkling-2-Mini uses its drafter, as text
+  prompts do.
+
 ## [0.5.7] - 2026-11-21
 
 ### Added

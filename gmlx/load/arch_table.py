@@ -222,6 +222,12 @@ MTP_DRAFTER_ARCHES = {
 # companion stays explicit --draft-gguf, matching the text path's auto.
 MTP_COMPANION_AUTO_MODEL_TYPES = ("deepseek_v4", "qwen4_exp", "muse_glimmer")
 
+# model_types whose image rows take plain sequential positions and need no
+# layout kwargs, so a drafted ``gmlx run`` prefills an image prompt as
+# prompt rows. Families with multimodal rope or image attention masks keep
+# their image prompts on the plain VLM path there.
+IMAGE_ROW_DRAFT_MODEL_TYPES = ("inkling2",)
+
 
 # Speech companions: GGUF arches that transcribe audio for a text model, and
 # the text arches that pair with one, by the repo name of the companion's
