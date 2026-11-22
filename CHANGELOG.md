@@ -20,6 +20,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `gmlx serve model.gguf` runs with the in-memory prompt cache on, so a
   repeated prompt or the next turn skips prefill. `--no-prompt-cache` turns it off.
+- Requires mlx-kquant 0.5.13.
 
 ### Fixed
 
