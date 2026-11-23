@@ -1,11 +1,14 @@
-"""The opt-in expert store of the fused MoE block (GMLX_MOE_EXPERT_STORE).
+"""The expert store of the fused MoE block (GMLX_MOE_EXPERT_STORE), full
+by default for qwen4_exp and off for other models.
 
 Off, nothing is registered and the block reads its mapped stacks. Full, the
 load builds each block's store before anything wires the stacks, the module
 tree keeps placeholders of the same shape and byte count, the loader's
 dicts let the mapped arrays go, and the block serves every width from the
-store. A forward that needs the mapped stacks then raises, and a load over
-the wired budget builds no store. Real kq kernels on the GPU."""
+store. A forward that needs the mapped stacks then raises. A load over the
+wired budget, one that streams its experts, one on the CPU device and a
+training load build no store, and a block whose fold turns off at some
+width keeps its stacks. Real kq kernels on the GPU."""
 from __future__ import annotations
 
 import gc
@@ -418,15 +421,18 @@ def test_planes_lists_the_store_arrays_of_a_full_store(monkeypatch):
     assert not {id(a) for a in planes} & es.held(m)[1]
 
 
-def _stack_gguf(tmp_path, m, codec="q5_0"):
+def _stack_gguf(tmp_path, m, codec="q5_0", base=0, before=None):
     """The model's expert stacks as a GGUF with the routed-expert tensor
-    names, the codec's raw bytes."""
+    names, the codec's raw bytes, layer 0 at block ``base``; ``before``'s
+    stacks first, from block 0."""
     import gguf
 
     path = str(tmp_path / "stacks.gguf")
     w = gguf.GGUFWriter(path, "qwen3next")
     qt = getattr(gguf.GGMLQuantizationType, codec.upper())
-    for li, b in enumerate(m.layers):
+    blocks = ([] if before is None else list(enumerate(before.layers))) + [
+        (base + li, b) for li, b in enumerate(m.layers)]
+    for li, b in blocks:
         for kind in ("gate", "up", "down"):
             raw = np.array(getattr(b.switch_mlp, f"{kind}_proj").weight)
             w.add_tensor(f"blk.{li}.ffn_{kind}_exps.weight", raw,
@@ -459,6 +465,115 @@ def test_release_maps_the_stacks_back_for_a_mode_the_store_cannot_serve(
     # The in-place path again, bit for bit.
     assert np.array_equal(_f32(m(_x(6))), want)
     assert es.release(m, "again") == 0
+
+
+def test_an_adapter_release_maps_each_file_once_and_counts_the_stacks(
+        monkeypatch, tmp_path):
+    """An adapter on the shared experts of two store-only blocks maps the
+    file once for both; the stacks mapped again join the load's untracked
+    weight bytes, and the verify records that hold the planes go now."""
+    import mlx_kquant as kq
+
+    import gmlx.gen.prefill_decay as pd
+    import gmlx.models.qwen4_exp.model  # noqa: F401  (the records' owner)
+
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    m = _model()
+    path = _stack_gguf(tmp_path, m)
+    assert es.build_at_load(m, paths=[path], log=lambda s: None) == 2
+    key = (path,)
+    object.__setattr__(m, "_kq_weights_key", key)
+    monkeypatch.setattr(pd, "_UNTRACKED_WEIGHTS", {key: 1000.0})
+    object.__setattr__(m.layers[1], "_verify_fused", (0, {"k": "plain"}, []))
+    maps = []
+    real = kq.load_gguf
+    monkeypatch.setattr(kq, "load_gguf",
+                        lambda p, *a: maps.append(p) or real(p, *a))
+    modules._stamp_gate_slots(
+        dict(m.named_modules()),
+        [f"layers.{i}.shared_expert.gate_proj" for i in (0, 1)], 0)
+    assert maps == [path]
+    assert all(b.__dict__["_kq_lora_slots"] == (0,) for b in m.layers)
+    assert pd.untracked_weight_bytes_for(key) == 1000 + sum(
+        a.nbytes for a in _stacks(m))
+    assert vars(m.layers[1])["_verify_fused"] == (-1, {}, [])
+
+
+def test_a_drafter_reads_and_maps_back_its_own_block(monkeypatch, tmp_path):
+    """An MTP drafter's layer 0 is block num_hidden_layers of its sidecar,
+    which also holds the target's blocks from 0: the store reads the
+    drafter's block from the file and maps that block back."""
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    target = _model(seed=40)
+    es._BLOCKS.clear()
+    m = _model()
+    raw = [np.array(a) for a in _stacks(m)]
+    object.__setattr__(m, "_kq_store_blk_base", 2)
+    path = _stack_gguf(tmp_path, m, base=2, before=target)
+    assert es.build_at_load(m, paths=[path], log=lambda s: None) == 2
+    assert es.STATS["mapped"] == 0
+    assert es.release(m, "this load streams its experts",
+                      log=lambda s: None) == 2
+    for a, r in zip(_stacks(m), raw, strict=True):
+        assert np.array_equal(np.array(a), r)
+
+
+@pytest.mark.parametrize("how", ["flag", "memory"])
+def test_a_load_that_streams_its_experts_builds_no_store(
+        monkeypatch, tmp_path, how):
+    import gmlx.stream.table_stream as ts
+
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    m = _model()
+    path = _stack_gguf(tmp_path, m)
+    assert es.stored_file_ranges([path])
+    if how == "flag":
+        monkeypatch.setattr(ts, "_FORCED", True)
+    else:
+        monkeypatch.setattr(ts, "_EXPERTS_FOR_MEMORY", {})
+        ts.stream_experts_for_memory(path, "unwired")
+    assert es.stored_file_ranges([path]) == {}
+    lines = []
+    assert es.build_at_load(m, paths=[path], log=lines.append) == 0
+    assert any("streams its experts" in line for line in lines)
+    assert es.held(m) == (0, set())
+
+
+def test_a_training_or_cpu_load_builds_no_store(monkeypatch):
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    with es.off("training"):
+        m = _model()
+        assert es.build_at_load(m, log=lambda s: None) == 0
+    assert not es._BLOCKS and es.held(m) == (0, set())
+    m = _model()
+    mx.set_default_device(mx.cpu)
+    try:
+        assert es.build_at_load(m, log=lambda s: None) == 0
+    finally:
+        mx.set_default_device(mx.gpu)
+    assert es.held(m) == (0, set())
+
+
+def test_a_block_whose_fold_turns_off_keeps_its_stacks(monkeypatch):
+    """A split-codec block skips the fold at 2 and 3 rows and runs its
+    members there, on the mapped stacks: no store for it."""
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    m = _model()
+    object.__setattr__(m.layers[0], "_kq_fold_skip_t", (2, 3))
+    assert es.build_at_load(m, log=lambda s: None) == 1
+    assert not m.layers[0].__dict__.get("_kq_store_only")
+    assert m.layers[1].__dict__.get("_kq_store_only")
+    mx.eval(m(_x(2)), m(_x(3)), m(_x(5)))
+
+
+def test_a_second_load_gets_its_bounded_store(monkeypatch):
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "0.001")
+    first = _model()
+    mx.eval(first(_x(4)))
+    assert first.layers[0].__dict__.get("_kq_expert_store") is not None
+    m = _model(seed=3)
+    mx.eval(m(_x(4)))
+    assert m.layers[0].__dict__.get("_kq_expert_store") is not None
 
 
 def test_release_without_the_shard_paths_raises(monkeypatch):

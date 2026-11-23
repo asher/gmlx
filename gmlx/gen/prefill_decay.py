@@ -767,6 +767,17 @@ def deduct_untracked_weights(nbytes: float, key: object) -> None:
         _deduct_locked(nbytes, key)
 
 
+def add_untracked_weights(nbytes: float, key: object) -> None:
+    """Grow ``key``'s registration by ``nbytes``: weights its load held as
+    tracked copies and has since mapped from the file again (an expert
+    store let go). A key with no registration is left alone."""
+    if key is None or nbytes <= 0:
+        return
+    with _UNTRACKED_LOCK:
+        if key in _UNTRACKED_WEIGHTS:
+            _UNTRACKED_WEIGHTS[key] += float(nbytes)
+
+
 def _deduct_locked(nbytes: float, key: object) -> None:
     if nbytes > 0 and key in _UNTRACKED_WEIGHTS:
         _UNTRACKED_WEIGHTS[key] = max(

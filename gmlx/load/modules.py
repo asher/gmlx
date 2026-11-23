@@ -2965,10 +2965,10 @@ def _lora_container_blocked(*mods) -> str | None:
     return None
 
 
-def _stamp_gate_slots(by_path: dict, paths, slot: int) -> None:
-    """Record ``slot`` on the nearest ancestor of each path whose class
-    names the child the path runs through in ``_kq_lora_gate``, so its
-    fused path can tell when an adapted member has a slot on."""
+def _gate_owners(by_path: dict, paths) -> list:
+    """The nearest ancestor of each path whose class names the child the
+    path runs through in ``_kq_lora_gate``, once each."""
+    out: dict = {}
     for path in paths:
         parts = path.split(".")
         for i in range(len(parts) - 1, -1, -1):
@@ -2977,14 +2977,31 @@ def _stamp_gate_slots(by_path: dict, paths, slot: int) -> None:
             if gate is None:
                 continue
             if parts[i] in gate:
-                if owner.__dict__.get("_kq_store_only"):
-                    # An adapted member needs the block's mapped stacks.
-                    expert_store.release_blocks(
-                        [owner], "an adapter is attached to this block")
-                slots = set(owner.__dict__.get("_kq_lora_slots", ()))
-                slots.add(int(slot))
-                object.__setattr__(owner, "_kq_lora_slots", tuple(sorted(slots)))
+                out[id(owner)] = owner
             break
+    return list(out.values())
+
+
+def _release_stores(by_path: dict, paths) -> None:
+    """Map the expert stacks back on the store-only blocks ``paths`` run
+    through, in one release: an adapted member needs them, and one release
+    maps each shard once."""
+    owners = [o for o in _gate_owners(by_path, paths)
+              if o.__dict__.get("_kq_store_only")]
+    if owners:
+        expert_store.release_blocks(
+            owners, "an adapter is attached to this block")
+
+
+def _stamp_gate_slots(by_path: dict, paths, slot: int) -> None:
+    """Record ``slot`` on the nearest ancestor of each path whose class
+    names the child the path runs through in ``_kq_lora_gate``, so its
+    fused path can tell when an adapted member has a slot on."""
+    _release_stores(by_path, paths)
+    for owner in _gate_owners(by_path, paths):
+        slots = set(owner.__dict__.get("_kq_lora_slots", ()))
+        slots.add(int(slot))
+        object.__setattr__(owner, "_kq_lora_slots", tuple(sorted(slots)))
 
 
 def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
@@ -2995,6 +3012,7 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
     lin_types, glu_types = switch_layer_types()
     by_path = dict(model.named_modules())
     classes: dict = {}
+    _release_stores(by_path, list(targets))
     for path, lm in targets.items():
         leaf = by_path.get(path)
         if leaf is None:

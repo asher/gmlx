@@ -62,6 +62,7 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     from gmlx._vendor.mlx_lm.tuner.trainer import TrainingArgs, train
 
     import gmlx.load.loadlog as loadlog
+    from gmlx.load import expert_store
     from gmlx.load.adapter import base_tensor_names, refusal_summary
     from gmlx.load.loader import load_model
     from gmlx.load.preflight import preflight
@@ -74,7 +75,8 @@ def train_lora(gguf_path: str, data: str, out_path: str, *, iters: int = 150,
     mx.random.seed(seed)
     base_arch = preflight(gguf_path, hf_source=hf_source).arch
     base_names = base_tensor_names(gguf_path)
-    with loadlog.load_ui(False, gguf_path):
+    # Training runs the experts' own forwards, on the mapped stacks.
+    with loadlog.load_ui(False, gguf_path), expert_store.off("training"):
         model, config, tokenizer = load_model(gguf_path, hf_source=hf_source)
 
     prepare_lora_student(model, rank=rank, scale=scale, dropout=dropout,

@@ -30,7 +30,10 @@ GMLX_MOE_EXPERT_STORE_GLU_ROWS rows up (default 8: below that the in-place
 GLU is the faster one on M5 Max); other widths keep the in-place kernels.
 GMLX_MOE_EXPERT_STORE_BLOCKS=N builds the stores of the first N blocks only.
 A block whose codecs have no store format, a block with a LoRA slot on,
-output scales or streamed experts keeps the in-place kernels.
+output scales, streamed experts or a shared expert that leaves the fold at
+some width keeps the in-place kernels. A load inside ``off`` (training, a
+streamed teacher), one that streams its experts, runs on the CPU device or
+is sharded builds no store.
 
 A full or down store is built at load, one block at a time, before anything reads
 or wires the mapped stacks: each stack is read from the file past the page
@@ -42,12 +45,15 @@ built at the first forward of any block.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 import re
 import sys
 import threading
 import time
 import weakref
+from typing import Callable, cast
 
 import mlx.core as mx
 import mlx_kquant as kq
@@ -85,9 +91,28 @@ def model_type_of(model):
     return None
 
 
+_OFF: contextvars.ContextVar = contextvars.ContextVar(
+    "gmlx_expert_store_off", default=None)
+
+
+@contextlib.contextmanager
+def off(reason: str):
+    """No store for the loads inside: their blocks keep the mapped expert
+    stacks, for a mode the store cannot serve (training, streamed
+    experts). ``reason`` says which."""
+    tok = _OFF.set(reason)
+    try:
+        yield
+    finally:
+        _OFF.reset(tok)
+
+
 def store_mode(model_type=None):
     """None when off, ("full", 0), ("down", 0) or ("cap", bytes). With the
-    variable unset, full for a model type in _DEFAULT_FULL, else off."""
+    variable unset, full for a model type in _DEFAULT_FULL, else off.
+    Inside ``off``, None."""
+    if _OFF.get() is not None:
+        return None
     raw = os.environ.get("GMLX_MOE_EXPERT_STORE")
     if raw is None:
         return ("full", 0) if model_type in _DEFAULT_FULL else None
@@ -146,6 +171,8 @@ def register(block, model_type=None) -> None:
     store is built later."""
     if store_mode(model_type) is not None and hasattr(kq, "moe_store_pack"):
         _BLOCKS.append(weakref.ref(block))
+        # A bounded store of this load is built at its first forward too.
+        _BUILT[0] = False
 
 
 def _projs(block):
@@ -155,6 +182,11 @@ def _projs(block):
 
 def _eligible(block, kind: str = "full") -> bool:
     if block.__dict__.get("_kq_lora_slots") is not None:
+        return False
+    if kind != "cap" and (not getattr(block, "_kq_shexp_fold", True)
+                          or getattr(block, "_kq_fold_skip_t", ())):
+        # Where the fold is off the block runs its members on the mapped
+        # stacks, which a full or down store lets go.
         return False
     projs = _projs(block)
     if projs is None:
@@ -260,6 +292,7 @@ def _pack_block(b, ids, slots, kind, lo, hi, glo, src=None):
         st.seg = (wg.kquant_type, wd.kquant_type, int(wg.weight.shape[0]),
                   int(wg.weight.shape[1]), int(wd.weight.shape[1]))
     old = ()
+    holders: list = []
     if kind == "full":
         from gmlx.stream.stack_unmap import placeholder
 
@@ -320,8 +353,8 @@ def _stream_bound(model) -> bool:
         budget = int(0.9 * metal_value("max_recommended_working_set_size"))
     except Exception:
         return False
-    total = sum(a.nbytes for _, a in tree_flatten(model.parameters()))
-    return total > budget
+    flat = cast(list[tuple[str, mx.array]], tree_flatten(model.parameters()))
+    return sum(a.nbytes for _, a in flat) > budget
 
 
 # msync(2) flag on Darwin.
@@ -518,6 +551,30 @@ def _layer_index(name: str):
     return int(m.group(1)) if m else None
 
 
+def _blk(model, li):
+    """The GGUF block number of ``model``'s layer ``li``. An MTP drafter
+    sets ``_kq_store_blk_base``: its layer 0 is block num_hidden_layers of
+    a NextN sidecar, and None for a file with no block names."""
+    base = getattr(model, "_kq_store_blk_base", 0)
+    return None if li is None or base is None else li + base
+
+
+def _off_reason(paths=None, blocks=()) -> str:
+    """Why a load of ``paths`` builds no full or down store, or empty."""
+    from gmlx.device import cpu_default_device
+    from gmlx.stream.table_stream import experts_stream_for_memory, latched
+
+    if latched():
+        return "the load streams its experts"
+    if paths and experts_stream_for_memory(paths[0]):
+        return "the check before the load streams its experts"
+    if cpu_default_device():
+        return "the default device is the CPU"
+    if any(getattr(b, "sharding_group", None) is not None for b in blocks):
+        return "the model is sharded"
+    return ""
+
+
 def stored_file_ranges(paths) -> dict:
     """The byte ranges, by real shard path, of the expert stacks a full
     or down store will hold in place of the mapped tensors: the page-cache
@@ -535,7 +592,7 @@ def stored_file_ranges(paths) -> dict:
                              array_limit=0).kv.get("general.architecture")
             mode = store_mode(next((t for t, a in _DEFAULT_FULL.items()
                                     if a == arch), None))
-        if mode is None or mode[0] not in ("full", "down"):
+        if mode is None or mode[0] not in ("full", "down") or _off_reason(paths):
             return {}
         n_blocks = env_int("GMLX_MOE_EXPERT_STORE_BLOCKS", 0)
         layers: dict = {}
@@ -548,16 +605,19 @@ def stored_file_ranges(paths) -> dict:
                         (path, scan.data_offset + t.offset, t.nbytes,
                          m.group(2), t.type_name.lower()))
         out: dict = {}
-        for n, li in enumerate(sorted(layers)):
+        n = 0
+        for li in sorted(layers):
             rs = layers[li]
-            if n_blocks > 0 and n >= n_blocks:
-                break
             if sorted(r[3] for r in rs) != ["down", "gate", "up"]:
                 continue
             if mode[0] == "down":
                 rs = [r for r in rs if r[3] == "down"]
             if not all(kq.moe_store_supported(r[4], "") for r in rs):
                 continue
+            # As build_at_load counts the lever: the blocks it stores.
+            if n_blocks > 0 and n >= n_blocks:
+                break
+            n += 1
             for path, off, nbytes, _, _ in rs:
                 out.setdefault(os.path.realpath(path), []).append(
                     (off, off + nbytes))
@@ -576,8 +636,8 @@ def _act_dtypes(model) -> list:
     bfloat16)."""
     from mlx.utils import tree_flatten
 
-    seen = {p.dtype for _, p in tree_flatten(model.parameters())
-            if p.dtype in (mx.bfloat16, mx.float16)}
+    flat = cast(list[tuple[str, mx.array]], tree_flatten(model.parameters()))
+    seen = {p.dtype for _, p in flat if p.dtype in (mx.bfloat16, mx.float16)}
     seen.add(mx.bfloat16)
     return sorted(seen, key=str)
 
@@ -593,7 +653,10 @@ def warm_kernels(blocks, dtypes, *, log=None, kind="full"):
         return None
     sigs = []
     for b in blocks:
-        wg, _, wd, sg, _, sd = _projs(b)
+        projs = _projs(b)
+        if projs is None:
+            continue
+        wg, _, wd, sg, _, sd = projs
         # A down store has no GLU kernels: empty names skip them.
         sig = (wg.kquant_type if kind == "full" else "",
                sg.kquant_type if kind == "full" else "", wd.kquant_type,
@@ -657,6 +720,11 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
     names = {id(m): name for name, m in model.named_modules()}
     todo.sort(key=lambda b: (_layer_index(names.get(id(b), "")) is None,
                              _layer_index(names.get(id(b), "")) or 0))
+    why = _off_reason(paths, todo)
+    if why:
+        say(f"[expert-store] off for this load: {why}")
+        _forget(todo)
+        return 0
     if _stream_bound(model):
         say("[expert-store] off for this load: the model is over the wired "
             "budget and streams its experts from the file")
@@ -694,7 +762,7 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
             n_exp = ws[0].shape[0]
             ids = np.arange(n_exp, dtype=np.uint32)
             src = None
-            li = _layer_index(names.get(id(b), ""))
+            li = _blk(model, _layer_index(names.get(id(b), "")))
             if files is not None and li is not None:
                 src = files.read(li, ws, kinds)
             if src is None:
@@ -776,8 +844,10 @@ def release_blocks(blocks, reason: str, *, log=None) -> int:
     """Put the mapped expert stacks back on store-only ``blocks`` and drop
     their stores, for a mode the store cannot serve (streamed experts, an
     adapter on an expert stack): the mode works as with the lever off. The
-    stacks are mapped again from the load's shards, zero copy. Raises when
-    the store was built without the shard paths. Returns the blocks
+    stacks are mapped again from the load's shards, zero copy, each shard
+    once per call, and join the load's untracked weight bytes; the
+    recorded verify graphs that hold the planes go now. Raises when the
+    store was built without the shard paths. Returns the blocks
     released."""
     blocks = [b for b in blocks if b.__dict__.get("_kq_store_only")]
     if not blocks:
@@ -811,12 +881,14 @@ def release_blocks(blocks, reason: str, *, log=None) -> int:
     models: dict = {}
     for name, (b, kind, _) in want.items():
         proj = getattr(b.switch_mlp, f"{kind}_proj")
-        w = got[name]
-        if w.nbytes != proj.weight.nbytes:
+        if got[name].nbytes != proj.weight.nbytes:
             raise RuntimeError(
                 f"GMLX_MOE_EXPERT_STORE=full: {reason}, and {name} does not "
                 "match the stack the store was built from")
-        proj.weight = w.reshape(proj.weight.shape)
+    for name, (b, kind, _) in want.items():
+        proj = getattr(b.switch_mlp, f"{kind}_proj")
+        proj.weight = got[name].reshape(proj.weight.shape)
+    mapped: dict = {}
     for b in blocks:
         st = b.__dict__.pop("_kq_expert_store", None)
         b.__dict__.pop("_kq_store_only", None)
@@ -831,6 +903,11 @@ def release_blocks(blocks, reason: str, *, log=None) -> int:
         m = mref() if mref is not None else None
         if m is not None:
             models[id(m)] = m
+            kinds = getattr(st, "kinds", ("gate", "up", "down"))
+            mapped[id(m)] = mapped.get(id(m), 0) + sum(
+                p.weight.nbytes for k, p in zip(
+                    ("gate", "up", "down"), _member_projs(b), strict=True)
+                if k in kinds)
         if st is not None:
             for ps in (st.g, st.u, st.d):
                 for a in ps:
@@ -839,17 +916,37 @@ def release_blocks(blocks, reason: str, *, log=None) -> int:
                         kq.residency_erase(a)
     if gone and hasattr(kq, "residency_commit"):
         kq.residency_commit()
+    from gmlx.gen.prefill_decay import add_untracked_weights
+
+    ids = {id(b) for b in blocks}
     for m in models.values():
         held_list = m.__dict__.get("_kq_resident_arrays")
         if held_list:
             held_list[:] = [a for a in held_list if id(a) not in gone]
-    ids = {id(b) for b in blocks}
+        # The load counted the store as tracked memory; the stacks mapped
+        # again are views MLX does not count.
+        add_untracked_weights(mapped[id(m)],
+                              getattr(m, "_kq_weights_key", None))
+        _drop_verify_records(m, ids)
     _DONE[:] = [r for r in _DONE if r() is not None and id(r()) not in ids]
     mx.clear_cache()
     (log or print)(
         f"[expert-store] released on {len(blocks)} blocks: {reason}; their "
         "experts are read in place from the file")
     return len(blocks)
+
+
+def _drop_verify_records(model, block_ids) -> None:
+    """Release now the recorded verify graphs (qwen4_exp) of the layers
+    that hold the blocks ``block_ids``: they keep the planes as
+    constants, and their next use would drop them only then."""
+    q4 = sys.modules.get("gmlx.models.qwen4_exp.model")
+    if q4 is None:
+        return
+    layers = [m for _, m in model.named_modules()
+              if "_verify_fused" in vars(m)
+              and any(id(s) in block_ids for s in m.modules())]
+    q4.drop_verify_records(layers)
 
 
 def planes(model) -> list:
@@ -894,7 +991,9 @@ def _build_all() -> None:
     _BUILT[0] = True
     mode = store_mode()
     blocks = [b for b in (r() for r in _BLOCKS) if b is not None]
-    todo = [(i, b) for i, b in enumerate(blocks) if _eligible(b)]
+    # A load after the first build adds its blocks; the built keep theirs.
+    todo = [(i, b) for i, b in enumerate(blocks) if _eligible(b, "cap")
+            and b.__dict__.get("_kq_expert_store") is None]
     if mode is None or not todo:
         return
     kind, cap = mode
@@ -1058,7 +1157,7 @@ _WIDE_COMBINE_SRC = """
     for (uint i = 1; i < n; ++i) total = lanes[i] + total;
     out[size_t(t) * D + d] = total;
 """
-_wide_combine_kernel = None
+_wide_combine_kernel: Callable[..., list[mx.array]] | None = None
 
 
 def _wide_combine_on() -> bool:
@@ -1070,9 +1169,9 @@ def wide_combine(y, order, scores):
     argsort that sorted them) mixed by scores ``[t, k]`` of y's dtype."""
     global _wide_combine_kernel
     if _wide_combine_kernel is None:
-        _wide_combine_kernel = mx.fast.metal_kernel(
+        _wide_combine_kernel = cast(Callable[..., list[mx.array]], mx.fast.metal_kernel(
             name="moe_wide_combine", input_names=["y", "inv", "s"],
-            output_names=["out"], source=_WIDE_COMBINE_SRC)
+            output_names=["out"], source=_WIDE_COMBINE_SRC))
     t, k = scores.shape
     pairs = t * k
     inv = mx.put_along_axis(

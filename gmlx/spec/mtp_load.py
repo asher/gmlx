@@ -941,6 +941,11 @@ def _load_qwen4exp_mtp_drafter(
         d_weights, d_meta, d_stats = remap_qwen4exp_mtp_arrays(
             arrays, kquant_meta)
     log(f"[mtp] drafter remap: {d_stats}")
+    # The file's block of the drafter's layer 0, for an expert store's
+    # reads and remaps (gmlx.load.expert_store): the sidecar's block
+    # num_hidden_layers; the companion names no blocks.
+    object.__setattr__(drafter, "_kq_store_blk_base",
+                       first_block if sidecar else None)
     _install_and_load(
         drafter,
         d_weights,
