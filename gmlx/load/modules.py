@@ -255,7 +255,9 @@ def _kq_row_floor(glu, k: int, d_in: int, caps=None) -> int:
     kernels gives each row the same GLU bits at every width, and one row is
     enough when the down codec is on them too."""
     gate = glu.gate_proj.kquant_type
-    if caps is not None and caps.qf_codec(gate):
+    # A gate and up pair in two codecs never runs the qf kernels.
+    if (caps is not None and caps.qf_codec(gate)
+            and glu.up_proj.kquant_type == gate):
         return 1 if caps.qf_codec(glu.down_proj.kquant_type) else 2
     floor = 2
     n = glu.gate_proj.weight.shape[1]
@@ -284,6 +286,9 @@ class _FusedMoeCaps:
                          and hasattr(kq, "gather_qmv_bias"))
         self.has_kq_fused = hasattr(kq, "moe_glu_gather_kq")
         _, self.glu_types = switch_layer_types()
+        # Gate and up stacks in different codecs: kq builds that list the
+        # pair run them in one fused gather (up_kquant_type).
+        self._glu_pair = getattr(kq, "moe_glu_pair_has_kernel", None)
 
         codecs = (
             "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q8_0",
@@ -386,6 +391,18 @@ class _FusedMoeCaps:
         self.glue_parts = env_int("GMLX_FUSED_MOE_GLUE_PARTS", 0)
         # Bit-identical add + two norms in one dispatch (norm handoff).
         self.has_norm_handoff = hasattr(kq, "add_rmsnorm_norm")
+
+    def glu_pair_ok(self, gate, up, shexp_gate="", shexp_up="",
+                    shared_slots=1) -> bool:
+        """Whether the kq build fuses a gate stack in ``gate`` with an up
+        stack in ``up`` (and the shared expert's codecs, when given)."""
+        if self._glu_pair is None:
+            return False
+        try:
+            return bool(self._glu_pair(gate, up, shexp_gate, shexp_up,
+                                       shared_slots=shared_slots))
+        except (TypeError, ValueError):
+            return False
 
     def qf_codec(self, codec) -> bool:
         """Whether kq runs ``codec``'s fused gathers on its qf kernels;
@@ -800,8 +817,9 @@ def _eligible_kquant_glu(m, caps):
             return False
         if proj.weight.shape[1] % 8:
             return False
-    # one dispatch fuses gate+up: they must share a codec (down may differ)
-    return m.gate_proj.kquant_type == m.up_proj.kquant_type
+    # one dispatch fuses gate+up: one codec, or a pair the build lists
+    gate, up = m.gate_proj.kquant_type, m.up_proj.kquant_type
+    return gate == up or caps.glu_pair_ok(gate, up)
 
 
 def _make_fused_kquant(base_cls, caps):
@@ -901,6 +919,8 @@ def _make_fused_kquant(base_cls, caps):
                 akw["alpha"] = self._kq_glu_alpha
                 akw["gate_bias"] = self._kq_bias32("_kq_gb32", gate)
                 akw["up_bias"] = self._kq_bias32("_kq_ub32", up)
+            ukw = ({"up_kquant_type": up.kquant_type}
+                   if up.kquant_type != gate.kquant_type else {})
             se = self._kq_shexp_projs() if scores is not None else None
             if se is not None:
                 sg, su, _ = se
@@ -909,12 +929,12 @@ def _make_fused_kquant(base_cls, caps):
                 return kq.moe_glu_gather_shexp_kq(
                     x.reshape(t, d_in), gate.weight, up.weight,
                     sg.weight, su.weight,
-                    gate.kquant_type, idx, **akw, **skw,
+                    gate.kquant_type, idx, **akw, **skw, **ukw,
                     **_glu_scale_kw(self, gate, up, (sg, su)))
             return kq.moe_glu_gather_kq(
                 x.reshape(t, d_in),
                 gate.weight, up.weight,
-                gate.kquant_type, idx, **akw,
+                gate.kquant_type, idx, **akw, **ukw,
                 **_glu_scale_kw(self, gate, up))
 
         def _fused_down(self, h, idx, scores=None, lora=None):
@@ -1168,7 +1188,7 @@ def _install_gateup_concat(m, budget_bytes) -> int:
     writes the real weights, so an install-time concat freezes the ctor
     placeholders (live bug: the fused path multiplied against zeros).
     Eligibility beyond _eligible_kquant_glu: gate/up must be
-    shape-identical (same codec is already guaranteed) and the copy must
+    shape-identical (so one codec) and the copy must
     fit the remaining budget (returned decremented) -- expert-heavy
     models would otherwise double most of their resident weight bytes."""
     gate, up = m.gate_proj, m.up_proj
@@ -1658,6 +1678,13 @@ def _shexp_fold_ok(sw, se, caps):
     # the gathers as k slots, where the kq build has those kernels.
     k = se.gate_proj.weight.shape[0] // inter
     if k < 1 or se.gate_proj.weight.shape[0] != k * inter:
+        return False
+    # Routed gate and up in different codecs: the build lists the pair
+    # with this shared expert.
+    if (sw.gate_proj.kquant_type != sw.up_proj.kquant_type
+            and not caps.glu_pair_ok(
+                sw.gate_proj.kquant_type, sw.up_proj.kquant_type,
+                se.gate_proj.kquant_type, se.up_proj.kquant_type, k)):
         return False
     for proj, stack in ((se.gate_proj, sw.gate_proj),
                         (se.up_proj, sw.up_proj),
