@@ -17,7 +17,7 @@ import mlx.core as mx
 import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.cache.media_salt import as_salt
-from gmlx.envflags import env_bool, env_int
+from gmlx.envflags import env_bool, env_int, env_value
 from gmlx.gen import deferred_clear
 from gmlx.serve.short_rows import all_short_lived
 from gmlx.spec.ckpt import (
@@ -105,7 +105,8 @@ _APC_LONGER = env_bool("GMLX_SPEC_APC_LONGER", False)
 # token too and its row gives the first token's logits, so no one-row
 # forward follows the chunks. 0: the last token runs alone. Unset: on for
 # a target that sets prefill_last_in_chunk, off for the rest.
-_LAST_IN_CHUNK = env_bool("GMLX_SPEC_LAST_IN_CHUNK", None)
+_LAST_IN_CHUNK = (env_bool("GMLX_SPEC_LAST_IN_CHUNK", False)
+                  if env_value("GMLX_SPEC_LAST_IN_CHUNK") is not None else None)
 
 # GMLX_SPEC_L0_AFTER_FIRST: where the last chunk ran the last token, the
 # prompt's first-level cache entry is stored once the serve step has
@@ -410,6 +411,15 @@ def _mtp_prefill_init(batch) -> None:
         _trim_prompt_columns(batch, restored)
         batch._processed_prompt_columns = restored
         batch._mtp_apc_prefix_len = restored
+
+
+def _store_after_clear(job) -> None:
+    """Run a store that copies the prompt's KV, after the clear the last
+    prefill chunk left waiting (gmlx.gen.deferred_clear): the copy then
+    takes memory the chunk's freed buffers gave back, not memory beside
+    them."""
+    deferred_clear.run()
+    job()
 
 
 def _l0_store_job(batch):
@@ -1002,7 +1012,7 @@ def install_full_prompt_mtp_prefill() -> None:
 
                     l0_queue = step_end_queue()
                 if l0_job is not None and l0_queue is None:
-                    l0_job()
+                    _store_after_clear(l0_job)
             except Exception:
                 _log.warning("APC store failed; continuing", exc_info=True)
         result = _orig_generate(
@@ -1018,7 +1028,7 @@ def install_full_prompt_mtp_prefill() -> None:
 
             def l0_after_first():
                 with mx.stream(stream):
-                    l0_job()
+                    _store_after_clear(l0_job)
 
             l0_queue.append(l0_after_first)
         from gmlx._vendor.mlx_vlm.generate.ar import SpeculativeGenerationBatch

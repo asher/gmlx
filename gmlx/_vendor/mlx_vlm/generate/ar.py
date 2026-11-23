@@ -74,6 +74,8 @@ from gmlx.serve import short_rows as _short_rows
 # gmlx: what the process held before each clear prices the next count of
 # memory wired outside it.
 from gmlx.serve.capacity import note_own_before_clear as _note_own_before_clear
+# gmlx: GMLX_SPEC_KEEP_BUFFERS reads as gmlx.spec.speculative reads it.
+from gmlx.envflags import env_bool as _env_bool
 # gmlx: a streamed lookup table's rows for the chunk are read into the page
 # cache beside its forward.
 from gmlx.stream.table_readahead import plan_rows_ahead as _plan_rows_ahead
@@ -3752,7 +3754,7 @@ class BatchGenerator:
             self._extend_generation_batch(gen_batch)
             self._prompt_batch = None
             generation_responses = [*generation_responses, *self._kq_first_now(alone)]
-            if os.environ.get("GMLX_SPEC_KEEP_BUFFERS") != "1":
+            if not _env_bool("GMLX_SPEC_KEEP_BUFFERS", False):
                 # gmlx: a clear the last chunk left for the first decode
                 # round frees the same buffers there, after the first
                 # token is out (gmlx.gen.deferred_clear). A batch that
@@ -3813,7 +3815,7 @@ class BatchGenerator:
                     self._prompt_batch = None
                     generation_responses = [
                         *generation_responses, *self._kq_first_now(alone)]
-                    if os.environ.get("GMLX_SPEC_KEEP_BUFFERS") != "1":
+                    if not _env_bool("GMLX_SPEC_KEEP_BUFFERS", False):
                         # gmlx: book what the process held before the clear.
                         _note_own_before_clear()
                         mx.clear_cache()

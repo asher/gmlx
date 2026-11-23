@@ -557,6 +557,8 @@ def _hold(monkeypatch, key):
         ran.set()
 
     monkeypatch.setattr(spec, "_round_log_note", lambda note: None)
+    # The worker thread runs a store this test thread holds for it.
+    monkeypatch.setattr(spec, "_owner", lambda: "worker")
     monkeypatch.setattr(spec, "_held_stores", [spec._HeldStore(job, key, 0)])
     return order, ran
 

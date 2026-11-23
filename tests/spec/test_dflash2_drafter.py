@@ -750,6 +750,26 @@ def test_sampled_block_stashes_the_rows_it_drew_from(monkeypatch, on, scored):
         assert (q > 0).sum() <= 4
 
 
+@_NEEDS_GPU
+def test_a_block_the_logs_record_is_not_cut():
+    """The walk that feeds the p/q and top-2 logs has no test of a cut
+    draft, so a block it records keeps every draft: a cut on the draft's
+    own pick would bias the token at the cut."""
+    lm = _target()
+    drafter = _drafter(lm, window=8, top_k=4)
+    _inject(drafter, 12, seed=1)
+    object.__setattr__(drafter, "row_floor", 0.999)
+    mx.random.seed(3)
+    plain = drafter.draft_block(3, None, None, BLOCK, None, greedy=False,
+                                stash=DraftStash(q=[]))
+    assert plain.shape[1] < BLOCK - 1
+    for logged in (DraftStash(q=[], pq=[]), DraftStash(q=[], top2=[])):
+        mx.random.seed(3)
+        toks = drafter.draft_block(3, None, None, BLOCK, None, greedy=False,
+                                   stash=logged)
+        assert toks.shape[1] == BLOCK - 1
+
+
 def _walk_rows(dtype, rows=7, seed=11):
     mx.random.seed(seed)
     drafter = _drafter(top_k=8)

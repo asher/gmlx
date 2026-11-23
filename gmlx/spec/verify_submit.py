@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import os
 import sys
+import threading
 
 import mlx.core as mx
 
@@ -86,16 +87,32 @@ def _hook(li: int, h: mx.array) -> mx.array:
     return h
 
 
+# Per model module: the verifies building inside ``marks`` and the hook
+# found before the first. Engines of one module on two threads overlap:
+# the last one out puts the hook back.
+_marks_lock = threading.Lock()
+_marks_users: dict = {}
+
+
 @contextlib.contextmanager
 def marks(lm):
     """Verify graphs built inside carry the boundaries."""
     mod = _module(lm)
-    prev = mod._VERIFY_LAYER_HOOK
-    mod._VERIFY_LAYER_HOOK = _hook
+    with _marks_lock:
+        n, prev = _marks_users.get(mod, (0, None))
+        if n == 0:
+            prev = mod._VERIFY_LAYER_HOOK
+            mod._VERIFY_LAYER_HOOK = _hook
+        _marks_users[mod] = (n + 1, prev)
     try:
         yield
     finally:
-        mod._VERIFY_LAYER_HOOK = prev
+        with _marks_lock:
+            n, prev = _marks_users.pop(mod)
+            if n > 1:
+                _marks_users[mod] = (n - 1, prev)
+            else:
+                mod._VERIFY_LAYER_HOOK = prev
 
 
 def submit(*arrays) -> None:

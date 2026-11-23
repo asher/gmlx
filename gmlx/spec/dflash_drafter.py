@@ -1900,6 +1900,11 @@ class DFlash2Drafter(DFlashDrafter):
         selector = self.candidate_selector
         rows = (h[0], logits[0], block[0, 0], skip)
         floor = float(self.row_floor or 0.0)
+        if stash is not None and (stash.pq is not None
+                                  or stash.top2 is not None):
+            # The walk that feeds the p/q and top-2 logs has no test of a
+            # cut draft, so a cut there would bias the token at the cut.
+            floor = 0.0
         if greedy and stash is None:
             walked = selector.walk(*rows, floor)
             first = edges = None

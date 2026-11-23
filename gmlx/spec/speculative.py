@@ -2849,6 +2849,9 @@ def _ckpt_post_prefill(model, prompt_cache: list, retire_ctx: dict) -> None:
             _log.info("APC ckpt post-prefill store skipped: render-stable "
                       "boundary landed")
             return
+        # The first token is out: the last chunk's clear runs before the
+        # store copies the prompt's KV, not at the first round's end.
+        deferred_clear.run()
         stored = ckpt_store(manager, retire_ctx["full_ids"], prompt_cache,
                             extra_hash=extra_hash,
                             grid_truncate=True,
@@ -3089,13 +3092,14 @@ def run_step_end() -> None:
         except Exception:  # noqa: BLE001
             _log.exception("step end job failed")
 
-# GMLX_SPEC_STORE_WHEN_IDLE (on; 0 off), under GMLX_SPEC_RETIRE_AFTER_FINAL: the
-# store of a deferred retire is held, so a request that arrives meanwhile
-# starts without waiting for it. The serve worker runs it once idle for
-# the grace with nothing arriving, one step after every active row's
-# first token, before admitting a request that continues the stored
-# sequence, and at shutdown. A store whose cache would hold more than
-# _HOLD_SHARE of free RAM runs at once, and the governor drops held ones.
+# GMLX_SPEC_STORE_WHEN_IDLE (on; 0 off), with GMLX_SPEC_RETIRE_AFTER_FINAL on:
+# the store of a request's retire is held, so a request that arrives
+# meanwhile starts without waiting for it. The serve worker that held it
+# runs it once idle for the grace with nothing arriving, one step after
+# every active row's first token, before admitting a request that
+# continues the stored sequence, and at shutdown. A store whose cache
+# would hold more than _HOLD_SHARE of free RAM runs at once, and the
+# governor drops held ones.
 _STORE_WHEN_IDLE = env_bool("GMLX_SPEC_STORE_WHEN_IDLE", True)
 _HOLD_SHARE = 0.05
 _held_stores: list = []
@@ -3108,12 +3112,28 @@ def held_store_grace_s() -> float:
     return max(0.0, env_float("GMLX_SPEC_STORE_IDLE_MS", 5.0)) / 1e3
 
 
-class _HeldStore:
-    __slots__ = ("job", "key", "nbytes", "t0")
+def _owner():
+    """The worker a store held now belongs to: the calling thread, the
+    engine worker that runs the request and owns its model's prompt cache."""
+    return threading.get_ident()
 
-    def __init__(self, job, key, nbytes):
+
+class _HeldStore:
+    __slots__ = ("job", "key", "nbytes", "t0", "owner")
+
+    def __init__(self, job, key, nbytes, owner=None):
         self.job, self.key, self.nbytes = job, key, nbytes
+        self.owner = _owner() if owner is None else owner
         self.t0 = time.perf_counter()
+
+
+def has_held_stores() -> bool:
+    """Whether the calling worker holds a store."""
+    if not _held_stores:
+        return False
+    me = _owner()
+    with _held_lock:
+        return any(h.owner == me for h in _held_stores)
 
 
 def _held_bytes() -> int:
@@ -3167,29 +3187,36 @@ def _hold_store(model, prompt_cache, generated, retire, drafter,
     except Exception:  # noqa: BLE001
         _log.debug("prompt cache store not held", exc_info=True)
         return False
-    # The store writes its record at the sequence end, its block-grid floor
-    # or a decode snapshot, so only a request that shares the sequence up to
-    # the first of those can use it.
+    # The store writes its record at the sequence end, its block-grid floor,
+    # a decode snapshot or where the next turn's render diverges, so only a
+    # request that shares the sequence up to the first of those can use it.
     seq = retire["full_ids"] + [int(t) for t in generated]
     bs = int(getattr(manager, "block_size", 0) or 1)
     end = len(seq) - 1
+    lcp = _retire_lcp(retire, seq, generated)
     first = min([end // bs * bs, end]
-                + [int(s[0]) for s in retire.get("snaps") or ()])
+                + [int(s[0]) for s in retire.get("snaps") or ()]
+                + ([] if lcp is None else [lcp]))
     key = seq[:max(1, first)]
     job = functools.partial(_retire_b1, model, prompt_cache, generated,
-                            retire, drafter=drafter, sidecar_ctx=sidecar_ctx)
+                            retire, drafter=drafter, sidecar_ctx=sidecar_ctx,
+                            lcp=lcp)
     with _held_lock:
         _held_stores.append(_HeldStore(job, key, nbytes))
     return True
 
 
 def run_held_stores(reason: str) -> None:
-    """Run every held store, oldest first. Never raises."""
+    """Run the calling worker's held stores, oldest first. A store held by
+    another engine's worker is left to it: it writes that engine's prompt
+    cache. Never raises."""
+    me = _owner()
     while True:
         with _held_lock:
-            if not _held_stores:
+            h = next((h for h in _held_stores if h.owner == me), None)
+            if h is None:
                 return
-            h = _held_stores.pop(0)
+            _held_stores.remove(h)
         t0 = time.perf_counter()
         try:
             h.job()
@@ -3200,10 +3227,12 @@ def run_held_stores(reason: str) -> None:
 
 
 def run_held_stores_for(prompt_ids) -> None:
-    """Before a request is admitted: run the held stores when it shares
-    enough of one's sequence to use what that store writes."""
+    """Before a request is admitted: run the calling worker's held stores
+    when it shares enough of one's sequence to use what that store
+    writes."""
+    me = _owner()
     with _held_lock:
-        hit = any(len(prompt_ids) >= len(h.key)
+        hit = any(h.owner == me and len(prompt_ids) >= len(h.key)
                   and prompt_ids[:len(h.key)] == h.key for h in _held_stores)
     if hit:
         run_held_stores("continuation")
@@ -3218,7 +3247,8 @@ def _close_and_retire(rounds, model, prompt_cache, generated, retire_ctx,
     t1 = time.perf_counter()
     held = False
     if retire_ctx is not None:
-        held = _STORE_WHEN_IDLE and _hold_store(
+        # GMLX_SPEC_RETIRE_AFTER_FINAL=0 stores before the last token.
+        held = _STORE_WHEN_IDLE and _RETIRE_AFTER_FINAL and _hold_store(
             model, prompt_cache, generated, retire_ctx, drafter, sidecar_ctx)
         if not held:
             _retire_b1(model, prompt_cache, generated, retire_ctx,
@@ -3228,9 +3258,23 @@ def _close_and_retire(rounds, model, prompt_cache, generated, retire_ctx,
         " held" if held else ""))
 
 
+def _retire_lcp(retire: dict, seq: list[int], generated) -> int | None:
+    """Where the next turn's render diverges from ``seq``: the retire key
+    ends there. None (no server render ctx, media, the kill switch
+    GMLX_APC_RETIRE_LCP=0, or a prediction failure) keys on ``seq``."""
+    if os.environ.get("GMLX_APC_RETIRE_LCP") == "0":
+        return None
+    from gmlx.cache.retire_key import next_turn_lcp
+    return next_turn_lcp(retire.get("render_ctx"), seq,
+                         [int(t) for t in generated])
+
+
+_UNSET = object()
+
+
 def _retire_b1(model, prompt_cache: list, generated: list[int],
                retire: dict | None, drafter=None,
-               sidecar_ctx: dict | None = None) -> None:
+               sidecar_ctx: dict | None = None, lcp=_UNSET) -> None:
     """Store a finished B=1 request's full KV into the shared APC.
 
     Guarded on an exact offset match: only stores when the target cache holds
@@ -3246,6 +3290,8 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
     prompt_cache is closure-owned and safe under a lazy (GC-time) retire, but
     the drafter is model-shared and may have been reseeded by a later
     request. Best-effort; never raises into the generator's finally.
+    ``lcp``: ``_retire_lcp`` of the whole sequence, taken when the store
+    was held.
     """
     if not retire:
         return
@@ -3277,14 +3323,12 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             return
         # Key on what the next turn will actually replay, not on what we
         # forwarded: templates strip/re-emit thinking and re-serialize tool
-        # calls, so a diverged tail makes the whole entry unmatchable. lcp
-        # None (no server render ctx, media, kill switch, or prediction
-        # failure) keeps today's behavior.
-        lcp = None
-        if os.environ.get("GMLX_APC_RETIRE_LCP") != "0":
-            from gmlx.cache.retire_key import next_turn_lcp
-            lcp = next_turn_lcp(retire.get("render_ctx"), seq,
-                                [int(t) for t in generated])
+        # calls, so a diverged tail makes the whole entry unmatchable. An
+        # lcp of the whole sequence caps at this one, its prefix.
+        if lcp is _UNSET:
+            lcp = _retire_lcp(retire, seq, generated)
+        elif lcp is not None:
+            lcp = min(int(lcp), len(seq))
         max_len = None
         if lcp is not None and lcp < len(seq):
             max_len = lcp

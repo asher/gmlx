@@ -140,3 +140,22 @@ def test_the_lever_is_on_by_default_and_needs_the_slot(monkeypatch):
 
     assert not vs.enabled(NoSlot())
     assert vs._parse_marks("1, 12,x,") == frozenset({1, 12})
+
+
+def test_overlapping_marks_put_the_hook_back(monkeypatch):
+    # Two engines of one model module build verifies on two threads at
+    # once: the hook stays while either builds and goes when both are out.
+    import sys
+    import types
+
+    mod = types.ModuleType("_fake_verify_module")
+    mod._VERIFY_LAYER_HOOK = None
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+    lm = type("LM", (), {"__module__": mod.__name__})()
+    a, b = vs.marks(lm), vs.marks(lm)
+    a.__enter__()
+    b.__enter__()
+    a.__exit__(None, None, None)
+    assert mod._VERIFY_LAYER_HOOK is vs._hook
+    b.__exit__(None, None, None)
+    assert mod._VERIFY_LAYER_HOOK is None

@@ -2013,7 +2013,7 @@ class ResponseGenerator:
         finally:
             try:
                 spec = sys.modules.get("gmlx.spec.speculative")
-                if spec is not None and spec._held_stores:
+                if spec is not None and spec.has_held_stores():
                     spec.run_held_stores("shutdown")
                 # The worker can outlive stop_and_join's timeout. Retire its
                 # disk writer only after its final request/store has finished.
@@ -2065,8 +2065,9 @@ class ResponseGenerator:
                 )
                 # gmlx: a held prompt cache store (gmlx.spec.speculative)
                 # waits out a short idle grace, for a request on its way.
+                # Each worker runs only the stores it held.
                 spec = sys.modules.get("gmlx.spec.speculative")
-                held = spec is not None and bool(spec._held_stores)
+                held = spec is not None and spec.has_held_stores()
                 new_items, should_stop = self._collect_pending_requests(
                     active=active_batch,
                     capacity=capacity,
@@ -2168,7 +2169,7 @@ class ResponseGenerator:
                         # gmlx: a held store this prompt can use lands
                         # before its lookup.
                         spec = sys.modules.get("gmlx.spec.speculative")
-                        if spec is not None and spec._held_stores:
+                        if spec is not None and spec.has_held_stores():
                             spec.run_held_stores_for(prompt_ids)
                         (uid,) = batch_gen.insert(
                             [prompt_ids],
@@ -2414,7 +2415,7 @@ class ResponseGenerator:
                 spec.run_step_end()
             # A held store runs a step after every row's first token, so
             # the first token goes out before it.
-            if (spec is not None and spec._held_stores and active
+            if (spec is not None and spec.has_held_stores() and active
                     and all(info.get("kq_first_step", step) < step
                             for info in active.values())):
                 spec.run_held_stores("decode")

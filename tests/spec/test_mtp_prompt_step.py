@@ -489,6 +489,47 @@ def test_a_whole_prompt_entry_serves_a_resend_with_no_forward(
     assert nxt[0] == [11]
 
 
+@pytest.mark.parametrize("after_first", [False, True])
+def test_the_whole_prompt_store_runs_after_the_last_chunks_clear(
+        ar, monkeypatch, after_first):
+    # The last chunk leaves its clear for later. The entry copies the
+    # prompt's KV, so the clear runs first and the copy takes the memory
+    # the chunk's buffers gave back; after the first token is out when
+    # the entry waits for the end of the serve step.
+    import gmlx.spec.engine as engine
+    import gmlx.spec.mtp_prefill as mtp_prefill
+    import gmlx.spec.speculative as spec
+    from gmlx.cache.prefix_cache import SpecPrefixCache
+    from gmlx.gen import deferred_clear
+
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", False)
+    monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", False)
+    monkeypatch.setattr(mtp_prefill, "_LAST_IN_CHUNK", True)
+    monkeypatch.setattr(mtp_prefill, "_L0_AFTER_FIRST", after_first)
+    monkeypatch.setattr(spec, "_KEEP_BUFFERS", False)
+    monkeypatch.setattr(deferred_clear, "_ENABLED", True)
+    monkeypatch.setattr(deferred_clear, "_pending", False)
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "16")
+    order = []
+    monkeypatch.setattr(mx, "clear_cache", lambda: order.append("clear"))
+    store = SpecPrefixCache.store
+
+    def recording_store(self, *args, **kwargs):
+        order.append("store")
+        return store(self, *args, **kwargs)
+
+    monkeypatch.setattr(SpecPrefixCache, "store", recording_store)
+    model = _HeadModel()
+    model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
+    spec.begin_step()
+    try:
+        _run(_one_row(ar, model, list(range(1, 9))))
+        assert order == ([] if after_first else ["clear", "store"])
+    finally:
+        spec.run_step_end()
+    assert order == ["clear", "store"] and not deferred_clear.pending()
+
+
 def test_a_whole_prompt_lookup_needs_the_first_token_logits():
     from gmlx.cache.prefix_cache import SpecPrefixCache
 
