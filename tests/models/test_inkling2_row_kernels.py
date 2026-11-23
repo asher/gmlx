@@ -11,10 +11,19 @@ import numpy as np
 import pytest
 
 import gmlx.models.inkling2.model as M
+from gmlx.image.float32 import f32_products_exact
 from gmlx.models.inkling2 import row_kernels
 
 pytestmark = pytest.mark.skipif(
     not row_kernels.enabled(), reason="the row kernels run on the GPU")
+
+
+def _f32_tol(tol):
+    """``tol`` for a float32 result whose ops path multiplies float32
+    matrices. On an M5-class GPU MLX multiplies them at TF32 unless
+    MLX_ENABLE_TF32=0, which the kernels do not: measured on M5 Max, the
+    ops path then differs by up to 3.5e-3 of 1 + |value|."""
+    return tol if f32_products_exact() else 1e-2
 
 
 @pytest.fixture
@@ -142,7 +151,8 @@ def test_the_depth_mix_matches_the_ops_path(n_blocks, nq, dtype, ops_path):
     got = M.depth_mix(blocks, cur, query)
     want = ops_path(M.depth_mix, blocks, cur, query)
     assert got.shape == (2, 3, nq, 512) and got.dtype == mx.float32
-    np.testing.assert_allclose(_f32(got), _f32(want), rtol=1e-5, atol=1e-5)
+    tol = _f32_tol(1e-5)
+    np.testing.assert_allclose(_f32(got), _f32(want), rtol=tol, atol=tol)
 
 
 def test_the_depth_mix_gradient_comes_from_the_ops_path(ops_path):
@@ -174,7 +184,7 @@ def test_the_controller_matches_the_ops_path(rows, dtype, ops_path):
     assert row_kernels.control_eligible(cur, msg, *w)
     got, want = ctrl(cur, msg), ops_path(ctrl, cur, msg)
     assert got.dtype == dtype
-    tol = 1e-5 if dtype == mx.float32 else 1e-2
+    tol = _f32_tol(1e-5) if dtype == mx.float32 else 1e-2
     np.testing.assert_allclose(_f32(got), _f32(want), rtol=tol, atol=tol)
 
 
@@ -260,7 +270,8 @@ def test_the_bias_mask_matches_the_ops_path(ring, L, window, B, K):
     g, w = np.array(got), np.array(want)
     np.testing.assert_array_equal(np.isinf(g), np.isinf(w))
     fin = ~np.isinf(w)
-    np.testing.assert_allclose(g[fin], w[fin], rtol=1e-5, atol=1e-5)
+    tol = _f32_tol(1e-5)
+    np.testing.assert_allclose(g[fin], w[fin], rtol=tol, atol=tol)
     # Distances past the table take the pad row: the bias is -sink alone.
     assert fin.any()
 
