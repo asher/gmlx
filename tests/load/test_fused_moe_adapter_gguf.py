@@ -334,6 +334,9 @@ def test_gpt_oss_default_load_takes_an_expert_adapter(gguf_index, tmp_path,
 
 def test_qwen4exp_folds_off_and_matches_unfused_on(gguf_index, tmp_path,
                                                     monkeypatch):
+    # The unfused forward it compares against runs on the mapped stacks,
+    # which the default expert store of the unadapted blocks lets go.
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "0")
     _fused_block_check(_qwen4exp(gguf_index), tmp_path, monkeypatch)
 
 
