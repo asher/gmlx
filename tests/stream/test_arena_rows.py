@@ -362,8 +362,9 @@ def test_fused_row_floor():
             self.kquant_type = codec
 
     class _G:
-        def __init__(self, n, codec="q4_k", down="q4_k"):
+        def __init__(self, n, codec="q4_k", down="q4_k", up=None):
             self.gate_proj = _P(n, codec)
+            self.up_proj = _P(n, up or codec)
             self.down_proj = _P(n, down)
 
     class _Caps:
@@ -384,3 +385,5 @@ def test_fused_row_floor():
     assert modules._kq_row_floor(_G(512), 4, 2048, qf) == 1
     assert modules._kq_row_floor(_G(512, down="q6_k"), 4, 2048, qf) == 2
     assert modules._kq_row_floor(_G(4096, "q6_k"), 8, 4096, qf) == 9
+    # A gate and up pair in two codecs never takes the qf kernels.
+    assert modules._kq_row_floor(_G(512, up="q6_k"), 4, 2048, qf) == 32

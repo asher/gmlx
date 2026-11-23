@@ -118,6 +118,8 @@ _OWNED = {
               ("model.layers.1.mlp.shared_mlp.gate_proj", "blk.1.ffn_gate_shexp.weight", IN)],
     "hy_v4_flash": [("model.layers.0.self_attn.q_a_proj", "blk.0.attn_q_a.weight", IN),
                     ("model.layers.1.mlp.routed_down", "blk.1.ffn_routed_down.weight", IN)],
+    "hy_v4": [("model.layers.0.self_attn.q_a_proj", "blk.0.attn_q_a.weight", IN),
+              ("model.layers.1.mlp.shared_experts.down_proj", "blk.1.ffn_down_shexp.weight", IN)],
     "hyv4": [("model.layers.0.self_attn.q_a_proj", "blk.0.attn_q_a.weight", IN),
              ("model.layers.1.mlp.shared_experts.down_proj", "blk.1.ffn_down_shexp.weight", IN)],
     "inkling2": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),

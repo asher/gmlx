@@ -89,9 +89,9 @@ def _mint_fallback(path, codec_name, kv=None):
     gguf-py's enum has no member for it."""
     from gmlx.load.headerscan import QUANT_TYPE_FALLBACK
 
-    (type_id, (name, (wpb, tsize))), = [
+    type_id, (name, (wpb, tsize)) = min(
         (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == codec_name
-    ]
+    )
 
     class _Sentinel:
         def __int__(self):

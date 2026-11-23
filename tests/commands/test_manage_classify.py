@@ -86,9 +86,9 @@ def test_classify_local_multi_shard(tmp_path):
 def _mint_fallback(path, codec_name, kv=None):
     """A file whose only weight uses a type id newer than the installed
     gguf-py (GGUFReader rejects it; headerscan's fallback names it)."""
-    (type_id, (name, (wpb, tsize))), = [
+    type_id, (name, (wpb, tsize)) = min(
         (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == codec_name
-    ]
+    )
 
     class _Sentinel:
         def __int__(self):
