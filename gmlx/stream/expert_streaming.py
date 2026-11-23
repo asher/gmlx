@@ -386,6 +386,20 @@ def _unwire(model) -> int:
     return sum(a.nbytes for a in arrays)
 
 
+def _resident_set(model, total_bytes: int, table_offloaded: int):
+    """``(bytes, skip ids)`` of the set the table-only install wires: the
+    model's arrays but the streamed tables, with a full expert store's
+    planes in place of the placeholders that stand for its stacks. The
+    planes are MLX memory not wired yet, which the unwired count still
+    holds, so the fit counts them as the wire inserts them."""
+    from gmlx.load import expert_store
+
+    stored_bytes, stored_ids = expert_store.held(model)
+    plane_bytes = sum(a.nbytes for a in expert_store.planes(model))
+    return (total_bytes - table_offloaded - stored_bytes + plane_bytes,
+            stored_ids)
+
+
 def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
                            budget, prefill_step, skip_ids,
                            keep=(None, 0)) -> bool:
@@ -721,14 +735,10 @@ def install_expert_streaming(
     if table_only:
         from gmlx.stream.table_stream import streamed_table_array_ids
 
-        from gmlx.load import expert_store
-
-        # A full expert store holds its stacks already, as MLX memory the
-        # free count no longer has: the fit is judged on the rest, and the
-        # placeholders stay out. The wire inserts the store's planes.
-        stored_bytes, stored_ids = expert_store.held(model)
+        wire_bytes, stored_ids = _resident_set(model, total_bytes,
+                                               table_offloaded)
         early_wired = _wire_resident_experts(
-            model, gguf_path, total_bytes - table_offloaded - stored_bytes,
+            model, gguf_path, wire_bytes,
             budget=budget, prefill_step=prefill_step,
             skip_ids=frozenset(streamed_table_array_ids(model)) | stored_ids,
             keep=wire_keep)
@@ -736,6 +746,14 @@ def install_expert_streaming(
             table_only = False
             compose = bool(plan.tables)
             force_stream = fell_back = True
+    if force_stream or (over_budget and not table_only):
+        # A full expert store cannot serve streamed experts: the stacks go
+        # back on the blocks, mapped, and the load streams them as it would
+        # with the lever off. Before the registration below is read: the
+        # stacks mapped again join it.
+        from gmlx.load import expert_store
+
+        expert_store.release(model, "this load streams its experts")
     # The weights' untracked registration before any deduct: the table and
     # expert credits both split total into tracked and untracked from it.
     # Read after the table deduct, a compose install sees the table as
@@ -793,13 +811,6 @@ def install_expert_streaming(
         attach_table_readahead(model, gguf_path)
 
     streaming = force_stream or over_budget
-    if streaming:
-        # A full expert store cannot serve streamed experts: the stacks go
-        # back on the blocks, mapped, and the load streams them as it would
-        # with the lever off.
-        from gmlx.load import expert_store
-
-        expert_store.release(model, "this load streams its experts")
     # the verdict itself: a CPU-only expert codec marks its modules the way
     # streaming does, so a module scan cannot tell the two apart
     model._kq_streaming = bool(streaming)
