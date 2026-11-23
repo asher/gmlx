@@ -53,7 +53,7 @@ import sys
 import threading
 import time
 import weakref
-from typing import Callable, cast
+from typing import Any, Callable, cast
 
 import mlx.core as mx
 import mlx_kquant as kq
@@ -64,6 +64,10 @@ from gmlx.envflags import env_bool, env_int
 
 from . import loadlog
 
+# mlx-kquant's store ops (moe_store_*), from 0.5.14 on and probed at run
+# time: one loosely typed name, so the module checks against releases
+# without them.
+_kq_store: Any = kq
 ABSENT = 0x80000000
 _BLOCKS: list = []
 _DONE: list = []
@@ -207,10 +211,10 @@ def _eligible(block, kind: str = "full") -> bool:
         seg_ok = getattr(kq, "moe_store_seg_supported", None)
         return (type(wd) is KQuantSwitchLinear and "bias" not in wd
                 and seg_ok is not None
-                and kq.moe_store_supported(wd.kquant_type, sd.kquant_type)
+                and _kq_store.moe_store_supported(wd.kquant_type, sd.kquant_type)
                 and seg_ok(wd.kquant_type, int(wg.weight.shape[1])))
-    return (kq.moe_store_supported(wg.kquant_type, sg.kquant_type)
-            and kq.moe_store_supported(wd.kquant_type, sd.kquant_type))
+    return (_kq_store.moe_store_supported(wg.kquant_type, sg.kquant_type)
+            and _kq_store.moe_store_supported(wd.kquant_type, sd.kquant_type))
 
 
 _DOWN_LEAF: list = [None]
@@ -248,7 +252,7 @@ def _down_leaf_class():
                 idx = idx.astype(mx.uint32)
             tr = kq.seg_tile_rows(idx.size, n_exp, xf.shape[-1], d_codec)
             maps = kq.expert_tile_map(idx, n_exp, tile_rows=tr)
-            y = kq.moe_store_seg(xf, st.d, d_codec, *maps, n_out=d_out,
+            y = _kq_store.moe_store_seg(xf, st.d, d_codec, *maps, n_out=d_out,
                                  tile_rows=tr)
             return y[:, None, :]
 
@@ -277,9 +281,9 @@ def _pack_block(b, ids, slots, kind, lo, hi, glo, src=None):
         return _pack_down(b, st, ids_a, k_down, src), old
     st.kinds = ("gate", "up", "down")
     sg, su, sd = src or (wg.weight, wu.weight, wd.weight)
-    st.g = kq.moe_store_pack(sg, wg.kquant_type, k_glu, ids_a)
-    st.u = kq.moe_store_pack(su, wu.kquant_type, k_glu, ids_a)
-    st.d = kq.moe_store_pack(sd, wd.kquant_type, k_down, ids_a)
+    st.g = _kq_store.moe_store_pack(sg, wg.kquant_type, k_glu, ids_a)
+    st.u = _kq_store.moe_store_pack(su, wu.kquant_type, k_glu, ids_a)
+    st.d = _kq_store.moe_store_pack(sd, wd.kquant_type, k_down, ids_a)
     st.lo, st.hi, st.glo = lo, hi, glo
     # The wide form reads slots as expert ids, so it needs every expert
     # stored in id order: a full store.
@@ -323,7 +327,7 @@ def _pack_down(b, st, ids_a, k_down, src):
     old = wd.weight
     st.kinds = ("down",)
     st.g, st.u = (), ()
-    st.d = kq.moe_store_pack(src[0] if src else old, wd.kquant_type, k_down,
+    st.d = _kq_store.moe_store_pack(src[0] if src else old, wd.kquant_type, k_down,
                              ids_a)
     st.lo, st.hi, st.glo = 1, 1 << 30, 1 << 31
     st.wide = 0
@@ -612,7 +616,7 @@ def stored_file_ranges(paths) -> dict:
                 continue
             if mode[0] == "down":
                 rs = [r for r in rs if r[3] == "down"]
-            if not all(kq.moe_store_supported(r[4], "") for r in rs):
+            if not all(_kq_store.moe_store_supported(r[4], "") for r in rs):
                 continue
             # As build_at_load counts the lever: the blocks it stores.
             if n_blocks > 0 and n >= n_blocks:
@@ -1104,19 +1108,19 @@ def _wide_sorted(glu, x, indices):
     maps = kq.expert_tile_map(idx, n_exp, tile_rows=tr)
     xr = mlx_guards.floor_divide(order, k)
     if _wide_pair_on(glu, g_codec):
-        (h,) = kq.moe_store_seg_pair(xf, st.g, st.u, g_codec, *maps,
+        (h,) = _kq_store.moe_store_seg_pair(xf, st.g, st.u, g_codec, *maps,
                                      n_out=inter, tile_rows=tr, x_rows=xr,
                                      fused=True)
     else:
-        x_gate = kq.moe_store_seg(xf, st.g, g_codec, *maps, n_out=inter,
+        x_gate = _kq_store.moe_store_seg(xf, st.g, g_codec, *maps, n_out=inter,
                                   tile_rows=tr, x_rows=xr)
-        x_up = kq.moe_store_seg(xf, st.u, g_codec, *maps, n_out=inter,
+        x_up = _kq_store.moe_store_seg(xf, st.u, g_codec, *maps, n_out=inter,
                                 tile_rows=tr, x_rows=xr)
         h = glu.activation(x_up, x_gate)
     trd = kq.seg_tile_rows(rows, n_exp, inter, d_codec)
     if trd != tr:
         maps = kq.expert_tile_map(idx, n_exp, tile_rows=trd)
-    y = kq.moe_store_seg(h, st.d, d_codec, *maps, n_out=d_out, tile_rows=trd)
+    y = _kq_store.moe_store_seg(h, st.d, d_codec, *maps, n_out=d_out, tile_rows=trd)
     return y, order
 
 
