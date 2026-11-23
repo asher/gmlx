@@ -1388,7 +1388,7 @@ class ResponseGenerator:
     ) -> Tuple[GenerationContext, "_TokenIterator"]:
         self.wait_until_ready()
         # gmlx: counted as arriving until it is queued, so an idle worker
-        # waits for peers only while one is being prepared.
+        # runs no held store while one is being prepared.
         # Through the class: a stand-in for self runs the same body.
         ResponseGenerator._kq_note_arriving(self, 1)
         try:
@@ -1994,9 +1994,7 @@ class ResponseGenerator:
         except QueueEmpty:
             pass
 
-        # gmlx: a lone request starts at once. The wait is for peers, and
-        # one is on its way only while generate() is preparing it.
-        if pending and coalesce_s > 0 and getattr(self, "_kq_arriving", 1) > 0:
+        if pending and coalesce_s > 0:
             time.sleep(coalesce_s)
 
         while not should_stop and _has_room():

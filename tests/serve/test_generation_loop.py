@@ -486,10 +486,10 @@ def test_a_gpu_thread_error_frees_the_batch_by_refcount(monkeypatch):
         _stop(rg, loop)
 
 
-def test_an_idle_worker_waits_for_peers_only_while_one_is_arriving(monkeypatch):
-    """The wait that lets a burst land in one batch runs only while
-    generate() is preparing another request. A lone request starts at
-    once."""
+def test_an_idle_worker_waits_for_peers_with_one_request_pending(monkeypatch):
+    """The wait that lets a burst land in one batch runs for a lone
+    pending request too: a peer sent at the same instant may not have
+    reached generate()'s arrival count yet."""
     rg = object.__new__(_GEN.ResponseGenerator)
     rg._stop = False
     rg.requests = queue.Queue()
@@ -499,12 +499,6 @@ def test_an_idle_worker_waits_for_peers_only_while_one_is_arriving(monkeypatch):
     monkeypatch.setattr(_GEN.time, "sleep", slept.append)
 
     rg.requests.put("first")
-    assert rg._collect_pending_requests(
-        active=False, coalesce_s=0.005) == (["first"], False)
-    assert slept == []
-
-    rg.requests.put("first")
-    rg._kq_arriving = 1
     assert rg._collect_pending_requests(
         active=False, coalesce_s=0.005) == (["first"], False)
     assert slept == [0.005]
