@@ -198,8 +198,9 @@ MTP_DRAFTER_ARCHES = {
     "gemma4_text": ("gemma4_assistant", "gemma4-assistant", "gemma4_mtp", "dflash"),
     # Qwen3.8-Flash-Next MTP head: gmlx's qwen4exp-mtp companion built from
     # the HF mtp.* tensors, or the llama.cpp mtp-*.gguf NextN sidecar, which
-    # keeps the target's arch.
-    "qwen4_exp": ("qwen4exp-mtp", "qwen4exp"),
+    # keeps the target's arch. Inco AI's DFlash 2 drafter comes last, so
+    # the head stays the one found beside the model.
+    "qwen4_exp": ("qwen4exp-mtp", "qwen4exp", "dflash"),
     # LiLiCorr DFlash drafters (Nemotron-3.5-Bolt) and the llama.cpp mtp-*.gguf
     # NextN sidecar (Nemotron-3.5-Super-VL), which keeps the target's arch.
     "nemotron_h": ("dflash", "nemotron_h_moe"),
@@ -238,7 +239,8 @@ NATIVE_ASR_ENCODER_ARCHES = frozenset({"pee"})
 # can drive. The loader refuses any other target, and discovery does not
 # pair one.
 DFLASH_CONTAINER_TARGETS = {
-    "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer", "ricursive"),
+    "dflash2": ("qwen3_5", "qwen3_5_text", "muse_glimmer", "ricursive",
+                "qwen4_exp"),
     "dflash_dspark": ("qwen3_5", "qwen3_5_text", "qwen3_5_moe",
                       "qwen3_5_moe_text"),
     "dflash": ("muse_glimmer", "gemma4_text"),

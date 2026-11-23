@@ -1526,6 +1526,10 @@ def _install_and_load(
 
     model.load_weights(list(loadable.items()), strict=False)
     log(f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters")
+    from . import expert_store
+
+    expert_store.build_at_load(model, drop=(loadable, hf_weights),
+                                paths=source_key)
     _warm_mmap_residency(model, log=log, active_before=active_before,
                          source_key=source_key)
 
@@ -2052,6 +2056,10 @@ def load_model(
     _log(
         f"[load_weights] loaded {len(loadable)} / {len(model_params)} model parameters"
     )
+    from . import expert_store
+
+    expert_store.build_at_load(model, drop=(loadable, hf_weights),
+                                paths=pf.shards)
     if fp32_norms(config.get("model_type")):
         n_norms = cast_fp32_norm_outputs(model, act_dtype)
         if n_norms:

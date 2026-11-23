@@ -992,6 +992,18 @@ def test_seed_figures_on_real_boxes():
     assert dp.rung.bytes + catalog.plan_addon_bytes(dp) <= box(128).ram - 32 * GiB
     assert r.bytes + catalog.plan_addon_bytes(dp) > box(128).ram - 24 * GiB
     assert catalog.default_plan(fn, box(192)).rung.tier == "balanced"
+    # Its drafter is Inco AI's DFlash 2 at Q6_K, which replaces the MTP
+    # head's sidecar. On 256 GB the Q8_0 file holds its weights in memory,
+    # its table read from the file, with the drafter on and the full context.
+    assert (fn.drafter.kind, fn.drafter.repo, fn.drafter.file) == (
+        "dflash2", "incoai/Qwen3.8-Flash-Next-DFlash2-GGUF",
+        "Qwen3.8-Flash-Next-DFlash2-Q6_K.gguf")
+    dp = catalog.default_plan(fn, box(256))
+    assert dp.rung.tier == "xhigh" and dp.rung.quant == "Q8_0"
+    assert dp.mmproj and dp.drafter and not dp.streaming
+    assert dp.rung.table_bytes > 0
+    assert catalog.context_estimate(fn, dp.rung, box(256), catalog.plan_addon_bytes(dp),
+                                    catalog.plan_speculates(dp)) == fn.trained_ctx
     # GLM-5.3-Flash on a 128 GiB Mac on macOS 26: a compact rung in memory.
     glm = catalog.model("glm-5.3-flash")
     ws = int(96.8 * GiB / 0.9)

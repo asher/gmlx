@@ -167,11 +167,11 @@ class LanguageModel(Qwen4ExpSpecHooks, nn.Module):
         positions = self._resolve_positions(
             inputs, cache, position_ids, rope_deltas)
         if return_hidden or return_shared_kv:
-            out, streams = self.model(
+            out, hidden = self._spec_forward(
                 inputs, cache, input_embeddings=inputs_embeds,
-                position_ids=positions, return_streams=True)
+                position_ids=positions)
             logits = None if skip_logits else self._head(out)
-            return _SpecOutput(logits=logits, hidden_states=[streams])
+            return _SpecOutput(logits=logits, hidden_states=[hidden])
         out = self.model(inputs, cache, input_embeddings=inputs_embeds,
                          position_ids=positions)
         return LanguageModelOutput(

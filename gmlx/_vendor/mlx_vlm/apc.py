@@ -64,7 +64,7 @@ import numpy as np
 from ._stream_cleanup import clear_mlx_streams
 from .apc_adapters import reserve_checkpoint_capacity
 from .apc_coordinator import APCCoordinator, PrefillMemoryPlan
-from .apc_storage import APCNode, ComponentId, KVBlockHandle, StateHandle  # gmlx: stacked blocks
+from .apc_storage import APCNode, ByteTally, ComponentId, KVBlockHandle, StateHandle  # gmlx: stacked blocks
 from .kv_quant import from_config as kv_quant_from_config
 from .kv_quant import kv_quant_fingerprint
 from .models.cache import cache_nbytes as _cache_nbytes
@@ -3221,7 +3221,11 @@ class APCManager:
         self.pool: List[APCBlock] = [APCBlock() for _ in range(num_blocks)]
         self._free_head: Optional[APCBlock] = None
         self._free_tail: Optional[APCBlock] = None
+        # gmlx: the pool's resident bytes, kept by its blocks as they
+        # change (ByteTally), where a scan of the pool read them.
+        self._pool_bytes = ByteTally()
         for b in self.pool:
+            b._tally = self._pool_bytes
             self._free_push(b)
         self.hash_table: dict[int, APCBlock] = {}
         self._exact_cache: "OrderedDict[int, APCExactCacheEntry]" = OrderedDict()
@@ -3391,7 +3395,7 @@ class APCManager:
                 self._release_one(b)
 
     def _resident_bytes_locked(self) -> int:
-        return sum(b.resident_bytes() for b in self.pool) + sum(
+        return self._pool_bytes.bytes + sum(
             _cache_nbytes(entry.prompt_cache) for entry in self._exact_cache.values()
         )
 

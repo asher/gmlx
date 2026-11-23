@@ -287,6 +287,43 @@ def test_streamed_table_array_ids_cover_weight():
     assert id(emb.weight) in ids and id(emb.scales) in ids
 
 
+@pytest.mark.parametrize("model_type,user,want", [
+    ("qwen4_exp", {}, str(256 << 20)),
+    ("qwen4_exp", {"KQ_FILE_ROWS_CACHE": "0"}, None),
+    ("hy_v4_flash", {}, None),
+])
+def test_flash_next_table_reads_keep_a_row_cache(monkeypatch, model_type,
+                                                 user, want):
+    """The cache Flash-Next's decode reads hit for common tokens; a user's
+    own setting, 0 included, wins, and other tables keep none."""
+    from types import SimpleNamespace
+
+    # A stand-in environment: mlx-kquant keeps a KQ_* key from its first
+    # read, so the process's own must stay as the run started.
+    env = dict(user)
+    monkeypatch.setattr(ts, "_KQ_ENV", env)
+    monkeypatch.setattr(ts, "_FILE_ROWS_MAX", None)
+    monkeypatch.setattr(ts, "_ROWS_CACHE_SET", False)
+    seen = []
+    fake = SimpleNamespace(
+        file_rows_failures=lambda: 0,
+        file_rows=lambda *a, **k: seen.append(
+            env.get("KQ_FILE_ROWS_CACHE_BYTES")) or "rows")
+    model = _Node()
+    model.model_type = model_type
+    model.model = _Node()
+    mod = _kquant_table()
+    if model_type == "qwen4_exp":
+        model.model.ple_embed = mod
+    else:
+        model.model.engram_embed = mod
+    ts.install_table_streaming(model)
+    mod._kq_table_readahead = SimpleNamespace(
+        _closed=False, path="t.gguf", offset=0, row_bytes=34, rows=8)
+    assert ts._file_rows(mod, mx.array([1, 2]), fake) == "rows"
+    assert seen == [want]
+
+
 # --- warm-touch exclusion -------------------------------------------------
 
 
@@ -1219,3 +1256,51 @@ def test_selection_skips_a_table_that_is_already_off_the_books(monkeypatch):
     # the table may say otherwise.
     assert not ts.table_stream_selected(model, 137 << 30, 103 << 30)
     assert ts.install_table_streaming(model) == (0, ["per_layer_token_embd.weight"])
+
+
+# --- small gathers read from the file --------------------------------------
+
+
+def test_small_gather_from_file_matches_mapped_gather(tmp_path, monkeypatch):
+    """A decode-sized gather of a streamed table reads its rows from the
+    file and returns what the gather over the table returns; a gather past
+    GMLX_TABLE_FILE_ROWS stays on the table."""
+    import mlx_kquant as kq
+
+    if not hasattr(kq, "file_rows"):
+        pytest.skip("mlx-kquant without file_rows")
+    rows, dims, offset = 64, 32, 192
+    emb = _kquant_table(rows, dims)
+    wires = np.array(emb.weight)
+    path = tmp_path / "table.bin"
+    path.write_bytes(b"\x5a" * offset + wires.tobytes())
+    emb.__class__ = ts._wrapped_class(type(emb), True)
+    ids = mx.array([[3, 63, 0, 17], [17, 5, 40, 3]])
+
+    monkeypatch.setattr(ts, "_FILE_ROWS_MAX", 0)
+    want = emb(ids)
+    mx.eval(want)
+
+    ra = _Node()
+    ra.path, ra.offset = str(path), offset
+    ra.rows, ra.row_bytes, ra._closed = rows, wires.shape[1], False
+    emb._kq_table_readahead = ra
+    calls = []
+    real = kq.file_rows
+    monkeypatch.setattr(
+        kq, "file_rows",
+        lambda *a, **k: (calls.append(a[0].size), real(*a, **k))[1])
+    monkeypatch.setattr(ts, "_FILE_ROWS_MAX", 8)
+    monkeypatch.setattr(ts, "_FILE_ROWS_FAILED", kq.file_rows_failures())
+    got = emb(ids)
+    mx.eval(got)
+    assert calls == [8]
+    assert got.dtype == want.dtype and mx.array_equal(got, want).item()
+
+    wide = mx.array(np.arange(9) % rows)
+    monkeypatch.setattr(ts, "_FILE_ROWS_MAX", 0)
+    want = emb(wide)
+    monkeypatch.setattr(ts, "_FILE_ROWS_MAX", 8)
+    got = emb(wide)
+    assert calls == [8]
+    assert mx.array_equal(got, want).item()

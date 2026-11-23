@@ -517,6 +517,56 @@ def test_system_prefix_lcp_probe_renders_lead_plus_dummy():
     assert len(calls) == 2
 
 
+def test_system_prefix_probe_is_kept_across_the_requests_of_a_session():
+    """A later request with the same template, system block and template
+    kwargs renders no probe. Another system block or tool list does."""
+    calls = []
+
+    def render(p, c, msgs, **kw):
+        calls.append((list(msgs), dict(kw)))
+        return _chatml(msgs) + str(kw.get("tools") or "")
+
+    lead = [{"role": "system", "content": "policy"}]
+    first = _probe_ctx(lead + [{"role": "user", "content": "one"}], _chatml)
+    first["render"] = render
+    want = len("<system>policy</><user>")
+
+    def live(ctx):
+        return [ord(ch) for ch in _chatml(ctx["messages"])]
+
+    assert rk.system_prefix_lcp(first, live(first)) == want
+    assert len(calls) == 2
+
+    def later(msgs, **kw):
+        ctx = dict(first, messages=msgs, kw=kw)
+        ctx.pop("_p_system")
+        return ctx
+
+    again = later(lead + [{"role": "user", "content": "two"},
+                          {"role": "assistant", "content": "reply"},
+                          {"role": "user", "content": "three"}])
+    assert rk.system_prefix_lcp(again, live(again)) == want
+    assert len(calls) == 2
+
+    other = later([{"role": "system", "content": "rules"},
+                   {"role": "user", "content": "one"}])
+    assert rk.system_prefix_lcp(other, live(other)) == len("<system>rules</><user>")
+    assert len(calls) == 4
+
+    tools = later(lead + [{"role": "user", "content": "one"}],
+                  tools=[{"name": "read"}])
+    assert rk.system_prefix_lcp(tools, live(tools)) == want
+    assert len(calls) == 6
+    assert calls[-1][1]["tools"] == [{"name": "read"}]
+
+    # Another template: its own probe, whatever the first one kept.
+    fold = _probe_ctx(lead + [{"role": "user", "content": "one"}], _folding)
+    fold["processor"], fold["config"] = first["processor"], first["config"]
+    assert rk.system_prefix_lcp(
+        fold, [ord(ch) for ch in _folding(fold["messages"])]
+    ) == len("<bos><user>policy\n\n")
+
+
 def test_system_prefix_lcp_clamped_by_live_prompt():
     # The live-prompt clamp guards against a template leaking user
     # content ahead of the divergence point.

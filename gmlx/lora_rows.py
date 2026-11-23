@@ -44,6 +44,7 @@ import mlx.core as mx
 import numpy as np
 
 from gmlx.cache.media_salt import as_salt
+from gmlx import mlx_guards
 from gmlx.upstream.patching import link
 
 _log = logging.getLogger(__name__)
@@ -205,7 +206,7 @@ def flat_row_factor(slot: int, tokens: int, k: int, dtype, order=None):
             f"tokens (not a multiple)")
     if order is not None:
         s_tok = mx.repeat(rows, tokens // b)
-        return s_tok[order // k].astype(dtype).reshape(-1, 1, 1)
+        return s_tok[mlx_guards.floor_divide(order, k)].astype(dtype).reshape(-1, 1, 1)
     key = ("flat", int(slot), int(tokens), int(k), dtype)
     derived = _local.derived
     arr = derived.get(key)

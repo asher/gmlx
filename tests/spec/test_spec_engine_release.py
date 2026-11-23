@@ -665,3 +665,33 @@ def test_a_command_buffer_failure_drops_a_speculative_batch(monkeypatch):
     assert gen.removed == []
     assert _queue(gen) == [(0, [1, 5, 21]), (1, [2, 5, 31])]
     assert snapshot._RETIRE_BLOCKED[0] == 0
+
+
+@pytest.mark.parametrize("lever, sent", [("0", []), ("1", [(0, 5)])])
+def test_a_batch_that_starts_its_own_rounds_sends_its_first_token_at_once(
+        monkeypatch, lever, sent):
+    # GMLX_SPEC_FIRST_IN_PREFILL_STEP: the step that runs generate() sends
+    # the first token. Off: the next step sends it. The last token of a
+    # request that finished in the tick's decode step goes out either way.
+    from types import SimpleNamespace
+
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+    monkeypatch.setenv("GMLX_SPEC_FIRST_IN_PREFILL_STEP", lever)
+    monkeypatch.setenv("GMLX_SPEC_KEEP_BUFFERS", "1")
+    batch = _make_batch(ar, max_tokens=8)
+    gen = object.__new__(ar.BatchGenerator)
+    gen._wire_stack = None
+    gen._generation_batch = []
+    gen._prompt_batch = SimpleNamespace(
+        uids=[0], needs_processing=lambda: False,
+        generate=lambda *a, **kw: batch)
+    gen.sampler = gen.compute_logprobs = None
+    gen.top_logprobs_k = 0
+    gen.tokenizer = SimpleNamespace(stopping_criteria=None)
+    gen._prompt_time_counter = 0.0
+    done = SimpleNamespace(uid=9, token=7, finish_reason="stop")
+    _, responses = gen._prefill_arm([], [done])
+    assert [(r.uid, r.token) for r in responses] == [(9, 7)] + sent
+    assert gen._generation_batch is batch and batch._sent_first == bool(sent)

@@ -13,6 +13,7 @@ import mlx.nn as nn
 
 
 import atexit
+import os
 import sys
 from functools import lru_cache
 from typing import Callable, NamedTuple, cast
@@ -841,13 +842,14 @@ def _kquant_linear_cls():
     return importlib.import_module("mlx_kquant.nn").KQuantLinear
 
 
-def kquant_multi(linears, x: mx.array):
+def kquant_multi(linears, x: mx.array, prefill: bool = False):
     """The outputs of ``linears`` on ``x`` from ``kq.quantized_matmul_multi``
     calls, one per codec, or None where none applies.
 
-    It applies at 2 to 8 rows of ``x``, the verify widths, to plain
-    unbiased KQuantLinears: the op runs the weights of one codec that share
-    ``x`` in one dispatch, each read from its own buffer. Members are
+    It applies at 2 to 8 rows of ``x``, the verify widths, or with
+    ``prefill`` past 128 rows, to plain unbiased KQuantLinears: the op runs
+    the weights of one codec that share ``x`` in one dispatch, each read
+    from its own buffer, with the bits of a call per weight. Members are
     grouped by codec, and a codec with two or more members runs as one
     call. The other members, those an adapter or a fold wraps, float ones
     and a codec's only member, come back as None for the caller to run.
@@ -859,7 +861,11 @@ def kquant_multi(linears, x: mx.array):
                     "quantized_matmul_multi", None)
     if multi is None or len(linears) < 2 or x.ndim < 2:
         return None
-    if not 2 <= x.size // x.shape[-1] <= 8:
+    rows = x.size // x.shape[-1]
+    if prefill and (rows <= 128
+                    or os.environ.get("GMLX_KQ_MULTI_PREFILL", "1") == "0"):
+        return None
+    if not prefill and not 2 <= rows <= 8:
         return None
     cls = _kquant_linear_cls()
     groups: dict = {}
@@ -881,11 +887,11 @@ def kquant_multi(linears, x: mx.array):
     return tuple(out) if ran else None
 
 
-def kquant_multi_or(linears, x: mx.array, rest):
+def kquant_multi_or(linears, x: mx.array, rest, prefill: bool = False):
     """``kquant_multi`` with the members it leaves out run by
     ``rest(members)``, which returns their outputs in order. None where
     ``kquant_multi`` is None."""
-    out = kquant_multi(linears, x)
+    out = kquant_multi(linears, x, prefill)
     if out is None:
         return None
     left = [lin for lin, o in zip(linears, out) if o is None]
@@ -1274,6 +1280,559 @@ def take_gdn_replay(cache):
     return pend[1], pend[2], pend[3]
 
 
+# One-kernel verify ("v2"), records form only. One threadgroup per (row,
+# value head): a prologue computes the conv, silu, q/k norm and gates of
+# every position once, one simdgroup a position, into threadgroup memory;
+# the recurrence runs from threadgroup memory with RIF state rows in flight
+# per simdgroup and the next rows loaded before the current rows are
+# stored; the gated output norm runs after it in the same threadgroup. The
+# conv window is read from the carried rows and the pending block's rows
+# (set_gdn_conv), so the forward builds no concatenated conv input, and a
+# rollback copies no state and no conv rows. Where b and a are float rows
+# the kernel takes their weight and x and computes them in the prologue, so
+# the layer runs no b/a GEMV.
+#
+# The float ops and their order are those of the scan and gate kernels
+# above (and of the head GEMV for b and a), so its outputs, records and
+# replayed states equal theirs bit for bit at every width.
+#
+# The layout (a threadgroup per value head, phases that hand operands over
+# in threadgroup memory, rows in flight) follows the verify_gdn_fused
+# kernel of Splash (Apache-2.0). No code is copied.
+_GDN_V2_NSG = 8
+_GDN_V2_RIF = 2
+_GDN_V2_MAX_ROWS = 16
+# Metal's threadgroup memory limit on Apple GPUs.
+_GDN_V2_TG_BYTES = 32768
+
+_GDN_VERIFY_V2_SRC = r"""
+    constexpr int n_per_t = Dk / 32;
+    constexpr int v_per_t = Dv / 32;
+    constexpr int key_dim = Hk * Dk;
+    constexpr int value_dim = Hv * Dv;
+    constexpr int conv_dim = 2 * key_dim + value_dim;
+    constexpr int RPSG = Dv / NSG;
+    constexpr int PASSES = (SMAX + NSG - 1) / NSG;
+    constexpr int KEEP = K_size - 1;
+    const float inv_scale = rsqrt((float)Dk);
+
+    uint lane = thread_position_in_threadgroup.x;
+    uint sg   = thread_position_in_threadgroup.y;
+    uint n    = threadgroup_position_in_grid.z;
+    uint b_idx = n / Hv;
+    uint hv_idx = n % Hv;
+    uint hk_idx = TILED ? (hv_idx % Hk) : (hv_idx / (Hv / Hk));
+    bool qk_writer = TILED ? (hv_idx < Hk) : (hv_idx % (Hv / Hk) == 0);
+    uint Tn = (uint)T;
+    int Rs = REPLAY ? (int)R[b_idx] : 0;
+    int Rc = REPLAY ? (int)RC[b_idx] : 0;
+
+    threadgroup float q_sh[SMAX * Dk];
+    threadgroup float k_sh[SMAX * Dk];
+    // v of each position, then the recurrent output in its place.
+    threadgroup float v_sh[SMAX * Dv];
+    threadgroup float g_sh[SMAX];
+    threadgroup float beta_sh[SMAX];
+
+    float A = exp((float)A_log[hv_idx]);
+    float dtb = (float)dt_bias[hv_idx];
+    auto cb = conv_base + (uint)b_idx * KEEP * conv_dim;
+    auto pqb = pq + (uint)b_idx * (uint)pq_shape[1] * conv_dim;
+    auto xb = qkv + (uint)b_idx * Tn * conv_dim;
+
+    // The conv rows the pending block leaves (row sg of the window this
+    // block starts from) and the rows this block leaves when all of it is
+    // kept, loaded ahead of the stores.
+    InT carry[2][v_per_t + 2 * n_per_t];
+    if (sg < KEEP) {
+        int hs = Rc + (int)sg;
+        int u = (int)Tn + (int)sg;
+        int hu = Rc + u;
+        const device InT* src[2];
+        src[0] = hs < KEEP ? cb + (uint)hs * conv_dim : pqb + (uint)(hs - KEEP) * conv_dim;
+        src[1] = u >= KEEP ? xb + (uint)(u - KEEP) * conv_dim
+               : (hu < KEEP ? cb + (uint)hu * conv_dim : pqb + (uint)(hu - KEEP) * conv_dim);
+        for (int c = REPLAY ? 0 : 1; c < 2; ++c) {
+            for (int i = 0; i < v_per_t; ++i)
+                carry[c][i] = src[c][2 * key_dim + hv_idx * Dv + v_per_t * lane + i];
+            for (int i = 0; i < n_per_t; ++i) {
+                carry[c][v_per_t + i] = src[c][hk_idx * Dk + n_per_t * lane + i];
+                carry[c][v_per_t + n_per_t + i] = src[c][key_dim + hk_idx * Dk + n_per_t * lane + i];
+            }
+        }
+    }
+
+    for (int pass = 0; pass < PASSES; ++pass) {
+        uint t = sg + (uint)pass * NSG;
+        if (t >= Tn) break;
+        // Tap w of position t: the carried window, then the block.
+        const device InT* tap[K_size];
+        for (int w = 0; w < K_size; ++w) {
+            int u = (int)t + w;
+            if (u >= KEEP) {
+                tap[w] = xb + (uint)(u - KEEP) * conv_dim;
+            } else {
+                int h = Rc + u;
+                tap[w] = h < KEEP ? cb + (uint)h * conv_dim
+                                  : pqb + (uint)(h - KEEP) * conv_dim;
+            }
+        }
+        float bv, av;
+        if (BA_FOLD) {
+            // b and a of position t from x and the b/a weight (in ba): lanes
+            // 0..7 take row hv and lanes 8..15 row Hv + hv, in the head
+            // GEMV's order, so the bits are its bits.
+            float res = 0.0f;
+            if (lane < 16) {
+                int lr = (int)lane & 7;
+                auto xr = x + ((uint)b_idx * Tn + t) * XK;
+                auto wr = ba + (lane < 8 ? hv_idx : Hv + hv_idx) * XK;
+                for (int k0 = 0; k0 < XK; k0 += 64) {
+                    int k = k0 + lr * 8;
+                    float acc = 0.0f;
+                    for (int j = 0; j < 8; ++j)
+                        if (k + j < XK) acc += (float)wr[k + j] * (float)xr[k + j];
+                    res += acc;
+                }
+            }
+            for (int off = 4; off >= 1; off >>= 1) res += simd_shuffle_down(res, (ushort)off);
+            float ra = simd_shuffle_down(res, (ushort)8);
+            bv = (float)(TX)res; av = (float)(TX)ra;
+        } else {
+            uint ba_base = ((b_idx * Tn + t) * 2) * Hv;
+            bv = (float)ba[ba_base + hv_idx]; av = (float)ba[ba_base + Hv + hv_idx];
+        }
+        float ab = av + dtb;
+        float sp = ab > 20.0f ? ab : log(1.0f + exp(ab));
+        float g = exp(-A * sp);
+        float beta = 1.0f / (1.0f + exp(-bv));
+
+        float qn[n_per_t], kn[n_per_t];
+        float qsq = 0.0f, ksq = 0.0f;
+        for (int i = 0; i < n_per_t; ++i) {
+            int dk = n_per_t * lane + i;
+            int qch = hk_idx * Dk + dk;
+            int kch = key_dim + hk_idx * Dk + dk;
+            float qa = 0.0f, ka = 0.0f;
+            for (int w = 0; w < K_size; ++w) {
+                qa += (float)tap[w][qch] * conv_weight[w * conv_dim + qch];
+                ka += (float)tap[w][kch] * conv_weight[w * conv_dim + kch];
+            }
+            if (CONV_BF16) { qa = (float)(InT)qa; ka = (float)(InT)ka; }
+            float qs = qa * (1.0f / (1.0f + exp(-qa)));
+            float ks = ka * (1.0f / (1.0f + exp(-ka)));
+            qn[i] = qs; kn[i] = ks; qsq += qs * qs; ksq += ks * ks;
+        }
+        float vv[v_per_t];
+        for (int i = 0; i < v_per_t; ++i) {
+            int vch = 2 * key_dim + hv_idx * Dv + v_per_t * lane + i;
+            float va = 0.0f;
+            for (int w = 0; w < K_size; ++w)
+                va += (float)tap[w][vch] * conv_weight[w * conv_dim + vch];
+            if (CONV_BF16) va = (float)(InT)va;
+            vv[i] = va * (1.0f / (1.0f + exp(-va)));
+        }
+        qsq = simd_sum(qsq); ksq = simd_sum(ksq);
+        float qscale = inv_scale * inv_scale * rsqrt(qsq / (float)Dk + 1e-6f);
+        float kscale = inv_scale * rsqrt(ksq / (float)Dk + 1e-6f);
+        uint rt = ((uint)b_idx * RSTRIDE + t) * Hv + hv_idx;
+        for (int i = 0; i < n_per_t; ++i) {
+            qn[i] *= qscale; kn[i] *= kscale;
+            q_sh[t * Dk + n_per_t * lane + i] = qn[i];
+            k_sh[t * Dk + n_per_t * lane + i] = kn[i];
+            kstore[rt * Dk + n_per_t * lane + i] = kn[i];
+        }
+        for (int i = 0; i < v_per_t; ++i) v_sh[t * Dv + v_per_t * lane + i] = vv[i];
+        if (lane == 0) { g_sh[t] = g; beta_sh[t] = beta; gstore[rt] = g; }
+/*CAPROWS*/
+    }
+    if (sg < KEEP) {
+        for (int c = REPLAY ? 0 : 1; c < 2; ++c) {
+            auto dst = (c == 0 ? conv_start : conv_out) + ((uint)b_idx * KEEP + sg) * conv_dim;
+            for (int i = 0; i < v_per_t; ++i)
+                dst[2 * key_dim + hv_idx * Dv + v_per_t * lane + i] = carry[c][i];
+            if (qk_writer) {
+                for (int i = 0; i < n_per_t; ++i) {
+                    dst[hk_idx * Dk + n_per_t * lane + i] = carry[c][v_per_t + i];
+                    dst[key_dim + hk_idx * Dk + n_per_t * lane + i] = carry[c][v_per_t + n_per_t + i];
+                }
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    int row_base = (int)sg * RPSG;
+    float st[RIF][n_per_t], nx[RIF][n_per_t];
+    for (int r = 0; r < RIF; ++r) {
+        auto i_state = state_in + ((uint)(n * Dv + row_base + r)) * Dk;
+        for (int i = 0; i < n_per_t; ++i) st[r][i] = (float)i_state[n_per_t * lane + i];
+    }
+    for (int bt = 0; bt < RPSG; bt += RIF) {
+        int row0 = row_base + bt;
+        for (int p = 0; p < Rs; ++p) {
+            uint rb = ((uint)b_idx * (uint)rd_shape[1] + p) * Hv + hv_idx;
+            float gp = rg[rb];
+            float kp[n_per_t];
+            for (int i = 0; i < n_per_t; ++i) kp[i] = rk[rb * Dk + n_per_t * lane + i];
+            for (int r = 0; r < RIF; ++r) {
+                float dp = rd[rb * Dv + row0 + r];
+                for (int i = 0; i < n_per_t; ++i) { st[r][i] *= gp; st[r][i] += kp[i] * dp; }
+            }
+        }
+        if (bt + RIF < RPSG) {
+            for (int r = 0; r < RIF; ++r) {
+                auto i_state = state_in + ((uint)(n * Dv + row0 + RIF + r)) * Dk;
+                for (int i = 0; i < n_per_t; ++i) nx[r][i] = (float)i_state[n_per_t * lane + i];
+            }
+        }
+        if (REPLAY) {
+            for (int r = 0; r < RIF; ++r) {
+                auto s_state = start + ((uint)(n * Dv + row0 + r)) * Dk;
+                for (int i = 0; i < n_per_t; ++i) s_state[n_per_t * lane + i] = (StT)st[r][i];
+            }
+        }
+        for (uint t = 0; t < Tn; ++t) {
+            float g = g_sh[t];
+            float beta = beta_sh[t];
+            float kn[n_per_t], qn[n_per_t];
+            for (int i = 0; i < n_per_t; ++i) {
+                kn[i] = k_sh[t * Dk + n_per_t * lane + i];
+                qn[i] = q_sh[t * Dk + n_per_t * lane + i];
+            }
+            // One reduction a phase for the rows in flight.
+            vec<float, RIF> mem, delta, out;
+            for (int r = 0; r < RIF; ++r) {
+                float kv_mem = 0.0f;
+                for (int i = 0; i < n_per_t; ++i) { st[r][i] *= g; kv_mem += st[r][i] * kn[i]; }
+                mem[r] = kv_mem;
+            }
+            mem = simd_sum(mem);
+            for (int r = 0; r < RIF; ++r) {
+                delta[r] = (v_sh[t * Dv + row0 + r] - mem[r]) * beta;
+                float o = 0.0f;
+                for (int i = 0; i < n_per_t; ++i) { st[r][i] += kn[i] * delta[r]; o += st[r][i] * qn[i]; }
+                out[r] = o;
+            }
+            out = simd_sum(out);
+            if (lane == 0) {
+                for (int r = 0; r < RIF; ++r) {
+                    dstore[(((uint)b_idx * RSTRIDE + t) * Hv + hv_idx) * Dv + row0 + r] = delta[r];
+                    v_sh[t * Dv + row0 + r] = out[r];
+                }
+            }
+        }
+        for (int r = 0; r < RIF; ++r)
+            for (int i = 0; i < n_per_t; ++i) st[r][i] = nx[r][i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (int pass = 0; pass < PASSES; ++pass) {
+        uint t = sg + (uint)pass * NSG;
+        if (t >= Tn) break;
+        float ov[v_per_t];
+        float ss = 0.0f;
+        for (int i = 0; i < v_per_t; ++i) {
+            ov[i] = v_sh[t * Dv + v_per_t * lane + i];
+            ss += ov[i] * ov[i];
+        }
+        ss = simd_sum(ss);
+        float rms_denom = rsqrt(ss / (float)Dv + 1e-6f);
+        uint row = ((uint)b_idx * Tn + t) * Hv + hv_idx;
+        for (int i = 0; i < v_per_t; ++i) {
+            float xn = ov[i] * rms_denom * (float)norm_weight[v_per_t * lane + i];
+            float zv = (float)z[row * Dv + v_per_t * lane + i];
+            float sig = 1.0f / (1.0f + exp(-zv));
+            float gate = GATE_SIGMOID ? sig : zv * sig;
+            y[row * Dv + v_per_t * lane + i] = (InT)(gate * xn);
+        }
+    }
+"""
+
+# The fixed row capacity form (GatedDeltaNet._verify_row_cap): the records
+# are written at SMAX rows a batch row whatever the block's width, and the
+# block's conv rows are copied out at the same capacity, so the arrays a
+# round leaves for the next one have one shape for every width. Rows past
+# the block's width are never written and never read (a replay reads the
+# first R records, a window the first RC rows). The plain form's source is
+# the text below with the block's width as the stride and no copy.
+_GDN_V2_CAP_ROWS = r"""
+        {
+            auto cr = crows + ((uint)b_idx * (uint)SMAX + t) * conv_dim;
+            auto xr = tap[K_size - 1];
+            for (int i = 0; i < v_per_t; ++i) {
+                int vch = 2 * key_dim + hv_idx * Dv + v_per_t * lane + i;
+                cr[vch] = xr[vch];
+            }
+            if (qk_writer) {
+                for (int i = 0; i < n_per_t; ++i) {
+                    int dk = hk_idx * Dk + n_per_t * lane + i;
+                    cr[dk] = xr[dk];
+                    cr[key_dim + dk] = xr[key_dim + dk];
+                }
+            }
+        }
+"""
+
+_GDN_V2_INPUTS = [
+    "conv_base",
+    "pq",
+    "qkv",
+    "conv_weight",
+    "ba",
+    "A_log",
+    "dt_bias",
+    "state_in",
+    "T",
+    "rd",
+    "rk",
+    "rg",
+    "R",
+    "RC",
+    "z",
+    "norm_weight",
+    "x",
+]
+_GDN_V2_OUTPUTS = ["y", "start", "conv_start", "dstore", "kstore", "gstore",
+                   "conv_out"]
+
+_gdn_verify_v2_kernel = (
+    _metal_kernel(
+        name="gmlx_gated_delta_verify_v2",
+        input_names=_GDN_V2_INPUTS,
+        output_names=_GDN_V2_OUTPUTS,
+        source=_GDN_VERIFY_V2_SRC.replace("RSTRIDE", "Tn")
+        .replace("/*CAPROWS*/\n", ""),
+    )
+    if mx.metal.is_available()
+    else None
+)
+
+_gdn_verify_v2_cap_kernel = (
+    _metal_kernel(
+        name="gmlx_gated_delta_verify_v2_cap",
+        input_names=_GDN_V2_INPUTS,
+        output_names=[*_GDN_V2_OUTPUTS, "crows"],
+        source=_GDN_VERIFY_V2_SRC.replace("RSTRIDE", "(uint)SMAX")
+        .replace("/*CAPROWS*/\n", _GDN_V2_CAP_ROWS),
+    )
+    if mx.metal.is_available()
+    else None
+)
+
+
+class GdnConvRows(NamedTuple):
+    """What a v2 verify leaves in the sink for the conv rollback: the conv
+    window the block started from and the block's own conv input rows."""
+
+    base: mx.array
+    rows: mx.array
+
+
+def gdn_conv_window(base: mx.array, rows: mx.array, steps) -> mx.array:
+    """The conv window after the first ``steps`` of ``rows`` on ``base``
+    (an int for every row, or one count per row). Lazy."""
+    keep = int(base.shape[1])
+    hist = mx.concatenate([base, rows], axis=1)
+    if isinstance(steps, int):
+        return mx.contiguous(hist[:, steps:steps + keep])
+    idx = steps[:, None] + mx.arange(keep, dtype=mx.int32)[None, :]
+    return mx.take_along_axis(hist, idx[..., None], axis=1)
+
+
+def set_gdn_conv(cache, base: mx.array, rows: mx.array, steps) -> None:
+    """Leave ``cache``'s conv state as the window after ``steps`` of
+    ``rows`` on ``base``. ``cache[0]`` becomes the lazy window, so any
+    reader gets the right rows, and the v2 kernel reads ``base`` and
+    ``rows`` itself instead (take_gdn_conv)."""
+    win = gdn_conv_window(base, rows, steps)
+    cache[0] = win
+    cache._gdn_conv = (win, base, rows, replay_steps(steps, int(base.shape[0])))
+
+
+def take_gdn_conv(cache):
+    """``(base, rows, steps)`` when ``cache[0]`` is still the window
+    set_gdn_conv left, else None. Clears the pending window either way."""
+    pend = getattr(cache, "_gdn_conv", None)
+    if pend is None:
+        return None
+    cache._gdn_conv = None
+    if pend[0] is not cache[0]:
+        return None
+    return pend[1], pend[2], pend[3]
+
+
+def gdn_verify_v2_default() -> bool:
+    """Whether the one-kernel verify is on: ``GMLX_GDN_VERIFY_V2`` when
+    set (1 forces it on any GPU), else on from the M3 generation up. Its
+    256-thread groups are not validated on M1 and M2 (see gdn_sg)."""
+    forced = env_int("GMLX_GDN_VERIFY_V2", -1)
+    if forced >= 0:
+        return forced > 0
+    from gmlx.load.dtypes import gpu_arch_gen
+
+    gen = gpu_arch_gen()
+    return gen == 0 or gen >= 15
+
+
+_NO_CONV_ROWS: dict = {}
+
+
+def _no_conv_rows(dtype) -> mx.array:
+    """Placeholder pending rows for a kernel called with RC=0. Eight
+    elements, so mlx binds it in the device address space like the rows it
+    stands in for."""
+    if dtype not in _NO_CONV_ROWS:
+        z = mx.zeros((1, 1, 8), dtype=dtype)
+        mx.eval(z)
+        _NO_CONV_ROWS[dtype] = z
+    return _NO_CONV_ROWS[dtype]
+
+
+def _gdn_verify_v2(self, inputs, mixed_qkv, ba, z, mask, cache, gdn_sink,
+                   ba_weight=None):
+    """The verify forward from the projections on, through the one-kernel
+    form. None where it does not apply and the caller runs the two-kernel
+    form: more than 16 positions, head dims that do not tile its grid, a
+    ragged batch (``cache.lengths``), or a conv state of another dtype.
+    With ``ba_weight`` (b's rows then a's, float) ``ba`` is not read: the
+    kernel computes b and a from ``inputs``, with the head GEMV's bits.
+    A layer with ``_verify_row_cap`` set gets the fixed row capacity form:
+    records and conv rows of 8 rows (16 past 8 positions) a batch row, of
+    which the first S are written, and a pending conv window after a full
+    accept too."""
+    B, S, _ = inputs.shape
+    Dv, Dk = self.head_v_dim, self.head_k_dim
+    Hv, Hk = self.num_v_heads, self.num_k_heads
+    K = self.conv_kernel_size
+    NSG, RIF = _GDN_V2_NSG, _GDN_V2_RIF
+    smax = 8 if S <= 8 else _GDN_V2_MAX_ROWS
+    if (
+        _gdn_verify_v2_kernel is None
+        or cache is None
+        or S > _GDN_V2_MAX_ROWS
+        or Dk % 32 != 0
+        or Dv % 32 != 0
+        or Dv % (NSG * RIF) != 0
+        or not 2 <= K <= NSG + 1
+        or 4 * smax * (2 * Dk + Dv + 2) > _GDN_V2_TG_BYTES
+        or getattr(cache, "lengths", None) is not None
+    ):
+        return None
+    dtype = mixed_qkv.dtype
+    conv_state = cache[0]
+    if conv_state is not None and (
+            conv_state.shape[0] != B or conv_state.dtype != dtype):
+        if conv_state.shape[0] == B:
+            return None
+        conv_state = None
+    pend_conv = take_gdn_conv(cache)
+    if conv_state is None:
+        conv_state = mx.zeros((B, K - 1, self.conv_dim), dtype=dtype)
+        pend_conv = None
+    if pend_conv is not None and pend_conv[1].dtype != dtype:
+        pend_conv = None
+    if mask is not None and mask.shape[0] == B:
+        mixed_qkv = mx.where(mask[..., None], mixed_qkv, 0)
+
+    init_state = cache[1]
+    state = init_state
+    pend = take_gdn_replay(cache)
+    if state is None or state.shape[0] != B:
+        state = mx.zeros((B, Hv, Dv, Dk), dtype=mx.float32)
+        pend = None
+
+    cw = getattr(self, "_gdn_verify_conv_weight", None)
+    if cw is None or cw[0] != id(self.conv1d.weight):
+        w = self.conv1d.weight[:, :, 0].T.astype(mx.float32)
+        mx.eval(w)
+        cw = (id(self.conv1d.weight), w)
+        self._gdn_verify_conv_weight = cw
+
+    replay = pend is not None or pend_conv is not None
+    if pend is None:
+        base, records, steps = state, _no_records(), replay_steps(0, B)
+    else:
+        base, records, steps = pend
+    if pend_conv is None:
+        conv_base, conv_rows, conv_steps = (
+            conv_state, _no_conv_rows(dtype), replay_steps(0, B))
+    else:
+        conv_base, conv_rows, conv_steps = pend_conv
+    fold = ba_weight is not None
+    x = mx.contiguous(inputs) if fold else _no_conv_rows(dtype)
+    # Fixed row capacity form: see _GDN_V2_CAP_ROWS.
+    cap = bool(getattr(self, "_verify_row_cap", False))
+    rows = smax if cap else S
+    y, start, conv_start, rd, rk, rg, conv_out, *crows = (
+            _gdn_verify_v2_cap_kernel if cap else _gdn_verify_v2_kernel)(
+        inputs=[conv_base, conv_rows, mixed_qkv, cw[1],
+                ba_weight if fold else ba, self.A_log,
+                self.dt_bias, base, S, *records, steps, conv_steps,
+                z, self.norm.weight, x],
+        template=[
+            ("InT", dtype),
+            ("StT", base.dtype),
+            ("Dk", Dk),
+            ("Dv", Dv),
+            ("Hk", Hk),
+            ("Hv", Hv),
+            ("K_size", K),
+            ("TILED", _kv_heads_tiled(self)),
+            ("CONV_BF16", 1),
+            ("GATE_SIGMOID", int(bool(getattr(self, "gdn_gate_sigmoid", False)))),
+            ("REPLAY", int(replay)),
+            ("NSG", NSG),
+            ("RIF", RIF),
+            ("SMAX", smax),
+            ("BA_FOLD", int(fold)),
+            ("XK", int(x.shape[-1])),
+            ("TX", x.dtype),
+        ],
+        grid=(32, NSG, B * Hv),
+        threadgroup=(32, NSG, 1),
+        output_shapes=[
+            (B, S, Hv, Dv),
+            # Written only after a replay; else the inputs are the start.
+            base.shape if replay else (1,),
+            conv_base.shape if replay else (1,),
+            (B, rows, Hv, Dv),
+            (B, rows, Hv, Dk),
+            (B, rows, Hv),
+            (B, K - 1, self.conv_dim),
+            *([(B, rows, self.conv_dim)] if cap else []),
+        ],
+        output_dtypes=[dtype, base.dtype, dtype, mx.float32, mx.float32,
+                       mx.float32, dtype, *([dtype] if cap else [])],
+    )
+    rollback = GdnRecords(start if replay else base, (rd, rk, rg))
+    conv = GdnConvRows(conv_start if replay else conv_base,
+                       crows[0] if cap else mixed_qkv)
+    # Full accept; the rollback shortens the replay and moves the window on
+    # a rejection.
+    cache[0] = conv_out
+    set_gdn_replay(cache, rollback.base, rollback.records, S)
+    if cap:
+        # conv_out is the window after all S rows. It is left pending as
+        # one, so the next verify reads the same arrays after a full
+        # accept as after a rollback (the same values either way).
+        cache._gdn_conv = (conv_out, conv.base, conv.rows, replay_steps(S, B))
+    if hasattr(cache, "advance"):
+        cache.advance(S)
+        from gmlx.models.qwen35.owned import (
+            _qwen3_5_advance_left_padding_info,
+            _qwen3_5_advance_lengths_info,
+        )
+
+        _qwen3_5_advance_left_padding_info(cache, S)
+        _qwen3_5_advance_lengths_info(cache, S)
+    if gdn_sink is not None:
+        # Slot 9 holds the conv rows (a GdnConvRows) and slot 11 the
+        # records; the rollback needs nothing else.
+        gdn_sink.append((None, None, None, None, None, self.A_log, self.dt_bias,
+                         init_state, mask, conv, K, rollback))
+    return _bf16_verify_linear(self.out_proj, y.reshape(B, S, -1))
+
+
 # Dense (bf16/f16) lm_head verify projection. mx.matmul runs the F16 head at
 # ~68% of peak for verify widths M=2-8 (tuned for M=1 GEMV and large-M GEMM, not
 # the small-batch middle). This M-stationary GEMV-ext -- one output row per
@@ -1422,7 +1981,8 @@ def _gdn_fused_verify_call(
     return _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink)
 
 
-def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False):
+def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False,
+                           v2=False):
     """Fused multi-position verify forward, shared by the class patch
     (stock fallback loads) and the owned GatedDeltaNet class. Callers
     guarantee the route conditions: sink set, S>1, kernel available,
@@ -1430,7 +1990,11 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
 
     ``records`` runs the records form of the scan: the sink carries a
     GdnRecords and the cache a pending replay of all S positions, so the
-    caller's rollback must know GdnRecords (the owned qwen3.5 one does)."""
+    caller's rollback must know GdnRecords (the owned qwen3.5 one does).
+
+    ``v2`` runs the one-kernel form where it applies (_gdn_verify_v2): the
+    sink carries a GdnRecords and a GdnConvRows, which the caller's
+    rollback must know (the qwen4_exp one does)."""
     B, S, _ = inputs.shape
     Dv = self.head_v_dim
 
@@ -1489,7 +2053,8 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
              for o, m in zip(ba_multi, (self.in_proj_b, self.in_proj_a))],
             axis=-1)
     elif cba[1] is not None:
-        ba = _f16_head_gemv(inputs, cba[1])
+        # The one-kernel verify computes b and a itself.
+        ba = None if v2 else _f16_head_gemv(inputs, cba[1])
     elif (ba_kq := _gdn_ba_kq(self)) is not None:
         ba = ba_kq(inputs)
     else:
@@ -1500,9 +2065,16 @@ def _gdn_fused_verify_body(self, inputs, mask, cache, gdn_sink, *, records=False
             ],
             axis=-1,
         )
+    z = z.reshape(B, S, self.num_v_heads, Dv)
+    if v2:
+        out = _gdn_verify_v2(self, inputs, mixed_qkv, ba, z, mask, cache, gdn_sink,
+                             ba_weight=cba[1] if ba is None else None)
+        if out is not None:
+            return out
+    if ba is None:
+        ba = _f16_head_gemv(inputs, cba[1])
     b = ba[..., : self.num_v_heads]
     a = ba[..., self.num_v_heads :]
-    z = z.reshape(B, S, self.num_v_heads, Dv)
 
     conv_state = cache[0] if (cache is not None and cache[0] is not None) else None
     if conv_state is None or conv_state.shape[0] != B:

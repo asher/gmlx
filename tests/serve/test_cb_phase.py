@@ -35,6 +35,8 @@ def fake_kq(monkeypatch):
     monkeypatch.setitem(cb_phase._state, "pre_lift", None)
     monkeypatch.setitem(cb_phase._state, "model", cb_phase._UNSET)
     monkeypatch.setitem(cb_phase._state, "holds", 0)
+    monkeypatch.setitem(cb_phase._state, "spec", False)
+    monkeypatch.delenv("GMLX_SPEC_CB_FINE", raising=False)
     return calls
 
 
@@ -109,6 +111,63 @@ def test_flip_dedupes(fake_kq):
     cb_phase.flip("prefill")
     cb_phase.flip("decode")
     assert fake_kq == [cb_phase.RAM_DECODE, cb_phase.FINE, cb_phase.RAM_DECODE]
+
+
+def test_one_buffer_lifts_the_caps_for_its_block(fake_kq):
+    """The block's submissions run on caps none reaches. The phase caps
+    come back at the end, on an error too, and the phase record stays."""
+    import gmlx.serve.cb_phase as cb_phase
+
+    cb_phase.flip("prefill")
+    with cb_phase.one_buffer():
+        assert fake_kq[-1] == cb_phase._WHOLE
+    with pytest.raises(RuntimeError), cb_phase.one_buffer():
+        raise RuntimeError
+    cb_phase.flip("prefill")
+    assert fake_kq == [cb_phase.FINE, cb_phase._WHOLE, cb_phase.FINE,
+                       cb_phase._WHOLE, cb_phase.FINE]
+
+
+def test_one_buffer_keeps_a_hold_a_pin_or_the_switch(held):
+    import gmlx.serve.cb_phase as cb_phase
+
+    key, writes = held
+    with cb_phase.one_buffer():
+        pass
+    assert writes == []
+    value = os.environ.pop(key)
+    with cb_phase.hold():
+        with cb_phase.one_buffer():
+            pass
+    os.environ[key] = value
+    assert writes == [cb_phase.FINE]
+
+
+def test_spec_rounds_decode_fine_and_plain_decode_keeps_its_caps(
+        fake_kq, monkeypatch):
+    import gmlx.serve.cb_phase as cb_phase
+
+    model = _model(False)
+    cb_phase.flip("decode", model)
+    cb_phase.spec_rounds(True, model)
+    cb_phase.flip("decode", model)      # the engine flips at every step
+    cb_phase.spec_rounds(False, model)
+    assert fake_kq == [cb_phase.RAM_DECODE, cb_phase.FINE_DECODE,
+                       cb_phase.RAM_DECODE]
+
+    del fake_kq[:]
+    monkeypatch.setenv("GMLX_SPEC_CB_FINE", "0")
+    cb_phase.spec_rounds(True, model)
+    cb_phase.spec_rounds(False, model)
+    assert fake_kq == []
+
+    monkeypatch.delenv("GMLX_SPEC_CB_FINE")
+    streamed = _model(True)
+    cb_phase.flip("decode", streamed)
+    del fake_kq[:]
+    cb_phase.spec_rounds(True, streamed)
+    cb_phase.spec_rounds(False, streamed)
+    assert fake_kq == []
 
 
 def test_flip_noop_without_kq(monkeypatch):

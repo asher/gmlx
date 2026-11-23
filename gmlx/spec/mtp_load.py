@@ -25,7 +25,7 @@ import gmlx.load.rope_scaling as rope_mod
 import gmlx.load.rope_swap as rope_swap
 from gmlx.load.dtypes import activation_dtype, activation_dtype_name
 from gmlx.device import cpu_default_device, metal_value
-from gmlx.envflags import env_int
+from gmlx.envflags import env_float, env_int
 from gmlx.upstream.gdn_patches import (
     _patch_dense_head_verify,
     require_tiled_gdn,
@@ -1497,7 +1497,7 @@ def _wire_dflash_capture(target, layer_ids) -> None:
     if not callable(getattr(lm, "set_dflash_capture", None)):
         raise RuntimeError(
             "DFlash drafters need a target carrying the _dflash_capture seam "
-            f"(muse_glimmer, gemma4, owned qwen3_5, ricursive); got {type(lm).__name__}"
+            f"(muse_glimmer, gemma4, owned qwen3_5, ricursive, qwen4_exp); got {type(lm).__name__}"
         )
     lm.set_dflash_capture(layer_ids)
 
@@ -1558,6 +1558,22 @@ def _load_plain_dflash_drafter(
     return drafter
 
 
+# DFlash 2 row cut by target family (DFlash2Drafter.row_floor): the chance
+# under which a draft is not worth its verify row. A row costs most where
+# the target is a mixture of experts, since each row routes its own.
+_DFLASH2_ROW_FLOOR = {
+    "qwen4_exp": 0.5,
+}
+
+
+def _dflash2_row_floor(model_type) -> float:
+    """GMLX_DFLASH_ROW_FLOOR, else the family's row, else 0 (no cut)."""
+    floor = env_float("GMLX_DFLASH_ROW_FLOOR", -1.0)
+    if floor < 0:
+        floor = _DFLASH2_ROW_FLOOR.get(str(model_type), 0.0)
+    return min(max(float(floor), 0.0), 1.0)
+
+
 def _load_dflash2_drafter(
     draft_gguf_path: str,
     target,
@@ -1601,11 +1617,13 @@ def _load_dflash2_drafter(
     )
     drafter.bind(target)
     _wire_dflash_capture(target, layer_ids)
+    drafter.row_floor = _dflash2_row_floor(target_config_dict.get("model_type"))
 
     from .drafter_protocol import validate_drafter
 
     validate_drafter(drafter)
-    log("[mtp] dflash2 drafter bound; target capture layers wired")
+    log("[mtp] dflash2 drafter bound; target capture layers wired"
+        + (f"; row floor {drafter.row_floor:g}" if drafter.row_floor else ""))
     _patch_draft_head_quantized(drafter, "lm_head")
     _stamp_mtp_width_cap(
         drafter, str(target_config_dict.get("model_type") or "dflash2"),
@@ -1786,9 +1804,9 @@ def _assistant_kind(model_type: str | None, draft_gguf_path: str) -> str:
     the pairing it is handed."""
     if model_type == "deepseek_v4":
         return "deepseek4"
-    if model_type == "qwen4_exp":
-        return "qwen4exp"
     header_arch = _drafter_header_arch(draft_gguf_path)
+    if model_type == "qwen4_exp" and header_arch != "dflash":
+        return "qwen4exp"
     if model_type == "nemotron_h" and header_arch != "dflash":
         return "nemotron"
     if model_type == "muse_glimmer" or header_arch == "dflash":
@@ -2219,6 +2237,10 @@ def load_mtp_model(
             deferred_tables=deferred_tables(pf.shards, arch),
             hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
         )
+    from gmlx.load import expert_store
+
+    # The stacks a full expert store replaced: this dict still names them.
+    expert_store.drop_mapped(arrays, last=True)
 
     # 2b. post-install arming: the tiled-V check + the fused gated-delta verify kernel
     #     (the MTP round's roofline; measured ~7% at M=5, ~15% at M=8 on the

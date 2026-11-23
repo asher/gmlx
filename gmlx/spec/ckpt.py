@@ -58,6 +58,64 @@ def _ckpt_live_ok(batch, block_size: int) -> bool:
     return False
 
 
+def l1_peek(batch, manager, mode, floor: int) -> int:
+    """The deepest checkpoint record past ``floor`` that
+    _l1_lookup_and_arm_store would restore for this batch, or 0. A dry
+    run: same salt, layout and guards as the lookup, nothing assembled."""
+    bs = int(manager.block_size)
+    if not (_ckpt_active(batch.model, mode, bs) and _ckpt_live_ok(batch, bs)):
+        return 0
+    view: Any = _L1View(batch.model, manager, mode)
+    ids_list = [int(t) for t in batch._mtp_full_input_ids[0].tolist()]
+    cold = (getattr(batch, "_apc_meta", None) or [None])[0]
+    if isinstance(cold, dict) and "extra_hash" in cold:
+        extra_hash = as_salt(cold["extra_hash"])
+    else:
+        extra_hash = view._apc_extra_hash(batch._prompt_kwargs or {})
+    from gmlx.cache.snapshot import ckpt_peek
+
+    p = ckpt_peek(
+        manager, ids_list, extra_hash=extra_hash,
+        min_prefix_tokens=max(int(floor),
+                              view._apc_safe_prefix_lookup_min(ids_list)),
+        layout=_ckpt_layout_live(batch, bs))
+    if p > floor and view._apc_suffix_is_text_only(ids_list, p):
+        return int(p)
+    return 0
+
+
+# Drafter seeds a manager keeps beside its retire records
+# (GMLX_SPEC_APC_LONGER): each is the packed target hidden of the last
+# rows of one finished request.
+_TAIL_SEEDS = 4
+
+
+def tail_seed_store(manager, ids, extra_hash, hidden) -> None:
+    """Keep ``hidden`` (1, rows, width), the target hidden of the last
+    ``rows`` positions of ``ids``, for the request that restores exactly
+    ``ids`` from the shared cache."""
+    seeds = getattr(manager, "_kq_tail_seeds", None)
+    if seeds is None:
+        seeds = manager._kq_tail_seeds = {}
+    key = (as_salt(extra_hash), tuple(int(t) for t in ids))
+    seeds.pop(key, None)
+    seeds[key] = hidden
+    while len(seeds) > _TAIL_SEEDS:
+        seeds.pop(next(iter(seeds)))
+
+
+def tail_seed_lookup(manager, ids, extra_hash):
+    """The hidden ``tail_seed_store`` kept for exactly ``ids``, or None."""
+    seeds = getattr(manager, "_kq_tail_seeds", None)
+    if not seeds:
+        return None
+    key = (as_salt(extra_hash), tuple(int(t) for t in ids))
+    hidden = seeds.pop(key, None)
+    if hidden is not None:
+        seeds[key] = hidden
+    return hidden
+
+
 def _l1_lookup_and_arm_store(batch, manager, mode, l0_prefix) -> int:
     """Consult the shared APCManager below L0 and arm the stock post-prefill
     store (mid-prefill exact checkpoints + post-prefill exact store / block
@@ -618,8 +676,14 @@ def _ckpt_replay_boundary(batch, meta, restored: int,
     deep-conversation records it exists to protect. Rotating layouts
     need N-1 at or past the window (below it the store's grid gate
     declines). Kill switch: GMLX_APC_CKPT_REPLAY=0.
+
+    An MTP batch whose last chunk runs the last token
+    (GMLX_SPEC_LAST_IN_CHUNK) has no pause at N-1: its first cache level
+    holds the whole prompt with the first token's logits for the resend.
     """
     if env_int("GMLX_APC_CKPT_REPLAY", 1) == 0:
+        return None
+    if getattr(batch, "_kq_last_in", False):
         return None
     n = len(meta.get("full_input_ids") or ())
     replay = n - 1
@@ -977,7 +1041,8 @@ def _ckpt_mid_prefill_store(batch) -> None:
     if ckpt_store(
             manager, meta["full_input_ids"][:checkpoint_len],
             batch.prompt_cache, extra_hash=as_salt(meta.get("extra_hash", 0)),
-            skeleton_disk=skel, kind=kind, keep=meta.get("ckpt_p_stable")):
+            skeleton_disk=skel, kind=kind, keep=meta.get("ckpt_p_stable"),
+            eval_async=bool(getattr(batch, "_kq_ckpt_async", False))):
         meta["ckpt_last_stored"] = checkpoint_len
         meta.setdefault("ckpt_stored_boundaries", []).append(checkpoint_len)
     if bounds:

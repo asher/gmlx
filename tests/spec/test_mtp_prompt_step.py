@@ -138,6 +138,10 @@ def test_an_mtp_chunk_books_what_it_held_before_its_clear(ar, monkeypatch):
         apc_coordinator=_Coordinator(), suffix_lens=[8],
         draft_model=object(), draft_kind="mtp")
     assert batch.prompt_step() > 0
+    # By default the clear waits for the next submit; it books first.
+    from gmlx.gen import deferred_clear
+
+    deferred_clear.run()
     assert order[-2:] == ["own", "clear"] and cap._OWN_PEAK == 99.6e9
 
 
@@ -169,6 +173,51 @@ def test_an_mtp_chunk_queues_its_rows_before_its_forward(ar, monkeypatch):
     n = batch.prompt_step()
     assert n > 0
     assert order[0] == ("submit", [(0, n)]) and order[-1] == "forward"
+
+
+@pytest.mark.parametrize("on, want", [
+    (True, ["one", "submit", "end", ("store", True)]),
+    (False, ["eval", ("store", False)])])
+def test_an_async_checkpoint_store_runs_before_the_chunk_wait(
+        ar, monkeypatch, on, want):
+    # GMLX_SPEC_CKPT_ASYNC: the store builds its copies while the GPU
+    # still runs the chunk's forward, not after the wait for it, and the
+    # chunk's hidden is submitted before the store, as one command buffer.
+    # A chunk with prompt columns after it does not wait at all.
+    from contextlib import contextmanager
+
+    import gmlx.serve.cb_phase as cb_phase
+    import gmlx.spec.mtp_prefill as mtp_prefill
+
+    monkeypatch.setattr(mtp_prefill, "_CKPT_ASYNC", on)
+    order = []
+
+    @contextmanager
+    def one_buffer():
+        order.append("one")
+        yield
+        order.append("end")
+
+    monkeypatch.setattr(cb_phase, "one_buffer", one_buffer)
+    real_eval, real_submit = mx.eval, mx.async_eval
+    monkeypatch.setattr(
+        mx, "eval", lambda *a, **k: order.append("eval") or real_eval(*a, **k))
+    monkeypatch.setattr(
+        mx, "async_eval",
+        lambda *a, **k: order.append("submit") or real_submit(*a, **k))
+    rows = [list(range(1, 9))]
+    batch = ar.PromptProcessingBatch(
+        _Model(), [0], rows, [4], _embeds(rows, 8), {},
+        warm_cache=[BatchKVCache(left_padding=[0])],
+        apc_coordinator=_Coordinator(), suffix_lens=[8],
+        draft_model=object(), draft_kind="mtp")
+    batch._store_apc_exact_checkpoints = (
+        lambda: order.append(("store", batch._kq_ckpt_async)))
+    assert batch.prompt_step() > 0
+    at = order.index(("store", on)) - want.index(("store", on))
+    assert order[at:at + len(want)] == want
+    if on:
+        assert "eval" not in order[at + len(want):]
 
 
 def test_mrope_position_ids_slice_on_the_sequence_axis(ar, monkeypatch):
@@ -286,6 +335,181 @@ def test_l0_restore_trims_mrope_position_ids(ar, monkeypatch):
     seen = [c["position_ids"] for c in model.calls]
     assert [c["n"] for c in model.calls] == [2, 1, 1]
     assert mx.concatenate(seen, axis=2).tolist() == pos[:, :, 5:].tolist()
+
+
+class _HeadModel(_Model):
+    """A target that projects logits from the hidden it returns. The stub's
+    hidden is the embedding, each element the token id."""
+
+    def speculative_logits_from_hidden(self, hidden):
+        return (mx.arange(_V)[None, None, :]
+                == hidden[..., :1].astype(mx.int32)).astype(mx.float32)
+
+
+class _OwnKVDrafter:
+    uses_shared_kv = False
+
+    def __init__(self, limit=None):
+        self.hidden_capture_limit = limit
+
+    def prefill_from_target_hidden(self, *args, **kwargs):
+        pass
+
+
+def _one_row(ar, model, ids, limit=None):
+    return ar.PromptProcessingBatch(
+        model, [0], [ids], [4], _embeds([ids], len(ids)), {},
+        warm_cache=[BatchKVCache(left_padding=[0])], suffix_lens=[len(ids)],
+        draft_model=_OwnKVDrafter(limit), draft_kind="mtp")
+
+
+def _handed(gen):
+    """What the rounds get from a prefill: first token, drafter hidden
+    rows, prompt tokens, cache depth."""
+    return (gen.first_tokens.tolist(), gen.hidden[..., 0].tolist(),
+            gen.prompt_tokens.tolist(), int(gen.prompt_cache[0]._idx))
+
+
+@pytest.mark.parametrize("step,on,off", [
+    ("16", [8], [7, 1]), ("3", [3, 3, 2], [3, 3, 1, 1])])
+def test_the_last_chunk_runs_the_last_token(ar, monkeypatch, step, on, off):
+    # GMLX_SPEC_LAST_IN_CHUNK: the chunk that ends one column short of the
+    # prompt runs that column too, and no one-column forward follows. The
+    # rounds get the same first token, hidden, tokens and cache depth.
+    import gmlx.spec.mtp_prefill as mtp_prefill
+
+    monkeypatch.setenv("PREFILL_STEP_SIZE", step)
+    monkeypatch.setenv("GMLX_PREFILL_MIN_TAIL", "0")
+    ids = list(range(1, 9))
+    got = {}
+    for lever, calls in ((False, off), (True, on)):
+        monkeypatch.setattr(mtp_prefill, "_LAST_IN_CHUNK", lever)
+        model = _HeadModel()
+        batch = _one_row(ar, model, ids)
+        _, gen = _run(batch)
+        assert [c["n"] for c in model.calls] == calls
+        assert "_kq_last_out" not in vars(batch)
+        got[lever] = _handed(gen)
+    assert got[True] == got[False]
+    assert got[True] == ([8], [[float(t) for t in ids]], [ids], 8)
+
+
+def test_a_checkpoint_one_token_short_keeps_the_last_token_alone(
+        ar, monkeypatch):
+    # A checkpoint due at N-1 stores the cache as it stands there, so the
+    # chunk still ends at it.
+    import gmlx.spec.mtp_prefill as mtp_prefill
+
+    monkeypatch.setattr(mtp_prefill, "_LAST_IN_CHUNK", True)
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "16")
+    monkeypatch.setattr(
+        ar.PromptProcessingBatch, "_next_apc_checkpoint_column",
+        lambda self: 7 if self._processed_prompt_columns < 7 else None)
+    model = _HeadModel()
+    _, gen = _run(_one_row(ar, model, list(range(1, 9))))
+    assert [c["n"] for c in model.calls] == [7, 1]
+    assert gen.first_tokens.tolist() == [8]
+
+
+@pytest.mark.parametrize("draft", ["shared_kv", "no_head", "two_rows"])
+def test_the_last_token_stays_alone_where_the_chunk_cannot_run_it(
+        ar, monkeypatch, draft):
+    import gmlx.spec.mtp_prefill as mtp_prefill
+
+    monkeypatch.setattr(mtp_prefill, "_LAST_IN_CHUNK", True)
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "16")
+    ids = list(range(1, 9))
+    model = _Model() if draft == "no_head" else _HeadModel()
+    if draft == "two_rows":
+        rows = [ids, [t + 10 for t in ids]]
+        batch = ar.PromptProcessingBatch(
+            model, [0, 1], rows, [4, 4], _embeds(rows, 8), {},
+            warm_cache=[BatchKVCache(left_padding=[0, 0])],
+            suffix_lens=[8, 8], draft_model=_OwnKVDrafter(),
+            draft_kind="mtp")
+    else:
+        batch = _one_row(ar, model, ids)
+        if draft == "shared_kv":
+            batch.draft_model.uses_shared_kv = True
+    _, gen = _run(batch)
+    assert [c["n"] for c in model.calls] == [7, 1]
+    assert gen.first_tokens.tolist()[0] == 8
+
+
+@pytest.mark.parametrize("after_first", [False, True])
+@pytest.mark.parametrize("limit", [None, 3])
+def test_a_whole_prompt_entry_serves_a_resend_with_no_forward(
+        ar, monkeypatch, limit, after_first):
+    # With the last token in the chunk the first cache level holds the
+    # whole prompt and its first token's logits. The same prompt sent again
+    # forwards nothing, and a longer prompt forwards only what it adds.
+    # GMLX_SPEC_L0_AFTER_FIRST stores the same entry at the end of the
+    # serve step that hands out the first token.
+    import gmlx.spec.engine as engine
+    import gmlx.spec.mtp_prefill as mtp_prefill
+    import gmlx.spec.speculative as spec
+    from gmlx.cache.prefix_cache import SpecPrefixCache
+
+    monkeypatch.setattr(engine, "_SPEC_APC_DISABLED", False)
+    monkeypatch.setattr(mtp_prefill, "_SPEC_APC_DISABLED", False)
+    monkeypatch.setattr(mtp_prefill, "_LAST_IN_CHUNK", True)
+    monkeypatch.setattr(mtp_prefill, "_L0_AFTER_FIRST", after_first)
+    monkeypatch.setenv("PREFILL_STEP_SIZE", "16")
+    ids = list(range(1, 9))
+    longer = ids + [9, 10, 11]
+
+    def cold(prompt):
+        m = _HeadModel()
+        m._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
+        return _handed(_run(_one_row(ar, m, prompt, limit))[1])
+
+    model = _HeadModel()
+    model._spec_prefix_cache = SpecPrefixCache(min_prefix=2)
+    spec.begin_step()
+    try:
+        first = _handed(_run(_one_row(ar, model, ids, limit))[1])
+        assert len(model._spec_prefix_cache) == (0 if after_first else 1)
+    finally:
+        spec.run_step_end()
+    assert [c["n"] for c in model.calls] == [8]
+
+    model.calls.clear()
+    batch = _one_row(ar, model, ids, limit)
+    again = _handed(_run(batch)[1])
+    assert model.calls == []
+    assert again == first == cold(ids)
+    assert len(model._spec_prefix_cache) == 1
+
+    model.calls.clear()
+    batch = _one_row(ar, model, longer, limit)
+    nxt = _handed(_run(batch)[1])
+    assert [c["n"] for c in model.calls] == [3]
+    assert batch._mtp_apc_prefix_len == 8
+    assert nxt == cold(longer)
+    assert nxt[0] == [11]
+
+
+def test_a_whole_prompt_lookup_needs_the_first_token_logits():
+    from gmlx.cache.prefix_cache import SpecPrefixCache
+
+    ids = mx.array([[1, 2, 3, 4]])
+    cache = [BatchKVCache(left_padding=[0])]
+    kv = mx.zeros((1, 1, 4, _D))
+    cache[0].update_and_fetch(kv, kv)
+    hidden = mx.zeros((1, 4, _D))
+    l0 = SpecPrefixCache(min_prefix=2)
+    l0.store(ids, cache, hidden)
+    # An entry without logits needs a column to forward.
+    assert l0.lookup(ids) is None and l0.lookup(ids, whole=True) is None
+    logits = mx.ones((1, 1, _V))
+    l0.store(ids, cache, hidden, first_logits=logits)
+    assert l0.lookup(ids) is None
+    n, entry = l0.lookup(ids, whole=True)
+    assert n == 4 and entry.first_logits is logits
+    assert entry.nbytes >= logits.nbytes + hidden.nbytes
+    # A longer prompt takes the entry either way.
+    more = mx.array([[1, 2, 3, 4, 5]])
+    assert l0.lookup(more)[0] == 4 and l0.lookup(more, whole=True)[0] == 4
 
 
 def test_a_multi_row_batch_logs_the_skipped_owned_lookup(monkeypatch, caplog):

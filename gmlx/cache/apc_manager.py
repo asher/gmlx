@@ -334,6 +334,7 @@ class GmlxAPCManager(_apc.APCManager):
         with self.lock:
             for _ in range(len(self.pool), target):
                 b = _apc.APCBlock()
+                b._tally = self._pool_bytes
                 self.pool.append(b)
                 self._free_push(b)
             self.num_blocks = target
@@ -440,10 +441,8 @@ class GmlxAPCManager(_apc.APCManager):
         """Resident GPU bytes this manager holds: committed pool blocks
         plus exact-prefix clones. Attribute math only, no device sync;
         the governor samples this on a slow cadence."""
-        total = 0
         with self.lock:
-            for b in self.pool:
-                total += b.resident_bytes()
+            total = self._pool_bytes.bytes
             for e in self._exact_cache.values():
                 for c in e.prompt_cache:
                     nb = getattr(c, "nbytes", 0)
@@ -707,15 +706,16 @@ class GmlxAPCManager(_apc.APCManager):
         return warm, matched
 
     def store_ckpt_blocks(self, token_ids, layer_keys, layer_values,
-                          *, extra_hash=0, disk=True):
+                          *, extra_hash=0, disk=True, eval_async=False):
         """Block store for checkpoint chains, always per-block. The
         layer-major branch would return no blocks (an unpinnable record)
         and clone the whole prefix into the 2-slot exact LRU. disk=False
         keeps a chain memory-only (the window chain's position salt makes
-        its disk shards undedupable)."""
+        its disk shards undedupable). ``eval_async``: the block copies are
+        submitted, not waited for (a memory-only chain)."""
         return self.store_kv_blocks(
             token_ids, layer_keys, layer_values, extra_hash=extra_hash,
-            _ckpt_disk=bool(disk))
+            _ckpt_disk=bool(disk), _eval_async=bool(eval_async))
 
     @staticmethod
     def _kernel_floor_hit() -> bool:
@@ -736,7 +736,7 @@ class GmlxAPCManager(_apc.APCManager):
 
     def store_kv_blocks(self, token_ids, layer_keys, layer_values,
                         *, extra_hash=0, skip_first_n_tokens=0,
-                        _ckpt_disk=None):
+                        _ckpt_disk=None, _eval_async=False):
         """The block store, with each block of a prompt with images keyed
         on the salt at its end (``block_chain``). A warm turn may have
         restored its prefix from another tier, or from blocks evicted
@@ -748,7 +748,8 @@ class GmlxAPCManager(_apc.APCManager):
                 skip_first_n_tokens = 0
         return self._store_kv_blocks_copy(
             token_ids, layer_keys, layer_values, extra_hash=extra_hash,
-            skip_first_n_tokens=skip_first_n_tokens, _ckpt_disk=_ckpt_disk)
+            skip_first_n_tokens=skip_first_n_tokens, _ckpt_disk=_ckpt_disk,
+            eval_async=_eval_async)
 
     def _chain_held(self, token_ids, extra_hash, n_tokens: int) -> bool:
         """Whether ``block_chain`` holds every block of the first
@@ -768,7 +769,7 @@ class GmlxAPCManager(_apc.APCManager):
 
     def _store_kv_blocks_copy(self, token_ids, layer_keys, layer_values,
                               *, extra_hash=0, skip_first_n_tokens=0,
-                              _ckpt_disk=None):
+                              _ckpt_disk=None, eval_async=False):
         import mlx.core as mx
 
         h = _store_helpers()
@@ -900,7 +901,15 @@ class GmlxAPCManager(_apc.APCManager):
                     return
                 if force or (eval_chunk_blocks > 0 and len(pending)
                              >= eval_chunk_blocks * per_block_tensors):
-                    mx.eval(pending)
+                    if eval_async:
+                        # One buffer: under the prefill caps each block
+                        # would be its own, each waiting on the in-flight
+                        # forward.
+                        from gmlx.serve.cb_phase import one_buffer
+                        with one_buffer():
+                            mx.async_eval(pending)
+                    else:
+                        mx.eval(pending)
                     pending.clear()
 
             for i in range(skip_full, n_full):

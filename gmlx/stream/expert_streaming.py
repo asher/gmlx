@@ -322,11 +322,19 @@ def _install_gpu_residency(model, moe_modules, *,
     nbytes = 0
     pending = 0
     left_out = left_out_bytes = 0
+    # A full expert store's planes stand where the mapped stacks did: they
+    # are wired with the stacks' share of the set.
+    planes = []
+    if include_expert_stacks:
+        from gmlx.load import expert_store
+
+        planes = expert_store.planes(model)
+    plane_ids = {id(a) for a in planes}
     try:
-        for _, a in tree_flatten(model.parameters()):
+        for a in [a for _, a in tree_flatten(model.parameters())] + planes:
             if id(a) in skip:
                 continue
-            if (not include_expert_stacks
+            if (not include_expert_stacks and id(a) not in plane_ids
                     and a.ndim == 3 and a.nbytes > (1 << 30)):
                 continue  # belt: any GB-scale stack is an expert container
             if room is not None and nbytes + a.nbytes > room:
@@ -713,10 +721,16 @@ def install_expert_streaming(
     if table_only:
         from gmlx.stream.table_stream import streamed_table_array_ids
 
+        from gmlx.load import expert_store
+
+        # A full expert store holds its stacks already, as MLX memory the
+        # free count no longer has: the fit is judged on the rest, and the
+        # placeholders stay out. The wire inserts the store's planes.
+        stored_bytes, stored_ids = expert_store.held(model)
         early_wired = _wire_resident_experts(
-            model, gguf_path, total_bytes - table_offloaded, budget=budget,
-            prefill_step=prefill_step,
-            skip_ids=frozenset(streamed_table_array_ids(model)),
+            model, gguf_path, total_bytes - table_offloaded - stored_bytes,
+            budget=budget, prefill_step=prefill_step,
+            skip_ids=frozenset(streamed_table_array_ids(model)) | stored_ids,
             keep=wire_keep)
         if not early_wired:
             table_only = False
@@ -779,6 +793,13 @@ def install_expert_streaming(
         attach_table_readahead(model, gguf_path)
 
     streaming = force_stream or over_budget
+    if streaming:
+        # A full expert store cannot serve streamed experts: the stacks go
+        # back on the blocks, mapped, and the load streams them as it would
+        # with the lever off.
+        from gmlx.load import expert_store
+
+        expert_store.release(model, "this load streams its experts")
     # the verdict itself: a CPU-only expert codec marks its modules the way
     # streaming does, so a module scan cannot tell the two apart
     model._kq_streaming = bool(streaming)

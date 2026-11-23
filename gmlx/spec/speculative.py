@@ -21,25 +21,30 @@ a no-op on a dense cache.
 from __future__ import annotations
 
 import atexit
+import contextlib
+import functools
 import logging
 import math
 import os
+import resource
 import sys
+import threading
 import time
 from typing import Any
 from collections.abc import Callable, Iterator
 
 import mlx.core as mx
 import gmlx.lora_rows as lora_rows
+from gmlx.spec import verify_submit as _verify_submit
 from gmlx import mlx_guards
 from gmlx.cache.kv_append import eval_cache as _eval_cache
 from gmlx.cache.kv_append import release as _release_kv
 from gmlx.cache import row_ends as _row_ends
 from gmlx.cache.media_salt import as_salt
 from gmlx.envflags import env_bool, env_float, env_int, env_value
+from gmlx.gen import deferred_clear
 from gmlx.gen.logprobs import RoundLogprobs
 from gmlx.gen.thinking_budget import drop_mtp_hook
-from gmlx.serve.capacity import note_own_before_clear
 from gmlx.serve.row_sampling import RowSampler
 
 # Speculative round helpers + the draft/target RNG coupler, owned here (see
@@ -49,6 +54,8 @@ from .helpers import (
     _MTPVerifyResult,
     _SpeculativeSamplerRNG,
     _append_arrays,
+    _copy_rng_state,
+    _restore_rng_state,
     _buffer_mtp_target_cache,
     _resolve_block_total,
     _mtp_cache_offset_max,
@@ -102,14 +109,40 @@ def _round_log_close():
             pass
 
 
+# Wrapper entry time of the request in flight, for the round log's pre note.
+_pre_stamp: list = [None]
+# Host stamps between that entry and the first round, for the same note:
+# the checkpoint store, the target cache buffering, the drafter's context
+# seed, its sidecar store.
+_pre_parts: list = []
+
+
+def _pre_part(name):
+    if _pre_stamp[0] is not None and _round_log_state["path"]:
+        _pre_parts.append((name, time.perf_counter()))
+
+
 def _round_log_session(kv_offset, max_tokens):
     # Delimit one generation's rounds; kv_offset ~= prompt depth.
     st = _round_log_open()
     if st is None:
         return
-    st["fh"].write(f"# session kv={int(kv_offset)} maxtok={int(max_tokens)}\n")
+    st["fh"].write(f"# session kv={int(kv_offset)} maxtok={int(max_tokens)}"
+                   f" t={time.perf_counter():.6f}\n")
     st["fh"].flush()
     st["idx"] = 0
+
+
+# Host stamps inside a round, written with the round's stage stamps when
+# the round log is on: the end of each submission (walk, commit, next
+# draft, each verify built ahead, the sync), so a command buffer can be
+# put to the submission that committed it.
+_spans: list = []
+
+
+def _span(name):
+    if _round_log_state["path"]:
+        _spans.append(f"{name}={time.perf_counter():.6f}")
 
 
 def _round_log_note(text):
@@ -271,6 +304,107 @@ def _mixed_block(block_total: int, width: int) -> int:
 # is unchanged either way: a gated round emits the target's own next token.
 _ROUND_GATE_AUTO = os.environ.get("GMLX_SPEC_GATE", "0").strip().lower() == "auto"
 _ROUND_GATE = 0.0 if _ROUND_GATE_AUTO else env_float("GMLX_SPEC_GATE", 0.0)
+# Deferred row cut (B=1 owned rounds): a drafter that cuts its block to the
+# rows worth verifying hands the engine the whole block and the cut as a lazy
+# count. After a round that kept every row the engine builds the full-width
+# verify while the GPU runs the draft: a cut that again keeps every row
+# submits that verify at once, a shorter one restores the cache and builds
+# the verify it asks for. 0 has the drafter cut before it returns. Output is
+# the same either way.
+_DEFER_CUT = env_bool("GMLX_SPEC_DEFER_CUT", True)
+# One stream for a round (B=1 owned rounds): the drafter's draft and commit
+# and the hidden the next draft seeds from are built on the verify's stream.
+# On the thread's default stream every hand-over between drafter and verify
+# is an event wait inside a command buffer, and each side commits a buffer
+# of its own for it. 0 leaves the drafter on the default stream. Output is
+# the same either way.
+_ONE_STREAM = env_bool("GMLX_SPEC_ONE_STREAM", True)
+# Keep the allocator's free buffers through the end of a speculative
+# prefill and through the rounds (1), so a round does not allocate again
+# what the clear just freed. The default (0) clears as before.
+_KEEP_BUFFERS = env_bool("GMLX_SPEC_KEEP_BUFFERS", False)
+# A B=1 round commits itself and submits the next draft before it yields its
+# tokens, so the GPU drafts while the consumer runs. A consumer that stops
+# inside the round has the commit taken back (accept_mark, accept_undo).
+_DRAFT_EARLY = env_bool("GMLX_SPEC_DRAFT_EARLY", False)
+# Commit a B=1 round and submit the next draft behind the verify, before the
+# walk is read, as if every draft were accepted. A round that is not takes
+# both back (accept_undo, discard_block, the RNG key) and runs as usual.
+_ASSUME_ACCEPT = env_bool("GMLX_SPEC_ASSUME_ACCEPT", False)
+# A verify rebuilt after a missed deferred cut reuses the table rows the
+# whole block read, on a model that offers it (reuse_verify_rows).
+_REUSE_ROWS = env_bool("GMLX_SPEC_REUSE_ROWS", False)
+# Rounds the assumed accept ran on: hits, misses, and hits whose block was
+# redrafted because the bonus fell in the id range its head skipped.
+_assume_stats = {"hit": 0, "miss": 0, "skip": 0, "counted": 0,
+                 "ahead": 0, "ahead_cut": 0, "prebuilt": 0, "prebuilt_miss": 0,
+                 "nomark": 0, "nofit": 0}
+# The same submission with no assumption: the commit writes every row, and
+# the next draft reads the accepted count on the GPU (drafter counted_ok).
+# Same math as the plain order, the drafter's keys in another order.
+# GMLX_SPEC_ACCEPT_COUNTED=0 reads the accepted count on the host.
+_ACCEPT_COUNTED = env_bool("GMLX_SPEC_ACCEPT_COUNTED", True)
+# The verify of a B=1 round is submitted whole before the draft's row cut is
+# read, so the host does not wait for the draft: 1 after a round whose cut
+# kept every row, 2 every round. A cut that then keeps fewer rows is not
+# applied to that round, which verifies the whole block. Unset (-1): 1
+# where the verify goes as one submission (verify_submit), 0 elsewhere.
+_VERIFY_AHEAD = env_int("GMLX_SPEC_VERIFY_AHEAD", -1)
+# With VERIFY_AHEAD=2: the verify that goes ahead of its row cut runs the
+# rows the cut is expected to keep in place of the whole block. N >= 1: the
+# last known cut plus N - 1 rows. A cut that then keeps more rows loses
+# them for that round; one that keeps fewer is not applied, as without
+# the lever. 0 (off) verifies the whole block.
+_AHEAD_PREDICT = env_int("GMLX_SPEC_AHEAD_PREDICT", 0)
+# With the commit and next draft submitted behind a verify (assumed or
+# counted accept) and the next round's verify going ahead of its row cut,
+# that verify is built while the GPU runs this one and submitted as soon as
+# the walk is read: once for a full accept (1), or for the N accepted counts
+# seen most at this width (N; a count on the GPU is needed for the others).
+# A round whose count was not built puts the cache objects back and builds
+# its verify as usual.
+_VERIFY_PREBUILT = env_int("GMLX_SPEC_VERIFY_PREBUILT", 0)
+# A verify built ahead leaves its table rows to its own submission, on a
+# model that offers it (hold_verify_rows): a build that is dropped then
+# reads none. 1: the builds for counts other than the full accept. 2: every
+# build ahead.
+_PREBUILT_LATE_ROWS = env_int("GMLX_SPEC_PREBUILT_LATE_ROWS", 0)
+# Rounds by width and accepted count, for the counts to build ahead.
+_prebuilt_seen: dict = {}
+
+
+def _prebuilt_counts(bs: int, n: int) -> list:
+    """The full accept, then the counts seen most at width ``bs``."""
+    seen = _prebuilt_seen.get(bs) or {}
+    rest = sorted((c for c in seen if c != bs - 1), key=lambda c: -seen[c])
+    return [bs - 1] + rest[:max(n - 1, 0)]
+# Seed of the process RNG stream at the start of every B=1 speculative
+# session (the drafter's draws and the accept uniforms read that stream;
+# the request seed only keys the target's own draws). Two servers then
+# write the same sampled text for a request. Unset: the stream as it is.
+_SESSION_SEED = env_int("GMLX_SPEC_SESSION_SEED", -1)
+# Round log note per round: the drafts, the tokens out, and the target's
+# top two ids and logits at each emitted position (one more head pass a
+# round; for tracing where two arms' texts part, not for timing).
+_TOKEN_TRACE = env_bool("GMLX_SPEC_TOKEN_TRACE", False)
+
+
+def _token_trace(lm, verify, draft_tokens, new_tokens, accepted, bs, emitted):
+    n = len(new_tokens)
+    with mx.stream(generation_stream):
+        rows = _verify_logits(lm, verify)
+        if rows.ndim == 3:
+            rows = rows[0]
+        rows = rows[:n].astype(mx.float32)
+        order = mx.argsort(-rows, axis=-1)[:, :2]
+        vals = mx.take_along_axis(rows, order, axis=-1)
+    ids, top = order.tolist(), vals.tolist()
+    cells = " ".join(
+        f"{t}:{i[0]}:{i[1]}:{v[0]:.4f}:{v[1]:.4f}"
+        for t, i, v in zip(new_tokens, ids, top))
+    drafts = ",".join(str(t) for t in draft_tokens.reshape(-1).tolist())
+    _round_log_note(f"tk at={emitted} bs={bs} acc={accepted} "
+                    f"drafts={drafts} out={cells}")
 # The auto threshold before the first gated round has been timed, and the
 # weight of each new round in the cost averages.
 _GATE_PRIOR = 2.0
@@ -599,8 +733,18 @@ def _verify_logits(lm, verify) -> mx.array:
             else lm.speculative_logits_from_hidden(verify.hidden))
 
 
+def _take_cut(draft_kwargs: dict):
+    """The first draft a row cut dropped this round and its proposal row
+    (DraftStash.cut), taken from the stash, or None."""
+    stash = draft_kwargs.get("stash")
+    cut = getattr(stash, "cut", None)
+    if cut is not None:
+        stash.cut = None
+    return cut
+
+
 def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
-                     q_rows: list[mx.array] | None, process=None):
+                     q_rows: list[mx.array] | None, process=None, cut=None):
     """Leviathan rejection walk with a single host sync.
 
     Accept draft j with prob min(1, p_j(d_j) / q_j(d_j)); the first rejection
@@ -608,7 +752,10 @@ def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
     sample from p. Same (accepted, new_tokens) contract as _coupled_walk.
     q_rows None proposes each draft with probability 1 (a copied token).
     process (the request's logits processors, one row per position) shapes
-    p, so a draft the processors rule out has p = 0 and is rejected."""
+    p, so a draft the processors rule out has p = 0 and is rejected.
+    ``cut`` is ``(token, q row)`` of the first draft a row cut dropped: on
+    full acceptance that draft is tested against the last target row in
+    place of the plain draw, and the round emits it or the residual draw."""
     with mx.stream(generation_stream):
         logits = _verify_logits(lm, verify)
         if logits.ndim == 3:
@@ -616,20 +763,21 @@ def _stochastic_walk(lm, verify, draft_tokens: mx.array, sampler, budget: int,
         if process is not None:
             logits = process(logits.astype(mx.float32))
         draft_row = draft_tokens.reshape(-1)
-        graph = _stoch_walk_graph(sampler, logits, draft_row, q_rows)
+        graph = _stoch_walk_graph(sampler, logits, draft_row, q_rows, cut)
     mx.eval(*graph, draft_row)                                    # the one sync
     return _stoch_walk_finish(graph, draft_row.tolist(), budget)
 
 
 def _stoch_walk_graph(sampler, logits: mx.array, draft_row: mx.array,
-                      q_rows: list[mx.array] | None):
+                      q_rows: list[mx.array] | None, cut=None):
     """One row's rejection walk as a deferred graph: ``logits`` [n_draft+1, V]
     (processors applied), ``draft_row`` [n_draft]. Returns (accept flags,
     residual draws, bonus draw) for _stoch_walk_finish."""
     n_draft = int(draft_row.shape[0])
     if (hasattr(sampler, "_filtered") and hasattr(sampler, "temperature")
             and getattr(sampler, "_has_filter", True)):
-        return _stoch_walk_graph_cand(sampler, logits, draft_row, q_rows)
+        return _stoch_walk_graph_cand(sampler, logits, draft_row, q_rows,
+                                      cut)
     p = _stoch_target_probs(sampler, logits)                  # [n_draft+1, V]
     p_n = p[:n_draft]
     if q_rows is None:
@@ -647,12 +795,24 @@ def _stoch_walk_graph(sampler, logits: mx.array, draft_row: mx.array,
     z = res.sum(axis=-1, keepdims=True)
     res = mx.where(z > 0, res / z, p_n)
     res_tokens = mx.random.categorical(mx.log(res), axis=-1)  # [n_draft]
+    if cut is not None and q_rows is not None:
+        # The dropped draft against the row the plain draw would read.
+        tok, q_cut = mx.array([int(cut[0])]), cut[1].astype(p.dtype)[None]
+        p_l = p[n_draft:]
+        ok = (mx.random.uniform(shape=(1,))
+              * mx.take_along_axis(q_cut, tok[:, None], axis=-1)[:, 0]
+              < mx.take_along_axis(p_l, tok[:, None], axis=-1)[:, 0])
+        r = mx.maximum(p_l - q_cut, 0.0)
+        z = r.sum(axis=-1, keepdims=True)
+        r = mx.where(z > 0, r / z, p_l)
+        r_tok = mx.random.categorical(mx.log(r), axis=-1)
+        return acc, res_tokens, mx.where(ok, tok.astype(r_tok.dtype), r_tok)
     bonus = mx.random.categorical(mx.log(p[n_draft:]), axis=-1)  # [1]
     return acc, res_tokens, bonus
 
 
 def _stoch_walk_graph_cand(sampler, logits: mx.array, draft_row: mx.array,
-                           q_rows: list[mx.array] | None):
+                           q_rows: list[mx.array] | None, cut=None):
     """_stoch_walk_graph for a filtering serve sampler, in candidate space.
 
     p is zero outside the sampler's k survivors per row, so p(d), the
@@ -680,6 +840,21 @@ def _stoch_walk_graph_cand(sampler, logits: mx.array, draft_row: mx.array,
     res = mx.where(z > 0, res / z, p_n)
     res_at = mx.random.categorical(mx.log(res), axis=-1)      # [n_draft]
     res_tokens = mx.take_along_axis(ids_n, res_at[:, None], axis=-1)[:, 0]
+    if cut is not None and q_rows is not None:
+        # The dropped draft against the row the plain draw would read.
+        tok, q_cut = mx.array([int(cut[0])]), cut[1][None]
+        ids_l, p_l = ids[n_draft:], pc[n_draft:]
+        p_tok = mx.where(ids_l == tok[:, None], p_l, 0.0).sum(axis=-1)
+        q_tok = mx.take_along_axis(q_cut, tok[:, None], axis=-1)[:, 0]
+        ok = mx.random.uniform(shape=(1,)) * q_tok < p_tok
+        r = mx.maximum(
+            p_l - mx.take_along_axis(q_cut, ids_l, axis=-1).astype(p_l.dtype),
+            0.0)
+        z = r.sum(axis=-1, keepdims=True)
+        r = mx.where(z > 0, r / z, p_l)
+        r_at = mx.random.categorical(mx.log(r), axis=-1)
+        r_tok = mx.take_along_axis(ids_l, r_at[:, None], axis=-1)[:, 0]
+        return acc, res_tokens, mx.where(ok, tok.astype(r_tok.dtype), r_tok)
     bonus_at = mx.random.categorical(mx.log(pc[n_draft:]), axis=-1)
     bonus = mx.take_along_axis(ids[n_draft:], bonus_at[:, None], axis=-1)[:, 0]
     return acc, res_tokens, bonus
@@ -872,6 +1047,7 @@ def _mixed_walk(
     *,
     stoch_row: int | None = None,
     q_rows: list | None = None,
+    cut=None,
     process=None,
 ) -> tuple[list[int], list[list[int]]]:
     """A mixed round's walk, with a single host sync.
@@ -895,7 +1071,7 @@ def _mixed_walk(
         if process is not None:
             logits = _process_rows(logits, process)
         graph = _stoch_walk_graph(sampler, logits[stoch_row],
-                                  draft_tokens[stoch_row], q_rows)
+                                  draft_tokens[stoch_row], q_rows, cut)
         target = None
         if others:
             rest = logits[mx.array(others, dtype=mx.int32)]
@@ -968,7 +1144,7 @@ def _next_forced_chunk(hook, queue: list, block_total: int):
 # Values a cache snapshot copies. A cache whose state holds anything else,
 # such as a nested storage object a forward could mutate in place, is never
 # snapshotted.
-_SNAP_SCALARS = (int, float, bool, str, type(None), mx.Dtype)
+_SNAP_SCALARS = (int, float, bool, str, bytes, type(None), mx.Dtype)
 
 
 def _snap_value(v, memo: dict):
@@ -1038,6 +1214,29 @@ def _leading_gdn_layers(lm) -> int:
             break
         n += 1
     return n
+
+
+def _cut_drafts(draft_tokens: mx.array, n: int) -> mx.array:
+    """The first ``n`` drafts of a block, submitted. Left lazy, the slice
+    is a pending op of the draft's stream inside the verify's graph, and the
+    verify stalls on it."""
+    if n >= draft_tokens.shape[1]:
+        return draft_tokens
+    if _ONE_STREAM:
+        with mx.stream(generation_stream):
+            out = draft_tokens[:, :n]
+    else:
+        out = draft_tokens[:, :n]
+    mx.async_eval(out)
+    return out
+
+
+def _on_round_stream(fn):
+    """``fn`` with its graph built on the round's stream."""
+    def run(*args, **kwargs):
+        with mx.stream(generation_stream):
+            return fn(*args, **kwargs)
+    return run
 
 
 def _commit_verify_head(verify, index: int) -> None:
@@ -1300,8 +1499,14 @@ def _owned_decode_rounds(
     if callable(prefill_draft) and seed_tokens is not None:
         sampler_rng.draft_call(prefill_draft, seed_tokens, hidden, b,
                                draft_sampler, token_dtype, **draft_kwargs)
+    _pre_part("seed")
+    if sidecar_ctx is not None:
+        # This request's own log of the hidden its drafter was fed; a later
+        # request's reset gives the drafter a new one.
+        sidecar_ctx["tail"] = getattr(drafter, "_tail", None)
 
     _sidecar_post_prefill(drafter, sidecar_ctx)
+    _pre_part("sidecar")
 
     if hidden.shape[1] > 1:
         hidden = hidden[:, -1:, :]
@@ -1319,16 +1524,58 @@ def _owned_decode_rounds(
     _walk_sampler = None if greedy else sampler
     _needs_shared_kv = getattr(drafter, "uses_shared_kv", True)
     _draft_block = drafter.draft_block
+    if _ONE_STREAM:
+        _draft_block = _on_round_stream(_draft_block)
+        if _has_accept:
+            _accept_fn = _on_round_stream(_accept_fn)
     _prefer_fixed_bs = getattr(drafter, "prefer_requested_block_size", False)
     # The verify layers a gated round may run and discard: every GDN layer
     # ahead of the first attention layer, whose cache write would copy the
     # buffer the snapshot holds.
     _gate_head = _leading_gdn_layers(lm) - 1
     gate_cost = _GateCost() if _ROUND_GATE_AUTO else None
+    # The profile reads the draft before the verify is built, and a gated
+    # round decides on the cut block, so both take the cut inside the draft.
+    _defer_cut = (_DEFER_CUT and not _ROUND_PROFILE and gate_cost is None
+                  and _ROUND_GATE <= 0
+                  and getattr(drafter, "supports_deferred_row_cut", False))
+    _cut_kwargs = {"defer_cut": True} if _defer_cut else {}
+    # Whether the last cut kept every row: the next one mostly follows it.
+    _cut_whole = True
 
-    def _finish_round(delivered: int) -> None:
+    # One submission for the verify (GMLX_SPEC_VERIFY_ONE_SUBMIT): the graph
+    # carries its command buffer boundaries and one async_eval submits it.
+    _one_submit = _verify_submit.enabled(lm) and _ROUND_GATE <= 0
+    _ahead = _VERIFY_AHEAD if _VERIFY_AHEAD >= 0 else int(_one_submit)
+    _verify_marks = ((lambda: _verify_submit.marks(lm)) if _one_submit
+                     else contextlib.nullcontext)
+
+    _reuse_rows = (getattr(lm, "reuse_verify_rows", None)
+                   if _REUSE_ROWS else None)
+    if not callable(_reuse_rows):
+        _reuse_rows = None
+    _hold_rows = (getattr(lm, "hold_verify_rows", None)
+                  if _PREBUILT_LATE_ROWS else None)
+    if not callable(_hold_rows):
+        _hold_rows = None
+
+    def _build_verify(drafts: mx.array, first: mx.array | None = None):
+        """``first`` is the round's bonus as a [1, 1] array not yet read."""
+        with mx.stream(generation_stream), lora_rows.published([row_uid]), \
+                _verify_marks():
+            verify_input = mx.concatenate(
+                [mx.array([[b]], dtype=token_dtype) if first is None
+                 else first, drafts], axis=1)
+            return _mtp_verify_target(
+                lm, verify_input, prompt_cache, sampler,
+                sample_target_tokens=(greedy and row_procs is None
+                                      and not want_lp),
+                rope_deltas=rope_deltas)
+
+    def _finish_round(delivered: int, width: int | None = None) -> None:
         """Close the final round at ``delivered`` tokens so the target KV and
-        the drafter head retire at one length.
+        the drafter head retire at one length. ``width`` is the block width
+        the target cache holds when an early commit already rolled it back.
 
         The head holds row p as (token p+1, hidden p), so it pairs with the
         target only through the last committed position whose successor is
@@ -1345,9 +1592,10 @@ def _owned_decode_rounds(
         k = min(delivered, accepted)
         bonus_delivered = delivered > accepted
         keep = k if bonus_delivered else max(k - 1, 0)
-        if _has_rollback and keep < bs - 1:
+        width = bs if width is None else width
+        if _has_rollback and keep < width - 1:
             with mx.stream(generation_stream):
-                _rollback_fn(prompt_cache, verify.gdn_states, keep, bs)
+                _rollback_fn(prompt_cache, verify.gdn_states, keep, width)
         if _has_accept and delivered > 0:
             _accept_fn(verify.hidden, draft_tokens, k,
                        new_tokens[:delivered] if bonus_delivered else [],
@@ -1367,19 +1615,98 @@ def _owned_decode_rounds(
         else:
             _log_spec_once(f"context copy: off, {copy_off_reason(lm)}")
 
+    # Early draft: needs a commit the drafter can take back and a target
+    # whose rollback can run a second time on one verify.
+    _early_ok = (_DRAFT_EARLY and _ONE_STREAM and _defer_cut
+                 and _has_accept and _has_rollback
+                 and not _needs_shared_kv and not sampler_rng.enabled
+                 and callable(getattr(drafter, "accept_mark", None))
+                 and getattr(lm, "speculative_rollback_repeatable", False))
+    # Assumed accept: the same needs, and a drafter whose block takes the
+    # bonus as an array not yet read.
+    _assume_ok = ((_ASSUME_ACCEPT or _ACCEPT_COUNTED)
+                  and _ONE_STREAM and _defer_cut
+                  and _has_accept and _has_rollback
+                  and not _needs_shared_kv and not sampler_rng.enabled
+                  and (greedy or stoch)
+                  and top2_stash is None and pq_stash is None
+                  and row_procs is None and not want_lp
+                  and thinking_hook is None and copier is None
+                  and gate_cost is None and _ROUND_GATE <= 0
+                  and callable(getattr(drafter, "accept_mark", None))
+                  and getattr(drafter, "supports_lazy_bonus", False)
+                  and getattr(lm, "speculative_rollback_repeatable", False))
+    # Verify ahead of the cut: no gate, no processors, nothing that reads
+    # the drafts before the walk.
+    _ahead_ok = (_ahead > 0 and _defer_cut and _ONE_STREAM
+                 and (greedy or stoch) and row_procs is None
+                 and gate_cost is None and _ROUND_GATE <= 0
+                 and not _ROUND_PROFILE and copier is None
+                 and callable(getattr(drafter, "pending_row_cut_array", None)))
+    _counted_ok = (_assume_ok and _ACCEPT_COUNTED
+                   and callable(getattr(drafter, "counted_ok", None)))
+    # The next round's block, drafted before this round's tokens went out.
+    pre_draft = None
+    # The next round's verify, built ahead and taken up after the walk:
+    # the cache snapshot that takes the build back, the verify, the block
+    # it reads, and the rollback the build ran on top of the snapshot.
+    pre_verify: list = [None]
+    # The last row cut read (GMLX_SPEC_AHEAD_PREDICT), None before the first.
+    pred_cut: list = [None]
+
+    def _ahead_rows(most: int) -> int:
+        """Drafts the next verify ahead of its cut runs, of ``most``."""
+        if _AHEAD_PREDICT <= 0 or _ahead < 2 or pred_cut[0] is None:
+            return most
+        return max(1, min(most, pred_cut[0] + _AHEAD_PREDICT - 1))
+
+    def _drop_prebuilt() -> None:
+        held = pre_verify[0]
+        if held is not None:
+            pre_verify[0] = None
+            _cache_restore(held[0])
+            if held[3] is not None:
+                with mx.stream(generation_stream):
+                    _rollback_fn(prompt_cache, *held[3])
+            _assume_stats["prebuilt_miss"] += 1
+
+    if _SESSION_SEED >= 0:
+        mx.random.seed(_SESSION_SEED)
     _round_log_session(kv_offset, max_tokens)
+    if _pre_stamp[0] is not None:
+        # Host time from the wrapper's entry (the first token is out) to
+        # the first round.
+        _now, _at, _cells = time.perf_counter(), _pre_stamp[0], []
+        for _name, _t in _pre_parts + [("setup", _now)]:
+            _cells.append("%s %.3f" % (_name, (_t - _at) * 1e3))
+            _at = _t
+        _round_log_note("pre %.3f ms from rounds entry: %s"
+                        % ((_now - _pre_stamp[0]) * 1e3, " ".join(_cells)))
+        _pre_stamp[0] = None
+        _pre_parts.clear()
     _prev_end = time.perf_counter()
-    _last_clear = emitted
+    # The last prefill chunk's clear, when it was left for the GPU's next
+    # work, runs at the first round's end.
+    _last_clear = emitted - 256 if deferred_clear.pending() else emitted
+    _mem_seen = [0, 0]
     forced_queue: list[int] = []
     try:
         while emitted < max_tokens:
             _t0 = time.perf_counter()
+            _spans.clear()
             _gap = (_t0 - _prev_end) * 1e3 if _prev_end else 0.0
             gated = False
             copied: list[int] = []
             round_rl = None
             forced = (_next_forced_chunk(thinking_hook, forced_queue, block_total)
                       if thinking_hook is not None else None)
+            early = None
+            assumed = None
+            # The whole block as drafted, once a cut read has waited for it
+            # or the verify went ahead of the cut.
+            draft_src = None
+            # The lazy row cut of a round whose verify went ahead of it.
+            keep_late = None
             if forced is not None:
                 # ^T forced close: commit the known close ids as a fully
                 # accepted round (the drafts ARE the forced ids, the bonus is
@@ -1419,14 +1746,16 @@ def _owned_decode_rounds(
                 copied = (copier.propose(
                     bs - 1, min(max_tokens - emitted, copy_cap))
                     if copier is not None else [])
-                if copied:
+                if pre_draft is not None:
+                    draft_tokens, pre_draft = pre_draft, None
+                elif copied:
                     # Context copy: the prompt's continuation stands in for
                     # the drafter's block this round, at its own length.
                     draft_tokens = mx.array([copied], dtype=token_dtype)
                 else:
                     draft_tokens = sampler_rng.draft_tokens(
                         _draft_block, b, hidden, None, bs, draft_sampler,
-                        token_dtype, **draft_kwargs)
+                        token_dtype, **draft_kwargs, **_cut_kwargs)
                 # The drafter may return fewer drafts than requested (e.g. the
                 # deepseek-v4 confidence-gated rollout); every downstream bs
                 # consumer (rollback width, accept bookkeeping, finish seams)
@@ -1451,21 +1780,82 @@ def _owned_decode_rounds(
                     if snap is None:
                         gated = estimate.item() < threshold
 
+                # Deferred row cut: the block is whole and still running.
+                # After a round whose cut kept every row the next one
+                # mostly does too, so the full-width verify is built now,
+                # over a snapshot of the cache, while the GPU runs the
+                # draft. After a cut round, or on a stack the snapshot
+                # cannot copy, the build waits for the cut.
+                cut_snap = None
+                go_ahead = (_ahead_ok and not gated and drafter.row_cut_pending
+                            and (_cut_whole or _ahead >= 2))
+                held = pre_verify[0]
+                if held is not None and not (go_ahead
+                                             and held[2] is draft_tokens):
+                    _drop_prebuilt()
+                    held = None
+                if go_ahead:
+                    keep_late = drafter.pending_row_cut_array()
+                    draft_src = draft_tokens
+                    # A verify built ahead fixed its width when built.
+                    n_cut = (held[4] if held is not None
+                             else _ahead_rows(bs - 1))
+                    drafter.apply_row_cut(n_cut)
+                    if n_cut < bs - 1:
+                        draft_tokens = _cut_drafts(draft_tokens, n_cut)
+                        bs = n_cut + 1
+                elif _defer_cut and not copied and not gated \
+                        and drafter.row_cut_pending:
+                    if _cut_whole:
+                        cut_snap = _cache_snapshot(prompt_cache)
+                    if cut_snap is None:
+                        draft_src = draft_tokens
+                        n_cut = drafter.pending_row_cut()
+                        _cut_whole = n_cut >= bs - 1
+                        drafter.apply_row_cut(n_cut)
+                        draft_tokens = _cut_drafts(draft_tokens, n_cut)
+                        bs = n_cut + 1
+
                 if _ROUND_PROFILE:
                     mx.eval(draft_tokens)
                 _td = time.perf_counter()
 
                 if not gated:
-                    with mx.stream(generation_stream), \
-                            lora_rows.published([row_uid]):
-                        verify_input = mx.concatenate(
-                            [mx.array([[b]], dtype=token_dtype), draft_tokens],
-                            axis=1)
-                        verify = _mtp_verify_target(
-                            lm, verify_input, prompt_cache, sampler,
-                            sample_target_tokens=(greedy and row_procs is None
-                                                  and not want_lp),
-                            rope_deltas=rope_deltas)
+                    if held is not None:
+                        # Built during the last verify. The snapshot goes
+                        # before the verify runs.
+                        pre_verify[0] = None
+                        verify, held[0], held = held[1], None, None
+                        _assume_stats["prebuilt"] += 1
+                    else:
+                        verify = _build_verify(draft_tokens)
+                    if cut_snap is not None:
+                        draft_src = draft_tokens
+                        n_cut = drafter.pending_row_cut()     # waits for the draft
+                        _cut_whole = n_cut >= bs - 1
+                        drafter.apply_row_cut(n_cut)
+                        if not _cut_whole:
+                            verify = None
+                            _cache_restore(cut_snap)
+                            cut_snap = None
+                            if _reuse_rows is not None:
+                                # The cut block takes the table rows the
+                                # whole block read.
+                                _reuse_rows(prompt_cache)
+                            draft_tokens = _cut_drafts(draft_tokens, n_cut)
+                            bs = n_cut + 1
+                            verify = _build_verify(draft_tokens)
+                        # Dropped before the verify runs: a live handle on a
+                        # cache buffer keeps a layer's write from reusing it.
+                        cut_snap = None
+                        if row_procs is None and not _one_submit:
+                            # The GPU starts on the verify while the host
+                            # builds the walk.
+                            mx.async_eval(verify.hidden)
+                    if _one_submit and snap is None:
+                        _verify_submit.submit(verify.hidden)
+                    elif keep_late is not None:
+                        mx.async_eval(verify.hidden)
                     if snap is not None:
                         # The first layers run while the host waits for the
                         # estimate, so the GPU does not idle through the wait.
@@ -1509,7 +1899,199 @@ def _owned_decode_rounds(
                     process = row_procs.processor(
                         draft_tokens.reshape(-1).tolist())
 
-                if stoch and copied:
+                if (_assume_ok and not gated and bs > 1
+                        and draft_src is not None
+                        and emitted + bs < max_tokens
+                        and (len(stoch_stash) == bs - 1 if stoch
+                             else verify.target_tokens is not None)):
+                    # The walk graph first, so its draws come ahead of the
+                    # next draft's as in the plain order.
+                    with mx.stream(generation_stream):
+                        draft_row = draft_tokens.reshape(-1)
+                        if stoch:
+                            w_logits = _verify_logits(lm, verify)
+                            if w_logits.ndim == 3:
+                                w_logits = w_logits[0]
+                            w_graph = _stoch_walk_graph(
+                                sampler, w_logits, draft_row,
+                                list(stoch_stash), _take_cut(draft_kwargs))
+                            w_bonus = w_graph[2]
+                        else:
+                            w_graph = (verify.target_tokens.reshape(-1),)
+                            w_bonus = w_graph[0][bs - 1:bs]
+                    mx.async_eval(*w_graph)
+                    _span("wk")
+                    stoch_stash.clear()
+                    mark = drafter.accept_mark(bs)
+                    pre = None
+                    counted = False
+                    left = max_tokens - (emitted + bs) + 1
+                    nbs = (min(block_total, left) if _prefer_fixed_bs
+                           else _mtp_next_block_size(
+                               drafter, block_total,
+                               configured_block_total, left))
+                    if mark is not None:
+                        # Counted: the block is the same size after any
+                        # accept, and the tokens are noted once known.
+                        counted = (_counted_ok and nbs > 1
+                                   and left >= block_total
+                                   and drafter.counted_ok(nbs, bs - 1, bs))
+                        if _counted_ok and not counted:
+                            _assume_stats["nofit"] += 1
+                        if not (counted or _ASSUME_ACCEPT):
+                            mark = None
+                    elif _counted_ok:
+                        # The ring compacts or grows for this commit.
+                        _assume_stats["nomark"] += 1
+                    if mark is not None:
+                        rng_mark = None if greedy else _copy_rng_state()
+                        # The round's tokens are noted once they are known.
+                        _accept_fn(verify.hidden, draft_tokens, bs - 1, [],
+                                   draft_sampler, token_dtype, **draft_kwargs)
+                        _span("cm")
+                        with mx.stream(generation_stream):
+                            nxt_hidden = verify.hidden[:, bs - 1:bs, :]
+                            if _has_draft_hidden:
+                                nxt_hidden = _draft_hidden_fn(nxt_hidden)
+                            if counted:
+                                if stoch:
+                                    ok = w_graph[0]
+                                    nxt = mx.concatenate(
+                                        [w_graph[1].astype(mx.int32),
+                                         w_graph[2].astype(mx.int32)])
+                                else:
+                                    ok = w_graph[0][:bs - 1] == draft_row
+                                    nxt = w_graph[0]
+                                n_ok = mx.cumprod(ok.astype(mx.int32)).sum()
+                                w_bonus = mx.take(nxt, n_ok)
+                                counted = ((bs - 1) - n_ok, bs - 1)
+                        if nbs > 1 and (counted or _ASSUME_ACCEPT):
+                            pre = _draft_block(
+                                w_bonus, nxt_hidden, None, nbs, draft_sampler,
+                                token_dtype, **draft_kwargs, **_cut_kwargs,
+                                lazy_bonus=True,
+                                **({"counted": counted} if counted else {}))
+                            _span("dr")
+                    built = None
+                    if (_VERIFY_PREBUILT and pre is not None and _ahead_ok
+                            and drafter.row_cut_pending):
+                        # This round's own cut, when its verify went ahead
+                        # of it: read once the block has run, no later
+                        # than the walk below.
+                        if keep_late is not None:
+                            pred_cut[0] = max(1, int(keep_late.item()))
+                        whole = (_cut_whole if keep_late is None else
+                                 pred_cut[0] >= bs - 1)
+                        n_pre = _ahead_rows(int(pre.shape[1]))
+                        pre_cut = (pre if n_pre >= int(pre.shape[1])
+                                   else _cut_drafts(pre, n_pre))
+                        base = (_cache_snapshot(prompt_cache)
+                                if whole or _ahead >= 2 else None)
+                        if base is not None:
+                            with mx.stream(generation_stream):
+                                first = w_bonus.reshape(1, 1).astype(
+                                    token_dtype)
+                            built = {}
+                            for c in (_prebuilt_counts(bs, _VERIFY_PREBUILT)
+                                      if counted else [bs - 1]):
+                                if c < bs - 1:
+                                    with mx.stream(generation_stream):
+                                        _rollback_fn(prompt_cache,
+                                                     verify.gdn_states, c, bs)
+                                    _span(f"rb{c}")
+                                if _hold_rows is not None and (
+                                        c < bs - 1 or _PREBUILT_LATE_ROWS >= 2):
+                                    _hold_rows(True)
+                                    try:
+                                        v_next = _build_verify(pre_cut, first)
+                                    finally:
+                                        _hold_rows(False)
+                                else:
+                                    v_next = _build_verify(pre_cut, first)
+                                _span(f"pv{c}")
+                                built[c] = (_cache_snapshot(prompt_cache),
+                                            v_next)
+                                # A restore hands the snapshot's own
+                                # containers to the caches: taken again
+                                # for the next one.
+                                _cache_restore(base)
+                                base = _cache_snapshot(prompt_cache)
+                    mx.eval(*w_graph)                         # the one sync
+                    _span("sy")
+                    # Read from the evaluated block: a read of the cut view
+                    # would be one more wait.
+                    drf = draft_src.tolist()[0][:bs - 1]
+                    if stoch:
+                        accepted, new_tokens = _stoch_walk_finish(
+                            w_graph, drf, max_tokens - emitted)
+                    else:
+                        tgt = w_graph[0].tolist()
+                        accepted = _accepted_prefix(
+                            [t == d for t, d in zip(tgt, drf)], bs - 1)
+                        new_tokens = (drf[:accepted]
+                                      + [tgt[accepted]])[:max_tokens - emitted]
+                        _walk_stats["rounds"] += 1
+                    assumed = False
+                    if built is not None:
+                        seen = _prebuilt_seen.setdefault(bs, {})
+                        seen[accepted] = seen.get(accepted, 0) + 1
+                        got = (built.get(accepted)
+                               if len(new_tokens) == accepted + 1 else None)
+                        if got is not None:
+                            # The caches as that build left them, its
+                            # rollback included.
+                            _cache_restore(got[0])
+                            pre_verify[0] = [
+                                base, got[1], pre,
+                                (verify.gdn_states, accepted, bs)
+                                if accepted < bs - 1 else None, n_pre]
+                        else:
+                            _assume_stats["prebuilt_miss"] += 1
+                        built = base = None
+                    if mark is not None:
+                        full = accepted == bs - 1 and len(new_tokens) == bs
+                        hit = pre is not None and (full or bool(counted))
+                        if hit and counted:
+                            # The rows past the accepted ones leave the
+                            # ring, and the target its rejected drafts.
+                            mark = drafter.accept_trim(mark, bs - 1 - accepted)
+                            if not full:
+                                with mx.stream(generation_stream):
+                                    nxt_hidden = verify.hidden[
+                                        :, accepted:accepted + 1, :]
+                                    if _has_draft_hidden:
+                                        nxt_hidden = _draft_hidden_fn(nxt_hidden)
+                                    if pre_verify[0] is None:
+                                        # A verify built ahead for this
+                                        # count rolled the caches back.
+                                        _rollback_fn(prompt_cache,
+                                                     verify.gdn_states,
+                                                     accepted, bs)
+                        if hit and not drafter.note_bonus(new_tokens):
+                            # The commit stands; the block is drafted again
+                            # from the known bonus.
+                            _assume_stats["skip"] += 1
+                            _drop_prebuilt()
+                            stoch_stash.clear()
+                            drafter.discard_block()
+                            if rng_mark is not None:
+                                _restore_rng_state(rng_mark)
+                            pre = _draft_block(
+                                new_tokens[-1], nxt_hidden, None, nbs,
+                                draft_sampler, token_dtype, **draft_kwargs,
+                                **_cut_kwargs)
+                        if hit:
+                            _assume_stats["counted" if counted else "hit"] += 1
+                            assumed = (mark, rng_mark, pre, nxt_hidden)
+                        else:
+                            _assume_stats["miss"] += 1
+                            _drop_prebuilt()
+                            stoch_stash.clear()
+                            drafter.discard_block()
+                            if rng_mark is not None:
+                                _restore_rng_state(rng_mark)
+                            drafter.accept_undo(mark)
+                elif stoch and copied:
                     # A copied token is a proposal with all its mass on
                     # that token (q = 1 there).
                     accepted, new_tokens = _stochastic_walk(
@@ -1519,8 +2101,8 @@ def _owned_decode_rounds(
                     accepted, new_tokens = _stochastic_walk(
                         lm, verify, draft_tokens, sampler,
                         max_tokens - emitted, list(stoch_stash),
-                        process=process)
-                else:
+                        process=process, cut=_take_cut(draft_kwargs))
+                elif assumed is None:
                     # Exact-match walk; also the per-round fallback when a drafter
                     # returns fewer drafts than it sampled (stash misaligned) --
                     # accepting a sampled draft iff it equals the target's own
@@ -1532,7 +2114,16 @@ def _owned_decode_rounds(
                               else None),
                         pq=list(pq_stash) if pq_stash and not copied else None,
                         base_pos=emitted, process=process)
-            stoch_stash.clear()
+            if forced is not None or not assumed:
+                # After an assumed accept that held, the stash is the next
+                # block's.
+                stoch_stash.clear()
+            if keep_late is not None:
+                # Evaluated with the block: no wait.
+                pred_cut[0] = max(1, int(keep_late.item()))
+                _cut_whole = pred_cut[0] >= bs - 1
+                _assume_stats["ahead"] += 1
+                _assume_stats["ahead_cut"] += not _cut_whole
             if top2_stash is not None:
                 # Consumed; the accept hook below re-seeds entry 0 for the
                 # next round. (A forced round drops the stale seed the same
@@ -1554,6 +2145,9 @@ def _owned_decode_rounds(
                 _record_speculative_round(drafter, accepted, bs - 1)
                 if copier is not None:
                     copier.drafted(accepted + 1, time.perf_counter() - _t0)
+            if _TOKEN_TRACE and _round_log_state["path"]:
+                _token_trace(lm, verify, draft_tokens, new_tokens, accepted,
+                             bs, emitted)
             _t1 = time.perf_counter()
             if gate_cost is not None and forced is None and not copied:
                 gate_cost.add(gated, _t1 - _t0)
@@ -1570,6 +2164,48 @@ def _owned_decode_rounds(
             if round_lp is not None:
                 round_lp[:] = (round_rl.entries([new_tokens])[0]
                                if round_rl is not None else [None] * n_new)
+            if forced is None and assumed:
+                # The commit and the next draft are already submitted.
+                early = assumed[:2]
+                pre_draft, hidden = assumed[2], assumed[3]
+                b = new_tokens[-1]
+                kv_offset += accepted + 1
+                if emitted + n_new - _last_clear >= 256 and not _KEEP_BUFFERS:
+                    deferred_clear.clear_now()
+                    _last_clear = emitted + n_new
+            elif (_early_ok and forced is None and not gated and not copied
+                    and thinking_hook is None and copier is None
+                    and n_new == accepted + 1 and emitted + n_new < max_tokens):
+                mark = drafter.accept_mark(accepted + 1)
+                if mark is not None:
+                    # The round's commit, as below the delivery, then the
+                    # next draft. The target cache is not read again before
+                    # the delivery ends.
+                    rng_mark = None if greedy else _copy_rng_state()
+                    sampler_rng.draft_call(
+                        _accept_fn, verify.hidden, draft_tokens, accepted,
+                        new_tokens, draft_sampler, token_dtype, **draft_kwargs)
+                    with mx.stream(generation_stream):
+                        hidden = verify.hidden[:, accepted:accepted + 1, :]
+                        if _has_draft_hidden:
+                            hidden = _draft_hidden_fn(hidden)
+                        if accepted < bs - 1:
+                            _rollback_fn(prompt_cache, verify.gdn_states,
+                                         accepted, bs)
+                    b = new_tokens[-1]
+                    kv_offset += accepted + 1
+                    if emitted + n_new - _last_clear >= 256 and not _KEEP_BUFFERS:
+                        deferred_clear.clear_now()
+                        _last_clear = emitted + n_new
+                    left = max_tokens - (emitted + n_new) + 1
+                    nbs = (min(block_total, left) if _prefer_fixed_bs
+                           else _mtp_next_block_size(
+                               drafter, block_total, configured_block_total, left))
+                    if nbs > 1:
+                        pre_draft = sampler_rng.draft_tokens(
+                            _draft_block, b, hidden, None, nbs, draft_sampler,
+                            token_dtype, **draft_kwargs, **_cut_kwargs)
+                    early = (mark, rng_mark)
             delivered = 0
             try:
                 for tok in new_tokens:
@@ -1580,6 +2216,16 @@ def _owned_decode_rounds(
                         thinking_hook.observe(tok)
                     yield tok
             except GeneratorExit:
+                _drop_prebuilt()
+                if early is not None:
+                    # The draft made ahead is dropped. Its draws are not
+                    # given back: another request may have drawn since, and
+                    # a rewind would hand it the same keys again.
+                    pre_draft = None
+                    stoch_stash.clear()
+                    drop = getattr(drafter, "discard_block", None)
+                    if callable(drop):
+                        drop()
                 capture = getattr(model, "_kq_preempt_capture", None)
                 if capture is not None:
                     # Preempt close, not a stop: the round completed and
@@ -1599,12 +2245,24 @@ def _owned_decode_rounds(
                                 else [])
                         capture_lp.extend(tail + [None] * (
                             n_new - delivered - len(tail)))
-                    if _has_rollback and accepted < bs - 1:
+                    if early is None and _has_rollback and accepted < bs - 1:
                         with mx.stream(generation_stream):
                             _rollback_fn(prompt_cache, verify.gdn_states,
                                          accepted, bs)
                     slot = getattr(model, "_kq_preempt_handoff", None)
-                    if (isinstance(slot, dict) and _has_accept
+                    handoff = (isinstance(slot, dict) and _has_accept
+                               and n_new == accepted + 1
+                               and not _needs_shared_kv
+                               and _mtp_width_cap(drafter, lm) == 1
+                               and _mixed_policy(drafter, lm, 1))
+                    if early is not None and not handoff:
+                        drafter.accept_undo(early[0])
+                    if (handoff and early is not None):
+                        nxt = verify.hidden[:, accepted:accepted + 1, :]
+                        slot["hidden"] = (_draft_hidden_fn(nxt)
+                                          if _has_draft_hidden else nxt)
+                        slot["drafter"] = drafter
+                    elif (isinstance(slot, dict) and _has_accept
                             and n_new == accepted + 1
                             and not _needs_shared_kv
                             and _mtp_width_cap(drafter, lm) == 1
@@ -1628,7 +2286,24 @@ def _owned_decode_rounds(
                 # on this; without it the final round leaves rejected drafts
                 # and unconsumed accepts in the cache), and mirror it into the
                 # drafter head so the two retire at one length.
-                _finish_round(delivered)
+                if early is None:
+                    _finish_round(delivered)
+                elif delivered < n_new:
+                    # Stopped inside the block: the early commit took every
+                    # row, the close takes the delivered ones.
+                    drafter.accept_undo(early[0])
+                    _finish_round(delivered, accepted + 1)
+                if _round_log_state["path"]:
+                    # The round a stop closed is a round of the log too.
+                    _round_log_note(
+                        f"st {_t0:.6f} {_td:.6f} {_tv:.6f} {_t1:.6f} "
+                        f"{resource.getrusage(resource.RUSAGE_SELF).ru_majflt}")
+                    if _spans:
+                        _round_log_note("sp " + " ".join(_spans))
+                        _spans.clear()
+                    _round_log((_t1 - _t0) * 1e3,
+                               (time.perf_counter() - _t1) * 1e3, 0.0,
+                               accepted, bs, gap_ms=_gap, copied=0, rows=1)
                 raise
             emitted += n_new
             if copier is not None:
@@ -1636,18 +2311,54 @@ def _owned_decode_rounds(
             if emitted >= max_tokens:
                 # Budget exhausted: the same finish-seam contract as the
                 # mid-round close above.
+                _drop_prebuilt()
                 _finish_round(delivered)
+                if _round_log_state["path"]:
+                    _round_log_note(
+                        f"st {_t0:.6f} {_td:.6f} {_tv:.6f} {_t1:.6f} "
+                        f"{resource.getrusage(resource.RUSAGE_SELF).ru_majflt}")
+                    if _spans:
+                        _round_log_note("sp " + " ".join(_spans))
+                        _spans.clear()
+                    _round_log((_t1 - _t0) * 1e3,
+                               (time.perf_counter() - _t1) * 1e3, 0.0,
+                               accepted, bs, gap_ms=_gap, copied=0, rows=1)
                 return
             _t2 = time.perf_counter()
+
+            # Stage stamps of the round the next row logs: start, verify
+            # build start, verify submitted, walk read.
+            if _round_log_state["path"]:
+                # With the process's major faults so far: a page-in of the
+                # mapped weights stalls a command buffer.
+                _round_log_note(
+                    f"st {_t0:.6f} {_td:.6f} {_tv:.6f} {_t1:.6f} "
+                    f"{resource.getrusage(resource.RUSAGE_SELF).ru_majflt}")
+                if _spans:
+                    _round_log_note("sp " + " ".join(_spans))
+                    _spans.clear()
+                _mem_seen[0] = max(_mem_seen[0], mx.get_active_memory())
+                _mem_seen[1] = max(_mem_seen[1], mx.get_cache_memory())
+            if early is not None:
+                _round_log((_t1 - _t0) * 1e3, (_t2 - _t1) * 1e3, 0.0,
+                           accepted, bs, gap_ms=_gap, copied=0, rows=1)
+                _prev_end = time.perf_counter()
+                continue
 
             if _has_accept:
                 sampler_rng.draft_call(_accept_fn, verify.hidden, draft_tokens,
                                        accepted, new_tokens, draft_sampler, token_dtype,
                                        **draft_kwargs)
 
-            hidden = (_draft_hidden_fn(verify.hidden[:, accepted:accepted + 1, :])
-                      if _has_draft_hidden
-                      else verify.hidden[:, accepted:accepted + 1, :])
+            if _ONE_STREAM:
+                with mx.stream(generation_stream):
+                    hidden = verify.hidden[:, accepted:accepted + 1, :]
+                    if _has_draft_hidden:
+                        hidden = _draft_hidden_fn(hidden)
+            else:
+                hidden = (_draft_hidden_fn(verify.hidden[:, accepted:accepted + 1, :])
+                          if _has_draft_hidden
+                          else verify.hidden[:, accepted:accepted + 1, :])
             b = new_tokens[-1] if new_tokens else b
             if accepted < bs - 1 and _has_rollback:
                 with mx.stream(generation_stream):
@@ -1661,9 +2372,8 @@ def _owned_decode_rounds(
                                       kv_valid_len=kv_offset)
             else:
                 kv_offset += accepted + 1
-            if emitted - _last_clear >= 256:
-                note_own_before_clear()
-                mx.clear_cache()
+            if emitted - _last_clear >= 256 and not _KEEP_BUFFERS:
+                deferred_clear.clear_now()
                 _last_clear = emitted
             _round_log((_t1 - _t0) * 1e3, (_t2 - _t1) * 1e3,
                        (time.perf_counter() - _t2) * 1e3, accepted, bs,
@@ -1675,7 +2385,24 @@ def _owned_decode_rounds(
             _prev_end = time.perf_counter()
 
     finally:
+        _drop_prebuilt()
         _walk_report()
+        if _assume_ok or _ahead_ok:
+            _round_log_note("assume " + " ".join(
+                f"{k}={v}" for k, v in _assume_stats.items()))
+        if _round_log_state["path"]:
+            import mlx_kquant as _kq
+
+            # Largest active and allocator cache bytes read at a round's
+            # end in this session (what the round order's levers hold shows
+            # here, not in the request's peak, which the prefill sets).
+            _round_log_note("mem active_max=%d cache_max=%d" % tuple(_mem_seen))
+
+            _rows_stats = getattr(_kq, "file_rows_cache_stats", None)
+            if _rows_stats is not None:
+                # Table row cache of kq (KQ_FILE_ROWS_CACHE), process totals.
+                _round_log_note("rows cache hits=%d misses=%d bytes=%d"
+                                % tuple(_rows_stats()))
         if copier is not None and copier.rounds:
             _round_log_note(
                 f"context copy rounds={copier.rounds} "
@@ -1931,6 +2658,8 @@ def owned_server_rounds(
     # replaces rotating entries with BufferedRotatingKVCache objects, and the
     # stash attr dies with the swapped-out entry (gemma-4's first layer is
     # rotating). A generator local is immune to cache-entry swaps.
+    _pre_stamp[0] = time.perf_counter()
+    _pre_parts.clear()
     retire_ctx = _pop_retire_ctx(prompt_cache)
     drafter_warm = _pop_drafter_warm(prompt_cache)
     seed_stream = _pop_seed_stream(prompt_cache)
@@ -1953,6 +2682,7 @@ def owned_server_rounds(
         }
         if retire_ctx.get("mode") == "ckpt":
             _ckpt_post_prefill(model, prompt_cache, retire_ctx)
+    _pre_part("ckpt")
     if thinking_hook is not None:
         # The server emitted the first bonus before these rounds; the hook
         # still has to see it (it may be a thinking marker).
@@ -1960,6 +2690,7 @@ def owned_server_rounds(
     if row_procs is not None:
         row_procs.start(b)
     _buffer_mtp_target_cache(prompt_cache, drafter, draft_block_size)
+    _pre_part("buffer")
     eff_sampler = None if greedy_sampling else sampler
     round_lp = None
     lp_k = 0
@@ -1991,6 +2722,9 @@ def owned_server_rounds(
         row_procs=row_procs, copy_prompt=copy_prompt,
         rope_deltas=_row_deltas(rope_deltas, 1),
         round_lp=round_lp, lp_k=lp_k)
+    from gmlx.serve import cb_phase
+    cb_phase.spec_rounds(True, model)
+    last = False
     try:
         for tok in rounds:
             generated.append(tok)
@@ -2010,20 +2744,36 @@ def owned_server_rounds(
             if ((eos_token_ids is not None and tok in eos_token_ids)
                     or (stop_check is not None and stop_check(0, tok))
                     or len(generated) >= max_tokens):
-                rounds.close()
-                if retire_ctx is not None:
-                    _retire_b1(model, prompt_cache, generated, retire_ctx,
-                               drafter=drafter, sidecar_ctx=sidecar_ctx)
-                    retire_ctx = None
+                queue = step_end_queue() if _RETIRE_AFTER_FINAL else None
+                if (queue is not None
+                        and not getattr(drafter, "_kq_head_covered", False)):
+                    # The token goes out first; the serve step runs the
+                    # close and the store once its responses are queued,
+                    # on the same worker turn. Outside a serve step nothing
+                    # would run them, and a drafter that stores its own KV
+                    # beside the prompt cache is reset by the step's
+                    # release first: they run here.
+                    queue.append(functools.partial(
+                        _close_and_retire, rounds, model, prompt_cache,
+                        list(generated), retire_ctx, drafter, sidecar_ctx))
+                    last = True
+                else:
+                    _close_and_retire(rounds, model, prompt_cache, generated,
+                                      retire_ctx, drafter, sidecar_ctx)
+                retire_ctx = None
                 rounds = None
                 prompt_cache = hidden = shared_kv_states = None
                 drafter_warm = first_bonus = prompt_tokens = copy_prompt = None
                 sidecar_ctx = None
-            meta = {"round_pos": pos[0], "round_len": pos[1]}
+            # A deferred close leaves the round open: the tick ends here.
+            meta = {"round_pos": pos[0],
+                    "round_len": pos[0] + 1 if last else pos[1]}
             if round_lp is not None:
                 meta["logprobs"] = [round_lp[pos[0]] if pos[0] < len(round_lp)
                                     else None]
             yield [tok], meta
+            if last:
+                return
     finally:
         if seeded is not None:
             seeded[0]._kq_rows = seeded[1]
@@ -2033,6 +2783,7 @@ def owned_server_rounds(
         # close would only fire at frame teardown, after this finally).
         # The terminal-token path above already closed, retired, and nulled
         # the locals, so this can't double-store. See _retire_b1.
+        cb_phase.spec_rounds(False, model)
         if rounds is not None:
             rounds.close()
         if (retire_ctx is not None
@@ -2307,6 +3058,176 @@ def _pop_retire_ctx(prompt_cache: list) -> dict | None:
     return retire
 
 
+# GMLX_SPEC_RETIRE_AFTER_FINAL (on; 0 off): a B=1 request's last token is
+# yielded before the round loop is closed and its KV retired into the prompt
+# cache; both then run at the end of the serve step (run_step_end), once the
+# token's response is queued. Off: they run before the last token is yielded.
+_RETIRE_AFTER_FINAL = env_bool("GMLX_SPEC_RETIRE_AFTER_FINAL", True)
+
+# Work the running serve step leaves for after its responses are queued,
+# per thread (begin_step, step_end_queue, run_step_end).
+_step_end = threading.local()
+
+
+def begin_step() -> None:
+    _step_end.jobs = []
+
+
+def step_end_queue() -> list | None:
+    """The calling thread's queue for the end of the serve step it runs,
+    or None outside one. A queued job runs before the worker forwards
+    anything else."""
+    return getattr(_step_end, "jobs", None)
+
+
+def run_step_end() -> None:
+    """Run the jobs the current serve step queued. Never raises."""
+    jobs, _step_end.jobs = getattr(_step_end, "jobs", None), None
+    for job in jobs or ():
+        try:
+            job()
+        except Exception:  # noqa: BLE001
+            _log.exception("step end job failed")
+
+# GMLX_SPEC_STORE_WHEN_IDLE (on; 0 off), under GMLX_SPEC_RETIRE_AFTER_FINAL: the
+# store of a deferred retire is held, so a request that arrives meanwhile
+# starts without waiting for it. The serve worker runs it once idle for
+# the grace with nothing arriving, one step after every active row's
+# first token, before admitting a request that continues the stored
+# sequence, and at shutdown. A store whose cache would hold more than
+# _HOLD_SHARE of free RAM runs at once, and the governor drops held ones.
+_STORE_WHEN_IDLE = env_bool("GMLX_SPEC_STORE_WHEN_IDLE", True)
+_HOLD_SHARE = 0.05
+_held_stores: list = []
+_held_lock = threading.Lock()
+
+
+def held_store_grace_s() -> float:
+    """How long an idle worker waits for a request before it runs held
+    stores."""
+    return max(0.0, env_float("GMLX_SPEC_STORE_IDLE_MS", 5.0)) / 1e3
+
+
+class _HeldStore:
+    __slots__ = ("job", "key", "nbytes", "t0")
+
+    def __init__(self, job, key, nbytes):
+        self.job, self.key, self.nbytes = job, key, nbytes
+        self.t0 = time.perf_counter()
+
+
+def _held_bytes() -> int:
+    with _held_lock:
+        return sum(h.nbytes for h in _held_stores)
+
+
+def _drop_held_stores(fraction: float) -> int:
+    """The governor's release: drop held stores, oldest first, until
+    ``fraction`` of their bytes is freed. A dropped store stores nothing."""
+    freed = 0
+    with _held_lock:
+        want = sum(h.nbytes for h in _held_stores) * min(1.0, float(fraction))
+        while _held_stores and freed < want:
+            freed += _held_stores.pop(0).nbytes
+    if freed:
+        _log.info("held prompt cache stores dropped for memory: %.1f MB",
+                  freed / 1e6)
+    return freed
+
+
+def _hold_store(model, prompt_cache, generated, retire, drafter,
+                sidecar_ctx) -> bool:
+    """Hold a closed request's store for later. False, holding nothing,
+    when it has to run now."""
+    manager = getattr(model, "_kq_apc_manager", None)
+    if manager is None or retire.get("mode") != "ckpt":
+        return False
+    # The drafter's own sidecar store reads the shared drafter, which the
+    # next request reseeds.
+    if drafter is not None and getattr(drafter, "_kq_head_covered", False):
+        return False
+    try:
+        from gmlx.cache.kv_cache import cache_nbytes
+        from gmlx.serve.kernel_vm import available_bytes
+
+        tail = (sidecar_ctx or {}).get("tail")
+        if tail is not None:
+            # The drafter resets its tail in place for the next request.
+            tail = tail.copy()
+            sidecar_ctx = dict(sidecar_ctx, tail=tail)
+        nbytes = (cache_nbytes(prompt_cache)
+                  + sum(getattr(s, "size", 0) for s in retire.get("snaps") or ())
+                  + (cache_nbytes([h for h, _ in tail.parts]) if tail else 0))
+        avail = available_bytes()
+        if avail is None or nbytes + _held_bytes() > _HOLD_SHARE * avail:
+            return False
+        from gmlx.serve.governor import register_cache
+
+        register_cache("spec_held_store", _held_bytes, _drop_held_stores)
+    except Exception:  # noqa: BLE001
+        _log.debug("prompt cache store not held", exc_info=True)
+        return False
+    # The store writes its record at the sequence end, its block-grid floor
+    # or a decode snapshot, so only a request that shares the sequence up to
+    # the first of those can use it.
+    seq = retire["full_ids"] + [int(t) for t in generated]
+    bs = int(getattr(manager, "block_size", 0) or 1)
+    end = len(seq) - 1
+    first = min([end // bs * bs, end]
+                + [int(s[0]) for s in retire.get("snaps") or ()])
+    key = seq[:max(1, first)]
+    job = functools.partial(_retire_b1, model, prompt_cache, generated,
+                            retire, drafter=drafter, sidecar_ctx=sidecar_ctx)
+    with _held_lock:
+        _held_stores.append(_HeldStore(job, key, nbytes))
+    return True
+
+
+def run_held_stores(reason: str) -> None:
+    """Run every held store, oldest first. Never raises."""
+    while True:
+        with _held_lock:
+            if not _held_stores:
+                return
+            h = _held_stores.pop(0)
+        t0 = time.perf_counter()
+        try:
+            h.job()
+        except Exception:  # noqa: BLE001
+            _log.exception("held prompt cache store failed")
+        _round_log_note("held store %s: waited %.3f ms ran %.3f ms" % (
+            reason, (t0 - h.t0) * 1e3, (time.perf_counter() - t0) * 1e3))
+
+
+def run_held_stores_for(prompt_ids) -> None:
+    """Before a request is admitted: run the held stores when it shares
+    enough of one's sequence to use what that store writes."""
+    with _held_lock:
+        hit = any(len(prompt_ids) >= len(h.key)
+                  and prompt_ids[:len(h.key)] == h.key for h in _held_stores)
+    if hit:
+        run_held_stores("continuation")
+
+
+def _close_and_retire(rounds, model, prompt_cache, generated, retire_ctx,
+                      drafter, sidecar_ctx) -> None:
+    """Close a finished request's round loop (its mid-round rollback trims
+    the target cache to the delivered tokens), then retire its KV."""
+    t0 = time.perf_counter()
+    rounds.close()
+    t1 = time.perf_counter()
+    held = False
+    if retire_ctx is not None:
+        held = _STORE_WHEN_IDLE and _hold_store(
+            model, prompt_cache, generated, retire_ctx, drafter, sidecar_ctx)
+        if not held:
+            _retire_b1(model, prompt_cache, generated, retire_ctx,
+                       drafter=drafter, sidecar_ctx=sidecar_ctx)
+    _round_log_note("end close %.3f ms retire %.3f ms%s" % (
+        (t1 - t0) * 1e3, (time.perf_counter() - t1) * 1e3,
+        " held" if held else ""))
+
+
 def _retire_b1(model, prompt_cache: list, generated: list[int],
                retire: dict | None, drafter=None,
                sidecar_ctx: dict | None = None) -> None:
@@ -2378,6 +3299,19 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             layout=retire.get("layout"))
         if ok:
             _log.info("APC retire store: tokens=%d", ok)
+            tail = (sidecar_ctx or {}).get("tail")
+            if tail is not None:
+                rows = tail.take(len(full_ids), ok)
+                if rows is not None:
+                    from gmlx.eval_guard import guard
+                    from gmlx.spec.ckpt import tail_seed_store
+
+                    guard.eval(rows, site="drafter-seed-store",
+                               owner="scratch")
+                    tail_seed_store(manager, seq[:ok],
+                                    retire.get("extra_hash", 0), rows)
+                    _log.info("APC drafter seed kept: %d rows, %.1f MB",
+                              int(rows.shape[1]), rows.nbytes / 1e6)
         if max_len is not None:
             # The drafter sidecar pairs with a same-key main entry; its KV
             # covers the full sequence and cannot be rewound to the LCP.
@@ -3654,7 +4588,10 @@ def _owned_decode_rounds_batch(
 
     _round_log_session(max(positions) if positions else 0, max_tokens)
     _prev_end = time.perf_counter()
-    _last_clear = sum(emitted)
+    # As in the B=1 loop: a deferred prefill clear runs at the first
+    # round's end.
+    _last_clear = (sum(emitted) - 256 if deferred_clear.pending()
+                   else sum(emitted))
     while len(active_idx) > 0:
         _drain_injections()
         # Env can be lowered on a live server (per-round read, like the pacing
@@ -3879,7 +4816,8 @@ def _owned_decode_rounds_batch(
                        and _stoch_supported_sampler(eff) else None)
             accepted_list, new_tokens_list = _mixed_walk(
                 lm, verify, draft_tokens, _walk_sampler, budgets,
-                stoch_row=stoch_j, q_rows=list(stoch_stash), process=process)
+                stoch_row=stoch_j, q_rows=list(stoch_stash), process=process,
+                cut=_take_cut(draft_kwargs))
             stoch_stash.clear()
             _t1 = time.perf_counter()
             sampler_rng.target_sampled(sync_draft=True)
@@ -4154,8 +5092,7 @@ def _owned_decode_rounds_batch(
                 left_padding=_batch_left_padding(prompt_cache))
 
         if sum(emitted) - _last_clear >= 256:
-            note_own_before_clear()
-            mx.clear_cache()
+            deferred_clear.clear_now()
             _last_clear = sum(emitted)
 
         acc_log = ([accepted_list[j] for j in log_rows] if log_rows

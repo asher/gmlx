@@ -47,11 +47,16 @@ class DraftStash:
     head pick at position 0). ``q``: the full-vocab proposal each token was
     drawn from (stochastic acceptance). ``pq``: log-domain draft rows for the
     p/q counterfactual log. ``top2``: the runner-up token per row. A list is
-    present only while its instrument is on."""
+    present only while its instrument is on. ``cut``: ``(token, q row)`` of
+    the first draft a row cut dropped from a block drawn from ``q`` rows;
+    the walk tests that draft against the target row behind the kept
+    drafts, so a cut that read the draft's own pick leaves the sampled
+    distribution exact. The walk takes it and sets it back to None."""
 
     q: list | None = None
     pq: list | None = None
     top2: list | None = None
+    cut: tuple | None = None
 
 
 # 1. BatchDrafterProtocol -- the contract as typed documentation

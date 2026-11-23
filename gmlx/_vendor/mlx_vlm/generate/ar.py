@@ -2678,13 +2678,17 @@ class PromptProcessingBatch:
             default=0,
         )
 
-        output = self.model(
-            self._input_ids,
-            cache=self.prompt_cache,
-            inputs_embeds=(None if self._inputs_embeds is None
-                           else _built_rows(self._inputs_embeds)),
-            **call_kwargs,
-        )
+        # gmlx: the last chunk ran this column, or the prefix cache held
+        # the prompt whole with these logits (mtp_prefill).
+        output = vars(self).pop("_kq_last_out", None)
+        if output is None:
+            output = self.model(
+                self._input_ids,
+                cache=self.prompt_cache,
+                inputs_embeds=(None if self._inputs_embeds is None
+                               else _built_rows(self._inputs_embeds)),
+                **call_kwargs,
+            )
         output = self._speculative_prefill.finish(output)
         logits = output.logits if hasattr(output, "logits") else output
         if self._right_pad_per_row is not None and any(self._right_pad_per_row):
@@ -3619,6 +3623,24 @@ class BatchGenerator:
             self._generation_batch.extend(gen_batch)
         self._kq_joining = None
 
+    def _kq_first_now(self, alone) -> list:
+        """gmlx: a speculative batch that starts its own rounds sends its
+        first tokens from the step that prefilled it, not from the next
+        one (GMLX_SPEC_FIRST_IN_PREFILL_STEP, 0 turns it off). They go
+        after the tick's decode responses: a request that finished in that
+        step has left the batch, which then reads as empty."""
+        gb = self._generation_batch
+        # Not is_speculative: continuous batch admission turns it off.
+        if not (
+            alone
+            and isinstance(gb, SpeculativeGenerationBatch)
+            and os.environ.get("GMLX_SPEC_FIRST_IN_PREFILL_STEP", "1") != "0"
+        ):
+            return []
+        # The batch has joined: a failure from here is a decode step's.
+        self._kq_admit = self._kq_joining = None
+        return gb.next()
+
     def _next(self, **kwargs):
         generation_responses = []
 
@@ -3725,11 +3747,23 @@ class BatchGenerator:
             self._prompt_time_counter += elapsed
             self._record_prompt_batch_time(self._prompt_batch, elapsed)
             prompt_responses = self._prompt_batch_progress(self._prompt_batch)
+            # gmlx: no batch is decoding, so this one starts its own rounds.
+            alone = len(self._generation_batch) == 0
             self._extend_generation_batch(gen_batch)
             self._prompt_batch = None
-            # gmlx: book what the process held before the clear.
-            _note_own_before_clear()
-            mx.clear_cache()
+            generation_responses = [*generation_responses, *self._kq_first_now(alone)]
+            if os.environ.get("GMLX_SPEC_KEEP_BUFFERS") != "1":
+                # gmlx: a clear the last chunk left for the first decode
+                # round frees the same buffers there, after the first
+                # token is out (gmlx.gen.deferred_clear). A batch that
+                # joins running rounds has no first round of its own.
+                from gmlx.gen import deferred_clear as _deferred_clear
+
+                if not (alone and _deferred_clear.pending()):
+                    # gmlx: book what the process held before the clear.
+                    _note_own_before_clear()
+                    mx.clear_cache()
+                    _deferred_clear.settled()
             return prompt_responses, generation_responses
 
         num_active = len(self._generation_batch)
@@ -3774,11 +3808,18 @@ class BatchGenerator:
                     self._prompt_time_counter += elapsed
                     self._record_prompt_batch_time(self._prompt_batch, elapsed)
                     prompt_responses = self._prompt_batch_progress(self._prompt_batch)
+                    alone = len(self._generation_batch) == 0
                     self._extend_generation_batch(gen_batch)
                     self._prompt_batch = None
-                    # gmlx: book what the process held before the clear.
-                    _note_own_before_clear()
-                    mx.clear_cache()
+                    generation_responses = [
+                        *generation_responses, *self._kq_first_now(alone)]
+                    if os.environ.get("GMLX_SPEC_KEEP_BUFFERS") != "1":
+                        # gmlx: book what the process held before the clear.
+                        _note_own_before_clear()
+                        mx.clear_cache()
+                        from gmlx.gen import deferred_clear as _deferred_clear
+
+                        _deferred_clear.settled()
                 return prompt_responses, generation_responses
 
             self._unprocessed_sequences = self._unprocessed_sequences[n:]
@@ -3854,11 +3895,17 @@ class BatchGenerator:
                 self._prompt_time_counter += elapsed
                 self._record_prompt_batch_time(self._prompt_batch, elapsed)
                 prompt_responses = self._prompt_batch_progress(self._prompt_batch)
+                alone = len(self._generation_batch) == 0
                 self._extend_generation_batch(gen_batch)
                 self._prompt_batch = None
+                generation_responses = [
+                    *generation_responses, *self._kq_first_now(alone)]
                 # gmlx: book what the process held before the clear.
                 _note_own_before_clear()
                 mx.clear_cache()
+                from gmlx.gen import deferred_clear as _deferred_clear
+
+                _deferred_clear.settled()
 
             return prompt_responses, generation_responses
 

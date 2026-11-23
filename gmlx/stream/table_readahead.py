@@ -12,6 +12,16 @@ reads the rest into the page cache on worker threads (``pread``), in the
 order the tokens read them, while the chunk's own gather runs. The rows
 of the two chunks after it follow, so later chunks find their pages read.
 
+The gather still takes one page fault a row for a page that is in the
+page cache but not yet in the model's mapping, on its one thread. So the
+workers do not ask page by page: each touches its pages through the
+read-ahead's own mapping in one numpy gather (a page not resident is read
+there, one page a fault), then through the model's mapping
+(``attach_table_readahead`` passes its bytes), which leaves the gather no
+fault to take. ``GMLX_TABLE_READAHEAD_COUNT=1`` (``count_cold`` on a
+read-ahead) runs the page by page pass instead, which counts the pages
+it read and leaves the model's mapping alone.
+
 It reads the prompts of a server with a prompt cache, whose prompt
 batches keep each whole prompt in their cache metadata.
 ``GMLX_TABLE_READAHEAD=0`` turns it off and
@@ -46,6 +56,9 @@ _ATTR = "_kq_table_readahead"
 _UPTO = "_gmlx_table_readahead_upto"
 _PROT_READ = 0x1
 _MAP_SHARED = 0x0001
+_MADV_RANDOM = 1
+# Pages a worker touches between two looks at the close flag.
+_TOUCH_STEP = 1024
 
 
 def readahead_enabled() -> bool:
@@ -63,12 +76,15 @@ class TableReadAhead:
     their ``[B, T, heads]`` rows (``PLEHostHash``). ``submit`` takes spans
     ``(tokens, start, end)``: the rows of ``tokens[start:end]``, with the
     tokens before ``start`` as their history. One coordinator thread
-    hashes each submission and maps its rows to pages; the workers check
-    and read them, page ``k`` of a submission on worker ``k % workers``.
+    hashes each submission and maps its rows to pages; the workers touch
+    them, page ``k`` of a submission on worker ``k % workers``.
+    ``table_bytes`` is the table as the model maps it, a uint8 array
+    whose first byte is the file's byte ``offset``: the workers touch
+    their pages through it too.
     """
 
     def __init__(self, path: str, offset: int, rows: int, row_bytes: int,
-                 hasher, workers: int | None = None):
+                 hasher, workers: int | None = None, table_bytes=None):
         from .feeder_common import DaemonPool
 
         self.path = path
@@ -85,6 +101,8 @@ class TableReadAhead:
         libc.munmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
         libc.mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
                                  ctypes.c_void_p]
+        libc.madvise.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                 ctypes.c_int]
         self._libc = libc
         fd = os.open(path, os.O_RDONLY)
         size = os.fstat(fd).st_size
@@ -93,6 +111,14 @@ class TableReadAhead:
             os.close(fd)
             raise OSError(ctypes.get_errno(), f"mmap of {path} failed")
         self._fd, self._size, self._addr = fd, size, addr
+        # A fault on this mapping reads its own page and no neighbors.
+        libc.madvise(addr, size, _MADV_RANDOM)
+        self._bytes = np.ctypeslib.as_array(
+            (ctypes.c_ubyte * size).from_address(addr))
+        self._table_bytes = table_bytes
+        self.count_cold = env_bool("GMLX_TABLE_READAHEAD_COUNT", False)
+        # Workers inside a touch; close unmaps only once there are none.
+        self._touching = 0
         self.workers = int(workers or _workers())
         self._pool = DaemonPool(self.workers, name="gmlx-table-ahead")
         self._jobs: queue.SimpleQueue = queue.SimpleQueue()
@@ -200,7 +226,32 @@ class TableReadAhead:
         os.preadv(self._fd, [buf], off)
 
     def _read(self, pages) -> int:
-        """Read the cold ones of ``pages``. Returns how many were cold."""
+        """Bring ``pages`` into the page cache and into the model's
+        mapping. Returns how many were cold when counting them."""
+        if self.count_cold:
+            return self._read_counted(pages)
+        with self._idle:
+            if self._closed:
+                return 0
+            self._touching += 1
+        try:
+            offs = np.asarray(pages, dtype=np.int64) * self.page
+            table = self._table_bytes
+            for i in range(0, len(offs), _TOUCH_STEP):
+                if self._closed:
+                    break
+                part = offs[i:i + _TOUCH_STEP]
+                np.take(self._bytes, part)
+                if table is not None:
+                    np.take(table, np.clip(part - self.offset, 0,
+                                           table.size - 1))
+        finally:
+            with self._idle:
+                self._touching -= 1
+                self._idle.notify_all()
+        return 0
+
+    def _read_counted(self, pages) -> int:
         vec = ctypes.c_ubyte()
         buf = bytearray(self.page)
         cold = 0
@@ -219,10 +270,13 @@ class TableReadAhead:
 
     def close(self) -> None:
         """Stop the threads, unmap, close. Idempotent. The coordinator
-        drops what is still queued and exits. Close waits for no worker:
-        one still on a page may then call ``mincore`` on the unmapped
-        range or ``pread`` a closed descriptor, or one reused since, both
-        reads whose errors ``_read`` catches."""
+        drops what is still queued and exits. A worker inside a touch
+        reads the mapping itself, so close waits for those (each looks at
+        the flag every ``_TOUCH_STEP`` pages) and leaves the file mapped
+        if one does not come back. A counting worker still on a page may
+        call ``mincore`` on the unmapped range or ``pread`` a closed
+        descriptor, or one reused since, both reads whose errors it
+        catches."""
         with self._lock:
             if self._closed:
                 return
@@ -230,6 +284,14 @@ class TableReadAhead:
             self._pool.shutdown(wait=False, cancel_futures=True)
         self._jobs.put(None)
         self._thread.join(timeout=1.0)
+        with self._idle:
+            clear = self._idle.wait_for(lambda: self._touching == 0, 5.0)
+        self._table_bytes = None
+        if not clear:
+            _log.warning("table read-ahead: a reader is still on %s; its "
+                         "mapping stays", os.path.basename(self.path))
+            return
+        self._bytes = None
         self._libc.munmap(self._addr, self._size)
         os.close(self._fd)
 
@@ -334,6 +396,23 @@ def read_ahead(batch, n: int) -> None:
         _log.debug("table read-ahead plan failed", exc_info=True)
 
 
+def _mapped_bytes(mod, src):
+    """The table of ``mod`` as the model maps it, a flat uint8 view, or
+    None when it is not the file's bytes one to one."""
+    try:
+        weight = mod["weight"] if "weight" in mod else None
+        if weight is None or weight.nbytes != src.rows * src.row_bytes:
+            return None
+        view = np.asarray(weight)
+        if view.flags.owndata or view.base is None:
+            return None     # a copy, not the mapping
+        return view.reshape(-1).view(np.uint8)
+    except Exception:
+        _log.debug("table read-ahead: no view of the mapped table",
+                   exc_info=True)
+        return None
+
+
 def attach_table_readahead(model, gguf_path: str | None) -> bool:
     """Attach a read-ahead to the streamed table of ``model`` its load
     mapped untracked, whose model hashes its rows on the host
@@ -369,7 +448,8 @@ def attach_table_readahead(model, gguf_path: str | None) -> bool:
                 continue
             try:
                 ra = TableReadAhead(src.path, src.offset, src.rows,
-                                    src.row_bytes, hasher)
+                                    src.row_bytes, hasher,
+                                    table_bytes=_mapped_bytes(mod, src))
             except OSError as exc:
                 loadlog.warn(f"[stream] {spec.label} not read ahead: {exc}")
                 return False

@@ -193,9 +193,18 @@ def test_float32_input_takes_the_fused_experts(t, monkeypatch):
     assert np.abs(g - w).max() <= 2e-2 * np.abs(w).max()
 
 
+def test_verify_width_takes_the_fused_block(calls):
+    # 11 * K >= 64 is past the default bound, but a qwen4exp verify of up
+    # to kq_block_rows rows runs fused.
+    block, _ = _block()
+    assert 11 <= block.kq_block_rows
+    mx.eval(block(_x(11)))
+    assert calls
+
+
 def test_wide_call_takes_the_stock_forward(calls):
     block, stock = _block()
-    x = _x(11)  # 11 * K >= 64: the prefill width
+    x = _x(block.kq_block_rows + 1)  # past the verify widths: a prefill
     got = block(x)
     want = stock.__call__(block, x)
     mx.eval(got, want)

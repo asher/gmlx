@@ -392,13 +392,16 @@ _SEED = (
          "Quick for its size: it reads a small part of its weights per token.",
          aliases=("flash-next",),
          mmproj="mmproj-F16.gguf",
-         drafter_repo="unsloth/Qwen3.8-Flash-Next-GGUF",
-         drafter_file="MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf",
+         # Inco AI's DFlash 2 drafter: Q6_K accepts as many drafts as Q8_0.
+         drafter_repo="incoai/Qwen3.8-Flash-Next-DFlash2-GGUF",
+         drafter_file="Qwen3.8-Flash-Next-DFlash2-Q6_K.gguf",
          license_note="Qwen Community License",
          # At 128 GB the balanced file wires 80 GB and reads its 27 GB table
          # through the page cache, 107 GB in all; the fastest tier holds the
-         # whole model in 91 GB and leaves room for other apps.
-         preferred_at=((128, "fastest"),),
+         # whole model in 91 GB and leaves room for other apps. At 256 GB
+         # the Q8_0 file holds its weights in memory and reads its 54 GB
+         # table from the file, with room for the full context.
+         preferred_at=((128, "fastest"), (256, "xhigh")),
          use="documents, code and tool calls"),
     Seed("ripple-65b", "Ripple-65B Preview", "AtomicChat/Ripple-65B-Preview-GGUF", "balanced",
          "A dense 65B reasoning and chat model with a 2M token context.",

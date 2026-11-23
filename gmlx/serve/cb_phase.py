@@ -68,7 +68,8 @@ _UNSET = object()
 # for a flip without a model, _UNSET when the last set had no model.
 # holds: the jobs in a hold block, which keep FINE on the device.
 _state: dict = {"phase": None, "caps": None, "kq": None, "lifted": False,
-                "pre_lift": None, "model": _UNSET, "holds": 0}
+                "pre_lift": None, "model": _UNSET, "holds": 0,
+                "spec": False}
 # The phase a hold records, which no engine flips to.
 _HOLD = "hold"
 # Engines on separate threads share the device fields: the compare, the
@@ -123,7 +124,22 @@ def decode_caps(model) -> tuple[int, int]:
     GMLX_CB_FINE_DECODE=1)."""
     if _streamed(model):
         return STREAMED_DECODE
-    return FINE_DECODE if os.environ.get("GMLX_CB_FINE_DECODE") == "1" else RAM_DECODE
+    if os.environ.get("GMLX_CB_FINE_DECODE") == "1" or _state.get("spec"):
+        return FINE_DECODE
+    return RAM_DECODE
+
+
+def spec_rounds(on: bool, model=None) -> None:
+    """Speculative rounds of ``model`` start or end. They decode on
+    FINE_DECODE: a round's host work is one large graph, and the GPU
+    starts on its first 50 ops while the host encodes the rest. Plain
+    decode keeps RAM_DECODE, as the rounds do under GMLX_SPEC_CB_FINE=0."""
+    on = bool(on) and os.environ.get("GMLX_SPEC_CB_FINE", "1") != "0"
+    if bool(_state.get("spec")) == on:
+        return
+    _state["spec"] = on
+    if _state["phase"] == "decode" and _live():
+        _set(decode_caps(model), "decode", model)
 
 
 def prefill_caps(model) -> tuple[int, int]:
@@ -225,6 +241,29 @@ def hold():
     finally:
         with _LOCK:
             _state["holds"] -= 1
+
+
+# Caps no single submission reaches.
+_WHOLE = (1 << 20, 1 << 20)
+
+
+@contextlib.contextmanager
+def one_buffer():
+    """Each submission inside goes to the GPU as one command buffer. MLX
+    holds the host while ten buffers are in flight, so a submission the
+    phase caps would cut into many waits once, not once a buffer. The
+    caps are put back at the end. The caps stay under a hold, the user's
+    pin, GMLX_CB_PHASE=0 or without kq. Nothing inside may flip a phase."""
+    kq = _kq()
+    with _LOCK:
+        if _state["holds"] or not _live() or not kq:
+            yield
+            return
+        prev = kq.set_cb_caps(*_WHOLE)
+        try:
+            yield
+        finally:
+            kq.set_cb_caps(int(prev[0]), int(prev[1]))
 
 
 def lift() -> None:

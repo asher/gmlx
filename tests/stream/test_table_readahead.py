@@ -36,6 +36,7 @@ def test_the_read_ahead_reads_the_cold_pages_its_rows_read(tmp_path,
                         lambda self, off, buf: read.append(off // page))
     ra = tra.TableReadAhead(str(path), offset, 120, row_bytes, _RowIsToken(),
                             workers=3)
+    ra.count_cold = True
     try:
         tokens = [5, 9, 5, 40, 77, 2]
         # Rows 9, 5 and 40 with token 5 before them, then row 5 with none.
@@ -50,6 +51,70 @@ def test_the_read_ahead_reads_the_cold_pages_its_rows_read(tmp_path,
     assert sorted(read) == sorted(want - warm)
     assert ra.stats["pages"] == len(want)
     assert ra.stats["cold"] == len(want - warm)
+
+
+class _Touched:
+    """Stands in for a mapping's bytes: records the offsets a gather
+    reads."""
+
+    def __init__(self, size, gate=None):
+        self.size, self.seen, self.gate = size, [], gate
+        self.entered = threading.Event()
+
+    def take(self, idx, **kw):
+        self.entered.set()
+        if self.gate is not None:
+            assert self.gate.wait(10.0)
+        self.seen.extend(int(i) for i in idx)
+
+
+def test_the_read_ahead_touches_its_pages_in_the_file_and_in_the_table(
+        tmp_path):
+    """Each page once through the read-ahead's mapping and once through
+    the model's, at a byte of the table inside that page."""
+    page = os.sysconf("SC_PAGE_SIZE")
+    path = tmp_path / "table.gguf"
+    path.write_bytes(b"\0" * (page * 64))
+    offset, row_bytes, rows = 100, page // 2, 120
+    table = _Touched(rows * row_bytes)
+    ra = tra.TableReadAhead(str(path), offset, rows, row_bytes, _RowIsToken(),
+                            workers=3, table_bytes=table)
+    own = ra._bytes = _Touched(ra._size)
+    try:
+        tokens = [5, 0, 9, 40]
+        ra.submit([(tokens, 1, 4)])
+        assert ra.wait(10.0)
+    finally:
+        ra.close()
+    want = set()
+    for r in (0, 9, 40):
+        start = offset + r * row_bytes
+        want |= {start // page, (start + row_bytes - 1) // page}
+    assert sorted(o // page for o in own.seen) == sorted(want)
+    assert all(o % page == 0 for o in own.seen)
+    assert sorted((i + offset) // page for i in table.seen) == sorted(want)
+    assert all(0 <= i < table.size for i in table.seen)
+    assert ra.stats["pages"] == len(want)
+
+
+def test_a_close_waits_for_a_reader_on_the_mapping(tmp_path):
+    """A worker reads the mapped file itself, so the file stays mapped
+    until it is back."""
+    page = os.sysconf("SC_PAGE_SIZE")
+    path = tmp_path / "table.gguf"
+    path.write_bytes(b"\0" * (page * 8))
+    gate = threading.Event()
+    ra = tra.TableReadAhead(str(path), 0, 64, 90, _RowIsToken(), workers=1)
+    own = ra._bytes = _Touched(ra._size, gate)
+    ra.submit([([0, 3], 1, 2)])
+    assert own.entered.wait(10.0)
+    closer = threading.Thread(target=ra.close)
+    closer.start()
+    closer.join(0.3)
+    assert closer.is_alive() and ra._bytes is own
+    gate.set()
+    closer.join(10.0)
+    assert not closer.is_alive() and ra._bytes is None
 
 
 def _batch(full, suffix, columns, done, step, right=None):

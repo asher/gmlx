@@ -340,6 +340,9 @@ def install_server_patches(cfg, *, reload_fn=None) -> None:
     from .systemone import install_systemone_route
 
     install_engine_jobs()
+    from gmlx.serve.idle_release import install_idle_release
+
+    install_idle_release()
     install_systemone_route(getattr(cfg, "systemone", None) or SystemoneCfg())
     install_chat_load_offload()
     install_optional_request_model()
