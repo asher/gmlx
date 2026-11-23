@@ -103,18 +103,20 @@ _OFF: contextvars.ContextVar = contextvars.ContextVar(
 
 
 class _Off:
-    __slots__ = ("reason", "said")
+    # ``blocks``: (block ref, store kind) of the fused blocks installed
+    # inside, which the store would have taken.
+    __slots__ = ("reason", "said", "blocks")
 
     def __init__(self, reason: str):
-        self.reason, self.said = reason, False
+        self.reason, self.said, self.blocks = reason, False, []
 
 
 @contextlib.contextmanager
 def off(reason: str):
     """No store for the loads inside: their blocks keep the mapped expert
     stacks, for a mode the store cannot serve (training, streamed
-    experts). ``reason`` says which; the first load inside that would
-    build a store prints it."""
+    experts). ``reason`` says which; the first load inside with fused
+    blocks the store would take prints it."""
     tok = _OFF.set(_Off(reason))
     try:
         yield
@@ -243,11 +245,18 @@ class ExpertStore:
 
 def register(block, model_type=None) -> None:
     """Note a fused block of a model of ``model_type`` at install time; its
-    store is built later."""
-    if store_mode(model_type) is not None and hasattr(kq, "moe_store_pack"):
-        _BLOCKS.append(weakref.ref(block))
-        # A bounded store of this load is built at its first forward too.
-        _BUILT[0] = False
+    store is built later. Inside ``off`` too, a bad lever value fails
+    here, before the weights load."""
+    mode = _env_mode(model_type)
+    if mode is None or not hasattr(kq, "moe_store_pack"):
+        return
+    scope = _OFF.get()
+    if scope is not None:
+        scope.blocks.append((weakref.ref(block), mode[0]))
+        return
+    _BLOCKS.append(weakref.ref(block))
+    # A bounded store of this load is built at its first forward too.
+    _BUILT[0] = False
 
 
 def _projs(block):
@@ -629,8 +638,8 @@ def _layer_index(name: str):
 def _blk(model, li):
     """The GGUF block number of ``model``'s layer ``li``. An MTP drafter
     sets ``_kq_store_blk_base``: its layer 0 is block num_hidden_layers of
-    a NextN sidecar, and None for a file with no block names (no store,
-    see ``drafter_load``)."""
+    a NextN sidecar or of the target's own file (an in-file head), and
+    None for a file with no block names (no store, see ``drafter_load``)."""
     base = getattr(model, "_kq_store_blk_base", 0)
     return None if li is None or base is None else li + base
 
@@ -788,9 +797,13 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
     say = log or print
     scope = _OFF.get()
     if scope is not None:
-        if not scope.said and _env_mode(model_type_of(model)) is not None:
-            scope.said = True
-            say(f"[expert-store] off for this load: {scope.reason}")
+        if not scope.said:
+            mine = {id(m) for _, m in model.named_modules()}
+            live = [(r(), how) for r, how in scope.blocks]
+            if any(b is not None and id(b) in mine and _eligible(b, how)
+                   for b, how in live):
+                scope.said = True
+                say(f"[expert-store] off for this load: {scope.reason}")
         return 0
     mode = store_mode(model_type_of(model))
     if mode is None or mode[0] not in ("full", "down") or not _BLOCKS:
@@ -830,9 +843,10 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
             _forget(todo)
             return 0
         if adapted:
-            say(f"[expert-store] skipped on {len(adapted)} blocks: an "
-                "adapter is attached to them; their experts are read in "
-                "place from the file")
+            k = len(adapted)
+            say(f"[expert-store] skipped on {k} {'block' if k == 1 else 'blocks'}"
+                " an adapter takes; the experts there are read in place from "
+                "the file")
     n_blocks = env_int("GMLX_MOE_EXPERT_STORE_BLOCKS", 0)
     warm_kernels([b for b in todo if id(b) not in adapted
                   and _eligible(b, kind)], _act_dtypes(model),

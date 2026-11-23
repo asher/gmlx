@@ -602,7 +602,7 @@ def test_an_adapter_keeps_the_store_on_the_blocks_it_does_not_take(
         assert es.build_at_load(m, log=lines.append) == 1
     assert m.layers[0].__dict__.get("_kq_store_only")
     assert m.layers[1].__dict__.get("_kq_expert_store") is None
-    assert any("skipped on 1 blocks: an adapter" in s for s in lines)
+    assert any("skipped on 1 block an adapter takes" in s for s in lines)
     mx.eval(m(_x(3)))
     lines.clear()
     m = _model(seed=3)
@@ -683,12 +683,19 @@ def test_a_training_or_cpu_load_builds_no_store(monkeypatch):
         assert es.build_at_load(m, log=lines.append) == 0
         assert es.build_at_load(m, log=lines.append) == 0
     assert not es._BLOCKS and es.held(m) == (0, set())
-    # Said once per scope, and only where the store would be on.
+    # Said once per scope, and only for a load with blocks the store takes.
     assert lines == ["[expert-store] off for this load: training"]
+    with es.off("training"):
+        dense = _Two(nn.Linear(8, 8), nn.Linear(8, 8))
+        assert es.build_at_load(dense, log=lines.append) == 0
     monkeypatch.delenv("GMLX_MOE_EXPERT_STORE")
     with es.off("training"):
-        assert es.build_at_load(m, log=lines.append) == 0
+        assert es.build_at_load(_model(), log=lines.append) == 0
     assert len(lines) == 1
+    # A bad value fails at install, before the weights load.
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "fulll")
+    with es.off("training"), pytest.raises(ValueError, match="full, down"):
+        _model()
     monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
     m = _model()
     mx.set_default_device(mx.cpu)
