@@ -101,6 +101,19 @@ def test_fused_rounds_equal_the_plain_ones(monkeypatch):
     _equal(plain, fused)
 
 
+def test_a_layout_met_after_a_replayed_full_accept_records(monkeypatch):
+    """A replayed full accept leaves the pending conv window and the
+    replay their own step arrays, so a layout first recorded after it
+    takes a record like any other, and no layer is pinned to the plain
+    call."""
+    rounds = [(4, 4)] * 4 + [(3, 3), (4, 4)] * 4
+    _, plain = _walk(monkeypatch, False, rounds=rounds)
+    lm, fused = _walk(monkeypatch, True, rounds=rounds)
+    _equal(plain, fused)
+    for layer in _gdn_layers(lm):
+        assert "plain" not in vars(layer)["_verify_fused"][1].values()
+
+
 def test_a_rollback_twice_on_one_verify(monkeypatch):
     def run(fused):
         monkeypatch.setattr(q4, "_VERIFY_FUSED", fused)

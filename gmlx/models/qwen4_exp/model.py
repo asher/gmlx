@@ -3274,6 +3274,18 @@ def _fused_release(table: dict) -> None:
                     _FUSED_HELD[0] -= 1
 
 
+def drop_verify_records(layers) -> None:
+    """Release the recorded verify graphs of ``layers`` now, for arrays
+    they hold as constants that were let go (an expert store released);
+    each layer records again from its next use."""
+    for layer in layers:
+        recs = vars(layer).get("_verify_fused")
+        if recs is not None:
+            _fused_release(recs[1])
+            # An epoch no use matches: the next one starts a table.
+            object.__setattr__(layer, "_verify_fused", (-1, {}, []))
+
+
 _VERIFY_FUSED_CAP = None
 
 
@@ -3388,15 +3400,17 @@ def _fused_bound() -> None:
 _FUSED_STEPS: dict = {}
 
 
-def _fused_steps(S: int, B: int) -> mx.array:
-    """The evaluated step counts of a full accept at ``S`` rows, one array
+def _fused_steps(S: int, B: int) -> tuple:
+    """The evaluated step counts of a full accept at ``S`` rows, one pair
     per shape for the process: evaluating one per record stopped the build
-    of a verify for a GPU round trip at every layer."""
+    of a verify for a GPU round trip at every layer. Two arrays, the
+    pending conv window's and the replay's: the next round's record takes
+    both as inputs, and one array cannot be two inputs."""
     steps = _FUSED_STEPS.get((S, B))
     if steps is None:
         import gmlx.upstream.gdn_patches as _gp
 
-        steps = _gp.replay_steps(S, B)
+        steps = (_gp.replay_steps(S, B), _gp.replay_steps(S, B))
         mx.eval(steps)
         _FUSED_STEPS[(S, B)] = steps
     return steps
@@ -3527,14 +3541,14 @@ def _fused_gdn_verify(layer, h, c, gdn_sink):
     out, conv_out, rbase, rd, rk, rg, cbase, crows = (
         (cand if kind == 0 else res)[i] for kind, i in refs)
     if pend_cv:
-        c._gdn_conv = (conv_out, cbase, crows, steps)
+        c._gdn_conv = (conv_out, cbase, crows, steps[0])
     elif hasattr(c, "_gdn_conv"):
         c._gdn_conv = None
     c[0] = conv_out
     # As set_gdn_replay(c, rbase, (rd, rk, rg), S) leaves the cache.
     state = kq.fused_call(lazy, [rbase, rd, rk, rg])[0]
     c[1] = state
-    c._gdn_replay = (state, rbase, (rd, rk, rg), steps)
+    c._gdn_replay = (state, rbase, (rd, rk, rg), steps[1])
     if hasattr(c, "advance"):
         # As the one-kernel verify leaves the cache (_gdn_verify_v2).
         from gmlx.models.qwen35.owned import (
@@ -3791,6 +3805,10 @@ def prepare_runtime(model) -> dict:
     import gmlx.upstream.gdn_patches as _gp
     from gmlx.envflags import env_bool
 
+    global _VERIFY_BLOCKED
+    # Each load starts with the recorded verify on: a model that swaps its
+    # weights around its layer calls turns it off again at its next call.
+    _VERIFY_BLOCKED = False
     counts = {"gdn_fused": 0, "gdn_ba_cat": 0, "gdn_fused_verify": 0}
     want = env_bool("GMLX_FUSED_GDN", True)
     fused = want and _gp._gdn_fused_decode_kernel is not None
