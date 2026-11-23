@@ -2967,6 +2967,20 @@ class PromptProcessingBatch:
         return rope_deltas
 
 
+def _kq_clear_after_prompt(alone: bool) -> None:
+    """gmlx: the cache clear once a prompt batch has its first tokens. A
+    clear the last chunk left for the first decode round frees the same
+    buffers there, after the first token is out (gmlx.gen.deferred_clear).
+    A batch that joins running rounds has no first round of its own."""
+    from gmlx.gen import deferred_clear as _deferred_clear
+
+    if not (alone and _deferred_clear.pending()):
+        # gmlx: book what the process held before the clear.
+        _note_own_before_clear()
+        mx.clear_cache()
+        _deferred_clear.settled()
+
+
 class BatchGenerator:
     """
     Continuous batching with separate prompt processing and generation phases.
@@ -3755,17 +3769,7 @@ class BatchGenerator:
             self._prompt_batch = None
             generation_responses = [*generation_responses, *self._kq_first_now(alone)]
             if not _env_bool("GMLX_SPEC_KEEP_BUFFERS", False):
-                # gmlx: a clear the last chunk left for the first decode
-                # round frees the same buffers there, after the first
-                # token is out (gmlx.gen.deferred_clear). A batch that
-                # joins running rounds has no first round of its own.
-                from gmlx.gen import deferred_clear as _deferred_clear
-
-                if not (alone and _deferred_clear.pending()):
-                    # gmlx: book what the process held before the clear.
-                    _note_own_before_clear()
-                    mx.clear_cache()
-                    _deferred_clear.settled()
+                _kq_clear_after_prompt(alone)
             return prompt_responses, generation_responses
 
         num_active = len(self._generation_batch)

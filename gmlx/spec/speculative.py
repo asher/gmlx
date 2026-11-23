@@ -3301,7 +3301,8 @@ def _retire_b1(model, prompt_cache: list, generated: list[int],
             return
         from gmlx.cache.snapshot import retirement_is_blocked
         if retirement_is_blocked():
-            # It would store nothing, after a render of the whole sequence.
+            # It would store nothing. A store run in place also skips its
+            # render of the whole sequence; a held one rendered when held.
             return
         full_ids = retire["full_ids"]
         seq = full_ids + [int(t) for t in generated]

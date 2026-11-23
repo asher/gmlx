@@ -495,7 +495,9 @@ def test_the_whole_prompt_store_runs_after_the_last_chunks_clear(
     # The last chunk leaves its clear for later. The entry copies the
     # prompt's KV, so the clear runs first and the copy takes the memory
     # the chunk's buffers gave back; after the first token is out when
-    # the entry waits for the end of the serve step.
+    # the entry waits for the end of the serve step. One clear at most
+    # lands before the first token: the step that prefilled the batch
+    # leaves the rest to the first round's end.
     import gmlx.spec.engine as engine
     import gmlx.spec.mtp_prefill as mtp_prefill
     import gmlx.spec.speculative as spec
@@ -524,10 +526,13 @@ def test_the_whole_prompt_store_runs_after_the_last_chunks_clear(
     spec.begin_step()
     try:
         _run(_one_row(ar, model, list(range(1, 9))))
+        # The clear of the step that gave the batch its first token.
+        ar._kq_clear_after_prompt(True)
         assert order == ([] if after_first else ["clear", "store"])
     finally:
         spec.run_step_end()
-    assert order == ["clear", "store"] and not deferred_clear.pending()
+    assert order == ["clear", "store"]
+    assert deferred_clear.pending() == (not after_first)
 
 
 def test_a_whole_prompt_lookup_needs_the_first_token_logits():

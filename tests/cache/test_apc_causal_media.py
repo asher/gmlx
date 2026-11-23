@@ -345,3 +345,46 @@ def test_the_mtp_target_restores_the_prefix_before_its_new_image(
     for (_n, pw, dw, hw), (_m, pc, dc, hc) in zip(warm_rest, cold_rest):
         assert np.array_equal(pw, pc) and np.array_equal(dw, dc)
         assert np.abs(hw - hc).max() < _ATOL
+
+
+@pytest.mark.parametrize("n", [6, 30])
+def test_the_whole_prompt_store_is_the_one_clear_before_the_first_token(
+        serve, monkeypatch, n):
+    """The last chunk's clear waits for the end of the first round, after
+    the first token is out. The prefix cache's store of the whole prompt
+    runs it first, so the copy takes the memory the chunks gave back: one
+    clear lands before the first token, for a prompt of one chunk (6
+    tokens) or of several (30)."""
+    from gmlx.gen import deferred_clear
+
+    install_owned_spec_engine()
+    install_continuous_batch_admission()
+    monkeypatch.setattr(deferred_clear, "_ENABLED", True)
+    monkeypatch.setattr(deferred_clear, "_pending", False)
+    model, head = _mtp_model()
+    lm = model.language_model
+    monkeypatch.setattr(lm, "_spec_prefix_cache", None, raising=False)
+    clears, stores = [], []
+    monkeypatch.setattr(mx, "clear_cache", lambda: clears.append(1))
+    store = SpecPrefixCache.store
+
+    def recording_store(self, *args, **kwargs):
+        stores.append(len(clears))
+        return store(self, *args, **kwargs)
+
+    monkeypatch.setattr(SpecPrefixCache, "store", recording_store)
+    proc = SimpleNamespace(tokenizer=SimpleNamespace(
+        stopping_criteria=StoppingCriteria([], None)))
+    gen = ar.BatchGenerator(lm, proc, sampler=lambda x: mx.argmax(x, axis=-1),
+                            max_tokens=4, apc_manager=_manager(),
+                            draft_model=head, draft_kind="mtp",
+                            greedy_sampling=True)
+    ids, kw = _request(model, [1 + i % 50 for i in range(n)], [])
+    gen.insert([ids], [4], prompt_kwargs=[kw])
+    before_first = None
+    while gen.has_work:
+        _p, resp = gen.next()
+        if resp and before_first is None:
+            before_first = len(clears)
+    gen.close()
+    assert stores[:1] == [1] and before_first == 1

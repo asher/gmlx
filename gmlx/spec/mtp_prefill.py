@@ -17,7 +17,7 @@ import mlx.core as mx
 import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.cache.media_salt import as_salt
-from gmlx.envflags import env_bool, env_int, env_value
+from gmlx.envflags import env_auto_bool, env_bool, env_int
 from gmlx.gen import deferred_clear
 from gmlx.serve.short_rows import all_short_lived
 from gmlx.spec.ckpt import (
@@ -103,10 +103,9 @@ _APC_LONGER = env_bool("GMLX_SPEC_APC_LONGER", False)
 
 # GMLX_SPEC_LAST_IN_CHUNK=1: the last prefill chunk runs the prompt's last
 # token too and its row gives the first token's logits, so no one-row
-# forward follows the chunks. 0: the last token runs alone. Unset: on for
-# a target that sets prefill_last_in_chunk, off for the rest.
-_LAST_IN_CHUNK = (env_bool("GMLX_SPEC_LAST_IN_CHUNK", False)
-                  if env_value("GMLX_SPEC_LAST_IN_CHUNK") is not None else None)
+# forward follows the chunks. 0: the last token runs alone. Unset or
+# empty: on for a target that sets prefill_last_in_chunk, off for the rest.
+_LAST_IN_CHUNK = env_auto_bool("GMLX_SPEC_LAST_IN_CHUNK")
 
 # GMLX_SPEC_L0_AFTER_FIRST: where the last chunk ran the last token, the
 # prompt's first-level cache entry is stored once the serve step has
@@ -1012,7 +1011,12 @@ def install_full_prompt_mtp_prefill() -> None:
 
                     l0_queue = step_end_queue()
                 if l0_job is not None and l0_queue is None:
+                    # One clear before the first token: the first round's
+                    # end clears what the copy leaves, as it would have.
+                    waiting = deferred_clear.pending()
                     _store_after_clear(l0_job)
+                    if waiting:
+                        deferred_clear.at_chunk_end()
             except Exception:
                 _log.warning("APC store failed; continuing", exc_info=True)
         result = _orig_generate(

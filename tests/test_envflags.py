@@ -16,7 +16,8 @@ import os
 import mlx.core as mx
 import pytest
 
-from gmlx.envflags import env_bool, env_float, env_int, env_switch
+from gmlx.envflags import (
+    env_auto_bool, env_bool, env_float, env_int, env_switch)
 
 
 def test_env_int_unset_uses_default(monkeypatch):
@@ -62,6 +63,16 @@ def test_env_switch_warns_on_an_unknown_value_and_keeps_the_default(
         assert env_switch("GMLX_TEST_FLAG", ("a", "b")) == "1"
     with pytest.warns(UserWarning, match="using 0"):
         assert env_switch("GMLX_TEST_FLAG", ("a", "b"), "0") == "0"
+
+
+def test_an_empty_or_unknown_auto_switch_stays_auto(monkeypatch):
+    # GMLX_SPEC_LAST_IN_CHUNK= from a launcher script means auto, not off.
+    monkeypatch.delenv("GMLX_TEST_FLAG", raising=False)
+    assert env_auto_bool("GMLX_TEST_FLAG") is None
+    for raw, want in (("", None), ("  ", None), ("auto", None), ("1", True),
+                      (" On ", True), ("0", False), ("no", False)):
+        monkeypatch.setenv("GMLX_TEST_FLAG", raw)
+        assert env_auto_bool("GMLX_TEST_FLAG") is want, raw
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "True", "YES", "on", " on "])
