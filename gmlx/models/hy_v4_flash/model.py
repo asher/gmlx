@@ -269,6 +269,8 @@ class ModelArgs(BaseModelArgs):
     max_position_embeddings: int = 1048576
     attention_bias: bool = False
     tie_word_embeddings: bool = False
+    # The VL container's image slot ids, mirrored for gmlx.cache.apc_media.
+    media_token_ids: List[int] = field(default_factory=list)
     num_nextn_predict_layers: int = 0
     # The draft block (block num_hidden_layers of the file) is a sparse
     # layer with an indexer of its own. 0 takes the trunk's sparse count.

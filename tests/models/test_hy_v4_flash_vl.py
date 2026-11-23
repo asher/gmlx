@@ -383,3 +383,16 @@ def test_the_draft_block_reads_an_image_slot_as_the_pad_token():
         drafter.seed_chunk(mx.array([ids]), hidden, cache)
         states.append(cache[0][0].state[0])
     assert mx.array_equal(states[0], states[1]).item()
+
+
+def test_the_serve_engine_sees_the_image_slot_ids():
+    """The engine reads media ids off the language model's config; the
+    prefix cache must keep reusable prefixes clear of image slots."""
+    from gmlx.cache.apc_media import install_media_token_ids
+
+    install_media_token_ids()
+    from gmlx._vendor.mlx_vlm.apc import multimodal_token_ids_from_config
+
+    model = _container()
+    ids = multimodal_token_ids_from_config(model.language_model.config)
+    assert {VOCAB + k for k in range(rp.N_SLOT_KINDS)} <= set(ids)

@@ -113,6 +113,8 @@ class ModelArgs(BaseModelArgs):
     max_position_embeddings: int = 1048576
     attention_bias: bool = False
     tie_word_embeddings: bool = False
+    # The VL container's image slot ids, mirrored for gmlx.cache.apc_media.
+    media_token_ids: List[int] = field(default_factory=list)
 
     def __post_init__(self):
         if self.scoring_func != "sigmoid":
@@ -143,27 +145,37 @@ class HyV4KVCache(KVCache):
 
 
 def positions_slot(cache):
-    """The image-position walk of a VL cache: a third member on layer 0's
+    """The image-position walk of a VL cache: the last member of layer 0's
     entry (``vlm_model.LanguageModel.make_cache``). None for a text cache."""
     if not cache or cache[0] is None:
         return None
     inner = getattr(cache[0], "caches", None)
-    if inner is None or len(inner) < 3:
+    if inner is None or len(inner) < 2:
         return None
-    member = inner[2]
+    member = inner[-1]
     return member if isinstance(member, ArraysCache) else None
 
 
 def rope_at(x: mx.array, positions: mx.array, base: float,
-            sections, traditional: bool) -> mx.array:
+            sections, traditional: bool, rope=None) -> mx.array:
     """Rope of ``x`` [..., N, D] at explicit ``positions``: [N], or [N, 3]
     (t, h, w) per row with each rope pair reading its own axis
     (``positions.pair_axes``, llama.cpp's IMROPE). ``traditional`` rotates
-    consecutive pairs, else the NeoX halves, as ``mx.fast.rope`` does."""
+    consecutive pairs, else the NeoX halves, as ``mx.fast.rope`` does.
+    A ``rope`` module with a table (``_freqs``, periods as ``mx.fast.rope``
+    takes them) and an ``mscale`` lends both, so image rows share the
+    scaled table of the text rows around them."""
     d = x.shape[-1]
     half = d // 2
-    freqs = mx.exp(
-        -mx.arange(0, half, dtype=mx.float32) * (math.log(base) / half))
+    table = getattr(rope, "_freqs", None)
+    if table is not None:
+        freqs = 1.0 / table.astype(mx.float32)
+    else:
+        freqs = mx.exp(
+            -mx.arange(0, half, dtype=mx.float32) * (math.log(base) / half))
+    m = getattr(rope, "mscale", 1.0)
+    if m != 1.0:
+        x = x * m
     at = positions.astype(mx.float32)
     if at.ndim == 2:
         axes = rope_positions.pair_axes(half, tuple(sections))
@@ -193,7 +205,7 @@ def _rope_pe(rope, args, x: mx.array, offset, pos) -> mx.array:
         return rope(x, pos.start)
     return rope_at(x, pos.rows, args.rope_theta,
                    args.rope_sections or rope_positions.ROPE_SECTIONS,
-                   args.rope_traditional)
+                   args.rope_traditional, rope)
 
 
 def split_cache(cache):
@@ -203,14 +215,16 @@ def split_cache(cache):
     indexer and its entry is the latent cache alone. Carrying an unwritten
     second slot on the 57 shared layers is not free: ``CacheList.state``
     reads ``keys.shape`` on every entry, so an empty slot crashes the
-    generation loop's ``mx.eval`` of the cache state.
+    generation loop's ``mx.eval`` of the cache state. The VL walk
+    (``positions_slot``) is never the indexer slot.
     """
     if cache is None:
         return None, None
     inner = getattr(cache, "caches", None)
     if inner is None:
         return cache, None
-    return inner[0], (inner[1] if len(inner) > 1 else None)
+    second = inner[1] if len(inner) > 1 else None
+    return inner[0], (None if isinstance(second, ArraysCache) else second)
 
 
 class IndependentHyperConnection(nn.Module):

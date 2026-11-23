@@ -12,8 +12,8 @@ closing every row of merged cells.
 The processor spells each image slot as an id past the vocab (vocab_size
 + slot kind, :mod:`gmlx.models.hy_v4_flash.positions`), so a prefill
 chunk can split an image. Image slots rotate at their (t, h, w), the
-interleaved M-RoPE of the VL conversion, and the walk's state rides a
-third member of layer 0's cache entry.
+interleaved M-RoPE of the VL conversion, and the walk's state rides the
+last member of layer 0's cache entry.
 """
 
 from __future__ import annotations
@@ -139,14 +139,16 @@ class LanguageModel(nn.Module):
         return _TextModel.quant_predicate.fget(self)
 
     def make_cache(self):
-        """The text model's cache, with the image-position walk as a third
+        """The text model's cache, with the image-position walk as the last
         member of layer 0's entry. Its first slot holds a placeholder row,
         so the cache's state and batch operations never meet an empty
-        member."""
+        member. Layer 0 has no indexer on a file without the DSA indexer."""
         caches = _TextModel.make_cache(self)
         walk = ArraysCache(2)
         walk[0] = mx.zeros((1, 1), dtype=mx.int32)
-        caches[0] = CacheList(*caches[0].caches, walk)
+        inner = getattr(caches[0], "caches", None)
+        caches[0] = CacheList(*(inner if inner is not None else (caches[0],)),
+                              walk)
         return caches
 
     def sanitize(self, weights):
@@ -161,6 +163,10 @@ class Model(nn.Module):
         self.vision_tower = VisionModel(config.vision_config)
         self.language_model = LanguageModel(
             config.text_config, config.image_token_id)
+        # The serve engine reads media ids off the language model's config
+        # (gmlx.cache.apc_media).
+        self.language_model.config.media_token_ids = list(
+            config.media_token_ids)
 
     def _image_features(self, pixel_values: mx.array, grids) -> mx.array:
         """Patches and each image's patch grid (n_h, n_w) -> the rows of

@@ -1,7 +1,8 @@
 """A MoE block whose gate and up expert stacks use different codecs (Hy4:
 an iq2_xxs gate with an stq1_0 up) takes the fused gathers where the kq
 build lists the pair, and hands the kernel the up codec. CPU-safe: the
-kernel calls are faked."""
+kernel calls and the build's pair list are faked, so the tests run on a kq
+without the pair kernels too."""
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -37,17 +38,24 @@ def _block(gate="iq2_xxs", up="stq1_0", down="iq3_xxs"):
     return block
 
 
-def _pair_listed():
-    return modules._FusedMoeCaps().glu_pair_ok("iq2_xxs", "stq1_0")
+_LISTED = {("iq2_xxs", "stq1_0"), ("stq1_0", "iq2_xxs"), ("q3_k", "iq3_s")}
 
 
-needs_pair = pytest.mark.skipif(
-    not _pair_listed(),
-    reason="installed mlx-kquant has no iq2_xxs gate with stq1_0 up kernel")
+@pytest.fixture
+def listed(monkeypatch):
+    """A kq build that lists the pairs in _LISTED."""
+    base = modules._FusedMoeCaps
+
+    class _Caps(base):
+        def __init__(self):
+            super().__init__()
+            self._glu_pair = (lambda g, u, *a, **kw: (g, u) in _LISTED)
+
+    monkeypatch.setattr(modules, "_FusedMoeCaps", _Caps)
+    return _Caps
 
 
-@needs_pair
-def test_a_listed_pair_installs_fused():
+def test_a_listed_pair_installs_fused(listed):
     blk = _block()
     assert install_fused_moe_glu(_Shell(blk)) == 1
     assert hasattr(blk.switch_mlp, "_fused_h")
@@ -70,10 +78,9 @@ def test_a_pair_without_a_kernel_stays_unfused(why, monkeypatch):
     assert install_fused_moe_glu(_Shell(blk)) == 0
 
 
-@needs_pair
 @pytest.mark.parametrize("up", ["stq1_0", "iq2_xxs"])
 def test_the_up_codec_reaches_the_kernel_only_when_it_differs(
-        up, monkeypatch):
+        up, listed, monkeypatch):
     import mlx_kquant as kq
 
     blk = _block(up=up)
@@ -93,11 +100,20 @@ def test_the_up_codec_reaches_the_kernel_only_when_it_differs(
         assert seen["kw"]["up_kquant_type"] == "stq1_0"
 
 
-@needs_pair
-def test_a_split_pair_never_counts_on_the_qf_kernels(monkeypatch):
+def test_a_split_pair_never_counts_on_the_qf_kernels(listed, monkeypatch):
     caps = modules._FusedMoeCaps()
     monkeypatch.setattr(caps, "qf_codec", lambda codec: True)
     same = _block(up="iq2_xxs").switch_mlp
     split = _block().switch_mlp
     assert modules._kq_row_floor(same, TOP_K, D, caps) == 1
     assert modules._kq_row_floor(split, TOP_K, D, caps) > 1
+
+
+def test_a_split_pair_of_one_shape_never_takes_the_concat(listed):
+    """q3_k and iq3_s blocks are both 110 bytes per 256 weights, so the
+    stacks match in shape; the concat would decode up in the gate codec."""
+    mlp = _block(gate="q3_k", up="iq3_s").switch_mlp
+    assert mlp.gate_proj.weight.shape == mlp.up_proj.weight.shape
+    budget = 1 << 40
+    assert modules._install_gateup_concat(mlp, budget) == budget
+    assert not getattr(mlp, "_kq_gate_up_pending", False)

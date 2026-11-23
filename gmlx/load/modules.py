@@ -818,8 +818,9 @@ def _eligible_kquant_glu(m, caps):
         if proj.weight.shape[1] % 8:
             return False
     # one dispatch fuses gate+up: one codec, or a pair the build lists
+    # (kq takes biases and output scales in one codec only)
     gate, up = m.gate_proj.kquant_type, m.up_proj.kquant_type
-    return gate == up or caps.glu_pair_ok(gate, up)
+    return gate == up or (not want_bias and caps.glu_pair_ok(gate, up))
 
 
 def _make_fused_kquant(base_cls, caps):
@@ -1187,12 +1188,13 @@ def _install_gateup_concat(m, budget_bytes) -> int:
     but the VALUES are not: module install runs before the load pipeline
     writes the real weights, so an install-time concat freezes the ctor
     placeholders (live bug: the fused path multiplied against zeros).
-    Eligibility beyond _eligible_kquant_glu: gate/up must be
-    shape-identical (so one codec) and the copy must
+    Eligibility beyond _eligible_kquant_glu: gate/up must share one
+    codec and one shape, and the copy must
     fit the remaining budget (returned decremented) -- expert-heavy
     models would otherwise double most of their resident weight bytes."""
     gate, up = m.gate_proj, m.up_proj
-    if gate.weight.shape != up.weight.shape:
+    if (gate.kquant_type != up.kquant_type
+            or gate.weight.shape != up.weight.shape):
         return budget_bytes
     cost = gate.weight.nbytes + up.weight.nbytes
     if cost > budget_bytes:
