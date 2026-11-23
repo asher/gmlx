@@ -69,10 +69,14 @@ def test_an_empty_or_unknown_auto_switch_stays_auto(monkeypatch):
     # GMLX_SPEC_LAST_IN_CHUNK= from a launcher script means auto, not off.
     monkeypatch.delenv("GMLX_TEST_FLAG", raising=False)
     assert env_auto_bool("GMLX_TEST_FLAG") is None
-    for raw, want in (("", None), ("  ", None), ("auto", None), ("1", True),
-                      (" On ", True), ("0", False), ("no", False)):
+    for raw, want in (("", None), ("  ", None), ("1", True), (" On ", True),
+                      ("0", False), ("no", False)):
         monkeypatch.setenv("GMLX_TEST_FLAG", raw)
         assert env_auto_bool("GMLX_TEST_FLAG") is want, raw
+    # A typo reads as auto, and says so.
+    monkeypatch.setenv("GMLX_TEST_FLAG", "flase")
+    with pytest.warns(UserWarning, match="GMLX_TEST_FLAG='flase'"):
+        assert env_auto_bool("GMLX_TEST_FLAG") is None
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "True", "YES", "on", " on "])
