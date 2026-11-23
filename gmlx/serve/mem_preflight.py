@@ -161,6 +161,13 @@ def recurrent_state_bytes(c) -> float | None:
                      + inner * state * _STATE_BYTES)
     width = _get(c, "conv_L_cache")
     hidden = _get(c, "hidden_size")
+    if _get(c, "model_type") == "inkling2":
+        # One convolution state per layer visit: the K, V, attention
+        # output and FFN output tails, held float32.
+        kv = (_get(c, "num_key_value_heads") or 0) * (_get(c, "head_dim") or 0)
+        if not (width and hidden and kv):
+            return None
+        return float((width - 1) * (2 * kv + 2 * hidden) * _STATE_BYTES)
     if width and hidden:
         return float((width - 1) * hidden * _CONV_BYTES)
     return None
@@ -308,6 +315,9 @@ def config_geometry(c):
     layers = _get(c, "num_hidden_layers")
     if not isinstance(layers, int) or layers <= 0:
         return None
+    visits = _get(c, "layer_visits")
+    if isinstance(visits, (list, tuple)) and visits:
+        return _visit_geometry(c, layers, visits)
     kinds = _config_kinds(c, layers)
     windows = _layer_windows(c, layers)
     state = recurrent_state_bytes(c)
@@ -324,6 +334,16 @@ def config_geometry(c):
         else:
             geo.append(LayerGeometry(True, windows[i], state, pools[i]))
     return geo
+
+
+def _visit_geometry(c, layers, visits):
+    """The stack of a looped model (inkling2) that runs its layers in the
+    order ``visits``: one convolution state per visit, then one attention
+    cache per visit."""
+    state = recurrent_state_bytes(c)
+    windows = _layer_windows(c, layers)
+    geo = [LayerGeometry(False, None, state or 0.0) for _ in visits]
+    return geo + [LayerGeometry(True, windows[int(v)]) for v in visits]
 
 
 def stack_geometry(model, stack):

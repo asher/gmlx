@@ -269,7 +269,9 @@ PRE_TOKENIZERS: dict[str, PreTokenizer] = {
              _entry(TEKKEN_PATTERN, ignore_merges=True, add_bos=True)),
     "tekken-num3": _entry(TEKKEN_NUM3_PATTERN, ignore_merges=True,
                           add_bos=True),
-    **_group("gpt-4o llama4 kanana2 talkie minimax-m2", _entry(O200K_PATTERN)),
+    # llama-vocab.cpp:2665-2675 (inkling2: GPT4O, no BOS).
+    **_group("gpt-4o llama4 kanana2 talkie minimax-m2 inkling2",
+             _entry(O200K_PATTERN)),
     **_group("deepseek-v3 joyai-llm hunyuan-dense hy_v4 hyv4",
              _entry(_DEEPSEEK3_PATTERNS)),
     "kimi-k2": _entry(KIMI_K2_PATTERN),

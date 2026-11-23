@@ -185,7 +185,7 @@ log the attention route.
 | `GMLX_KV_APPEND_INPLACE=0` | Append decode rows with a slice write, which copies the whole KV cache while a step still reads it, instead of writing them in place. |
 | `GMLX_KV_GROW_DIV` | The KV cache grows by this fraction of its size, rounded to 256 rows. The default is `8`, and `0` grows by 256 rows. |
 | `GMLX_KV_GROW_CAP` | The largest KV cache growth step, in rows. The default is `8192`, and `0` means no cap. |
-| `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. |
+| `GMLX_ROUTE_LOG=1` | Print per-route attention call counts at process exit. Models that build their own bias add their own names, such as `inkling2_dense_sliding`. |
 | `KV_KEY_BITS`, `KV_VALUE_BITS` | Upstream mlx-vlm widths for kvarn keys and values, for the whole server. They override [`GMLX_KVARN_BITS`](../env-vars.md#runtime). |
 | `GMLX_CASCADE_SDPA=0` | Disable the shared-prefix cascade decode route, which reads a shared prefix once per step for the whole batch. |
 | `GMLX_CASCADE_MIN_P` | Shortest shared prefix, in tokens, that the cascade route handles. The default is `1024`. |
@@ -213,6 +213,7 @@ fusions.
 | `GMLX_Q4_QSA_ROWS_SDPA=0` | Flash-Next sparse attention over a block of queries gathers its pages, not reading them in place through kq paged rows. |
 | `GMLX_Q4_QSA_ROWS_PREFILL=0` | A Flash-Next prefill chunk past the sparse boundary keeps the block-sparse kernel, not kq paged rows, on a GPU with tensor-op units. |
 | `GMLX_FUSED_MOE_SWIGLU_OAI=0` | Run MiniMax-M3 MoE layers on the stock expert gathers, with the shared expert as its own MLP. `=1` fuses every codec, even where that is slower. |
+| `GMLX_FUSED_MOE_SITU=0` | Run Kimi K3 and Inkling 2 experts on the stock gathers instead of the fused situ gate and up gather. |
 | `GMLX_FUSED_MOE_SHEXP_OAI=0` | Run the MiniMax-M3 shared expert as its own MLP instead of inside the fused expert kernels. Slower. |
 | `GMLX_GDN_BA_CAT=0` | Run the gated-delta b and a projections as two matmuls instead of one over their joined weight. Output is bit-identical. |
 | `GMLX_HADAMARD_KERNEL=0` | Run the Hadamard-fold rotation as MLX ops instead of the mlx-kquant kernel. Numerics match to one rounding. |
@@ -258,6 +259,7 @@ fusions.
 | `GMLX_HY4_SWA_ROLL=0` | Keep every key on Hy4-flash sliding-window layers instead of the window alone. Their memory then grows with the context. |
 | `GMLX_HY4_KEYS_DENSE=0` | Expand Hy4-flash per-head keys through the K-quant gather instead of a matmul on the dequantized stack. |
 | `GMLX_HY4_ROW_KERNEL=0` | Build a Hy4-flash decode step's key and query rows on the op chain instead of one kernel each. Output is bit-identical. |
+| `GMLX_INKLING2_ROW_KERNEL=0` | Run Inkling 2's decode and verify kernels, the fused verify attention among them, as op chains. Output matches to rounding. |
 | `GMLX_HY4_KQ_ROUTER=0` | Run a Hy4-flash decode step's expert routing as an op chain instead of one mlx-kquant dispatch. |
 | `GMLX_HY4_ROUTER_SPLIT=0` | Compute Hy4-flash router logits at decode widths with the stock matmul instead of the split-sum kernel. |
 | `GMLX_HY4_IMAGE_POS_1D=1` | Rotate Hy4-flash image slots at their slot index, as llama.cpp does, instead of the reference's (t, h, w) positions. |

@@ -607,7 +607,8 @@ class ModelCfg:
     # N = cap. Clamped by a per-drafter hard limit (B=1-only drafters).
     speculative_width_cap: int | None = None
     # Context copy: draft from the prompt where the output repeats it.
-    context_copy: bool = False
+    # None = the drafter family's default.
+    context_copy: bool | None = None
     # Rope scaling options (a RopeOverride): llama.cpp's rope flags, keyed
     # as in the `rope_scaling:` block. None = the GGUF header's scaling.
     rope_scaling: Any = None
@@ -1239,8 +1240,9 @@ class ResolvedModel:
     # ModelCfg.speculative_auto. Load-affecting: a build may drop the
     # drafter.
     speculative_auto: bool = False
-    # Context copy on this id's drafter. Load-affecting the same way.
-    context_copy: bool = False
+    # Context copy on this id's drafter (None = the family default).
+    # Load-affecting the same way.
+    context_copy: bool | None = None
     # Rope scaling options (a RopeOverride, None = the header's). Load-
     # affecting: the rope tables are built at load, and KV made under one
     # scaling is wrong under another.
@@ -1303,7 +1305,7 @@ class ResolvedModel:
             bool(self.speculative),
             bool(self.speculative_auto),
             str(self.speculative_width_cap),
-            bool(self.context_copy),
+            str(self.context_copy),
             self.chat_template,
             adapters,
             str(stream),
@@ -2152,7 +2154,7 @@ def resolve_model(
         speculative=bool(model.speculative or model.draft_gguf or model.native_mtp),
         speculative_width_cap=model.speculative_width_cap,
         speculative_auto=bool(model.speculative_auto),
-        context_copy=bool(model.context_copy),
+        context_copy=model.context_copy,
         mmproj=resolve_path(model.mmproj, cfg.model_dirs),
         asr=(resolve_path(model.asr, cfg.model_dirs)
              if isinstance(model.asr, str) else None),
@@ -2331,7 +2333,8 @@ def env_for(resolved: ResolvedModel) -> dict[str, str]:
     # sibling id's cap linger in the process env and be inherited here.
     cap = resolved.speculative_width_cap
     env["MLX_VLM_GGUF_SPEC_WIDTH_CAP"] = "" if cap is None else str(cap)
-    env["MLX_VLM_GGUF_CONTEXT_COPY"] = "1" if resolved.context_copy else ""
+    copy = resolved.context_copy
+    env["MLX_VLM_GGUF_CONTEXT_COPY"] = "" if copy is None else str(int(copy))
     return env
 
 
@@ -2936,8 +2939,8 @@ def _parse_model(model_id: str, raw: dict) -> ModelCfg:
         **_normalize_speculative(raw.get("speculative"), f"model {model_id!r}"),
         speculative_width_cap=_normalize_speculative_width_cap(
             raw.get("speculative_width_cap"), f"model {model_id!r}"),
-        context_copy=bool(_normalize_optional_bool(
-            raw.get("context_copy"), "context_copy", f"model {model_id!r}")),
+        context_copy=_normalize_optional_bool(
+            raw.get("context_copy"), "context_copy", f"model {model_id!r}"),
         rope_scaling=_normalize_rope_scaling(
             raw.get("rope_scaling"), f"model {model_id!r}"),
         overrides=dict(ov),

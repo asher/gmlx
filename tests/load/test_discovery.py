@@ -450,6 +450,109 @@ def test_drafter_pairs_into_a_model_already_in_the_config(tmp_path, monkeypatch)
     assert mc.draft_gguf and mc.speculative is True
 
 
+def _inkling_classify(monkeypatch):
+    """Inkling-2-Mini's official headers: the drafter's size label gives
+    its own size (318M), the target's its own (128x1.8B)."""
+    def _f(path):
+        name = os.path.basename(path)
+        if name.startswith("dspark-"):
+            meta = {"general.architecture": "dflash",
+                    "general.basename": "Inkling-2-Mini",
+                    "general.size_label": "318M",
+                    "general.name": "Inkling-2-Mini",
+                    "dflash.embedding_length": 2304}
+            container = "dflash_dspark_inkling2"
+        else:
+            meta = {"general.architecture": "inkling2",
+                    "general.basename": "Inkling-2-Mini",
+                    "general.size_label": "128x1.8B",
+                    "general.name": "Inkling-2-Mini",
+                    "inkling2.embedding_length": 2304}
+            container = None
+        return disc._classify_meta(meta, basename=name, path=path,
+                                   container=container)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_a_drafter_whose_size_label_is_its_own_pairs_with_its_target(
+        tmp_path, monkeypatch, configured):
+    _inkling_classify(monkeypatch)
+    root = _write(tmp_path, "Inkling-2-Mini-UD-Q4_K_M.gguf",
+                  "Inkling-2-Mini-UD-Q8_K_XL.gguf",
+                  "dspark-Inkling-2-Mini-Q8_0.gguf")
+    drafter = str(root / "dspark-Inkling-2-Mini-Q8_0.gguf")
+    spec = DiscoverSpec(dir=str(root), recursive=False, pair_mmproj=True,
+                        speculative="auto")
+    if not configured:
+        models = disc.scan_dirs([spec], [str(root)])
+        assert [m.draft_gguf for m in models] == [drafter, drafter]
+        return
+    # sync-models --add-companions: the drafter pairs into the entry.
+    target = str(root / "Inkling-2-Mini-UD-Q4_K_M.gguf")
+    mc = ModelCfg(id="inkling-2-mini-q4", path=target)
+    stats = {}
+    disc.scan_dirs([spec], [str(root)], known_paths={target},
+                   known_models={target: mc}, stats=stats)
+    assert stats["draft_pairs"]["inkling-2-mini-q4"] == drafter
+
+
+def _gemma_classify(monkeypatch, target_width=3840):
+    """gemma-4-12b-it's official headers: the assistant names only its
+    family (``gemma-4``) at its own size, 423M."""
+    def _f(path):
+        name = os.path.basename(path)
+        if name.startswith("mtp-"):
+            meta = {"general.architecture": "gemma4-assistant",
+                    "general.basename": "gemma-4",
+                    "general.size_label": "423M",
+                    "gemma4-assistant.embedding_length": 1024,
+                    "gemma4-assistant.embedding_length_out": 3840}
+        else:
+            meta = {"general.architecture": "gemma4",
+                    "general.basename": "Gemma-4-12B-It",
+                    "general.size_label": "12B",
+                    "general.name": "Gemma-4-12B-It",
+                    "general.base_model.0.name": "Gemma 4 12b It",
+                    "gemma4.embedding_length": target_width}
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+
+
+@pytest.mark.parametrize("width,paired", [(3840, True), (5376, False)])
+def test_a_drafter_that_names_only_its_family_pairs_by_filename(
+        tmp_path, monkeypatch, width, paired):
+    _gemma_classify(monkeypatch, target_width=width)
+    root = _write(tmp_path, "gemma-4-12b-it-Q3_K_S.gguf",
+                  "gemma-4-12b-it-Q4_K_M.gguf", "mtp-gemma-4-12b-it.gguf")
+    drafter = str(root / "mtp-gemma-4-12b-it.gguf")
+    want = drafter if paired else None
+    assert [m.draft_gguf for m in _scan(root)] == [want, want]
+
+
+def test_a_family_drafter_stays_off_another_family(tmp_path, monkeypatch):
+    def _f(path):
+        name = os.path.basename(path)
+        if name.startswith("mtp-"):
+            meta = {"general.architecture": "gemma4-assistant",
+                    "general.basename": "gemma-4",
+                    "general.size_label": "423M",
+                    "gemma4-assistant.embedding_length_out": 3840}
+        else:
+            meta = {"general.architecture": "gemma4",
+                    "general.basename": "Gemma-3n-E4B",
+                    "general.name": "Gemma-3n-E4B",
+                    "gemma4.embedding_length": 3840}
+        return disc._classify_meta(meta, basename=name, path=path)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    root = _write(tmp_path, "gemma-3n-E4B-Q4_K_M.gguf",
+                  "mtp-gemma-4-12b-it.gguf")
+    assert [m.draft_gguf for m in _scan(root)] == [None]
+
+
 def _repo_with_mtp_folder(root):
     """The Hugging Face layout: each quant in its own folder, the drafter
     in MTP/."""
@@ -2169,10 +2272,11 @@ def test_header_meta_keeps_the_declared_base_ids(tmp_path, monkeypatch):
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
-    assert disc.header_meta(path)["declared"] == ["minicpm-v-4.7-214m"]
+    want = ["minicpm-v-4.7-214m", "minicpm-v-4.7"]
+    assert disc.header_meta(path)["declared"] == want
     disc._HEADER_MEMO.clear()
     disc._HEADER_DISK = None                    # read back from the file
-    assert disc.header_meta(path)["declared"] == ["minicpm-v-4.7-214m"]
+    assert disc.header_meta(path)["declared"] == want
 
 
 def test_a_scan_skips_pull_stages_and_takes_video_ids(tmp_path, monkeypatch):

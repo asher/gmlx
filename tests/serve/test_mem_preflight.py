@@ -419,6 +419,16 @@ LFM3_CFG = dict(model_type="lfm3", num_hidden_layers=24, hidden_size=2048,
                 num_attention_heads=16, num_key_value_heads=4, head_dim=128,
                 sliding_window=256, conv_L_cache=7, layer_types=LFM3_TYPES)
 LFM3_STATE = 6 * 2048 * 2            # LFM3-Omni-2B
+INKLING2_VISITS = (list(range(18)) + list(range(6, 18)) * 2
+                   + list(range(18, 24)))
+INKLING2_CFG = dict(
+    model_type="inkling2", num_hidden_layers=24, hidden_size=2304,
+    num_attention_heads=24, num_key_value_heads=8, head_dim=128,
+    sliding_window=1024, conv_L_cache=4, layer_visits=INKLING2_VISITS,
+    layer_types=["full_attention" if i % 6 == 5 else "sliding_attention"
+                 for i in range(24)])
+# K, V, attention output and FFN output tails, 3 rows each, float32.
+INKLING2_STATE = 3 * (2 * 1024 + 2 * 2304) * 4    # Inkling-2-Mini
 
 
 def test_fixed_rows_charge_once():
@@ -436,6 +446,8 @@ def test_recurrent_state_bytes_per_family():
     assert mp.recurrent_state_bytes(SimpleNamespace(**NEMO_CFG)) == NEMO_STATE
     assert mp.recurrent_state_bytes(SimpleNamespace(**KDA_CFG)) == KDA_STATE
     assert mp.recurrent_state_bytes(SimpleNamespace(**LFM3_CFG)) == LFM3_STATE
+    assert (mp.recurrent_state_bytes(SimpleNamespace(**INKLING2_CFG))
+            == INKLING2_STATE)
     assert mp.recurrent_state_bytes(DENSE.config) is None
 
 
@@ -492,6 +504,37 @@ def test_lfm3_conv_layers_hold_a_tail_and_sliding_layers_cap():
     del without["conv_L_cache"]
     dense = mp.kv_layer_costs(_model(**without))
     assert mp.prompt_kv_bytes(dense, 32768) == 38912 * 32768 + 5 * 256 * per
+
+
+def test_inkling2_prices_every_layer_visit():
+    # 48 visits: the 12 core layers run three times, each visit with its
+    # own convolution state and attention cache.
+    costs = mp.kv_layer_costs(_model(**INKLING2_CFG))
+    per = 2 * 8 * 128 * 2.0
+    state = [c for c in costs if isinstance(c[0], mp.FixedRows)]
+    full = [c for c in costs if c[0] is None]
+    sliding = [c for c in costs
+               if c[0] == 1024 and not isinstance(c[0], mp.FixedRows)]
+    assert state == [(mp.FixedRows(1), INKLING2_STATE)] * 48
+    assert full == [(None, per)] * 8
+    assert sliding == [(1024, per)] * 40
+    # Past the window a token costs 32 KiB: the 8 full visits.
+    fixed = 40 * 1024 * per + 48 * INKLING2_STATE
+    assert mp.prompt_kv_bytes(costs, 32768) == 8 * per * 32768 + fixed
+
+
+def test_inkling2_config_geometry_matches_the_cache_stack():
+    from gmlx.models.inkling2.model import Model, ModelArgs
+
+    cfg = dict(INKLING2_CFG, hidden_size=64, num_attention_heads=4,
+               num_key_value_heads=2, head_dim=16, vocab_size=64,
+               unpadded_vocab_size=60, sliding_window=16, num_experts=4,
+               num_experts_per_tok=2, moe_intermediate_size=32,
+               loop={"start": 6, "end": 18, "passes": 3, "gate_rank": 4})
+    model = Model(ModelArgs.from_dict(cfg))
+    wrapped = SimpleNamespace(config=SimpleNamespace(**cfg))
+    assert (mp.stack_geometry(wrapped, model.make_cache())
+            == mp.config_geometry(wrapped.config))
 
 
 def test_unsized_recurrent_family_prices_growth():

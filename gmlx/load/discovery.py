@@ -141,18 +141,24 @@ def is_drafter_arch(arch: str | None) -> bool:
     return bool(arch) and ("assistant" in arch or "_mtp" in arch)
 
 
-def declared_base_ids(meta) -> tuple:
+def declared_base_ids(meta, *, drafter: bool = False) -> tuple:
     """The base-model ids a GGUF header declares, as filename-style slugs.
     ``general.basename`` gets ``general.size_label`` appended when it carries
     no size token of its own (bartowski's ``Muse-Glimmer`` + ``30B``), so it
-    meets the drafter's ``Muse-Glimmer-30B`` on equal terms."""
+    meets the drafter's ``Muse-Glimmer-30B`` on equal terms. A drafter's
+    size label can give its own size (Inkling-2-Mini's DSpark says 318M)
+    as well as its target's, so a ``drafter`` also declares the bare
+    basename."""
     out: list[str] = []
     base = read_string(meta, "general.basename")
     if base:
         size = read_string(meta, "general.size_label")
         if size and not _SIZE_TOKEN_RE.search(base):
-            base = f"{base}-{size}"
-        out.append(base)
+            out.append(f"{base}-{size}")
+            if drafter:
+                out.append(base)
+        else:
+            out.append(base)
     base_model = read_string(meta, "general.base_model.0.name")
     if base_model:
         out.append(base_model)
@@ -259,7 +265,7 @@ def _classify_meta(
         return ClassifiedGguf(ap, "drafter", arch, False, quant, False,
                               n_embd=_drafter_hidden_size(meta, arch),
                               drafter_kind=_drafter_kind(meta, arch),
-                              declared=declared_base_ids(meta),
+                              declared=declared_base_ids(meta, drafter=True),
                               container=container)
     if read_string(meta, "general.type") == "vae" or arch == "autoencoder":
         return ClassifiedGguf(ap, "image-vae", arch, False, quant, False)
@@ -445,7 +451,7 @@ def _read_header(path: str) -> tuple:
     return c, read_string(kv, "general.name"), _read_sampling(kv)
 
 
-_HEADER_CACHE_V = 6
+_HEADER_CACHE_V = 7
 _HEADER_META_KEYS = ("arch", "name", "kind", "mtp", "sampling",
                      "drafter_kind", "declared", "speech_checkpoint",
                      "decision")
@@ -468,7 +474,8 @@ def header_meta(path: str) -> dict | None:
     disk = _load_header_cache()
     ent = disk.get(ap)
     # v3 adds the declared base ids; v4 the speech companion kind; v5 the
-    # speech encoder kind and the NeMo checkpoint id; v6 the decision mark.
+    # speech encoder kind and the NeMo checkpoint id; v6 the decision mark;
+    # v7 a drafter's bare basename among its declared ids.
     if (isinstance(ent, dict) and ent.get("mtime") == int(st.st_mtime)
             and ent.get("size") == st.st_size and ent.get("v") == _HEADER_CACHE_V):
         meta = {k: ent.get(k) for k in _HEADER_META_KEYS}
@@ -1402,6 +1409,32 @@ def text_tensor_bytes(path: str) -> int | None:
     return total or None
 
 
+def drafter_derived_bytes(scan) -> int:
+    """Bytes a drafter builds at bind beyond its file: the Inkling 2
+    DSpark drafter folds the target's head into its recurrent head, a
+    [markov_rank, vocab] bf16 map plus a float32 bias row
+    (``Inkling2DSparkDrafter._folded_head``). 0 for every other drafter."""
+    if not any(t.name == "dspark_hidden_out.weight" for t in scan.tensors):
+        return 0
+    rank = read_int(scan.kv, "dflash.dspark.markov_rank") or 0
+    vocab = read_int(scan.kv, "dflash.vocab_size") or 0
+    return rank * vocab * 2 + vocab * 4
+
+
+def drafter_resident_bytes(path: str) -> int:
+    """The bytes a drafter file holds once loaded: its size plus what it
+    builds at bind (``drafter_derived_bytes``). 0 for a missing file."""
+    from .headerscan import scan_gguf
+
+    if not os.path.isfile(path):
+        return 0
+    try:
+        derived = drafter_derived_bytes(scan_gguf(path))
+    except Exception:
+        derived = 0
+    return os.path.getsize(path) + derived
+
+
 def mtp_block_bytes(path: str) -> int:
     """Bytes of the NextN/MTP blocks of the split set at ``path``, the
     tensors ``text_tensor_bytes`` leaves out, which an MTP drafter built
@@ -1954,6 +1987,13 @@ def _target_ids(c: ClassifiedGguf) -> set:
     return ids
 
 
+def _names_family(declared, c: ClassifiedGguf) -> bool:
+    """Whether a drafter id is the family part of one of ``c``'s ids: a
+    drafter header that names ``Gemma-4`` alone serves a gemma-4 target of
+    whatever size, and the filename then decides."""
+    return any(t.startswith(f"{d}-") for d in declared for t in _target_ids(c))
+
+
 def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
                      drafter_kinds: dict | None = None) -> list:
     """The models the drafter ``dr`` can serve; empty leaves it unpaired.
@@ -1967,10 +2007,12 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
     (``drafter_kinds``: drafter path -> kind).
 
     Header identity decides first: a hit when the drafter's declared base ids
-    meet the target's; a veto when both declare and disjointly. Otherwise
-    (``declared_only`` off) the filename selects among the candidates, on the
-    :func:`_mmproj_targets` rule, and a lone candidate pairs without it.
-    Two quants of one target both pair on purpose."""
+    meet the target's; a veto when both declare and disjointly, unless a
+    drafter id names the target's family (``gemma-4`` before
+    ``gemma-4-12b-it``). Otherwise (``declared_only`` off) the filename
+    selects among the candidates, on the :func:`_mmproj_targets` rule, and a
+    lone candidate pairs without it. Two quants of one target both pair on
+    purpose."""
     if no_auto_pair(dr.declared):
         return []
     kinds = drafter_kinds or {}
@@ -1999,7 +2041,8 @@ def _drafter_targets(dr: ClassifiedGguf, made, *, declared_only: bool = False,
         hits = [mc for mc, c in cands if set(dr.declared) & _target_ids(c)]
         if hits:
             return hits
-        cands = [(mc, c) for mc, c in cands if not c.declared]
+        cands = [(mc, c) for mc, c in cands
+                 if not c.declared or _names_family(dr.declared, c)]
         if not cands:
             return []
     if declared_only:

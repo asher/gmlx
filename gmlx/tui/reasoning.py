@@ -114,12 +114,30 @@ _MARKERS: tuple[tuple[str, str], ...] = (
     ("</ifm|think_fast>", _ANSWER),
     ("<ifm|think_faster>", _REASON),
     ("</ifm|think_faster>", _ANSWER),
+    # Inkling: each block of a turn is "<|message_model|>", a content
+    # marker, the body and "<|end_message|>". A tool call puts the tool name
+    # before its content marker, so the header runs up to the content marker.
+    # As with "<|eom|>", the mode after a block is answer until the next
+    # header decides.
+    ("<|message_model|>", _DROP),
+    ("<|content_thinking|>", _REASON),
+    ("<|content_text|>", _ANSWER),
+    ("<|content_invoke_tool_json|>", _DROP),
+    ("<|content_invoke_tool_text|>", _DROP),
+    ("<|end_message|>", _ANSWER),
+    ("<|content_model_end_sampling|>", _DROP),
 )
 
 # Markers that open a message header - text from here to the closing
 # "<|message|>" is routing metadata, never a display span. Harmony puts the
 # channel in the marker itself; ATEM puts the recipient in the header body.
-_HEADER_PREFIXES = ("<|channel|>", "<|start|>assistant")
+_HEADER_PREFIXES = ("<|channel|>", "<|start|>assistant", "<|message_model|>")
+
+# Inkling content markers. Each ends a "<|message_model|>" header. A tool
+# marker opens a call, whose body is dropped.
+_BODY_MARKERS = ("<|content_thinking|>", "<|content_text|>")
+_TOOL_BODY_MARKERS = ("<|content_invoke_tool_json|>",
+                      "<|content_invoke_tool_text|>")
 
 # ATEM's reasoning recipient. "self" is the only recipient that is not
 # user-visible; "user", "commentary" and tool namespaces are answer-side.
@@ -128,7 +146,7 @@ _SELF_RECIPIENT = "to=self"
 # A header with a recipient and this constraint opens a Beam tool call.
 _RECIPIENT_RE = re.compile(r"to=([^\s<]+)")
 _TOOL_CONSTRAINT = "<|constrain|>xml"
-_TOOL_ENDS = ("<|end|>", "<|call|>", "<|return|>")
+_TOOL_ENDS = ("<|end|>", "<|call|>", "<|return|>", "<|end_message|>")
 
 
 class ReasoningFilter:
@@ -192,7 +210,9 @@ class ReasoningFilter:
             # (harmony) or "<|start|>assistant to=RECIPIENT<|message|>" (ATEM):
             # an opener marker starts the header, "<|message|>" closes it, and
             # the text in between is routing, never a display span.
-            if self._tool and (marker in _TOOL_ENDS or marker.startswith("<|start|>")):
+            if self._tool and (marker in _TOOL_ENDS
+                               or marker.startswith(("<|start|>",
+                                                     "<|message_model|>"))):
                 self._tool = False
             # A channel inside a "<|start|>" header keeps the recipient
             # already read: "<|start|>assistant to=NAME<|channel|>...".
@@ -202,6 +222,11 @@ class ReasoningFilter:
                 self._open_header(at_start=marker.startswith("<|start|>"))
             elif marker == "<|message|>":
                 self._close_header()
+            elif marker in _BODY_MARKERS:
+                self._end_header()
+            elif marker in _TOOL_BODY_MARKERS:
+                self._end_header()
+                self._tool = True
             elif marker == "<|constrain|>" and self._swallow:
                 self._header += marker
         return [s for s in spans if s[0]]
@@ -226,6 +251,12 @@ class ReasoningFilter:
             m = _RECIPIENT_RE.search(header)
             self._tool = (m is not None and m.group(1) != "self"
                           and _TOOL_CONSTRAINT in header)
+        self._header = ""
+        self._header_at_start = False
+
+    def _end_header(self) -> None:
+        """End an Inkling header. Its content marker already set the mode."""
+        self._swallow = False
         self._header = ""
         self._header_at_start = False
 
@@ -745,13 +776,54 @@ def with_thinking_prefill(prompt, prefill: str):
     return prompt + prefill
 
 
+# The reasoning_effort values Inkling's chat template accepts by name. It
+# also takes numbers from 0 to 0.99, and raises on anything else.
+_INKLING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+# The server's spellings of "no reasoning", which Inkling spells "none".
+_OFF_EFFORTS = ("none", "off", "disabled", "false", "0")
+
+
+def inkling_template(template) -> bool:
+    """Whether ``template`` is an Inkling chat template."""
+    return (isinstance(template, str) and "<|message_model|>" in template
+            and "<|content_thinking|>" in template)
+
+
+def inkling_effort(value):
+    """``value`` as Inkling's template takes it. ValueError for a value the
+    template would refuse."""
+    if isinstance(value, bool):
+        raise ValueError(f"reasoning_effort must be a level name or a "
+                         f"number, got {value!r}")
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip().lower()
+        if text in _OFF_EFFORTS:
+            return "none"
+        if text in _INKLING_EFFORTS:
+            return text
+        try:
+            number = float(text)
+        except ValueError:
+            number = None
+        if number is None:
+            raise ValueError(
+                f"reasoning_effort {value!r} is not one of "
+                f"{', '.join(_INKLING_EFFORTS)} or a number from 0 to 0.99")
+    if not 0.0 <= number <= 0.99:
+        raise ValueError(
+            f"reasoning_effort {value!r} is outside 0 to 0.99")
+    return number
+
+
 def off_by_budget(thinking, template: str) -> bool:
     """Whether ``thinking`` asks for off on a template that has no thinking
     switch but names a think pair. A thinking budget of 0 serves that off:
     each thinking block closes as soon as it opens."""
     if _thinking_mode(thinking) != "off" or not template:
         return False
-    if _has_thinking_switch(template):
+    if _has_thinking_switch(template) or inkling_template(template):
         return False
     from gmlx.gen.thinking_budget import think_pairs_in
 
@@ -787,6 +859,12 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     :func:`thinking_prefill` a caller passing ``prefill`` appends."""
     _warn = warn or (lambda msg: None)
     out = dict(base)
+    if reasoning_effort is not None and inkling_template(template):
+        try:
+            reasoning_effort = inkling_effort(reasoning_effort)
+        except ValueError as exc:
+            _warn(f"{exc} - ignored")
+            reasoning_effort = None
     if reasoning_effort is not None:
         name = _effort_variable(template)
         out[name] = reasoning_effort
@@ -825,6 +903,10 @@ def map_thinking_controls(base: dict, thinking=None, reasoning_effort=None,
     elif "no_think" in template and _reads(template, "reasoning_effort"):
         out.setdefault("reasoning_effort",
                        "no_think" if mode == "off" else "high")
+    elif inkling_template(template):
+        # Effort "none" is Inkling's off. On is the template's default.
+        if mode == "off":
+            out.setdefault("reasoning_effort", "none")
     elif off_by_budget(mode, template):
         pass
     elif _reads(template, "reasoning_effort"):

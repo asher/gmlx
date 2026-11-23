@@ -228,12 +228,16 @@ word still copies beside a strong drafter.
 On the server, a request copies when it starts while no other request
 decodes, and stops copying when another request joins it.
 
-[`context_copy: true`](config.md#modelscontext_copy) turns it on for a
-model. `GMLX_CONTEXT_COPY=1` turns it on for every model, in `run` and
-`chat` too, `GMLX_CONTEXT_COPY=0` turns it off everywhere, and
-`GMLX_CONTEXT_COPY_MAX` sets the longest copy. Context copy gains on
-grounded answers, edits and rewrites, and does nothing on free prose that
-does not repeat the prompt.
+Inkling-2-Mini copies by default, and other models do not. To change it:
+
+- [`context_copy`](config.md#modelscontext_copy) set to `true` or `false`
+  turns it on or off for one model.
+- `GMLX_CONTEXT_COPY=1` turns it on for every model, in `run` and `chat`
+  too, and `GMLX_CONTEXT_COPY=0` turns it off everywhere.
+- `GMLX_CONTEXT_COPY_MAX` sets the longest copy.
+
+Context copy gains on grounded answers, edits and rewrites, and does
+nothing on free prose that does not repeat the prompt.
 
 ## Stochastic acceptance
 

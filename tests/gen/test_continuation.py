@@ -102,6 +102,7 @@ _HANDLERS = {
     "granite_switch_systemone.jinja": "autoparser",
     "smollm2_template.jinja": "autoparser",
     "hy4_flash_template.jinja": "autoparser",
+    "inkling2_template.jinja": "inkling",
 }
 
 
@@ -150,6 +151,7 @@ def test_the_autoparser_list_is_the_fixture_templates():
     ("gemma4_12b_template.jinja", True),
     ("gptoss_template.jinja", False),
     ("kimi_k3_template.jinja", False),
+    ("inkling2_template.jinja", False),
 ])
 def test_recipe_supported(name, ok):
     src = (_FIXTURES / name).read_text()

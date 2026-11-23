@@ -52,6 +52,8 @@ _MODELS = {
         "<\uff5chy_image\u2581pad:6124c78e\uff5c>"
         "<\uff5chy_image\u2581end:6124c78e\uff5c>",
         "<\uff5chy_end:6124c78e\uff5c>"),
+    "inkling2_vl": ("inkling2_template.jinja",
+                    "<|content_image|><|unused_200054|>", "<|end_message|>"),
 }
 
 
@@ -303,7 +305,8 @@ def test_the_gemma4_processor_keeps_the_client_order(route, model_type):
 # message holds it and whose processor expands the image markers in prompt
 # order.
 _IN_PLACE = ("deepseek_v41_vl", "deepseek_v4_vl", "gemma4", "gemma4_unified",
-             "glm5_next", "hy_v4_flash_vl", "kimi_k25", "lfm3_omni",
+             "glm5_next", "hy_v4_flash_vl", "inkling2_vl", "kimi_k25",
+             "lfm3_omni",
              "lfm3_vl", "minicpmv4_6",
              "minicpmv4_7", "minimax_m3_vision", "mistral3", "muse_glimmer",
              "muse_spark", "nemotron_h_omni", "pixtral", "qwen3_5",

@@ -751,6 +751,7 @@ The recommended models:
 | `k2-horizon-7b` | 7B | Apache 2.0 | chat with a 512K context |
 | `granite-switch-4.1-8b` | 8B | Apache 2.0 | chat, decisions and audio |
 | `gemma-4-26b-a4b` | 26B-A4B | Apache 2.0 | general chat |
+| `inkling-2-mini` | 26B-A3.4B | Apache 2.0 | reasoning chat with images |
 | `qwen3.8-27b` | 27B | Apache 2.0 | documents, code and tool calls |
 | `ternary-bonsai-2-27b` | 27B | Apache 2.0 | 27B-class chat on a small Mac |
 | `granite-switch-4.1-30b` | 30B | Apache 2.0 | chat, decisions and audio |

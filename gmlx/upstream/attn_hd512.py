@@ -606,6 +606,12 @@ def route_counts() -> dict:
     return dict(_ROUTE_COUNTS)
 
 
+def note_route(name, q, k, mask=None):
+    """Count a model-owned attention route, such as one that builds its
+    own bias, under ``name``. The call it makes is counted again by route."""
+    _route(name, q, k, mask)
+
+
 def _route(name, q, k, mask):
     key = (name, q.shape[3], q.shape[2], _kv_bucket(k.shape[2]))
     _ROUTE_COUNTS[key] = _ROUTE_COUNTS.get(key, 0) + 1

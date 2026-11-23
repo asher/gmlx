@@ -20,6 +20,7 @@ so generalizing architecture coverage never touches this file.
 from __future__ import annotations
 
 import os
+import re
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -360,6 +361,9 @@ class _FusedMoeCaps:
         # gathers and on the shared-expert fold; same sniff
         self.has_swiglu_oai = self.has_kq_fused and "swiglu_oai" in glu_doc
         self.has_shexp_oai = self.has_swiglu_oai and "swiglu_oai" in shexp_doc
+        # situ (Kimi K3, Inkling 2) on the routed gathers only; same sniff
+        self.has_situ = self.has_kq_fused and re.search(
+            r"\bsitu\b", glu_doc) is not None
         self.router_ok = (
             os.environ.get("GMLX_FUSED_MOE_ROUTER", "1") != "0"
             and hasattr(kq, "moe_router_topk")
@@ -471,6 +475,12 @@ def _kq_act_kind(m, caps):
                 and (lever != "" or codec in _SWIGLU_OAI_FAST_CODECS
                      or caps.qf_codec(codec))):
             return "swiglu_oai"
+        return None
+    if name == "SituActivation" and "kimi_k3" in mod:
+        # GMLX_FUSED_MOE_SITU=0 keeps the stock path
+        if caps.has_situ and os.environ.get(
+                "GMLX_FUSED_MOE_SITU", "1") != "0" and act._beta > 0.0:
+            return "situ"
         return None
     if name == "LimitedSwiGLU" and "deepseek_v4" in mod:
         limit = float(getattr(act, "limit", 0.0) or 0.0)
@@ -883,7 +893,7 @@ def _make_fused_kquant(base_cls, caps):
             akw = {"act": act}
             if act == "silu_limit":
                 akw["limit"] = self._kq_glu_limit
-            elif act == "swiglu_oai":
+            elif act in ("swiglu_oai", "situ"):
                 akw["limit"] = self._kq_glu_limit
                 akw["alpha"] = self._kq_glu_alpha
             elif act == "swiglu_clamp":
@@ -1130,6 +1140,12 @@ def _install_kquant_glu_fusion(model, caps) -> int:
                 m, "_kq_glu_limit", float(m.activation.limit))
             object.__setattr__(
                 m, "_kq_glu_alpha", float(m.activation.alpha))
+        elif act_kind == "situ":
+            # kq reads alpha 0 as an unbounded up branch, as lb <= 0 does
+            object.__setattr__(
+                m, "_kq_glu_limit", float(m.activation._beta))
+            object.__setattr__(
+                m, "_kq_glu_alpha", max(float(m.activation._lb), 0.0))
         elif act_kind == "swiglu_clamp":
             # gpt-oss constants (swiglu() defaults in mlx-lm). The float32
             # bias copies are made on the first fused call, after the
@@ -3212,12 +3228,18 @@ _FUSED_CAT_SLOTS = {
     "_gdn_ba_kq": ("in_proj_b", "in_proj_a"),
 }
 # Row-fused projection pairs the model holds as child modules and calls in
-# place of their members (deepseek_v4 install_gemv_row_fusion, run at every
+# place of their members (deepseek_v4 install_gemv_row_fusion and inkling2
+# install_row_fusion, run at every
 # load). A cleared slot sends the forward back to the members, which then
 # serve their adapters. Nothing rebuilds a slot once cleared.
 _FUSED_CHILD_SLOTS = {
     "_qa_kv_fused": ("wq_a", "wkv"),
     "_kv_gate_fused": ("wkv", "wgate"),
+    # inkling2 install_row_fusion.
+    "_q_fused": ("q_proj", "gate_proj", "rel_proj", "sink_proj"),
+    "_kv_fused": ("k_proj", "v_proj"),
+    "_kc_fused": ("k_proj", "k_conv_proj"),
+    "_vc_fused": ("v_proj", "v_conv_proj"),
 }
 
 

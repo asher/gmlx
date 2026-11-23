@@ -61,6 +61,7 @@ class Drafter:
     file: str
     bytes: int
     cross_base: bool = False         # trained for another checkpoint than the entry's
+    derived_bytes: int = 0           # built at bind beyond the file (drafter_derived_bytes)
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,8 @@ class Seed:
     preferred_at: tuple = ()  # (memory class, tier) pairs: where a bare pull starts there
     hears: bool = False       # the mmproj is a speech encoder: every pull takes it
     head_from_class: int = 0  # the smallest memory class that keeps the native head on
+    tier_quants: tuple = ()   # (tier, quant) pairs over the quant-name rule, when names mislead
+    skip_tiers: tuple = ()    # tiers the entry leaves empty until a timed run picks them
 
 
 _LFM_LICENSE = dict(
@@ -308,6 +311,21 @@ _SEED = (
          drafter_repo="unsloth/gemma-4-26B-A4B-it-GGUF",
          drafter_file="mtp-gemma-4-26B-A4B-it.gguf",
          use="general chat"),
+    Seed("inkling-2-mini", "Inkling-2-Mini", "unsloth/Inkling-2-Mini-GGUF", "balanced",
+         "Reasoning chat with image input and tool calls.",
+         "Quick for its size: it reads 3.4B of its 26B weights per token.",
+         mmproj="mmproj-BF16.gguf",
+         mmproj_f16="mmproj-F16.gguf",
+         drafter_repo="unsloth/Inkling-2-Mini-GGUF",
+         drafter_file="dspark-Inkling-2-Mini-Q8_0.gguf",
+         params="26B-A3.4B",
+         # The experts are NVFP4 in every file from IQ4_XS up; the names
+         # describe the other layers. Q4_K_XL keeps those at Q8_0.
+         tier_quants=(("high", "Q4_K_XL"),),
+         # IQ4_XS decodes no faster than the balanced Q4_K_M: both keep
+         # the experts NVFP4. No fastest tier.
+         skip_tiers=("fastest",),
+         use="reasoning chat with images"),
     Seed("qwen3.8-27b", "Qwen3.8-27B", "unsloth/Qwen3.8-27B-GGUF", "high",
          "Strong at long documents, code and tool calls.",
          "Steady for a 27B, with faster replies on by default.",
@@ -483,9 +501,10 @@ def _build(seed: Seed, facts: dict) -> Model:
                          key=lambda r: r.bytes))
     drafter = None
     if seed.drafter_file:
-        kind, nbytes = facts.get("drafter") or ("", 0)
+        kind, nbytes, *derived = facts.get("drafter") or ("", 0)
         drafter = Drafter(kind=kind, repo=seed.drafter_repo, file=seed.drafter_file,
-                          bytes=nbytes, cross_base=seed.cross_base)
+                          bytes=nbytes, cross_base=seed.cross_base,
+                          derived_bytes=derived[0] if derived else 0)
     asr = None
     if seed.asr_file:
         asr = Asr(repo=seed.asr_repo, file=seed.asr_file, bytes=facts.get("asr") or 0)
@@ -721,7 +740,7 @@ def addon_bytes(m: Model, mmproj: bool, drafter: bool) -> int:
     if mmproj and m.mmproj:
         n += m.mmproj_bytes
     if drafter and m.drafter is not None:
-        n += m.drafter.bytes
+        n += m.drafter.bytes + m.drafter.derived_bytes
     if m.asr is not None:
         n += m.asr.bytes
     return n

@@ -167,6 +167,9 @@ def handler_for(src: str) -> str:
     if (has("<tool_call>") and has("<function=") and has("<parameter=")
             and not has("'<tool_call><function=' ~ tool_call.name ~ '>'")):
         return "qwen3-coder"
+    # common/parsers/inkling.cpp, llama.cpp 29b52d398.
+    if has("<|message_user|>") and has("<|content_image|>"):
+        return "inkling"
     return "autoparser"
 
 

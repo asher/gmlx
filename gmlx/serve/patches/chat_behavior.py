@@ -153,7 +153,11 @@ def _stash_template_kwargs(args, request, _processor):
 
         merged = map_thinking_controls(merged, raw, req_effort, template,
                                        warn=_warn_thinking)
-    from gmlx.tui.reasoning import off_by_budget, thinking_switch_flag
+    from gmlx.tui.reasoning import (
+        inkling_template,
+        off_by_budget,
+        thinking_switch_flag,
+    )
 
     # A template with no thinking switch takes off as a thinking budget of
     # 0. An explicit budget wins.
@@ -174,11 +178,76 @@ def _stash_template_kwargs(args, request, _processor):
     else:
         args.enable_thinking = True
         thinking_explicit = False
+    if inkling_template(template):
+        _inkling_effort_kwargs(
+            args, request, merged, template,
+            switch=args.enable_thinking if thinking_explicit else None,
+            request_switch=request_switch or flag is not None)
+        args._kq_inkling = True
     if merged:
         args._kq_template_kwargs = merged
     args._kq_thinking_explicit = thinking_explicit
     _LAST_GEN_ARGS.set(args)
     return args
+
+
+def _inkling_effort_kwargs(args, request, merged, template, *, switch,
+                           request_switch) -> None:
+    """Spell the reasoning effort as Inkling's template takes it, in
+    ``merged``. The template reads only ``reasoning_effort``, and off is
+    effort "none". From strongest: the request's own template kwargs, the
+    request's effort, the request's thinking switch, then the profile's
+    effort and its switch. ``switch`` is the resolved thinking switch, or
+    None. A value the template would refuse is a 400."""
+    from gmlx.tui.reasoning import inkling_effort, normalize_template_kwargs
+
+    req_kw = getattr(request, "chat_template_kwargs", None)
+    req_kw = (normalize_template_kwargs(req_kw, template)
+              if isinstance(req_kw, dict) else {})
+    if req_kw.get("enable_thinking") is not None:
+        switch = _template_switch(req_kw["enable_thinking"])
+        request_switch = True
+    elif switch is None and merged.get("enable_thinking") is not None:
+        # The profile's own template kwargs.
+        switch = _template_switch(merged["enable_thinking"])
+    effort = merged.get("reasoning_effort")
+    if "reasoning_effort" in req_kw:
+        effort = req_kw["reasoning_effort"]
+    elif getattr(args, "reasoning_effort", None) is not None:
+        effort = args.reasoning_effort
+    elif switch is False and (request_switch or effort is None):
+        effort = "none"
+    elif switch and request_switch and str(effort).strip().lower() in (
+            "none", "off", "disabled", "false", "0"):
+        effort = None
+    if effort is None:
+        merged.pop("reasoning_effort", None)
+        return
+    try:
+        merged["reasoning_effort"] = inkling_effort(effort)
+    except ValueError as exc:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+def _template_switch(value) -> bool | None:
+    """An ``enable_thinking`` template kwarg as on/off. A value that is
+    neither is a 400."""
+    from gmlx.tui.reasoning import thinking_switch_flag
+
+    if isinstance(value, str):
+        value = value.strip().lower()
+        value = {"true": True, "false": False}.get(value, value)
+    elif value in (0, 1) and not isinstance(value, bool):
+        value = bool(value)
+    flag = thinking_switch_flag(value)
+    if flag is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=400, detail=(
+            f"enable_thinking must be true or false, got {value!r}"))
+    return flag
 
 
 def install_chat_template_kwargs() -> None:
@@ -445,6 +514,7 @@ _STREAM_SEED_FLAG = "_kq_gguf_stream_thinking_seed"
 # the response/message section markers and the turn terminator would leak
 # into chat content verbatim. Gated on the model's think-open spelling.
 _XTML_THINK_OPEN = "<|open|>think<|sep|>"
+_INKLING_THINK_OPEN = "<|message_model|><|content_thinking|>"
 _XTML_SECTION_MARKERS = (
     "<|open|>response<|sep|>", "<|close|>response<|sep|>",
     "<|close|>message<|sep|>", "<|end_of_msg|>",
@@ -610,14 +680,19 @@ def install_stream_thinking_seed() -> None:
             if prompt is not None:
                 self.in_thinking = _prompt_tail_opens_thinking(
                     prompt, self.open_close_markers)
-                if prompt.rstrip().endswith("<|start|>assistant"):
-                    # harmony (gpt-oss) and ATEM (Muse models): the state
-                    # machine's open/close pairs cannot express channel or
-                    # recipient routing, so the stream splits through the
-                    # REPL's marker filter instead. Both prompts stop
-                    # mid-header, so the filter starts inside one.
+                in_header = prompt.rstrip().endswith("<|start|>assistant")
+                inkling = (getattr(_LAST_GEN_ARGS.get(), "_kq_inkling", False)
+                           or _INKLING_THINK_OPEN in self.open_markers)
+                if in_header or inkling:
+                    # harmony (gpt-oss), ATEM (Muse models) and Inkling: the
+                    # state machine's open/close pairs cannot express
+                    # channel, recipient or block-header routing, so the
+                    # stream splits through the REPL's marker filter
+                    # instead. Harmony and ATEM prompts stop mid-header, so
+                    # the filter starts inside one.
                     from gmlx.tui.reasoning import ReasoningFilter
-                    self._kq_harmony = ReasoningFilter(start_in_header=True)
+                    self._kq_harmony = ReasoningFilter(
+                        start_in_header=in_header)
                     self._kq_harmony_closed = False
 
         cls.__init__ = link(__init__, original_init, _STREAM_SEED_FLAG)

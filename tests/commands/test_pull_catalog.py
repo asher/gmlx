@@ -1062,3 +1062,19 @@ def test_a_live_plan_downloads_the_files_main_holds_now():
     no_drafter = {**repos, "org/drafter": {}}
     with pytest.raises(catalog.GoneFromRepo, match="--no-drafter"):
         catalog.live_plan(plan, no_drafter.get)
+
+
+def test_inkling_drafter_fit_counts_the_folded_head():
+    """The Inkling 2 drafter builds a folded head beyond its file, so its
+    add-on prices both; the download size stays the file."""
+    m = catalog.model("inkling-2-mini")
+    d = m.drafter
+    assert d.derived_bytes == 256 * 201024 * 2 + 201024 * 4
+    assert (catalog.addon_bytes(m, False, True)
+            == d.bytes + d.derived_bytes + (m.asr.bytes if m.asr else 0))
+
+
+def test_inkling_offers_no_untimed_fastest_pick():
+    m = catalog.model("inkling-2-mini")
+    assert "fastest" not in {r.tier for r in m.rungs}
+    assert {"balanced", "high", "xhigh"} <= {r.tier for r in m.rungs}

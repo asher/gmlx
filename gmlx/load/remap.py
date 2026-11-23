@@ -240,6 +240,11 @@ ARCH_ALIAS = {
     # names target the mlx-lm lfm2 class.
     "lfm3": "LFM3",
     "ricursive": "RICURSIVE",
+    # Thinking Machines Inkling 2 in both GGUF layouts: unsloth's looped
+    # layout ('inkling2') and llama.cpp mainline ('inkling2_loop'). The
+    # INKLING2 block claims every tensor of both.
+    "inkling2": "INKLING2",
+    "inkling2_loop": "INKLING2",
     # IBM Granite Switch (llama.cpp 'graniteswitch'): NORM rope with Q/K rows
     # permuted inside the fused attn_qkv at conversion, so the class runs
     # traditional rope on the wire layout. The GRANITESWITCH block claims
@@ -878,6 +883,107 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
          "model.layers.{bid}.mlp.shared_experts.up_proj.weight", "passthrough"),
         (re.compile(r"^blk\.(\d+)\.ffn_down_shexp\.weight$"),
          "model.layers.{bid}.mlp.shared_experts.down_proj.weight", "passthrough"),
+    ],
+    "INKLING2": [
+        # Every tensor of both layouts is claimed here, on physical layers.
+        # The loop controllers have one name per layout (attn = the Q
+        # controller). The root layout's packed message queries load whole
+        # and the model's sanitize splits them per layer.
+        (re.compile(r"^token_embd\.weight$"),
+         "model.embed_tokens.weight", "passthrough"),
+        (re.compile(r"^token_embd_norm\.weight$"),
+         "model.embed_norm.weight", "passthrough"),
+        (re.compile(r"^output_norm\.weight$"),
+         "model.norm.weight", "passthrough"),
+        (re.compile(r"^output_res_query\.weight$"),
+         "model.output_res_query", "passthrough"),
+        (re.compile(r"^output\.weight$"),
+         "lm_head.weight", "passthrough"),
+        (re.compile(r"^loop_res_query\.weight$"),
+         "model.loop_res_query", "passthrough"),
+        (re.compile(r"^loop_kv_res_query\.weight$"),
+         "model.loop_kv_res_query", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_norm\.weight$"),
+         "model.layers.{bid}.input_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_inp_norm\.weight$"),
+         "model.layers.{bid}.q_inp_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_inp_norm\.weight$"),
+         "model.layers.{bid}.k_inp_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v_inp_norm\.weight$"),
+         "model.layers.{bid}.v_inp_norm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_res_query\.weight$"),
+         "model.layers.{bid}.attn_res_query", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_res_query\.weight$"),
+         "model.layers.{bid}.ffn_res_query", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q\.weight$"),
+         "model.layers.{bid}.self_attn.q_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k\.weight$"),
+         "model.layers.{bid}.self_attn.k_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v\.weight$"),
+         "model.layers.{bid}.self_attn.v_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_output\.weight$"),
+         "model.layers.{bid}.self_attn.o_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_gate\.weight$"),
+         "model.layers.{bid}.self_attn.gate_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_rel\.weight$"),
+         "model.layers.{bid}.self_attn.rel_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_sink_proj\.weight$"),
+         "model.layers.{bid}.self_attn.sink_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_conv_proj\.weight$"),
+         "model.layers.{bid}.self_attn.k_conv_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v_conv_proj\.weight$"),
+         "model.layers.{bid}.self_attn.v_conv_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_q_clip\.weight$"),
+         "model.layers.{bid}.self_attn.q_clip", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_rel_clip\.weight$"),
+         "model.layers.{bid}.self_attn.rel_clip", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_rel_bias\.weight$"),
+         "model.layers.{bid}.self_attn.rel_bias", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_k_conv\.weight$"),
+         "model.layers.{bid}.self_attn.k_conv", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_v_conv\.weight$"),
+         "model.layers.{bid}.self_attn.v_conv", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.attn_post_conv\.weight$"),
+         "model.layers.{bid}.self_attn.post_conv", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_post_conv\.weight$"),
+         "model.layers.{bid}.ffn_post_conv", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_norm\.weight$"),
+         "model.layers.{bid}.post_attention_layernorm.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_inp\.weight$"),
+         "model.layers.{bid}.mlp.gate.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.exp_probs_b\.bias$"),
+         "model.layers.{bid}.mlp.e_score_correction_bias", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.ffn_gate_up_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.gate_up_proj.weight",
+         "moe_split_gate_up"),
+        (re.compile(r"^blk\.(\d+)\.ffn_down_exps\.weight$"),
+         "model.layers.{bid}.mlp.switch_mlp.down_proj.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_msg_query\.weight$"),
+         "model.layers.{bid}.loop.msg_query", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_(?:attn|q_ctrl)_down\.weight$"),
+         "model.layers.{bid}.loop.q.down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_(?:attn|q_ctrl)_gain\.weight$"),
+         "model.layers.{bid}.loop.q.gain.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_(?:attn|q_ctrl)_forget\.weight$"),
+         "model.layers.{bid}.loop.q.forget.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_k(?:_ctrl)?_down\.weight$"),
+         "model.layers.{bid}.loop.k.down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_k(?:_ctrl)?_gain\.weight$"),
+         "model.layers.{bid}.loop.k.gain.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_k(?:_ctrl)?_forget\.weight$"),
+         "model.layers.{bid}.loop.k.forget.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_v(?:_ctrl)?_down\.weight$"),
+         "model.layers.{bid}.loop.v.down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_v(?:_ctrl)?_gain\.weight$"),
+         "model.layers.{bid}.loop.v.gain.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_v(?:_ctrl)?_forget\.weight$"),
+         "model.layers.{bid}.loop.v.forget.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_(?:mlp|ffn_ctrl)_down\.weight$"),
+         "model.layers.{bid}.loop.ffn.down.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_(?:mlp|ffn_ctrl)_gain\.weight$"),
+         "model.layers.{bid}.loop.ffn.gain.weight", "passthrough"),
+        (re.compile(r"^blk\.(\d+)\.loop_(?:mlp|ffn_ctrl)_forget\.weight$"),
+         "model.layers.{bid}.loop.ffn.forget.weight", "passthrough"),
     ],
     "RICURSIVE": [
         # Every tensor is claimed here. attn_gate and attn_vres_lambda are in
@@ -2524,7 +2630,7 @@ EXPECTED_SKIP_TENSORS = frozenset({
 _WEIGHT_SCALE_RE = re.compile(
     r"^(blk\.\d+\.(?:attn_q|attn_k|attn_v|attn_output|attn_qkv|attn_gate"
     r"|ffn_gate|ffn_down|ffn_up|ffn_gate_shexp|ffn_down_shexp|ffn_up_shexp"
-    r"|ffn_gate_exps|ffn_down_exps|ffn_up_exps"
+    r"|ffn_gate_exps|ffn_down_exps|ffn_up_exps|ffn_gate_up_exps"
     r"|ssm_in|ssm_out|ssm_alpha|ssm_beta"
     r"|nextn\.eh_proj|nextn\.shared_head_head)|output)\.scale$")
 
@@ -2637,9 +2743,13 @@ def parse_gguf_name(arch_string: str, gguf_name: str) -> RemapDecision:
         d = parse_gguf_name(arch_string, m.group(1) + ".weight")
         if d.kind != RemapDecision.KIND_MAP or not d.hf_name.endswith(".weight"):
             return d
+        # A fused gate/up weight splits in two; its scale multiplies the
+        # fused output, so both halves take it.
+        transform = ("moe_split_gate_up_scale"
+                     if d.transform == "moe_split_gate_up" else "flatten")
         return RemapDecision(RemapDecision.KIND_MAP,
                              hf_name=d.hf_name[:-len("weight")] + "out_scale",
-                             transform="flatten", bid=d.bid)
+                             transform=transform, bid=d.bid)
 
     # Universal Unsloth-UD .scale skip (after arch-priority claims).
     if _is_unsloth_ud_scale(gguf_name):

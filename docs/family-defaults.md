@@ -47,6 +47,7 @@ a model ends up with.
 | `flint` | `flint` | temperature=1.0 top_p=0.95 top_k=20 | - |
 | `llama` | `llama`, `smollm3` | temperature=0.6 top_p=0.9 | - |
 | `mistral` | `mistral3` | temperature=0.15 | - |
+| `inkling` | `inkling2`, `inkling2_loop` | temperature=1.0 top_p=1.0 top_k=0 min_p=0.0 thinking_start_token=&lt;\|message_model\|&gt;&lt;\|content_thinking\|&gt; thinking_end_token=&lt;\|end_message\|&gt; | `@reasoning-high`: reasoning_effort=high; `@reasoning-low`: reasoning_effort=low; `@reasoning-max`: reasoning_effort=max; `@reasoning-medium`: reasoning_effort=medium |
 | `default` | (anything else) | temperature=0.7 top_p=0.95 | `@coding`: temperature=0.3; `@creative`: temperature=1.0 min_p=0.05 |
 
 The sampling values of a family, of the header's `general.sampling.*` keys

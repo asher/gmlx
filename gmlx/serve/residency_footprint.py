@@ -109,9 +109,10 @@ def _drafter_bytes(model_path: str, build_spec) -> int:
     if not getattr(build_spec, "speculative", False):
         return 0
     draft = getattr(build_spec, "draft_gguf", None) or ""
+    from gmlx.load.discovery import drafter_resident_bytes, mtp_block_bytes
+
     if draft:
-        return os.path.getsize(draft) if os.path.isfile(draft) else 0
-    from gmlx.load.discovery import mtp_block_bytes
+        return drafter_resident_bytes(draft)
 
     return mtp_block_bytes(model_path)
 

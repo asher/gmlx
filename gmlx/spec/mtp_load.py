@@ -32,6 +32,7 @@ from gmlx.upstream.gdn_patches import (
 )
 from gmlx.load.gguf_meta import first_nonzero_int, read_int, read_string
 from gmlx.load.loader import (
+    _FP32_CAST_BY_MODEL_TYPE,
     _FP32_KEEP_BY_MODEL_TYPE,
     _active_now,
     _install_and_load,
@@ -108,6 +109,9 @@ _MTP_WIDTH_LIMIT_BY_MODEL_TYPE = {
 # Unknown arch: cap conservatively rather than opting a new family into the
 # losing regime. Uncapped is earned by measurement, not inherited by default.
 _MTP_WIDTH_CAP_FALLBACK = 2
+# Families that copy from the prompt unless the model's context_copy key
+# says otherwise. Inkling 2 gains on verbatim text and holds even elsewhere.
+_CONTEXT_COPY_BY_MODEL_TYPE = frozenset({"inkling2"})
 
 # Drafted depth per DFlash round: the GGUF's trained block, capped at 16.
 # Verify cost on the 30B target is flat from 8 to 16 rows (the kquant split-K
@@ -121,6 +125,8 @@ _DFLASH_BLOCK_DEFAULT = {
     "dflash2": None,
     "dflash_dspark": None,
     "lilicorr": None,
+    # Inkling 2 DSpark: 3 drafts a round; its block of 8 is the ceiling.
+    "dflash_dspark_inkling2": 4,
 }
 
 
@@ -156,7 +162,8 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
     drafters) that replaces the family's table row.
     MLX_VLM_GGUF_SPEC_WIDTH_CAP (per-model config, load-window env) overrides
     both and is itself clamped by the hard limit. MLX_VLM_GGUF_CONTEXT_COPY
-    (same window) stamps the model's context_copy key.
+    (same window) stamps the model's context_copy key: ``1`` on, ``0`` off,
+    empty for the family default.
     """
     if hard_limit is not None:
         limit = int(hard_limit)
@@ -194,8 +201,9 @@ def _stamp_mtp_width_cap(drafter, model_type: str, *, target=None,
         drafter.mtp_target_moe = bool(target_moe)
         # The model's context_copy config key (load-window env), read by
         # context_copy.context_copy_enabled.
-        drafter.context_copy = (
-            os.environ.get("MLX_VLM_GGUF_CONTEXT_COPY", "") == "1")
+        copy = os.environ.get("MLX_VLM_GGUF_CONTEXT_COPY", "")
+        drafter.context_copy = (copy == "1" if copy in ("0", "1")
+                                else model_type in _CONTEXT_COPY_BY_MODEL_TYPE)
     except AttributeError:
         pass  # slotted/frozen drafter forbids ad-hoc attrs
     log(f"[mtp] width cap: {cap or 'uncapped'}"
@@ -1176,11 +1184,31 @@ _LILICORR_ROOT = {
     "lilicorr.anchor_norm": "lilicorr.anchor_norm",
 }
 _LILICORR_HEAD_LAYER_RE = re.compile(r"^lilicorr\.layers\.(\d+)\.attn\.in_proj$")
+# The Inkling 2 DSpark (gmlx.models.inkling2.dspark): per-layer context
+# projections and tap norms, and the recurrent head. ``dspark_fuse`` and
+# ``mask_embd`` are raw arrays.
+_INKLING2_DSPARK_BLK = {
+    **_DFLASH_BLK,
+    "attn_k_ctx": "self_attn.k_ctx_proj.weight",
+    "attn_v_ctx": "self_attn.v_ctx_proj.weight",
+    "attn_k_ctx_norm": "self_attn.k_ctx_norm.weight",
+    "dflare_norm": "dflare_norm.weight",
+}
+_INKLING2_DSPARK_ROOT = {
+    "output_norm": "norm.weight",
+    "dspark_fuse": "dspark_fuse",
+    "dspark_norm": "dspark_norm.weight",
+    "mask_embd": "mask_embd",
+    "markov_w1": "markov_w1.weight",
+    "joint_proj": "joint_proj.weight",
+    "dspark_hidden_out": "hidden_out.weight",
+}
 _DFLASH_CONTAINER_MAPS = {
     "dflash": (_DFLASH_BLK, _DFLASH_ROOT),
     "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
     "dflash_dspark": (_DFLASH_BLK, {**_DFLASH_ROOT, **_DFLASH_DSPARK_ROOT}),
     "lilicorr": (_LILICORR_BLK, _LILICORR_ROOT),
+    "dflash_dspark_inkling2": (_INKLING2_DSPARK_BLK, _INKLING2_DSPARK_ROOT),
 }
 
 
@@ -1288,17 +1316,27 @@ def _dflash_config_from_meta(
             f"{draft_gguf_path}: dflash.target_layers / dflash.block_size / "
             f"tokenizer.ggml.mask_token_id missing - re-run the converter"
         )
-    # llama.cpp indexes the residual ENTERING a layer, so the converter writes
-    # the HF ids (layer outputs) one higher. Undo that: the capture seam takes
-    # layer-output indices.
-    layer_ids = tuple(int(i) - 1 for i in layers)
-    n_target_layers = int(target_config_dict["num_hidden_layers"])
+    inkling2 = container == "dflash_dspark_inkling2"
+    if inkling2:
+        # Layer-visit inputs, as the Inkling 2 capture seam takes them;
+        # index len(layer_visits) is the normed final hidden state.
+        layer_ids = tuple(int(i) for i in layers)
+        n_target_layers = len(target_config_dict.get("layer_visits") or ())
+        top = n_target_layers
+    else:
+        # llama.cpp indexes the residual ENTERING a layer, so the converter
+        # writes the HF ids (layer outputs) one higher. Undo that: the
+        # capture seam takes layer-output indices.
+        layer_ids = tuple(int(i) - 1 for i in layers)
+        n_target_layers = int(target_config_dict["num_hidden_layers"])
+        top = n_target_layers - 1
     if list(layer_ids) != sorted(set(layer_ids)) or not (
-        0 <= layer_ids[0] and layer_ids[-1] < n_target_layers
+        0 <= layer_ids[0] and layer_ids[-1] <= top
     ):
         raise ValueError(
             f"{draft_gguf_path}: dflash.target_layers {layers} must be "
-            f"strictly increasing and within [1, {n_target_layers}]"
+            f"strictly increasing and within [{0 if inkling2 else 1}, "
+            f"{n_target_layers}]"
         )
     hidden = int(target_config_dict["hidden_size"])
     declared = meta.get("dflash.embedding_length")
@@ -1308,6 +1346,17 @@ def _dflash_config_from_meta(
             f"target hidden_size {hidden}"
         )
     vocab = int(target_config_dict["vocab_size"])
+    padded_vocab = None
+    if inkling2:
+        # Drafts are drawn over the unpadded vocabulary; the head and the
+        # markov table keep the padded rows.
+        padded_vocab = vocab
+        vocab = int(target_config_dict.get("unpadded_vocab_size") or vocab)
+        ne = (shapes or {}).get("markov_w1.weight")
+        if ne is not None and int(ne[-1]) != padded_vocab:
+            raise ValueError(
+                f"{draft_gguf_path}: markov_w1 has {ne[-1]} rows, the target "
+                f"head has {padded_vocab}")
     if container == "dflash2" and shapes:
         for name in ("selector_predecessor.weight", "selector_successor.weight"):
             ne = shapes.get(name)
@@ -1367,6 +1416,19 @@ def _dflash_config_from_meta(
         native_total, block_total = _drafter_block_depths(
             int(block_size) + int(anchor), None)
         runtime_block = _measured_block(meta, block_total)
+    if inkling2:
+        markov_rank, confidence, snr_range, anchor = _dspark_head_keys(
+            draft_gguf_path, meta, arrays, shapes)
+        if (anchor or confidence or snr_range or causal or not window
+                or int(block_size) != 8 or not softcap or softcap <= 0
+                or layer_ids[-1] != n_target_layers):
+            raise ValueError(
+                f"{draft_gguf_path}: the Inkling 2 DSpark drafter needs a "
+                "non-causal block of 8 with a non-drafting anchor, a sliding "
+                "window, a logit softcap, the final hidden state as its last "
+                "tap and no confidence or log-SNR head")
+        # The anchor row sees the window before it as well.
+        window += 1
     config = DFlashConfig(
         hidden_size=hidden,
         intermediate_size=int(meta["dflash.feed_forward_length"]),
@@ -1405,6 +1467,7 @@ def _dflash_config_from_meta(
         confidence_head=confidence,
         log_snr_range=snr_range,
         sample_from_anchor=anchor,
+        padded_vocab_size=padded_vocab,
         attention_sinks=any(n.endswith(".attn_sinks.weight") for n in arrays),
         **(_lilicorr_head_keys(draft_gguf_path, meta)
            if container == "lilicorr" else {}),
@@ -1497,7 +1560,8 @@ def _wire_dflash_capture(target, layer_ids) -> None:
     if not callable(getattr(lm, "set_dflash_capture", None)):
         raise RuntimeError(
             "DFlash drafters need a target carrying the _dflash_capture seam "
-            f"(muse_glimmer, gemma4, owned qwen3_5, ricursive, qwen4_exp); got {type(lm).__name__}"
+            "(muse_glimmer, gemma4, owned qwen3_5, ricursive, inkling2, "
+            f"qwen4_exp); got {type(lm).__name__}"
         )
     lm.set_dflash_capture(layer_ids)
 
@@ -1685,6 +1749,59 @@ def _load_dflash_dspark_drafter(
     return drafter
 
 
+def _load_inkling2_dspark_drafter(
+    draft_gguf_path: str,
+    target,
+    target_config_dict: dict,
+    *,
+    arrays: dict,
+    kquant_meta: dict,
+    meta: dict,
+    shapes: dict | None = None,
+    active_before: float | None = None,
+    log=loadlog.verbose_print,
+):
+    """Build + load + bind the Inkling 2 DSpark drafter and wire the
+    target's ``_dflash_capture`` with its layer-visit taps."""
+    from gmlx.models.inkling2.dspark import Inkling2DSparkDrafter
+
+    config, layer_ids = _dflash_config_from_meta(
+        draft_gguf_path, meta, target_config_dict, "dflash_dspark_inkling2",
+        arrays=arrays, shapes=shapes)
+    drafter = Inkling2DSparkDrafter(config)
+    log(
+        f"[mtp] drafter: inkling2 dspark layers={config.num_hidden_layers} "
+        f"taps={layer_ids} block_total={config.block_size} "
+        f"(native {config.native_block_size}) window={config.sliding_window} "
+        f"markov_rank={config.markov_rank}"
+    )
+    d_weights, d_meta, d_stats = remap_dflash_arrays(
+        arrays, kquant_meta, "dflash_dspark_inkling2")
+    log(f"[mtp] drafter remap: {d_stats}")
+    _install_and_load(
+        drafter,
+        d_weights,
+        d_meta,
+        log=log,
+        sanitize=False,
+        source_key=weights_source_key(draft_gguf_path),
+        active_before=active_before,
+        # The tap mix and the recurrent head run in fp32, as the
+        # reference's F32 tensors do.
+        fp32_keep=("dspark_fuse", "mask_embd", "norm.weight"),
+    )
+    drafter.bind(target)
+    _wire_dflash_capture(target, layer_ids)
+
+    from .drafter_protocol import validate_drafter
+
+    validate_drafter(drafter)
+    log("[mtp] inkling2 dspark drafter bound; target capture taps wired")
+    _stamp_mtp_width_cap(drafter, "inkling2", target=target, hard_limit=1,
+                         log=log)
+    return drafter
+
+
 def _load_lilicorr_drafter(
     draft_gguf_path: str,
     target,
@@ -1768,6 +1885,7 @@ def _load_dflash_drafter(
         "dflash_dspark": _load_dflash_dspark_drafter,
         "dflash": _load_plain_dflash_drafter,
         "lilicorr": _load_lilicorr_drafter,
+        "dflash_dspark_inkling2": _load_inkling2_dspark_drafter,
     }
     loader = loaders.get(container)
     if loader is None:
@@ -2214,7 +2332,8 @@ def load_mtp_model(
     # wo_a 2D->3D MultiLinear reshape, same as the plain-text load path) and
     # the fp32 pins (HC tables / sinks / router -- see _FP32_KEEP_BY_MODEL_TYPE).
     # hy_v3's sanitize strips the in-GGUF MTP block (model.layers.80.*) from
-    # the trunk weights, same as its plain-text load path. mlx-vlm targets
+    # the trunk weights, same as its plain-text load path. inkling2's splits
+    # the looped layout's packed message queries. mlx-vlm targets
     # keep sanitize=False (seam 2: GGUF norms already raw).
     _mt = config_dict.get("model_type") or ""
     from gmlx.load.hadamard import hadamard_targets_for
@@ -2227,9 +2346,10 @@ def load_mtp_model(
             hf_kquant_meta,
             log=_log,
             sanitize=(_mt in ("deepseek_v4", "deepseek_v4_vl", "hy_v3",
-                              "glm5_next", "hy_v4_flash")),
+                              "glm5_next", "hy_v4_flash", "inkling2")),
             no_alias=owned_names,
             fp32_keep=_FP32_KEEP_BY_MODEL_TYPE.get(_mt, ()),
+            fp32_cast=_FP32_CAST_BY_MODEL_TYPE.get(_mt, ()),
             source_key=weights_source_key(*pf.shards),
             active_before=active_before,
             # The tables the wire load skipped: past the buffer ceiling, or
@@ -2327,6 +2447,7 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
       applies to a base-built tree too.
     - qwen4_exp: prepare_runtime (idempotent; load_vlm_model may have run
       it already on the VLM path).
+    - inkling2: the same-input projection fusion.
     - gemma4 family: nothing to arm. Dense-head verify is categorically
       inapplicable (head tied to the quantized embedding, no lm_head; the
       q6_k head already runs kq's fast verify path) and the qwen verify
@@ -2345,6 +2466,14 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
         log(f"[patch] qwen4_exp: fused GDN decode on {counts['gdn_fused']} "
             f"layers, verify on {counts['gdn_fused_verify']}, b/a cat on "
             f"{counts['gdn_ba_cat']}")
+    elif mt == "inkling2":
+        # The text MTP load skips install_view_rebinds; idempotent after
+        # the VLM load ran it.
+        from gmlx.load.loader import install_row_fusion
+
+        n = install_row_fusion(model, mt)
+        if n:
+            log(f"[install] gemv row fusion on {n} projection groups")
 
 
 @loadlog.seeds
