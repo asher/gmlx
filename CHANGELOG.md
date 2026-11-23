@@ -29,6 +29,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file was not found. It now says that gmlx pulls `.gguf` files only.
 - With the prompt cache off, a model with a drafter read a repeated prompt
   again in full. The repeat now reuses all but the prompt's last token.
+- `gmlx sync-models --add-companions` and discover scans pair a gemma-4
+  assistant drafter that sits in its model's folder, which they skipped.
 
 ## [0.5.6] - 2026-11-19
 
