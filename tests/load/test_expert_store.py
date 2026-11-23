@@ -536,35 +536,41 @@ def test_a_drafter_whose_file_block_is_not_known_builds_no_store(
     assert es.held(m) == (0, set()) and not es._BLOCKS
 
 
-@pytest.mark.parametrize("target,off", [
-    ("blk.0.ffn_down_shexp.weight", True),
-    ("blk.0.ffn_down_exps.weight", True),
-    ("blk.0.attn_q.weight", False)])
-def test_an_adapter_on_a_block_s_experts_loads_without_the_store(
-        monkeypatch, tmp_path, target, off):
-    """A serve or CLI load with an adapter that takes a block's experts or
-    shared expert builds no store: the install would give it up after the
-    build's load time. An adapter elsewhere leaves the store on."""
+def _adapter(tmp_path, *targets):
     import gguf
 
-    import gmlx.commands.cli as cli
-    import gmlx.serve.bridge_vlm as bridge
-
-    path = str(tmp_path / "adapter.gguf")
+    path = str(tmp_path / f"adapter{len(list(tmp_path.iterdir()))}.gguf")
     w = gguf.GGUFWriter(path, "qwen4exp")
-    for suffix in (".lora_a", ".lora_b"):
-        w.add_tensor(target + suffix, np.zeros((4, 8), np.float32))
+    for target in targets:
+        for suffix in (".lora_a", ".lora_b"):
+            w.add_tensor(target + suffix, np.zeros((4, 8), np.float32))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
+    return path
+
+
+@pytest.mark.parametrize("target,blocks", [
+    ("blk.7.ffn_down_shexp.weight", {7}),
+    ("blk.7.ffn_down_exps.weight", {7}),
+    ("blk.7.attn_q.weight", set())])
+def test_a_serve_or_cli_adapter_names_the_blocks_it_takes(
+        monkeypatch, tmp_path, target, blocks):
+    """A serve or CLI load runs with the blocks whose experts or shared
+    expert its adapter takes, read from the adapter header before the
+    load: those build no store."""
+    import gmlx.commands.cli as cli
+    import gmlx.serve.bridge_vlm as bridge
+
+    path = _adapter(tmp_path, target)
     seen = []
 
     class _Loaded(Exception):
         pass
 
     def load_model(*a, **k):
-        seen.append(es.store_mode("qwen4_exp"))
+        seen.append(set(es._SKIP.get()))
         raise _Loaded
 
     monkeypatch.setattr(bridge, "load_model", load_model)
@@ -572,9 +578,31 @@ def test_an_adapter_on_a_block_s_experts_loads_without_the_store(
         bridge.load_serveable_model("base.gguf", adapter_gguf=path)
     args = SimpleNamespace(adapter=[(path, 1.0)], gguf="base.gguf")
     with cli._check_cli_adapter(args):
-        seen.append(es.store_mode("qwen4_exp"))
-    want = None if off else ("full", 0)
-    assert seen == [want, want] and es.store_mode("qwen4_exp") == ("full", 0)
+        seen.append(set(es._SKIP.get()))
+    assert seen == [blocks, blocks] and not es._SKIP.get()
+
+
+def test_an_adapter_keeps_the_store_on_the_blocks_it_does_not_take(
+        monkeypatch, tmp_path):
+    """An adapter on the last block's experts leaves the store on the
+    others; one that takes every block turns the store off for the load."""
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    lines = []
+    m = _model()
+    with es.adapter_scope(_adapter(tmp_path, "blk.1.ffn_up_exps.weight")):
+        assert es.build_at_load(m, log=lines.append) == 1
+    assert m.layers[0].__dict__.get("_kq_store_only")
+    assert m.layers[1].__dict__.get("_kq_expert_store") is None
+    assert any("skipped on 1 blocks: an adapter" in s for s in lines)
+    mx.eval(m(_x(3)))
+    lines.clear()
+    m = _model(seed=3)
+    both = _adapter(tmp_path, "blk.0.ffn_gate_shexp.weight",
+                    "blk.1.ffn_down_exps.weight")
+    with es.adapter_scope(both):
+        assert es.build_at_load(m, log=lines.append) == 0
+    assert es.held(m) == (0, set())
+    assert any("off for this load: an adapter" in s for s in lines)
 
 
 def test_the_drafter_loaders_run_in_the_drafter_scope(monkeypatch):
@@ -619,10 +647,19 @@ def test_a_load_that_streams_its_experts_builds_no_store(
 
 def test_a_training_or_cpu_load_builds_no_store(monkeypatch):
     monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    lines = []
     with es.off("training"):
         m = _model()
-        assert es.build_at_load(m, log=lambda s: None) == 0
+        assert es.build_at_load(m, log=lines.append) == 0
+        assert es.build_at_load(m, log=lines.append) == 0
     assert not es._BLOCKS and es.held(m) == (0, set())
+    # Said once per scope, and only where the store would be on.
+    assert lines == ["[expert-store] off for this load: training"]
+    monkeypatch.delenv("GMLX_MOE_EXPERT_STORE")
+    with es.off("training"):
+        assert es.build_at_load(m, log=lines.append) == 0
+    assert len(lines) == 1
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
     m = _model()
     mx.set_default_device(mx.cpu)
     try:

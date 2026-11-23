@@ -31,11 +31,12 @@ GLU is the faster one on M5 Max); other widths keep the in-place kernels.
 GMLX_MOE_EXPERT_STORE_BLOCKS=N builds the stores of the first N blocks only.
 A block whose codecs have no store format, a block with a LoRA slot on,
 output scales, streamed experts or a shared expert that leaves the fold at
-some width keeps the in-place kernels. A load inside ``off`` (training, a
-streamed teacher, an adapter on the experts or shared expert of a block),
-one that streams its experts, runs on the CPU device or is sharded builds
-no store, nor does a drafter whose loader does not give its block in the
-file.
+some width keeps the in-place kernels, as does a block whose experts or
+shared expert an adapter of the load takes (``adapter_scope``). A load
+inside ``off`` (training, a streamed teacher), one that streams its
+experts, runs on the CPU device or is sharded builds no store, nor does a
+drafter whose loader does not give its block in the file, nor a load whose
+adapter takes every block.
 
 A full or down store is built at load, one block at a time, before anything reads
 or wires the mapped stacks: each stack is read from the file past the page
@@ -101,41 +102,64 @@ _OFF: contextvars.ContextVar = contextvars.ContextVar(
     "gmlx_expert_store_off", default=None)
 
 
+class _Off:
+    __slots__ = ("reason", "said")
+
+    def __init__(self, reason: str):
+        self.reason, self.said = reason, False
+
+
 @contextlib.contextmanager
 def off(reason: str):
     """No store for the loads inside: their blocks keep the mapped expert
     stacks, for a mode the store cannot serve (training, streamed
-    experts). ``reason`` says which."""
-    tok = _OFF.set(reason)
+    experts). ``reason`` says which; the first load inside that would
+    build a store prints it."""
+    tok = _OFF.set(_Off(reason))
     try:
         yield
     finally:
         _OFF.reset(tok)
 
 
+_SKIP: contextvars.ContextVar = contextvars.ContextVar(
+    "gmlx_expert_store_skip", default=frozenset())
+
 # An adapter tensor on an MoE block's experts or shared expert.
 _ON_STORE_BLOCK = re.compile(
-    r"^blk\.\d+\.ffn_(?:gate|up|down|gate_up)_(?:exps|shexp)\.")
+    r"^blk\.(\d+)\.ffn_(?:gate|up|down|gate_up)_(?:exps|shexp)\.")
+
+
+@contextlib.contextmanager
+def _skipping(blocks: frozenset):
+    tok = _SKIP.set(_SKIP.get() | blocks)
+    try:
+        yield
+    finally:
+        _SKIP.reset(tok)
 
 
 def adapter_scope(adapter_paths):
-    """``off`` for a load that an adapter of ``adapter_paths`` (one path
-    or several) attaches to an MoE block's experts or shared expert: the
-    install gives that block's store up, so a build first would be load
-    time for nothing. Read from the adapter headers; a null context when
+    """For a load that an adapter of ``adapter_paths`` (one path or
+    several) attaches to: the GGUF blocks whose experts or shared expert
+    it takes build no store, since the install would give it up after the
+    build's load time. Read from the adapter headers; a null context when
     no adapter takes such a target."""
     from .headerscan import scan_gguf
 
     paths = ((adapter_paths,) if isinstance(adapter_paths, str)
              else tuple(adapter_paths or ()))
+    blocks: set = set()
     for path in paths:
         try:
             names = [t.name for t in scan_gguf(path).tensors]
         except Exception:
             continue                       # the load reports the file
-        if any(_ON_STORE_BLOCK.match(n) for n in names):
-            return off("an adapter on its experts")
-    return contextlib.nullcontext()
+        for name in names:
+            m = _ON_STORE_BLOCK.match(name)
+            if m:
+                blocks.add(int(m.group(1)))
+    return _skipping(frozenset(blocks)) if blocks else contextlib.nullcontext()
 
 
 _DRAFTER: contextvars.ContextVar = contextvars.ContextVar(
@@ -160,6 +184,10 @@ def store_mode(model_type=None):
     Inside ``off``, None."""
     if _OFF.get() is not None:
         return None
+    return _env_mode(model_type)
+
+
+def _env_mode(model_type=None):
     raw = os.environ.get("GMLX_MOE_EXPERT_STORE")
     if raw is None:
         return ("full", 0) if model_type in _DEFAULT_FULL else None
@@ -661,7 +689,8 @@ def stored_file_ranges(paths) -> dict:
         n = 0
         for li in sorted(layers):
             rs = layers[li]
-            if sorted(r[3] for r in rs) != ["down", "gate", "up"]:
+            if (sorted(r[3] for r in rs) != ["down", "gate", "up"]
+                    or li in _SKIP.get()):
                 continue
             if mode[0] == "down":
                 rs = [r for r in rs if r[3] == "down"]
@@ -755,13 +784,19 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
     not match, the pack reads the mapping. Returns the blocks built."""
     # Ids of a past load's arrays may belong to live arrays by now.
     _GONE.clear()
+    # Printed like the [stream] lines: the line says how the experts are held.
+    say = log or print
+    scope = _OFF.get()
+    if scope is not None:
+        if not scope.said and _env_mode(model_type_of(model)) is not None:
+            scope.said = True
+            say(f"[expert-store] off for this load: {scope.reason}")
+        return 0
     mode = store_mode(model_type_of(model))
     if mode is None or mode[0] not in ("full", "down") or not _BLOCKS:
         return 0
     kind = mode[0]
     kinds = ("gate", "up", "down") if kind == "full" else ("down",)
-    # Printed like the [stream] lines: the line says how the experts are held.
-    say = log or print
     mine = {id(m) for _, m in model.named_modules()}
     todo = [b for b in (r() for r in _BLOCKS)
             if b is not None and id(b) in mine
@@ -783,8 +818,24 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
             "budget and streams its experts from the file")
         _forget(todo)
         return 0
+    adapted: set = set()
+    if _SKIP.get():
+        elig = [b for b in todo if _eligible(b, kind)]
+        adapted = {id(b) for b in elig
+                   if _blk(model, _layer_index(names.get(id(b), "")))
+                   in _SKIP.get()}
+        if elig and len(adapted) == len(elig):
+            say("[expert-store] off for this load: an adapter is attached "
+                "to the experts of every block")
+            _forget(todo)
+            return 0
+        if adapted:
+            say(f"[expert-store] skipped on {len(adapted)} blocks: an "
+                "adapter is attached to them; their experts are read in "
+                "place from the file")
     n_blocks = env_int("GMLX_MOE_EXPERT_STORE_BLOCKS", 0)
-    warm_kernels([b for b in todo if _eligible(b, kind)], _act_dtypes(model),
+    warm_kernels([b for b in todo if id(b) not in adapted
+                  and _eligible(b, kind)], _act_dtypes(model),
                  log=say, kind=kind)
     t0 = time.perf_counter()
     held = n = skipped = mapped = 0
@@ -802,6 +853,8 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
                 "is packed from the mapping")
     try:
         for b in todo:
+            if id(b) in adapted:
+                continue
             if not _eligible(b, kind):
                 skipped += 1
                 continue

@@ -108,7 +108,7 @@ is already running does not see a variable you export later.
 | `GMLX_MOE_EXPERT_STORE=0` | Keep a Flash-Next load's routed experts as zero-copy views of the GGUF, not in the kq store layout. Other models keep the views by default. |
 | `GMLX_MOE_EXPERT_STORE=full` | Hold the routed experts of every fused MoE block in the kq store layout, on any model. |
 | `GMLX_MOE_EXPERT_STORE`, load | A store load reads each stack from the file past the page cache and never wires the mapped copy. Outputs differ from the views in rounding. |
-| `GMLX_MOE_EXPERT_STORE`, limits | Training, a CPU device, a sharded or over-budget load, streamed experts and a load-time adapter on a block's experts build no store. A later one gives it up. |
+| `GMLX_MOE_EXPERT_STORE`, limits | Training, a CPU device, a sharded or over-budget load and streamed experts build no store; nor do blocks whose experts or shared expert an adapter takes. |
 | `GMLX_MOE_EXPERT_STORE=down` | Hold only the down stacks in the store. Gate and up stay mapped and run the in-place kernels with their bits. Built and limited as `full`. |
 | `GMLX_MOE_EXPERT_STORE_WIDE_ROWS=160` | Full store: rows of a forward from which the block runs its wide form on the store. 0 keeps the tile kernels at every width. |
 | `GMLX_MOE_WIDE_COMBINE=0` | Full store, wide form: unsort the expert rows, weigh them and sum them as three ops, not in one kernel. Output is bit-identical. |
