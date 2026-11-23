@@ -510,12 +510,49 @@ def test_a_drafter_reads_and_maps_back_its_own_block(monkeypatch, tmp_path):
     raw = [np.array(a) for a in _stacks(m)]
     object.__setattr__(m, "_kq_store_blk_base", 2)
     path = _stack_gguf(tmp_path, m, base=2, before=target)
-    assert es.build_at_load(m, paths=[path], log=lambda s: None) == 2
+    with es.drafter_load():
+        assert es.build_at_load(m, paths=[path], log=lambda s: None) == 2
     assert es.STATS["mapped"] == 0
     assert es.release(m, "this load streams its experts",
                       log=lambda s: None) == 2
     for a, r in zip(_stacks(m), raw, strict=True):
         assert np.array_equal(np.array(a), r)
+
+
+def test_a_drafter_whose_file_block_is_not_known_builds_no_store(
+        monkeypatch, tmp_path):
+    """A drafter loader that does not give its layers' block in a file it
+    shares with the target builds no store: its module path names the
+    target's blocks, which the store would read and a release map back."""
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    target = _model(seed=40)
+    es._BLOCKS.clear()
+    m = _model()
+    path = _stack_gguf(tmp_path, m, base=2, before=target)
+    lines = []
+    with es.drafter_load():
+        assert es.build_at_load(m, paths=[path], log=lines.append) == 0
+    assert any("drafter's blocks" in line for line in lines)
+    assert es.held(m) == (0, set()) and not es._BLOCKS
+
+
+def test_the_drafter_loaders_run_in_the_drafter_scope(monkeypatch):
+    import gmlx.spec.mtp_load as ml
+
+    seen = []
+
+    class _Config(dict):
+        def get(self, *a):
+            seen.append(es._DRAFTER.get())
+            raise LookupError
+
+    monkeypatch.setattr(ml, "_assistant_kind", lambda *a: "dflash")
+    monkeypatch.setattr(ml, "_load_dflash_drafter",
+                        lambda *a, **k: seen.append(es._DRAFTER.get()))
+    ml._load_assistant_drafter("d.gguf", None, {}, zero_copy=True, log=print)
+    with pytest.raises(LookupError):
+        ml._load_mtp_drafter({}, {}, "qwen35moe", _Config(), None)
+    assert seen == [True, True] and not es._DRAFTER.get()
 
 
 @pytest.mark.parametrize("how", ["flag", "memory"])

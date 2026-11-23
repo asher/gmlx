@@ -33,7 +33,8 @@ A block whose codecs have no store format, a block with a LoRA slot on,
 output scales, streamed experts or a shared expert that leaves the fold at
 some width keeps the in-place kernels. A load inside ``off`` (training, a
 streamed teacher), one that streams its experts, runs on the CPU device or
-is sharded builds no store.
+is sharded builds no store, nor does a drafter whose loader does not give
+its block in the file.
 
 A full or down store is built at load, one block at a time, before anything reads
 or wires the mapped stacks: each stack is read from the file past the page
@@ -109,6 +110,22 @@ def off(reason: str):
         yield
     finally:
         _OFF.reset(tok)
+
+
+_DRAFTER: contextvars.ContextVar = contextvars.ContextVar(
+    "gmlx_expert_store_drafter", default=False)
+
+
+@contextlib.contextmanager
+def drafter_load():
+    """The loads inside are speculative drafters. A drafter's module path
+    does not give its block in the file, so only one whose loader sets
+    ``_kq_store_blk_base`` to that block gets a full or down store."""
+    tok = _DRAFTER.set(True)
+    try:
+        yield
+    finally:
+        _DRAFTER.reset(tok)
 
 
 def store_mode(model_type=None):
@@ -558,12 +575,13 @@ def _layer_index(name: str):
 def _blk(model, li):
     """The GGUF block number of ``model``'s layer ``li``. An MTP drafter
     sets ``_kq_store_blk_base``: its layer 0 is block num_hidden_layers of
-    a NextN sidecar, and None for a file with no block names."""
+    a NextN sidecar, and None for a file with no block names (no store,
+    see ``drafter_load``)."""
     base = getattr(model, "_kq_store_blk_base", 0)
     return None if li is None or base is None else li + base
 
 
-def _off_reason(paths=None, blocks=()) -> str:
+def _off_reason(paths=None, blocks=(), model=None) -> str:
     """Why a load of ``paths`` builds no full or down store, or empty."""
     from gmlx.device import cpu_default_device
     from gmlx.stream.table_stream import experts_stream_for_memory, latched
@@ -576,6 +594,11 @@ def _off_reason(paths=None, blocks=()) -> str:
         return "the default device is the CPU"
     if any(getattr(b, "sharding_group", None) is not None for b in blocks):
         return "the model is sharded"
+    if (model is not None and _DRAFTER.get()
+            and not isinstance(getattr(model, "_kq_store_blk_base", None), int)):
+        # Its module path would read, and a release map back, the
+        # target's blocks of a shared file.
+        return "the drafter's blocks in its file are not known"
     return ""
 
 
@@ -724,7 +747,7 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
     names = {id(m): name for name, m in model.named_modules()}
     todo.sort(key=lambda b: (_layer_index(names.get(id(b), "")) is None,
                              _layer_index(names.get(id(b), "")) or 0))
-    why = _off_reason(paths, todo)
+    why = _off_reason(paths, todo, model)
     if why:
         say(f"[expert-store] off for this load: {why}")
         _forget(todo)

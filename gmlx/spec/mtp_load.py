@@ -21,6 +21,7 @@ import mlx.nn as nn
 import mlx_kquant as kq
 
 import gmlx.load.loadlog as loadlog
+from gmlx.load import expert_store
 import gmlx.load.rope_scaling as rope_mod
 import gmlx.load.rope_swap as rope_swap
 from gmlx.load.dtypes import activation_dtype, activation_dtype_name
@@ -261,6 +262,8 @@ def _nemotron_verify_route(env=os.environ) -> None:
         env.setdefault("KQ_VERIFY_EXT", "0")
 
 
+# A drafter's expert store needs its block in the file (expert_store).
+@expert_store.drafter_load()
 def _load_mtp_drafter(
     arrays: dict,
     kquant_meta: dict,
@@ -2198,6 +2201,7 @@ def _resolve_companion_drafter(model_type: str | None, gguf_path: str, *, log):
     return path
 
 
+@expert_store.drafter_load()
 def _load_assistant_drafter(draft_gguf_path: str, model, text_config_dict: dict,
                             *, zero_copy: bool, log, target_gguf_path=None):
     """Kind-dispatched companion (``--draft-gguf``) loader, shared by the
