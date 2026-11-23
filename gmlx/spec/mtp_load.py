@@ -262,6 +262,12 @@ def _nemotron_verify_route(env=os.environ) -> None:
         env.setdefault("KQ_VERIFY_EXT", "0")
 
 
+def _stamp_store_block(drafter, first_block: int) -> None:
+    # An in-file head's layer 0 is the file's block num_hidden_layers: its
+    # expert store reads, and a release maps back, that block.
+    object.__setattr__(drafter, "_kq_store_blk_base", int(first_block))
+
+
 # A drafter's expert store needs its block in the file (expert_store).
 @expert_store.drafter_load()
 def _load_mtp_drafter(
@@ -383,6 +389,7 @@ def _load_mtp_drafter(
             n_head=n_head, n_head_kv=n_head_kv,
         )
         log(f"[mtp] drafter remap (block {first_mtp_block}): {d_stats}")
+        _stamp_store_block(drafter, first_mtp_block)
         _install_and_load(
             drafter,
             d_weights,
@@ -442,6 +449,7 @@ def _load_mtp_drafter(
     )
     log(f"[mtp] drafter remap (block {first_mtp_block}+): {d_stats}")
 
+    _stamp_store_block(drafter, first_mtp_block)
     _install_and_load(
         drafter,
         d_weights,

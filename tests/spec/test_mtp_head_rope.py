@@ -83,3 +83,16 @@ def test_mtp_head_rotates_as_its_target(monkeypatch, arch, meta, shapes):
         table, mag = _rope_state(r)
         assert mag == pytest.approx(want_mag)
         np.testing.assert_allclose(table, want_table, rtol=1e-6)
+
+
+def test_an_in_file_head_names_its_block_for_the_expert_store(monkeypatch):
+    """The head's layer 0 is the file's block num_hidden_layers: its expert
+    store reads, and a release maps back, that block and not the trunk's
+    first."""
+    meta = {**_q35_meta(), "qwen35.block_count": 5,
+            "qwen35.nextn_predict_layers": 1}
+    target, cfg = build_model(synthesize_config(meta, dict(_Q35_SHAPES)),
+                              mtp=True)
+    head = _head(monkeypatch, cfg, target, "qwen35")
+    assert head.__dict__.get("_kq_store_blk_base") == 4
+    assert cfg["num_hidden_layers"] == 4
