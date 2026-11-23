@@ -2968,10 +2968,12 @@ class PromptProcessingBatch:
 
 
 def _kq_clear_after_prompt(alone: bool) -> None:
-    """gmlx: the cache clear once a prompt batch has its first tokens. A
-    clear the last chunk left for the first decode round frees the same
-    buffers there, after the first token is out (gmlx.gen.deferred_clear).
-    A batch that joins running rounds has no first round of its own."""
+    """gmlx: the cache clear at the end of the step that ran a prompt
+    batch's generate(). A batch ``alone`` starts its own rounds: a clear
+    its last chunk left for the first decode round frees the same buffers
+    there, after the first token is out (gmlx.gen.deferred_clear). Any
+    other batch clears here, before its first tokens go out: it joins
+    running rounds or waits for another prefill."""
     from gmlx.gen import deferred_clear as _deferred_clear
 
     if not (alone and _deferred_clear.pending()):
