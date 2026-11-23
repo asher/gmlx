@@ -555,12 +555,14 @@ def _adapter(tmp_path, *targets):
     ("blk.7.ffn_down_shexp.weight", {7}),
     ("blk.7.ffn_down_exps.weight", {7}),
     ("blk.7.attn_q.weight", set())])
-def test_a_serve_or_cli_adapter_names_the_blocks_it_takes(
+def test_a_serve_cli_or_kld_adapter_names_the_blocks_it_takes(
         monkeypatch, tmp_path, target, blocks):
-    """A serve or CLI load runs with the blocks whose experts or shared
-    expert its adapter takes, read from the adapter header before the
-    load: those build no store."""
+    """A serve, CLI or kld load runs with the blocks whose experts or
+    shared expert its adapter takes, read from the adapter header before
+    the load: those build no store."""
     import gmlx.commands.cli as cli
+    import gmlx.commands.kld as kld
+    import gmlx.load.loader as loader
     import gmlx.serve.bridge_vlm as bridge
 
     path = _adapter(tmp_path, target)
@@ -574,12 +576,19 @@ def test_a_serve_or_cli_adapter_names_the_blocks_it_takes(
         raise _Loaded
 
     monkeypatch.setattr(bridge, "load_model", load_model)
+    monkeypatch.setattr(loader, "load_model", load_model)
+    # Not the stream latch and wired cap decision a real kld load makes.
+    monkeypatch.setattr(cli, "_ensure_stream_cb_caps", lambda ns: None)
     with pytest.raises(_Loaded):
         bridge.load_serveable_model("base.gguf", adapter_gguf=path)
     args = SimpleNamespace(adapter=[(path, 1.0)], gguf="base.gguf")
     with cli._check_cli_adapter(args):
         seen.append(set(es._SKIP.get()))
-    assert seen == [blocks, blocks] and not es._SKIP.get()
+    with pytest.raises(_Loaded):
+        kld._load(kld.Source("base.gguf"),
+                  kld.parse_args(["base.gguf", "--text", "t.txt"]),
+                  [(path, "")])
+    assert seen == [blocks] * 3 and not es._SKIP.get()
 
 
 def test_an_adapter_keeps_the_store_on_the_blocks_it_does_not_take(
@@ -603,6 +612,27 @@ def test_an_adapter_keeps_the_store_on_the_blocks_it_does_not_take(
         assert es.build_at_load(m, log=lines.append) == 0
     assert es.held(m) == (0, set())
     assert any("off for this load: an adapter" in s for s in lines)
+
+
+def test_the_populate_reads_the_blocks_an_adapter_takes(monkeypatch, tmp_path):
+    """The page-cache populate leaves out the stacks the store reads past
+    the cache, and so keeps those of a block an adapter takes."""
+    from gmlx.load.headerscan import scan_gguf
+
+    monkeypatch.setenv("GMLX_MOE_EXPERT_STORE", "full")
+    path = _stack_gguf(tmp_path, _model())
+    scan = scan_gguf(path, array_limit=0)
+
+    def ranges(block):
+        return [(scan.data_offset + t.offset,
+                 scan.data_offset + t.offset + t.nbytes)
+                for t in scan.tensors if t.name.startswith(f"blk.{block}.")]
+
+    real = os.path.realpath(path)
+    assert es.stored_file_ranges([path]) == {
+        real: sorted(ranges(0) + ranges(1))}
+    with es.adapter_scope(_adapter(tmp_path, "blk.1.ffn_down_shexp.weight")):
+        assert es.stored_file_ranges([path]) == {real: sorted(ranges(0))}
 
 
 def test_the_drafter_loaders_run_in_the_drafter_scope(monkeypatch):
