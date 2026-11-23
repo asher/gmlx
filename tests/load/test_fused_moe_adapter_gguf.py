@@ -169,15 +169,15 @@ def _capture(monkeypatch, cls, width):
 
 
 def _fold_calls(monkeypatch):
-    """Record each call of the fold kernel."""
+    """Record the row count of each call of the fold kernel."""
     import mlx_kquant as kq
 
     seen = []
     real = kq.moe_glu_gather_shexp_kq
 
-    def spy(*a, **k):
-        seen.append(1)
-        return real(*a, **k)
+    def spy(x, *a, **k):
+        seen.append(x.size // x.shape[-1])
+        return real(x, *a, **k)
 
     monkeypatch.setattr(kq, "moe_glu_gather_shexp_kq", spy)
     return seen
@@ -217,9 +217,11 @@ def _fused_block_check(gguf, tmp_path, monkeypatch):
         assert len(adapted) == len(LAYERS)
         for b in blocks:
             assert (type(b), b.__dict__.get("_kq_shexp_fold", True)) == before[id(b)]
+        # Counted at the decode step: a prompt of up to kq_block_rows rows
+        # (qwen4exp) folds too.
         folds = _fold_calls(monkeypatch)
         assert np.array_equal(step(0), base)
-        n_off = len(folds)
+        n_off = folds.count(1)
         folds.clear()
 
         with monkeypatch.context() as m:
@@ -231,7 +233,7 @@ def _fused_block_check(gguf, tmp_path, monkeypatch):
                     and 1 not in b.__dict__.get("_kq_fold_skip_t", ())}
         print(f"[{arch}] {len(blocks)} fused blocks, {len(fold_ids)} fold")
         assert n_off == len(fold_ids)
-        assert len(folds) == n_off - sum(id(b) in fold_ids for b in adapted)
+        assert folds.count(1) == n_off - sum(id(b) in fold_ids for b in adapted)
         with monkeypatch.context() as m:
             m.setattr(modules, "_FUSED_MOE_BLOCK_ENABLED", False)
             ref = step(1)
