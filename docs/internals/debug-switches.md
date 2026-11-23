@@ -53,7 +53,7 @@ is already running does not see a variable you export later.
 | `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step, with the same output. `auto` derives X from round costs. |
 | `GMLX_GDN_REPLAY=0` | Store the recurrent state after each verify position instead of records that the next step replays. Output is bit-identical. |
-| `GMLX_GDN_VERIFY_V2` | `0` runs a Flash-Next verify's gated-delta layers as two kernels, `1` forces the one-kernel form. Output is bit-identical. |
+| `GMLX_GDN_VERIFY_V2` | `0` runs a Flash-Next verify's gated-delta layers as two kernels, `1` as one. Default `1` from M3 on, `0` on M1 and M2. Same bits. |
 | `GMLX_GDN_STAGED_SCAN=0` | Run a Flash-Next prefill's gated-delta scan in the stock kernel, not the one that stages 16 tokens at a time. Output is bit-identical. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
 | `GMLX_SPEC_ONE_STREAM=0` | Leave the drafter of a speculative round on the thread's default GPU stream instead of the verify's stream. Output is the same either way. |
@@ -89,8 +89,8 @@ is already running does not see a variable you export later.
 | `GMLX_SPEC_STORE_IDLE_MS=N` | Idle time with no request on its way before a held prompt cache store runs (5). |
 | `GMLX_DFLASH_COUNTED_SHORT=0` | A ring shorter than the window takes the plain draft, not the counted one with its dead rows masked. The two differ in rounding only. |
 | `GMLX_DFLASH_RING_SLACK=N` | Spare rows of the DFlash ring past its window (512, at least 16): more rows, fewer compactions, which a commit ahead cannot take back. |
-| `GMLX_SPEC_DEFER_CUT=0` | A DFlash 2 drafter cuts its draft rows before it returns, not while the GPU runs the draft. Same output. |
-| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft at the first row whose proposal mass is under P (0 to 1). Default 0.5 for Flash-Next, `0` never cuts. |
+| `GMLX_SPEC_DEFER_CUT=0` | A DFlash 2 drafter cuts its draft rows before it returns. Flash-Next then verifies the cut rows only, so output differs in rounding. |
+| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft where the product of the selector's untempered pick probabilities falls under P. The first draft stays. Default 0.5, `0` off. |
 | `GMLX_DFLASH_RING_IN_PLACE=0` | DFlash draft attention copies the ring buffer per layer, not reading it in place. |
 | `GMLX_DFLASH_QMM_MULTI=0` | Run each DFlash draft projection that shares an input (q/k/v, gate/up) as its own dispatch, not one per codec. |
 | `GMLX_DFLASH_WALK_KERNEL=0` | Run the DFlash 2 selector walk (picks, proposal rows, row cut) as an op chain, not one kernel. |
@@ -108,7 +108,7 @@ is already running does not see a variable you export later.
 | `GMLX_MOE_EXPERT_STORE=0` | Keep a Flash-Next load's routed experts as zero-copy views of the GGUF, not in the kq store layout. Other models keep the views by default. |
 | `GMLX_MOE_EXPERT_STORE=full` | Hold the routed experts of every fused MoE block in the kq store layout, on any model. |
 | `GMLX_MOE_EXPERT_STORE`, load | A store load reads each stack from the file past the page cache and never wires the mapped copy. Outputs differ from the views in rounding. |
-| `GMLX_MOE_EXPERT_STORE`, limits | A load over the wired budget builds no store. Streamed experts, or an adapter on an expert stack, give the store up and read the experts in place. |
+| `GMLX_MOE_EXPERT_STORE`, limits | Training, a CPU device, a sharded or over-budget load and streamed experts build no store. An adapter on a block's experts or shared expert gives it up. |
 | `GMLX_MOE_EXPERT_STORE=down` | Hold only the down stacks in the store. Gate and up stay mapped and run the in-place kernels with their bits. Built and limited as `full`. |
 | `GMLX_MOE_EXPERT_STORE_WIDE_ROWS=160` | Full store: rows of a forward from which the block runs its wide form on the store. 0 keeps the tile kernels at every width. |
 | `GMLX_MOE_WIDE_COMBINE=0` | Full store, wide form: unsort the expert rows, weigh them and sum them as three ops, not in one kernel. Output is bit-identical. |
