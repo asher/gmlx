@@ -32,9 +32,10 @@ GMLX_MOE_EXPERT_STORE_BLOCKS=N builds the stores of the first N blocks only.
 A block whose codecs have no store format, a block with a LoRA slot on,
 output scales, streamed experts or a shared expert that leaves the fold at
 some width keeps the in-place kernels. A load inside ``off`` (training, a
-streamed teacher), one that streams its experts, runs on the CPU device or
-is sharded builds no store, nor does a drafter whose loader does not give
-its block in the file.
+streamed teacher, an adapter on the experts or shared expert of a block),
+one that streams its experts, runs on the CPU device or is sharded builds
+no store, nor does a drafter whose loader does not give its block in the
+file.
 
 A full or down store is built at load, one block at a time, before anything reads
 or wires the mapped stacks: each stack is read from the file past the page
@@ -110,6 +111,31 @@ def off(reason: str):
         yield
     finally:
         _OFF.reset(tok)
+
+
+# An adapter tensor on an MoE block's experts or shared expert.
+_ON_STORE_BLOCK = re.compile(
+    r"^blk\.\d+\.ffn_(?:gate|up|down|gate_up)_(?:exps|shexp)\.")
+
+
+def adapter_scope(adapter_paths):
+    """``off`` for a load that an adapter of ``adapter_paths`` (one path
+    or several) attaches to an MoE block's experts or shared expert: the
+    install gives that block's store up, so a build first would be load
+    time for nothing. Read from the adapter headers; a null context when
+    no adapter takes such a target."""
+    from .headerscan import scan_gguf
+
+    paths = ((adapter_paths,) if isinstance(adapter_paths, str)
+             else tuple(adapter_paths or ()))
+    for path in paths:
+        try:
+            names = [t.name for t in scan_gguf(path).tensors]
+        except Exception:
+            continue                       # the load reports the file
+        if any(_ON_STORE_BLOCK.match(n) for n in names):
+            return off("an adapter on its experts")
+    return contextlib.nullcontext()
 
 
 _DRAFTER: contextvars.ContextVar = contextvars.ContextVar(
@@ -831,8 +857,9 @@ def build_at_load(model, *, log=None, drop=(), paths=None) -> int:
            if waited >= 0.05 else "")
         + (f"; {dropped / 2**30:.2f} GiB of their file ranges dropped "
            f"from the page cache" if dropped else "")
-        + (f"; {skipped} blocks keep their mapped experts (no store "
-           f"format for their codecs)" if skipped else ""))
+        + (f"; {skipped} blocks keep their mapped experts (a codec with "
+           f"no store format, a LoRA slot or a fold that turns off)"
+           if skipped else ""))
     return n
 
 

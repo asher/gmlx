@@ -536,6 +536,47 @@ def test_a_drafter_whose_file_block_is_not_known_builds_no_store(
     assert es.held(m) == (0, set()) and not es._BLOCKS
 
 
+@pytest.mark.parametrize("target,off", [
+    ("blk.0.ffn_down_shexp.weight", True),
+    ("blk.0.ffn_down_exps.weight", True),
+    ("blk.0.attn_q.weight", False)])
+def test_an_adapter_on_a_block_s_experts_loads_without_the_store(
+        monkeypatch, tmp_path, target, off):
+    """A serve or CLI load with an adapter that takes a block's experts or
+    shared expert builds no store: the install would give it up after the
+    build's load time. An adapter elsewhere leaves the store on."""
+    import gguf
+
+    import gmlx.commands.cli as cli
+    import gmlx.serve.bridge_vlm as bridge
+
+    path = str(tmp_path / "adapter.gguf")
+    w = gguf.GGUFWriter(path, "qwen4exp")
+    for suffix in (".lora_a", ".lora_b"):
+        w.add_tensor(target + suffix, np.zeros((4, 8), np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    seen = []
+
+    class _Loaded(Exception):
+        pass
+
+    def load_model(*a, **k):
+        seen.append(es.store_mode("qwen4_exp"))
+        raise _Loaded
+
+    monkeypatch.setattr(bridge, "load_model", load_model)
+    with pytest.raises(_Loaded):
+        bridge.load_serveable_model("base.gguf", adapter_gguf=path)
+    args = SimpleNamespace(adapter=[(path, 1.0)], gguf="base.gguf")
+    with cli._check_cli_adapter(args):
+        seen.append(es.store_mode("qwen4_exp"))
+    want = None if off else ("full", 0)
+    assert seen == [want, want] and es.store_mode("qwen4_exp") == ("full", 0)
+
+
 def test_the_drafter_loaders_run_in_the_drafter_scope(monkeypatch):
     import gmlx.spec.mtp_load as ml
 

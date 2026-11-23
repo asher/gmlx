@@ -3319,9 +3319,9 @@ def _backend_mtp_text(args, kv_kwargs) -> _ChatBackend:
                                    _cli_adapter_hook)
     from gmlx.spec.mtp_load import load_mtp_model
 
-    _check_cli_adapter(args)
+    scope = _check_cli_adapter(args)
     b = _ChatBackend()
-    with loadlog.load_ui(args.verbose, args.gguf):
+    with loadlog.load_ui(args.verbose, args.gguf), scope:
         b.model, b.drafter, b.config, b.tok = load_mtp_model(
             args.gguf,
             arch=args.arch,
@@ -3420,20 +3420,22 @@ def _backend_plain_text(args, kv_kwargs) -> _ChatBackend:
 
     from gmlx.commands.cli import _check_cli_adapter
 
-    _check_cli_adapter(args)
+    scope = _check_cli_adapter(args)
     b = _ChatBackend()
 
     def _load_text_model():
-        return load_model(
-            args.gguf,
-            arch=args.arch,
-            hf_source=args.hf_source,
-            chat_template=args.chat_template,
-            no_remap=args.no_remap,
-            zero_copy=not args.no_zero_copy,
-            rope_override=rope_override_from_args(args),
-            verbose=args.verbose,
-        )
+        # Entered on the thread that loads (the background load's own).
+        with scope:
+            return load_model(
+                args.gguf,
+                arch=args.arch,
+                hf_source=args.hf_source,
+                chat_template=args.chat_template,
+                no_remap=args.no_remap,
+                zero_copy=not args.no_zero_copy,
+                rope_override=rope_override_from_args(args),
+                verbose=args.verbose,
+            )
 
     kv_policy = None        # set at the load join (kv-bits policy arm)
     kvarn_cfg = None        # set at the load join (kvarn scheme accepted)

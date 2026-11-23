@@ -46,6 +46,7 @@ sequential one.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -54,7 +55,7 @@ import threading
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from gmlx._vendor.mlx_vlm import tokenizer_utils as _mlxvlm_tok
 from gmlx.models.vlm_text_only import Model as TextOnlyModel
@@ -646,6 +647,26 @@ def _install_stream_placement(
         install_moe_layer_shed(text_model, moe_layer_shed)
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _adapter_store_scoped(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Run ``fn`` with no expert store when an adapter of its
+    ``adapter_gguf`` takes the experts or shared expert of a block: the
+    install gives that store up, so a build first would be load time for
+    nothing (``expert_store.adapter_scope``)."""
+    @functools.wraps(fn)
+    def scoped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        from gmlx.load import expert_store
+
+        with expert_store.adapter_scope(kwargs.get("adapter_gguf")):
+            return fn(*args, **kwargs)
+
+    return scoped
+
+
+@_adapter_store_scoped
 @rope_scaling.scoped
 def load_serveable_model(
     gguf_path: str,
