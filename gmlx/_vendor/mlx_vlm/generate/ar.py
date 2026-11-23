@@ -3639,6 +3639,13 @@ class BatchGenerator:
             self._generation_batch.extend(gen_batch)
         self._kq_joining = None
 
+    def _kq_alone(self) -> bool:
+        """gmlx: the batch just prefilled starts its own rounds: none is
+        decoding and no request waits for its prefill. A waiting request
+        prefills next, and a first token sent ahead of that prefill would
+        wait it out before the second token."""
+        return len(self._generation_batch) == 0 and not self._unprocessed_sequences
+
     def _kq_first_now(self, alone) -> list:
         """gmlx: a speculative batch that starts its own rounds sends its
         first tokens from the step that prefilled it, not from the next
@@ -3763,8 +3770,7 @@ class BatchGenerator:
             self._prompt_time_counter += elapsed
             self._record_prompt_batch_time(self._prompt_batch, elapsed)
             prompt_responses = self._prompt_batch_progress(self._prompt_batch)
-            # gmlx: no batch is decoding, so this one starts its own rounds.
-            alone = len(self._generation_batch) == 0
+            alone = self._kq_alone()
             self._extend_generation_batch(gen_batch)
             self._prompt_batch = None
             generation_responses = [*generation_responses, *self._kq_first_now(alone)]
@@ -3814,7 +3820,7 @@ class BatchGenerator:
                     self._prompt_time_counter += elapsed
                     self._record_prompt_batch_time(self._prompt_batch, elapsed)
                     prompt_responses = self._prompt_batch_progress(self._prompt_batch)
-                    alone = len(self._generation_batch) == 0
+                    alone = self._kq_alone()
                     self._extend_generation_batch(gen_batch)
                     self._prompt_batch = None
                     generation_responses = [
@@ -3901,7 +3907,7 @@ class BatchGenerator:
                 self._prompt_time_counter += elapsed
                 self._record_prompt_batch_time(self._prompt_batch, elapsed)
                 prompt_responses = self._prompt_batch_progress(self._prompt_batch)
-                alone = len(self._generation_batch) == 0
+                alone = self._kq_alone()
                 self._extend_generation_batch(gen_batch)
                 self._prompt_batch = None
                 generation_responses = [

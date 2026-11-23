@@ -667,12 +667,15 @@ def test_a_command_buffer_failure_drops_a_speculative_batch(monkeypatch):
     assert snapshot._RETIRE_BLOCKED[0] == 0
 
 
-@pytest.mark.parametrize("lever, sent", [("0", []), ("1", [(0, 5)])])
+@pytest.mark.parametrize("lever, waiting, sent", [
+    ("0", False, []), ("1", False, [(0, 5)]), ("1", True, [])])
 def test_a_batch_that_starts_its_own_rounds_sends_its_first_token_at_once(
-        monkeypatch, lever, sent):
+        monkeypatch, lever, waiting, sent):
     # GMLX_SPEC_FIRST_IN_PREFILL_STEP: the step that runs generate() sends
     # the first token. Off: the next step sends it. The last token of a
     # request that finished in the tick's decode step goes out either way.
+    # With another request waiting for its prefill the next step sends it
+    # too: sent now, it would wait out that prefill before the second.
     from types import SimpleNamespace
 
     from gmlx._vendor.mlx_vlm.generate import ar
@@ -684,6 +687,7 @@ def test_a_batch_that_starts_its_own_rounds_sends_its_first_token_at_once(
     gen = object.__new__(ar.BatchGenerator)
     gen._wire_stack = None
     gen._generation_batch = []
+    gen._unprocessed_sequences = [(1, [2, 5, 31])] if waiting else []
     gen._prompt_batch = SimpleNamespace(
         uids=[0], needs_processing=lambda: False,
         generate=lambda *a, **kw: batch)

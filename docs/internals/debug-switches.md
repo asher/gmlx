@@ -68,7 +68,7 @@ is already running does not see a variable you export later.
 | `GMLX_SPEC_CLEAR_AFTER_SUBMIT=0` | Clear the allocator's cache at the end of each speculative prefill chunk, not after the next GPU submit. Same output. |
 | `GMLX_SPEC_LAST_IN_CHUNK` | `0` runs a speculative prompt's last token as a one-row forward after its last chunk, `1` puts it in the chunk on any target. Default: on for Flash-Next. |
 | `GMLX_SPEC_L0_AFTER_FIRST=0` | With the last token in the chunk: store a new prompt's speculative prompt cache entry before its first token goes out, not after. |
-| `GMLX_SPEC_FIRST_IN_PREFILL_STEP=0` | A speculative request with no other request decoding sends its first token from the step after the one that finished its prefill. |
+| `GMLX_SPEC_FIRST_IN_PREFILL_STEP=0` | A speculative request with no other request decoding or waiting sends its first token from the step after the one that finished its prefill. |
 | `GMLX_SPEC_CKPT_ASYNC=1` | A speculative prefill stores its checkpoint before the chunk's final wait and does not wait for the copies. Memory-only caches, Flash-Next layers. |
 | `GMLX_SERVE_FIRST_YIELD_US=N` | After a step that queued a request's first token, the worker waits N microseconds so the token reaches the client first (200). `0` turns it off. |
 | `GMLX_SPEC_DRAFT_EARLY=1` | Commit a B=1 speculative round and submit the next draft before its tokens go out. Same tokens; a stop inside a round is undone. |
