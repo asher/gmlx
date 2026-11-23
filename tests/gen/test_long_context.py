@@ -48,7 +48,7 @@ CANDIDATE_ARCHES = [
     "kimi-k3", "muse-glimmer", "muse-spark", "qwen4exp", "glm5-next", "glm5next", "hyv4",
     "hy_v4_flash",
     "k2-horizon", "beam", "flint", "ricursive", "graniteswitch",
-    "qwen3vl", "lfm3",
+    "qwen3vl", "lfm3", "inkling2", "inkling2_loop",
 ]
 
 # Per-arch extra flags for the llama.cpp reference run.

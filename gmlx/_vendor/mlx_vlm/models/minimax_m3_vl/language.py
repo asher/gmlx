@@ -285,6 +285,7 @@ _MINIMAX_M3_SPARSE_PREFILL_ONE_PASS_SOURCE = r"""
     threadgroup U sum_exp_scores[BN];
 
     int key_length = int(k_size[0]);
+    const int Q_LEN = int(queries_shape[2]);
     int query_idx = int(row_idx % Q_LEN);
     int batch_head_idx = int(row_idx / Q_LEN);
     int batch_idx = batch_head_idx / NUM_Q_HEADS;
@@ -493,10 +494,11 @@ def _minimax_m3_sparse_prefill_attention(
             scale_array,
             key_length_array,
         ],
+        # gmlx: the kernel reads the query length from queries_shape, so one
+        # compile serves every chunk length.
         template=[
             ("T", queries.dtype),
             ("D_SIZE", int(d_size)),
-            ("Q_LEN", int(query_length)),
             ("NUM_Q_HEADS", int(q_heads)),
             ("NUM_KV_HEADS", int(kv_heads)),
             ("GQA_FACTOR", int(q_heads // kv_heads)),

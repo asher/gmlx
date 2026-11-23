@@ -148,6 +148,7 @@ back.
 - Beam-1.0
 - Flint
 - Ripple-65B
+- Inkling 2, in the Unsloth and the mainline llama.cpp layouts
 
 Each family's output is checked against llama.cpp at 16k context. The
 [coverage table](https://asher.github.io/gmlx/arch-coverage.html) lists the

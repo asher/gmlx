@@ -344,6 +344,46 @@ def test_vlm_native_head_image_request_stays_plain_vlm(gguf, mmproj, vlm_mtp_stu
     assert vlm_mtp_stubs["vlm"] == 1 and vlm_mtp_stubs["mtp"] == 0
 
 
+@pytest.fixture
+def plain_image_family(monkeypatch):
+    """The target header names a family with plain image positions."""
+    import gmlx.load.discovery as discovery
+
+    monkeypatch.setattr(discovery, "header_meta",
+                        lambda *a, **k: {"arch": "inkling2"})
+    monkeypatch.setattr(cli, "unfit_request", lambda *a, **k: None)
+    seen = {}
+
+    def fake_image_prompt(model, processor, prompt, images):
+        seen["images"] = images
+        return [1, 2, 3], "rows"
+
+    monkeypatch.setattr(cli, "image_prompt", fake_image_prompt)
+    return seen
+
+
+def test_plain_position_image_with_draft_routes_to_mtp(
+        gguf, mmproj, draft, vlm_mtp_stubs, plain_image_family):
+    # Inkling 2 places image rows at plain positions: the drafted run
+    # prefills them as prompt rows.
+    rc = cli.main([gguf, "--mmproj", mmproj, "--draft-gguf", draft,
+                   "--image", "/p.png", "--prompt", "x",
+                   "--no-chat-template"])
+    assert rc == 0
+    assert vlm_mtp_stubs["mtp"] == 1 and vlm_mtp_stubs["vlm"] == 0
+    assert plain_image_family["images"] == ["/p.png"]
+    assert vlm_mtp_stubs["gen_kwargs"]["prompt_rows"] == "rows"
+
+
+def test_a_resized_image_stays_plain_vlm(gguf, mmproj, draft, vlm_mtp_stubs,
+                                         plain_image_family):
+    rc = cli.main([gguf, "--mmproj", mmproj, "--draft-gguf", draft,
+                   "--image", "/p.png", "--prompt", "x",
+                   "--resize-shape", "224"])
+    assert rc == 0
+    assert vlm_mtp_stubs["vlm"] == 1 and vlm_mtp_stubs["mtp"] == 0
+
+
 # _vlm_mtp_drafter_available precedence
 def test_drafter_available_native_head(gguf, mmproj, monkeypatch):
     monkeypatch.setattr(cli, "_has_native_mtp_head", lambda *a, **k: True)

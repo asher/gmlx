@@ -689,9 +689,11 @@ def test_a_pooling_model_keeps_groups_of_one(monkeypatch):
             self.prefill_batch_size = kwargs.get("prefill_batch_size", 8)
             self.completion_batch_size = kwargs.get("completion_batch_size")
 
+    # The L1 view copies its helpers from the real BatchGenerator, so bind
+    # it before the probe replaces the class.
+    engine._bind_l1_view()
     monkeypatch.setattr(ar, "BatchGenerator", _ProbeBG)
     engine._install_apc_manager_stash()
-    engine._bind_l1_view()
     pooling.install_pooled_prefill_batch_gate()
     monkeypatch.setattr(pooling, "model_has_pools", lambda m: True)
     hybrid = types.SimpleNamespace(make_cache=lambda: make_hybrid_cache(0))

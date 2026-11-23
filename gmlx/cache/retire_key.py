@@ -176,16 +176,16 @@ def truncated_thinking(text, pairs, prompt) -> bool:
 
 
 def header_split(text, prompt):
-    """``(reasoning, content)`` of a harmony (gpt-oss) or ATEM (Muse) reply,
-    else None. The stock splitter knows none of these markers and returns
-    the raw markup as content, which the model's own chat template rejects
-    once a client sends the reply back as history. ATEM writes no channel
+    """``(reasoning, content)`` of a harmony (gpt-oss), ATEM (Muse) or
+    Inkling reply, else None. The stock splitter knows none of these
+    markers and returns the raw markup as content, which the model's own
+    chat template rejects once a client sends the reply back as history. ATEM writes no channel
     marker: a ``prompt`` that ends mid-header and a header close in the
     reply mark it. Shared rule for the server's splitter and the retirement
     mirror, as in :func:`truncated_thinking`."""
     in_header = isinstance(prompt, str) and prompt.rstrip().endswith(
         "<|start|>assistant")
-    if not text or not ("<|channel|>" in text
+    if not text or not ("<|channel|>" in text or "<|message_model|>" in text
                         or (in_header and "<|message|>" in text)):
         return None
     # Gemma's lopsided "<|channel>thought" lacks the closing pipe, so this

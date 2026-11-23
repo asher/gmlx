@@ -55,7 +55,7 @@ from gmlx.load import arch_table, catalog, remote  # noqa: E402
 from gmlx.load.catalog import MEMORY_CLASSES, TIERS, Seed  # noqa: E402
 from gmlx.load.discovery import (_classify_meta, declared_base_ids,  # noqa: E402
                                  _drafter_kind, _looks_like_drafter,
-                                 _target_ids)
+                                 _target_ids, drafter_derived_bytes)
 from gmlx.load.config_synth import supported_arches, trained_context_cap  # noqa: E402
 from gmlx.load.gguf_meta import read_int, read_string  # noqa: E402
 from gmlx.gen.prefill_decay import transient_declaration  # noqa: E402
@@ -184,12 +184,16 @@ def reads_as_drafter(scan) -> bool:
             and not any(n.startswith("blk.0.") for n in names))
 
 
-def resolve_tier(groups: dict, tier: str, moe: bool) -> tuple:
+def resolve_tier(groups: dict, tier: str, moe: bool,
+                 override: str | None = None) -> tuple:
     """``(first shard path, quant, note)`` for a tier, or ``(None, None,
-    note)`` when the repo ships no file for it."""
+    note)`` when the repo ships no file for it. ``override`` is the quant
+    the entry names for the tier (``Seed.tier_quants``)."""
     quants = TIER_QUANTS[tier]
     if isinstance(quants, dict):
         quants = quants["moe" if moe else "dense"]
+    if override:
+        quants = (override,)
     for q in quants:
         for candidate in (q, "UD-" + q):
             first = file_for_quant(groups, candidate)
@@ -285,7 +289,10 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     chosen: list = []                 # (quant, tier, first shard path)
     if tiered:
         for tier in TIERS:
-            first, quant, note = resolve_tier(groups, tier, moe)
+            if tier in seed.skip_tiers:
+                continue
+            first, quant, note = resolve_tier(
+                groups, tier, moe, dict(seed.tier_quants).get(tier))
             if note:
                 notes.append(f"{seed.name}: {note}")
             if first is not None:
@@ -383,15 +390,19 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                 ("audio", "clip.has_audio_encoder"),
                 ("speech", "clip.has_gen_audio_encoder")) if mm.kv.get(key))
             if seed.mmproj_f16:
-                # The F16 twin a pull takes on M1 and M2: the same tensors,
-                # so the same size to within its header.
+                # The F16 twin a pull takes on M1 and M2: the same tensors.
+                # Sizes can differ, as a converter may keep a tensor in F32
+                # in one file only.
                 twin = files.get(seed.mmproj_f16)
                 if twin is None:
                     problems.append(f"{seed.name}: {seed.mmproj_f16} is not in the listing")
-                elif abs(twin - mmproj_bytes) > 1 << 20:
-                    problems.append(
-                        f"{seed.name}: {seed.mmproj_f16} is {twin} bytes and "
-                        f"{seed.mmproj} is {mmproj_bytes}")
+                else:
+                    tw = header(seed.repo, seed.mmproj_f16, revision, cache)
+                    if ({(t.name, tuple(t.shape)) for t in tw.tensors}
+                            != {(t.name, tuple(t.shape)) for t in mm.tensors}):
+                        problems.append(
+                            f"{seed.name}: {seed.mmproj_f16} and {seed.mmproj} "
+                            "hold different tensors")
     else:
         towers = [p for p in files if os.path.basename(p).lower().startswith("mmproj")
                   and p not in seed.ignored_files]
@@ -428,6 +439,9 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
                     problems.append(f"{seed.name}: drafter declares {sorted(declared)}, the "
                                     f"model answers to {sorted(targets)}; set cross_base")
             drafter = (kind, int(d_files[seed.drafter_file]))
+            derived = drafter_derived_bytes(d)
+            if derived:
+                drafter += (derived,)
     elif not native:
         for path in files:
             if not path.endswith(".gguf") or path in seed.ignored_files:

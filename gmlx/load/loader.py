@@ -230,6 +230,10 @@ def build_model(config_dict: dict, *, mtp: bool = False):
         import gmlx.models.qwen4_exp.model as qwen4_exp_model
 
         qwen4_exp_model.ensure_registered()
+    if mt == "inkling2":
+        import gmlx.models.inkling2.tools as inkling2_tools
+
+        inkling2_tools.ensure_registered()
     if mt in ("muse_glimmer", "muse_spark"):
         # Muse Spark calls tools in the same ATEM format.
         import gmlx.models.muse_glimmer.tools as muse_glimmer_tools
@@ -741,17 +745,24 @@ def _verify_zero_copy_views(model, no_alias, log) -> None:
 # VL containers that hold one as language_model.
 _ROW_FUSION_TYPES = ("deepseek_v4", "deepseek_v41",
                      "deepseek_v4_vl", "deepseek_v41_vl")
+_INKLING2_TYPES = ("inkling2", "inkling2_vl")
 
 
 def install_row_fusion(model, model_type: str | None) -> int:
-    """deepseek_v4.install_gemv_row_fusion on the text tower of a loaded
-    model, a VL container's language_model included. Returns the pairs
-    fused; 0 for any other model type."""
+    """The same-input projection fusion of deepseek_v4
+    (install_gemv_row_fusion) or inkling2 (install_row_fusion) on the text
+    tower of a loaded model, a VL container's language_model included.
+    Returns the groups fused; 0 for any other model type."""
+    text = getattr(model, "language_model", model)
+    if model_type in _INKLING2_TYPES:
+        from gmlx.models.inkling2.model import install_row_fusion as ink
+
+        return ink(text)
     if model_type not in _ROW_FUSION_TYPES:
         return 0
     from gmlx.models.deepseek_v4.model import install_gemv_row_fusion
 
-    return install_gemv_row_fusion(getattr(model, "language_model", model))
+    return install_gemv_row_fusion(text)
 
 
 def install_view_rebinds(model, model_type: str | None) -> tuple[dict | None, int]:
@@ -1057,6 +1068,18 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # ricursive: the value-residual logit is F32 on the wire, one per layer.
     # Kept in step with the model class's cast_predicate.
     "ricursive": (".vres_lambda",),
+    # inkling2: sigmoid top-8-of-128 routing with a selection bias, the
+    # depth-mix and message queries, the clip scales, the relative-bias
+    # tables, the convolution taps and the norms are F32 on the wire and
+    # used in float32. Kept in step with the model class's FP32_KEEP.
+    "inkling2": (".mlp.gate.weight", ".e_score_correction_bias",
+                 "_res_query", ".msg_query", ".q_clip", ".rel_clip",
+                 ".rel_bias", "_conv", ".loop.", "norm.weight"),
+    # inkling2_vl: the same set under language_model.*. The vision norms
+    # also match norm.weight; the tower runs in fp32, so that is harmless.
+    "inkling2_vl": (".mlp.gate.weight", ".e_score_correction_bias",
+                    "_res_query", ".msg_query", ".q_clip", ".rel_clip",
+                    ".rel_bias", "_conv", ".loop.", "norm.weight"),
     # nemotron_h: llama.cpp routes in fp32 (F32 wire router and selection
     # bias; Bolt picks top-9 of up to 496), and A_log feeds the fp32 scan.
     # Kept in step with the model class's cast_predicate.
@@ -1154,6 +1177,11 @@ _FP32_CAST_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # last ten blocks). Against llama.cpp's float32 tower, the worst image
     # token cosine is 0.40 for bfloat16 and 0.98 for float32.
     "minimax_m3_vision": ("vision_tower.",),
+    # inkling2: the loop controllers are float32 in the reference. The
+    # looped GGUF layout stores them BF16 and llama.cpp mainline F32; the
+    # cast makes both load the same values.
+    "inkling2": (".loop.",),
+    "inkling2_vl": (".loop.",),
 }
 
 # The same cast behind an environment switch that is off by default: model
@@ -2024,11 +2052,17 @@ def load_model(
     # Model-types in _FP32_KEEP_BY_MODEL_TYPE pin listed params to float32,
     # and those in dtypes.NO_FLOAT16_MODEL_TYPES run float32 over float16.
     fp32_keep = fp32_keep_for(config.get("model_type") or "")
+    fp32_cast = float_dtype_rules(config.get("model_type") or "")["fp32_cast"]
     act_dtype = activation_dtype(config.get("model_type"))
     act_name = activation_dtype_name(config.get("model_type"))
     n_cast = 0
     for k in list(loadable):
         v = loadable[k]
+        if (fp32_cast and k not in hf_kquant_meta
+                and v.dtype in (mx.float16, mx.bfloat16)
+                and any(s in k for s in fp32_cast)):
+            loadable[k] = v.astype(mx.float32)
+            continue
         if v.dtype in (mx.float32, mx.float16) and k not in hf_kquant_meta:
             if k.endswith((".out_scale", ".post_scale")) or (
                     fp32_keep and any(s in k for s in fp32_keep)):

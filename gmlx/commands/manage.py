@@ -653,7 +653,18 @@ def _resolve_to_file(ref: remote.Ref) -> remote.Ref:
     into). File refs (and non-hf refs) pass through untouched."""
     if ref.kind != "hf" or not ref.is_dir:
         return ref
-    entries = remote.hf_list_dir(ref.repo, ref.path_in_repo or "", ref.revision)
+    try:
+        entries = remote.hf_list_dir(ref.repo, ref.path_in_repo or "",
+                                     ref.revision)
+    except remote.RemoteError as e:
+        # A file with another extension is not a folder, so its listing
+        # fails. Name the real cause.
+        name = (ref.path_in_repo or "").rsplit("/", 1)[-1]
+        if "not found" in str(e) and "." in name.strip("."):
+            raise remote.RemoteError(
+                f"{name} is not a .gguf file: gmlx pull fetches .gguf files "
+                f"and folders of them ({e})") from None
+        raise
     where = f"{ref.repo}/{ref.path_in_repo}" if ref.path_in_repo else ref.repo
     ggufs = [p for p, typ, _ in entries if typ == "file" and p.endswith(".gguf")]
     if not ggufs:

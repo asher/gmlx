@@ -206,6 +206,14 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # NeoX RoPE on the sliding-window layers and NoPE on the full ones, and
     # a clamped SwiGLU. Model class owned by gmlx (no mlx-lm class).
     "ricursive": "ricursive",
+    # Thinking Machines Inkling 2: a looped MoE (a core of layers runs
+    # several passes with shared weights) with relative-position bias
+    # attention and sinks, short convolutions on K, V and both residual
+    # branches, block attention residuals, and situ experts. Two GGUF
+    # layouts: unsloth's looped one ('inkling2') and llama.cpp mainline
+    # ('inkling2_loop'). Model class owned by gmlx.
+    "inkling2": "inkling2",
+    "inkling2_loop": "inkling2",
     # Moonshot Kimi-K3 (2.8T-A50B): hybrid KDA (linear, per-channel decay) +
     # nope-only MLA layers from the per-layer head_count_kv schedule, latent
     # 896-expert sigmoid MoE behind down/up projections, situ activation,
@@ -2368,6 +2376,205 @@ def _synth_flint(meta, shapes, config: dict) -> None:
     config["norm_topk_prob"] = req(_read_bool, "expert_weights_norm")
     config["router_bias"] = _has_tensor(
         shapes, f"blk.{n_dense}.exp_probs_b.bias")
+
+
+# inkling2 (Thinking Machines Inkling 2, both GGUF layouts)
+
+def inkling2_loop_layer(visit: int, start: int, end: int, passes: int) -> int:
+    """The physical layer that loop visit ``visit`` runs, in execution
+    order: the prelude, ``passes`` runs of the core, then the coda."""
+    core = end - start
+    if visit < start:
+        return visit
+    if visit < start + passes * core:
+        return start + (visit - start) % core
+    return visit - (passes - 1) * core
+
+
+def _synth_inkling2(meta, shapes, config: dict) -> None:
+    """Synthesize an inkling2 config from an 'inkling2' or 'inkling2_loop'
+    GGUF.
+
+    The two layouts hold the same model. Unsloth's looped layout
+    ('inkling2') writes one block per layer visit in execution order
+    (``block_count`` and the per-layer arrays cover every visit) with keys
+    ``num_loops``, ``loop.core_start`` and ``loop.core_end``. llama.cpp
+    mainline ('inkling2_loop') writes the physical layers with
+    ``loop.count``, ``loop.start``, ``loop.end`` and ``loop.varying``. A
+    plain 'inkling2' file with no loop keys runs one pass. Refusals follow
+    llama.cpp's inkling2 and inkling2_loop loaders.
+    """
+    arch = _read_string(meta, "general.architecture")
+
+    def key(name):
+        return f"{arch}.{name}"
+
+    def req(read, name):
+        return _require(read(meta, key(name)), arch=arch, gguf_field=key(name))
+
+    blocks = req(_read_int, "block_count")
+    if arch == "inkling2_loop":
+        start = req(_read_int, "loop.start")
+        end = req(_read_int, "loop.end")
+        passes = req(_read_int, "loop.count")
+        varying = bool(_read_bool(meta, key("loop.varying")))
+        phys = blocks
+    else:
+        passes = _read_int(meta, key("num_loops")) or 1
+        varying = False
+        start = _read_int(meta, key("loop.core_start")) or 0
+        end = _read_int(meta, key("loop.core_end")) or 0
+        phys = blocks - (passes - 1) * (end - start) if passes > 1 else blocks
+    if varying:
+        raise NotImplementedError(
+            "inkling2: this GGUF has a variable loop count (loop.varying); "
+            "gmlx runs fixed-pass loops only.")
+    block_size = req(_read_int, "attn_res.block_size")
+    if passes > 1:
+        gate_rank = req(_read_int, "loop.gate_rank")
+        if (not gate_rank or not start or start >= end or end > phys
+                or start % block_size or end % block_size):
+            raise ValueError(
+                f"inkling2 synth: invalid loop core [{start}, {end}) with "
+                f"block size {block_size}, {passes} passes or gate rank "
+                f"{gate_rank} for {phys} layers")
+        config["loop"] = {"start": start, "end": end, "passes": passes,
+                          "gate_rank": gate_rank}
+        n_visits = phys + (passes - 1) * (end - start)
+        visits = [inkling2_loop_layer(v, start, end, passes)
+                  for v in range(n_visits)]
+    else:
+        config["loop"] = None
+        visits = list(range(phys))
+    config["num_hidden_layers"] = phys
+    config["layer_visits"] = visits
+    looped_layout = arch == "inkling2" and passes > 1
+
+    def per_layer(read, name):
+        """A per-layer array cut to the physical layers. The looped layout
+        stores it per visit; each visit must agree with its layer."""
+        values = req(read, name)
+        if looped_layout:
+            if len(values) != len(visits):
+                raise ValueError(
+                    f"inkling2 synth: {key(name)} has {len(values)} entries "
+                    f"for {len(visits)} layer visits")
+            out = [None] * phys
+            for v, p in enumerate(visits):
+                if out[p] is None:
+                    out[p] = values[v]
+                elif out[p] != values[v]:
+                    raise ValueError(
+                        f"inkling2 synth: {key(name)} differs between "
+                        f"visits of layer {p}")
+            return out
+        if len(values) != phys:
+            raise ValueError(
+                f"inkling2 synth: {key(name)} has {len(values)} entries for "
+                f"{phys} layers")
+        return list(values)
+
+    def uniform(values, name):
+        if len(set(values)) != 1:
+            raise NotImplementedError(
+                f"inkling2 synth: {key(name)} varies by layer "
+                f"({sorted(set(values))}); gmlx supports one value")
+        return values[0]
+
+    def scalar_or_layers(name):
+        values = req(_read_int_array, name)
+        if len(values) == 1:
+            return values[0]
+        return uniform(per_layer(_read_int_array, name), name)
+
+    n_heads = scalar_or_layers("attention.head_count")
+    n_kv = scalar_or_layers("attention.head_count_kv")
+    if not n_kv or n_heads % n_kv:
+        raise ValueError(
+            "inkling2: invalid attention or expert dimensions")
+    config["num_attention_heads"] = n_heads
+    config["num_key_value_heads"] = n_kv
+    head_dim = req(_read_int, "attention.key_length")
+    if _read_int(meta, key("attention.value_length")) not in (None, head_dim):
+        raise ValueError("inkling2: invalid attention or expert dimensions")
+    for name in ("attention.key_length_swa", "attention.value_length_swa"):
+        v = _read_int(meta, key(name))
+        if v is not None and v != head_dim:
+            raise NotImplementedError(
+                f"inkling2 synth: {key(name)} {v} differs from the full "
+                f"layers' {head_dim}")
+    config["head_dim"] = head_dim
+
+    swa = per_layer(_read_bool_array, "attention.sliding_window_pattern")
+    config["layer_types"] = ["sliding_attention" if s else "full_attention"
+                             for s in swa]
+    window = req(_read_int, "attention.sliding_window")
+    rel_len = req(_read_int, "attention.relative_length")
+    extent = req(_read_int, "attention.relative_extent")
+    l_cache = req(_read_int, "shortconv.l_cache")
+    floor = req(_read_int, "attention.log_scale_floor")
+    if (not rel_len or not extent or not window or not block_size
+            or not floor or l_cache < 2 or l_cache > 64):
+        raise ValueError(
+            "inkling2: invalid dimensions, vocabulary, or layer pattern")
+    config["sliding_window"] = window
+    config["rel_length"] = rel_len
+    config["rel_extent"] = extent
+    config["attn_res_block_size"] = block_size
+    config["conv_L_cache"] = l_cache
+    config["log_scale_floor"] = floor
+
+    def positive(value):
+        if value is None or not math.isfinite(value) or value <= 0:
+            raise ValueError(
+                "inkling2: normalization, clipping and scaling parameters "
+                "must be finite and positive")
+        return float(value)
+
+    def read_float(name):
+        return _read_float(meta, key(name))
+
+    config["rms_norm_eps"] = positive(
+        read_float("attention.layer_norm_rms_epsilon"))
+    config["qk_clip"] = positive(read_float("attention.qk_clip"))
+    config["rel_clip"] = positive(read_float("attention.relative_clip"))
+    config["situ_beta"] = positive(read_float("activation.situ_beta"))
+    config["situ_linear_beta"] = positive(
+        read_float("activation.situ_linear_beta"))
+    alpha = req(_read_float, "attention.log_scale_alpha")
+    if not math.isfinite(alpha) or alpha < 0:
+        raise ValueError("inkling2: invalid logarithmic scale")
+    config["log_scale_alpha"] = float(alpha)
+
+    padded = req(_read_int, "vocab_size")
+    unpadded = req(_read_int, "vocab_size_unpadded")
+    if not unpadded or unpadded > padded:
+        raise ValueError(
+            "inkling2: invalid dimensions, vocabulary, or layer pattern")
+    n_tokens = _array_len(meta, "tokenizer.ggml.tokens")
+    if n_tokens is not None and n_tokens != unpadded:
+        raise ValueError(
+            f"inkling2: tokenizer size {n_tokens} must equal the unpadded "
+            f"vocabulary size {unpadded}")
+    config["vocab_size"] = padded
+    config["unpadded_vocab_size"] = unpadded
+
+    n_experts = req(_read_int, "expert_count")
+    n_used = scalar_or_layers("expert_used_count")
+    ff_exp = scalar_or_layers("expert_feed_forward_length")
+    if not n_used or n_used > n_experts or not ff_exp:
+        raise ValueError(
+            "inkling2: invalid attention or expert dimensions")
+    config["num_experts"] = n_experts
+    config["num_experts_per_tok"] = n_used
+    config["moe_intermediate_size"] = ff_exp
+    config["expert_weights_scale"] = float(
+        read_float("expert_weights_scale") or 1.0)
+    config["use_gate_bias"] = _has_tensor(shapes, "blk.0.exp_probs_b.bias")
+    config["final_logit_softcapping"] = float(
+        read_float("final_logit_softcapping") or 0.0)
+    config["tie_word_embeddings"] = False
+    config.pop("rope_theta", None)
 
 
 # ricursive (Ricursive Ripple)
@@ -4807,6 +5014,8 @@ _SYNTH = {
     "flint": _synth_flint,
     "lfm3": _synth_lfm3,
     "ricursive": _synth_ricursive,
+    "inkling2": _synth_inkling2,
+    "inkling2_loop": _synth_inkling2,
     "graniteswitch": _synth_graniteswitch,
     "granitehybrid": _synth_granite_hybrid,
     "falcon-h1": _synth_falcon_h1,

@@ -78,7 +78,7 @@ _IN_PLACE_IMAGES = frozenset((
     "kimi_k25", "deepseek_v4_vl", "deepseek_v41_vl", "muse_glimmer",
     "muse_spark", "glm5_next", "mistral3", "pixtral", "nemotron_h_omni",
     "minicpmv4_6", "minicpmv4_7", "minimax_m3_vision", "lfm3_omni",
-    "lfm3_vl", "hy_v4_flash_vl",
+    "lfm3_vl", "hy_v4_flash_vl", "inkling2_vl",
 ))
 # The model types whose chat template renders a video item where the
 # content list holds it, and whose processor expands the video markers of
@@ -102,12 +102,14 @@ _TOOL_IMAGES = frozenset((
     "qwen3_5", "qwen3_5_moe", "kimi_k25", "muse_glimmer", "muse_spark",
     "glm5_next", "gemma4_unified", "nemotron_h_omni", "minicpmv4_6",
     "minicpmv4_7", "minimax_m3_vision", "lfm3_omni", "lfm3_vl",
+    "inkling2_vl",
 ))
 # The model types whose chat template raises on a JSON-string
 # ``tool_calls[*].function.arguments``.
 _DICT_TOOL_ARGUMENTS = frozenset(("muse_glimmer", "muse_spark", "k2_horizon",
                                   "beam", "flint", "ricursive", "lfm3",
-                                  "lfm3_omni", "lfm3_vl", "lfm3_audio"))
+                                  "lfm3_omni", "lfm3_vl", "lfm3_audio",
+                                  "inkling2", "inkling2_vl"))
 
 
 def _tool_images(message) -> int:

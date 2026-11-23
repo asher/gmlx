@@ -113,6 +113,7 @@ projector and architecture that it found. gmlx supports these families:
 | Nemotron 3.5 Transcribe | `pee` with `nemotron_h_moe` | NVIDIA-Nemotron-3.5-Transcribe-30B-A4B | It reads audio only, up to six clips and an hour in all. |
 | Muse Spark | `muse-glimmer` and `muse-spark-audio` with `muse-spark` | Muse-Spark-Open-816B-A42B | It reads images and audio. It is larger than RAM on most Macs, so it needs `--stream-experts`. |
 | Kimi K2.5 and K2.7 | `kimik25` with `deepseek2` | Kimi-K2.5, Kimi-K2.7-Code | It is larger than RAM on most Macs, so it needs `--stream-experts`. |
+| Inkling 2 | `inkling2v` with `inkling2` or `inkling2_loop` | Inkling-2-Mini | Each image becomes at most 4,096 tokens. |
 | Hy4-flash | `hy_v4_flash` with `hy_v4_flash` | Hy4-flash | No companion file is published yet. gmlx reads one in the layout of llama.cpp's `hy_v4_flash` projector. |
 | DeepSeek-V4-Flash-Vision-Exp | `deepseek4v` with `deepseek4` | The unsloth UD builds | |
 | DeepSeek-V4.1-Flash-Vision | `deepseek4-vision` or `deepseek41v` with `deepseek41` | The antirez encoder GGUF, the unsloth DeepSeek-V4.1-Flash-1017 companion | unsloth puts the companion above the quant folders, and a folder scan pairs it with each quant. `--mmproj` works too. |

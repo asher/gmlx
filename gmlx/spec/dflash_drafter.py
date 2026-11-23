@@ -125,6 +125,9 @@ class DFlashConfig:
     log_snr_range: Optional[tuple] = None
     # The anchor row proposes a token as well (llama.cpp's default).
     sample_from_anchor: bool = True
+    # Rows of the target's head and token tables when they pad past
+    # vocab_size (Inkling 2); None means vocab_size.
+    padded_vocab_size: Optional[int] = None
     # Per-head attention sinks in every draft layer (Nemotron drafters).
     attention_sinks: bool = False
     # Per layer, whether it rotates; empty means every layer does.

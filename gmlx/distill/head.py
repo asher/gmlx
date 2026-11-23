@@ -38,7 +38,12 @@ class HeadSpec:
         params wins (trainable heads read the live tree); an f16 one is
         read as the module's cached bf16 copy when the spec has one, else
         cast on the call, since the softmax cotangents underflow f16;
-        quantized heads dequantize once and cache."""
+        quantized heads dequantize once and cache. Rows past ``V`` (a head
+        padded past the vocabulary) are cut."""
+        w = self._dense_weight(params)
+        return w[: self.V] if w.shape[0] > self.V else w
+
+    def _dense_weight(self, params):
         if params is not None and isinstance(params, dict) and "weight" in params:
             w = params["weight"]
             if w.dtype in (_MX().float32, _MX().bfloat16):
@@ -165,6 +170,9 @@ def head_spec_from_model(model) -> HeadSpec:
     if softcap is not None:
         softcap = float(softcap) or None
     scale = head_scale(args)
+    # A head padded past the vocabulary (Inkling 2) returns the real rows
+    # only, as the model's logits do.
+    cut = cfg.get("unpadded_vocab_size") if isinstance(cfg, dict) else None
     inner = getattr(model, "model", model)
     head = getattr(model, "lm_head", None)
     if head is not None and not (isinstance(getattr(args, "tie_word_embeddings", None), bool)
@@ -177,10 +185,12 @@ def head_spec_from_model(model) -> HeadSpec:
             prev = mod.parameters()
             mod.update(params)
             try:
-                return mod(h) * scale if scale != 1.0 else mod(h)
+                out = mod(h) * scale if scale != 1.0 else mod(h)
+                return out[..., :cut] if cut else out
             finally:
                 mod.update(prev)
         V = int(mod.weight.shape[0]) if hasattr(mod, "weight") else int(mod(mx_zeros(1, h_dim(inner))).shape[-1])
+        V = min(V, int(cut)) if cut else V
         return HeadSpec(fn=fn, params=mod.parameters(), softcap=softcap, V=V, live=mod.parameters,
                         weight=head_weight_fn(mod), scale=scale, pre=_input_transform(mod), module=mod)
     emb = inner.embed_tokens
@@ -189,11 +199,13 @@ def head_spec_from_model(model) -> HeadSpec:
         prev = emb.parameters()
         emb.update(params)
         try:
-            return emb.as_linear(h) * scale if scale != 1.0 else emb.as_linear(h)
+            out = emb.as_linear(h) * scale if scale != 1.0 else emb.as_linear(h)
+            return out[..., :cut] if cut else out
         finally:
             emb.update(prev)
+    V2 = int(emb.weight.shape[0]) if hasattr(emb, "weight") else int(emb.as_linear(mx_zeros(1, h_dim(inner))).shape[-1])
     return HeadSpec(fn=fn2, params=emb.parameters(), softcap=softcap,
-                    V=int(emb.weight.shape[0]) if hasattr(emb, "weight") else int(emb.as_linear(mx_zeros(1, h_dim(inner))).shape[-1]),
+                    V=min(V2, int(cut)) if cut else V2,
                     live=emb.parameters, weight=head_weight_fn(emb), scale=scale, pre=_input_transform(emb),
                     module=emb)
 
