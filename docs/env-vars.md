@@ -56,6 +56,7 @@ is internal and may change between releases.
 | `GMLX_MTP_WIDTH_CAP` | Each drafter's default | Speculative width cap for every model, over each model's `speculative_width_cap`. `0` removes the cap. |
 | `GMLX_CONTEXT_COPY` | Unset | `1` turns on [context copy](speculative-decoding.md#context-copy) for every model, `0` turns it off. Unset, each model's `context_copy` decides. |
 | `GMLX_CONTEXT_COPY_MAX` | `24` | Longest context copy in tokens, up to 31. Under 4 turns copying off. A block drafter's draft length keeps the output token-identical to a run without copies. |
+| `GMLX_RESIDENCY_KEEPALIVE_S` | `600` | Seconds an idle server keeps model memory wired after a request, so the next starts at once. Yields to memory pressure and loads. `0` off. |
 | `GMLX_IMAGE_CHAT_SHARE` | `0.5` | Chat's GPU share while an image runs, `0` to `0.9`, or `off`. A clip gives chat more, as [Video jobs](internals/image-serving.md#video-jobs) says. |
 
 ## Runtime
@@ -66,6 +67,7 @@ is internal and may change between releases.
 | `GMLX_DECODE_ARENA_GB` | What the memory ceiling leaves | Size of a streamed model's expert [arena](glossary.md#arena) in GiB. Lower it to keep a second model loaded. |
 | `GMLX_FUSED_MOE` | `1` | `0` loads every MoE block unfused, which is slower. |
 | `GMLX_FUSED_MOE_BLOCK` | `1` | `0` loads the fused MoE blocks of models such as Qwen3.5 MoE and Gemma 4 unfused, which is slower. |
+| `GMLX_MOE_EXPERT_STORE` | Store for Flash-Next | `0` keeps Qwen3.8-Flash-Next's experts as zero-copy views of the GGUF, mapped and not wired, at a slower prefill and decode. |
 | `GMLX_GOVERNOR` | `1` | `0` turns off the [governor](glossary.md#governor) that sheds requests when memory runs out. |
 | `GMLX_SPARSE_ATTN` | `0` | `1` turns on top-k sparse attention for deep decode, which is lossy. |
 | `GMLX_SPARSE_K` | `2048` | Tokens that sparse attention reads in each step. |

@@ -279,6 +279,32 @@ for s in (mx.cpu, mx.gpu):
   stream it is the stock op.
 - Test: `test_layer_norm_on_the_cpu_takes_its_statistics_in_float64` in `tests/test_mlx_guards.py`.
 
+## Integer floor division runs as eight GPU kernels
+
+- Dependency: mlx 0.32.3, any stream.
+- Affected: `a // k` and `mx.floor_divide` on integer arrays, unsigned ones included.
+- What goes wrong: the op is built as a divide plus a sign fix of seven more ops (remainder,
+  compares, a logical and, a cast, a subtract), each its own kernel. The values are right. For an
+  unsigned array the fix never changes a value, so seven kernels a call do no work.
+
+Smallest repro:
+
+```python
+import io
+import mlx.core as mx
+
+f = io.StringIO()
+mx.export_to_dot(f, mx.array(list(range(20)), dtype=mx.uint32) // 10)
+print(f.getvalue().count("shape=rectangle"))  # 14 ops, 8 of them kernels
+```
+
+- Where gmlx meets it: every sorted MoE forward takes the token row of each route as
+  `order // k`, once a MoE layer.
+- Guard: `floor_divide` in `gmlx/mlx_guards.py` compiles an unsigned array's floor division
+  into one kernel with the stock op's values; anything else is the stock op. The sorted expert
+  paths of `gmlx/load/expert_store.py`, `gmlx/load/modules.py` and `gmlx/lora_rows.py` use it.
+- Test: `test_floor_divide_of_sorted_route_ids_is_one_kernel` in `tests/test_mlx_guards.py`.
+
 ## The diffusers single-file loader leaves a BF16 tensor outside a linear layer undecoded
 
 - Dependency: diffusers at e0abab83, the revision the image reference scripts under

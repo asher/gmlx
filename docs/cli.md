@@ -679,7 +679,7 @@ after them with the quants for this Mac:
 ```text
 Recommended for this Mac
   NAME                      DOWNLOAD  IMAGES  GOOD FOR
-  qwen3.8-flash-next         90.7 GB  yes     documents, code and tool calls
+  qwen3.8-flash-next         88.6 GB  yes     documents, code and tool calls
   ornith-1.5-122b            75.1 GB  yes     coding
 
 Image models
@@ -722,6 +722,10 @@ quant appears where no tier fits. A mixture-of-experts model larger than
 this Mac's memory is listed as running from the SSD, and `pull` says so
 before it downloads one, as [Models larger than memory](streaming.md)
 describes.
+
+Faster replies come from a drafter file the pull takes beside the model,
+as [Speculative decoding](speculative-decoding.md) describes. For
+`qwen3.8-flash-next` it is the Q6_K file of Inco AI's DFlash 2 drafter.
 
 A pull by name registers the model under its id and adds the name as an
 alias, marked `set by gmlx pull` in the config, so `gmlx chat <name>` and a

@@ -53,7 +53,76 @@ is already running does not see a variable you export later.
 | `GMLX_DSPARK_CONF=T` | Set a DSpark drafter's block-cut confidence threshold, in 0..1. |
 | `GMLX_SPEC_GATE=X` | Run a greedy DFlash 2 round expected to emit fewer than X tokens as one plain step, with the same output. `auto` derives X from round costs. |
 | `GMLX_GDN_REPLAY=0` | Store the recurrent state after each verify position instead of records that the next step replays. Output is bit-identical. |
+| `GMLX_GDN_VERIFY_V2` | `0` runs a Flash-Next verify's gated-delta layers as two kernels, `1` forces the one-kernel form. Output is bit-identical. |
+| `GMLX_GDN_STAGED_SCAN=0` | Run a Flash-Next prefill's gated-delta scan in the stock kernel, not the one that stages 16 tokens at a time. Output is bit-identical. |
 | `GMLX_MTP_DEBUG=1` | Log the MTP notices, including the verify branch the first time each branch runs. |
+| `GMLX_SPEC_ONE_STREAM=0` | Leave the drafter of a speculative round on the thread's default GPU stream instead of the verify's stream. Output is the same either way. |
+| `GMLX_Q4_PREFILL_PIPELINE=0` | Build a whole Flash-Next prefill forward before the GPU gets any of it, not layer by layer. Output is bit-identical. |
+| `GMLX_Q4_GDN_PREFILL_FUSE=0` | Run a Flash-Next prefill's gated-delta conv, norms and output gate as separate ops, not one kernel each. Output is bit-identical. |
+| `GMLX_GDN_SCAN_GATES=0` | Compute a Flash-Next prefill's gated-delta decay and beta as ops before the scan, not inside it. Output is bit-identical. |
+| `GMLX_Q4_PLE_PREFILL_FUSE=0` | Run a Flash-Next prefill's PLE conv and silu as separate ops, not one kernel. Output is bit-identical. |
+| `GMLX_Q4_QSA_BS_STATIC_PAGES=0` | Size the page lists of a sparse prefill attention by a host read of the widest one, which stops the forward at each layer. Same bits. |
+| `GMLX_Q4_PLE_EARLY=0` | Read the lookup-table rows of a Flash-Next verify or prefill chunk with the layer that uses them, not ahead of it. Output is the same either way. |
+| `GMLX_SPEC_CB_FINE=0` | Run speculative rounds of a model in memory on the plain decode caps, 400 ops per command buffer. The default is 50 ops for the rounds only. |
+| `GMLX_SPEC_KEEP_BUFFERS=1` | Skip the allocator clears at prefill end, every 256 round tokens and at release. Kept buffers go back at idle under memory pressure and before a load. |
+| `GMLX_SPEC_CLEAR_AFTER_SUBMIT=0` | Clear the allocator's cache at the end of each speculative prefill chunk, not after the next GPU submit. Same output. |
+| `GMLX_SPEC_LAST_IN_CHUNK` | `0` runs a speculative prompt's last token as a one-row forward after its last chunk, `1` puts it in the chunk on any target. Default: on for Flash-Next. |
+| `GMLX_SPEC_L0_AFTER_FIRST=0` | With the last token in the chunk: store a new prompt's speculative prompt cache entry before its first token goes out, not after. |
+| `GMLX_SPEC_FIRST_IN_PREFILL_STEP=0` | A speculative request with no other request decoding sends its first token from the step after the one that finished its prefill. |
+| `GMLX_SPEC_CKPT_ASYNC=1` | A speculative prefill stores its checkpoint before the chunk's final wait and does not wait for the copies. Memory-only caches, Flash-Next layers. |
+| `GMLX_SERVE_FIRST_YIELD_US=N` | After a step that queued a request's first token, the worker waits N microseconds so the token reaches the client first (200). `0` turns it off. |
+| `GMLX_SPEC_DRAFT_EARLY=1` | Commit a B=1 speculative round and submit the next draft before its tokens go out. Same tokens; a stop inside a round is undone. |
+| `GMLX_SPEC_VERIFY_ONE_SUBMIT=0` | Submit a B=1 Flash-Next verify under the decode command buffer caps, not as one submission whose buffer ends are kq marks. Same bits. |
+| `GMLX_SPEC_VERIFY_MARKS=1,12` | Layers ahead of which the one-submit verify ends a command buffer; the rest is one buffer. |
+| `GMLX_SPEC_ASSUME_ACCEPT=1` | B=1 round submits its commit and next draft behind the verify as if all drafts pass; a miss or a stop is undone. Same bits. |
+| `GMLX_SPEC_REUSE_ROWS=1` | A verify rebuilt after a missed deferred row cut takes the table rows the whole block read (model reuse_verify_rows). Same bits. |
+| `GMLX_SPEC_ACCEPT_COUNTED=0` | Read a B=1 round's accepted count on the host before its commit and next draft go out. On, a DFlash 2 draft on Flash-Next reads it on the GPU. |
+| `GMLX_DFLASH_COUNTED_F32=0` | A counted draft (GMLX_SPEC_ACCEPT_COUNTED) keeps the ring's stored dtype in its attention in place of float32. |
+| `GMLX_DFLASH_COUNTED_GATHER=0` | A counted draft masks the ring buffer rows (stock attention) in place of reading them by row index in the plain key order. |
+| `GMLX_SPEC_VERIFY_AHEAD=N` | Submit a B=1 verify whole before the row cut is read: 1 after a whole round, 2 always, 0 never. Default 1 where the verify is one submission, else 0. |
+| `GMLX_SPEC_VERIFY_PREBUILT=N` | With a counted commit and VERIFY_AHEAD=2: the next verify is built ahead for the N likeliest accept counts; the others are dropped. |
+| `GMLX_SPEC_APC_LONGER=1` | A prompt both prefix cache levels hold restores the longer record; a DFlash request keeps its last hidden rows to seed that turn. |
+| `GMLX_SPEC_PREBUILT_LATE_ROWS=1` | A verify built ahead for a count other than the full accept reads its table rows when it is taken up; `2` holds every build. Same bits. |
+| `GMLX_SPEC_AHEAD_PREDICT=N` | With VERIFY_AHEAD=2: the verify ahead of the row cut runs the rows of the last known cut and N minus 1 more in place of the whole block. |
+| `GMLX_SPEC_RETIRE_AFTER_FINAL=0` | Close a B=1 speculative request's round loop and retire its KV into the prompt cache before its last token is sent, not after. |
+| `GMLX_SPEC_STORE_WHEN_IDLE=0` | Store a finished speculative request in the prompt cache at once, not when the worker is idle or the next request's first token is out. |
+| `GMLX_SPEC_STORE_IDLE_MS=N` | Idle time with no request on its way before a held prompt cache store runs (5). |
+| `GMLX_DFLASH_COUNTED_SHORT=0` | A ring shorter than the window takes the plain draft, not the counted one with its dead rows masked. The two differ in rounding only. |
+| `GMLX_DFLASH_RING_SLACK=N` | Spare rows of the DFlash ring past its window (512, at least 16): more rows, fewer compactions, which a commit ahead cannot take back. |
+| `GMLX_SPEC_DEFER_CUT=0` | A DFlash 2 drafter cuts its draft rows before it returns, not while the GPU runs the draft. Same output. |
+| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft at the first row whose proposal mass is under P (0 to 1). Default 0.5 for Flash-Next, `0` never cuts. |
+| `GMLX_DFLASH_RING_IN_PLACE=0` | DFlash draft attention copies the ring buffer per layer, not reading it in place. |
+| `GMLX_DFLASH_QMM_MULTI=0` | Run each DFlash draft projection that shares an input (q/k/v, gate/up) as its own dispatch, not one per codec. |
+| `GMLX_DFLASH_WALK_KERNEL=0` | Run the DFlash 2 selector walk (picks, proposal rows, row cut) as an op chain, not one kernel. |
+| `GMLX_DFLASH_LATTICE_WALK=0` | Build the whole DFlash 2 lattice before the walk, not only the rows of the path the walk kernel takes. |
+| `GMLX_DFLASH_LATTICE_TOPK=0` | Take the DFlash 2 lattice candidates from a full-width argpartition, not the hierarchical top-k. |
+| `GMLX_DFLASH_HEAD_SUBSET=0` | A DFlash 2 draft reads the whole head every round, not skipping the token ids the request has not used. |
+| `GMLX_DFLASH_COMMIT_ASYNC=0` | A verified DFlash round's commit runs ahead of the next draft, not on the GPU as soon as it is built. |
+| `GMLX_DFLASH_CONV_KERNEL=0` | Run the DFlash draft's grouped conv as an op chain, not the fused kernels. |
+| `GMLX_SPEC_TOKEN_TRACE=1` | With GMLX_ROUND_LOG: a note per B=1 round with drafts, tokens out and the target's top two ids and logits. Adds a head pass. |
+| `GMLX_SPEC_SESSION_SEED=N` | Seeds the process RNG stream at each B=1 speculative session start, so two servers write the same sampled text for a request. |
+| `GMLX_Q4_VERIFY_FUSED=0` | Run a qwen4_exp verify's layers as plain calls, not recorded kq graphs that replay their Metal calls. Same bits. A LoRA or streamed experts run plain anyway. |
+| `GMLX_Q4_VERIFY_FUSED_QSA=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep the attention layers of the verify on the plain call. |
+| `GMLX_Q4_VERIFY_FUSED_CAP=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep per-width record arrays in the gated-delta verify (one record layout per pair of round widths). |
+| `GMLX_Q4_VERIFY_FUSED_MAX_RECORDS`, `GMLX_Q4_VERIFY_FUSED_MAX_MB` | Bound on the recorded verify graphs of the process (4096 handles, 256 MB of programs); the least recently used go first. |
+| `GMLX_MOE_EXPERT_STORE=0` | Keep a Flash-Next load's routed experts as zero-copy views of the GGUF, not in the kq store layout. Other models keep the views by default. |
+| `GMLX_MOE_EXPERT_STORE=full` | Hold the routed experts of every fused MoE block in the kq store layout, on any model. |
+| `GMLX_MOE_EXPERT_STORE`, load | A store load reads each stack from the file past the page cache and never wires the mapped copy. Outputs differ from the views in rounding. |
+| `GMLX_MOE_EXPERT_STORE`, limits | A load over the wired budget builds no store. Streamed experts, or an adapter on an expert stack, give the store up and read the experts in place. |
+| `GMLX_MOE_EXPERT_STORE=down` | Hold only the down stacks in the store. Gate and up stay mapped and run the in-place kernels with their bits. Built and limited as `full`. |
+| `GMLX_MOE_EXPERT_STORE_WIDE_ROWS=160` | Full store: rows of a forward from which the block runs its wide form on the store. 0 keeps the tile kernels at every width. |
+| `GMLX_MOE_WIDE_COMBINE=0` | Full store, wide form: unsort the expert rows, weigh them and sum them as three ops, not in one kernel. Output is bit-identical. |
+| `GMLX_MOE_WIDE_PAIR=0` | Full store, wide form: run gate and up as two kernels and the SwiGLU as its own op, not as one kernel. Output is bit-identical. |
+| `GMLX_KQ_MULTI_PREFILL=0` | Prefill past 128 rows: run projections that share an input (GDN qkv and z, attention q, k, v, shared gate and up) one call each. Same bits. |
+| `GMLX_MOE_EXPERT_STORE_WARM=0` | Full store: do not build the store kernels' pipelines on a thread during the load; each builds at its first use. |
+| `GMLX_MOE_EXPERT_STORE_BLOCKS=N` | Build the stores of the first N blocks only (a staged memory test). |
+| `GMLX_MOE_EXPERT_STORE_FILE_READ=0` | Pack the store through the file mapping, instead of reading each stack from the file past the page cache. |
+| `GMLX_MOE_EXPERT_STORE_DROP_CACHE=0` | Keep the page cache's copy of the stacks the store holds. With free memory short, the kernel then compresses memory during the build. |
+| `GMLX_MOE_EXPERT_STORE_PACE=0` | Do not hold the store build while free memory is short of the next block. |
+| `GMLX_MOE_EXPERT_STORE=<GiB>` | Test build. A bounded store of that many GiB beside the mapped tensors, built at the first forward. |
+| `GMLX_MOE_EXPERT_STORE_HOT=file.npz` | Bounded store: `counts` [blocks, experts] of use. The most used experts get the slots. Without it, the lowest ids. |
+| `GMLX_MOE_EXPERT_STORE_ROWS=2,16` | Bounded store: the row counts a block serves from the store. Other widths keep the in-place kernels. |
+| `GMLX_MOE_EXPERT_STORE_GLU_ROWS=8` | Bounded store: the fewest rows served by the store GLU. Below it, the in-place GLU feeds the store down. |
 | `GMLX_DRAFT_HEAD` | `q8` or `q4` drafts an MTP or DFlash 2 round through a `q8_0` or `q4_0` copy of a float target head, and `f16` uses the head as is. The default is `q8`. |
 | `GMLX_DRAFT_BLOCK_SIZE` | Block size of each speculative round for `serve`, as `--draft-block-size` sets. A round drafts one token fewer. |
 | `GMLX_NEM_MTP_BLOCK=N` | Block of a Nemotron-H native head, drafts plus one: 8 on Nemotron 3.5 Transcribe, 3 on the others. `--draft-block-size` cannot go deeper. |
@@ -138,6 +207,11 @@ fusions.
 | Variable | Meaning |
 |----------|---------|
 | `GMLX_FUSED_GDN=0` | Disable the fused gated-delta Metal kernels of the Qwen3.5 and 3.6 hybrids. The fusion affects numerics. |
+| `GMLX_Q4_MOE_BLOCK_ROWS=N` | Widest Flash-Next MoE call that runs the fused kq block (16). `0` keeps the stock bound of 64 gathered rows, 6 rows at top_k 10. |
+| `GMLX_Q4_HC_MIX=0` | Run the Flash-Next low-rank hyper-connection mix as three ops, not one kq op. |
+| `GMLX_Q4_QSA_NORM_ROPE=0` | Run the Flash-Next indexer norm and rope as op chains, not one fused kernel. |
+| `GMLX_Q4_QSA_ROWS_SDPA=0` | Flash-Next sparse attention over a block of queries gathers its pages, not reading them in place through kq paged rows. |
+| `GMLX_Q4_QSA_ROWS_PREFILL=0` | A Flash-Next prefill chunk past the sparse boundary keeps the block-sparse kernel, not kq paged rows, on a GPU with tensor-op units. |
 | `GMLX_FUSED_MOE_SWIGLU_OAI=0` | Run MiniMax-M3 MoE layers on the stock expert gathers, with the shared expert as its own MLP. `=1` fuses every codec, even where that is slower. |
 | `GMLX_FUSED_MOE_SHEXP_OAI=0` | Run the MiniMax-M3 shared expert as its own MLP instead of inside the fused expert kernels. Slower. |
 | `GMLX_GDN_BA_CAT=0` | Run the gated-delta b and a projections as two matmuls instead of one over their joined weight. Output is bit-identical. |
@@ -249,8 +323,11 @@ other layer adds its delta on stock ops.
 | `GMLX_STREAM_PLE=0` | Disable the streamable lookup-table tier. `1` forces the tables to stream even when the model fits, as `--stream-experts` and `--stream-cpu` do. |
 | `GMLX_TABLE_MAX_BUFFER` | Bytes a lookup table may hold in one GPU buffer. The default is the device limit, and a larger table is read row by row. |
 | `GMLX_TABLE_PREAD_WORKERS` | Reader threads for each file-backed lookup table. The default is `32`. |
+| `GMLX_TABLE_FILE_ROWS=N` | Largest row gather of a streamed mapped table read from the file by parallel reads. The default is `512`, and `0` turns it off. |
+| `KQ_FILE_ROWS_CACHE_BYTES=B` | Bytes of rows each table keeps from mlx-kquant's reads from the file. Flash-Next's table keeps 256 MiB unless you set it; `0` turns it off. |
 | `GMLX_TABLE_READAHEAD=0` | Stop reading a lookup table's rows a prefill chunk ahead: into the page cache for a mapped table, held in memory for a table read from its file. |
 | `GMLX_TABLE_READAHEAD_WORKERS` | Reader threads for the table read-ahead. The default is `16`. |
+| `GMLX_TABLE_READAHEAD_COUNT=1` | Read a mapped table's pages ahead one by one and count the ones read from disk. Slower, and the chunk's own read then takes each page fault. |
 | `GMLX_DECODE_FAST_DISK` | The `stream_fast_disk` policy, `auto`, `on` or `off`, as `--stream-fast-disk` sets. |
 | `GMLX_DECODE_SEED=0` | Start the decode arena empty instead of seeding it with the prompt's most routed experts. |
 | `GMLX_DECODE_ASYNC_GATHER=0` | Keep each streamed layer's expert gather in the next layer's eval instead of submitting it as soon as it is built. |
