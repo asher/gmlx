@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import shutil
 import sys
 import tempfile
 
@@ -48,7 +49,23 @@ stock_blocker.install()
 import host_box  # noqa: E402
 
 
+def _private_basetemp(config) -> None:
+    """Give a pytest run from inside a test its own temp root. pytest runs
+    that share the default root race in their exit cleanup: two unlink the
+    same dead ``pytest-current`` link, and the second fails a child whose
+    tests passed. The outer run marks the environment; xdist workers take
+    their root from the controller."""
+    if (os.environ.get("GMLX_PYTEST_OUTER")
+            and not hasattr(config, "workerinput")
+            and config.option.basetemp is None):
+        root = tempfile.mkdtemp(prefix="pytest-inner-")
+        config.option.basetemp = root
+        config.add_cleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+    os.environ.setdefault("GMLX_PYTEST_OUTER", "1")
+
+
 def pytest_configure(config):
+    _private_basetemp(config)
     # Every test sees the CI runner unless it declares a Mac with
     # host_gb (host_box.py). Before anything reads the device.
     import host_box

@@ -37,7 +37,8 @@ def test_a_caught_blocked_import_fails_the_run(tmp_path, name):
     env["PYTHONPATH"] = str(_TESTS)
     r = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         "-p", "stock_blocker", "test_inner.py"],
+         "-p", "stock_blocker", "--basetemp", str(tmp_path / "inner-tmp"),
+         "test_inner.py"],
         cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
     assert r.returncode == code, r.stdout[-2000:]
     assert "1 passed" in r.stdout
