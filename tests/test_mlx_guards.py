@@ -16,9 +16,14 @@ limit are beside the caller's other tests.
 ``layer_norm``: on the CPU stream the stock op adds a long row in float32
 one element after another and loses digits; the guard takes the
 statistics in float64 there and is the stock op on a GPU stream.
+
+``floor_divide``: the stock integer floor division is a divide and a sign
+fix of seven ops, each a GPU kernel; the guard runs an unsigned array's
+as one compiled op.
 """
 from __future__ import annotations
 
+import io
 import os
 
 import mlx.core as mx
@@ -316,3 +321,26 @@ def test_layer_norm_on_the_gpu_is_the_stock_op():
         got = mlx_guards.layer_norm(x, 1e-5)
         want = mx.fast.layer_norm(x, None, None, 1e-5)
     assert np.array(got).tobytes() == np.array(want).tobytes()
+
+
+def _ops(a: mx.array) -> int:
+    # The primitives of a's graph that are left to run.
+    f = io.StringIO()
+    mx.export_to_dot(f, a)
+    return f.getvalue().count("shape=rectangle")
+
+
+@pytest.mark.parametrize("k", [1, 6, 10])
+def test_floor_divide_of_sorted_route_ids_is_one_kernel(k):
+    """The token row of each sorted route, ``order // k``, has the stock
+    op's values from one op. Signed integers keep the stock op, negative
+    values included."""
+    order = mx.array(np.random.default_rng(k).permutation(871 * k)
+                     .astype(np.uint32))
+    got = mlx_guards.floor_divide(order, k)
+    assert _ops(got) == 1 and _ops(order // k) > 1
+    assert got.dtype == mx.uint32
+    np.testing.assert_array_equal(np.array(got), np.array(order) // k)
+    signed = mx.arange(-3 * k - 2, 3 * k + 2, dtype=mx.int32)
+    np.testing.assert_array_equal(
+        np.array(mlx_guards.floor_divide(signed, k)), np.array(signed) // k)

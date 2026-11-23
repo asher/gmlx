@@ -256,10 +256,13 @@ def _collect_snapshot_arrays(snaps: list[Any], out: list[mx.array]) -> None:
             out.extend([snap[0], snap[1]])
 
 
-def _entry_nbytes(kv_snaps: list[Any], hidden: mx.array) -> int:
+def _entry_nbytes(kv_snaps: list[Any], hidden: mx.array,
+                  first_logits: mx.array | None = None) -> int:
     """Bytes pinned by one entry. Dedup by array identity: K-eq-V layers
     store the same array as both K and V and must be counted once."""
     arrays: list[mx.array] = [hidden]
+    if first_logits is not None:
+        arrays.append(first_logits)
     _collect_snapshot_arrays(kv_snaps, arrays)
     seen = set()
     total = 0
@@ -284,7 +287,8 @@ def _salt_at(salt: Any, n: int) -> Any:
 
 
 class _PrefixEntry:
-    __slots__ = ("salt", "token_ids", "kv_snaps", "hidden", "nbytes")
+    __slots__ = ("salt", "token_ids", "kv_snaps", "hidden", "first_logits",
+                 "nbytes")
 
     def __init__(
         self,
@@ -292,12 +296,17 @@ class _PrefixEntry:
         token_ids: tuple[int, ...],
         kv_snaps: list[Any],
         hidden: mx.array,
+        first_logits: mx.array | None = None,
     ):
         self.salt = salt
         self.token_ids = token_ids
         self.kv_snaps = kv_snaps
         self.hidden = hidden
-        self.nbytes = _entry_nbytes(kv_snaps, hidden)
+        # The logits of the token after the last one held, when the
+        # snapshot was taken with them: such an entry serves its own
+        # prompt sent again with no forward.
+        self.first_logits = first_logits
+        self.nbytes = _entry_nbytes(kv_snaps, hidden, first_logits)
 
     @property
     def key(self) -> tuple[Any, tuple[int, ...]]:
@@ -353,12 +362,15 @@ class SpecPrefixCache:
     def lookup(
         self, token_ids: mx.array, salt: Any = 0,
         accept: Callable[[int], bool] | None = None,
+        whole: bool = False,
     ) -> tuple[int, _PrefixEntry] | None:
         """Find the longest cached prefix matching token_ids under ``salt``.
 
         Returns (prefix_len, entry) on hit, None on miss.  Requires at least
         one suffix token (``prefix_len < len(query)``) so the caller always
         has tokens to forward through the model for logits + shared_kv.
+        With ``whole``, an entry as long as the query also matches when it
+        holds the first token's logits: the caller forwards nothing.
         ``accept`` refuses a prefix length, as the APC media guard does.
         Moves the matched entry to the head of the LRU on access.
         """
@@ -369,8 +381,11 @@ class SpecPrefixCache:
         with self._lock:
             for entry in self._entries.values():
                 n = len(entry.token_ids)
-                if n >= len(ids) or n <= best_len or entry.salt != _salt_at(
+                if n > len(ids) or n <= best_len or entry.salt != _salt_at(
                         salt, n):
+                    continue
+                if n == len(ids) and not (whole
+                                          and entry.first_logits is not None):
                     continue
                 if ids[:n] == entry.token_ids and (accept is None
                                                    or accept(n)):
@@ -391,9 +406,11 @@ class SpecPrefixCache:
         prompt_cache: list,
         hidden: mx.array,
         salt: Any = 0,
+        first_logits: mx.array | None = None,
     ) -> None:
         """Cache target KV state + hidden for this token sequence under
-        ``salt``.
+        ``salt``, with the logits of the token that follows when the
+        caller has them (see ``lookup``'s ``whole``).
 
         Snapshots every cache entry in prompt_cache (architecture-agnostic:
         handles KVCache, RotatingKVCache, ArraysCache, CacheList) and the
@@ -411,7 +428,8 @@ class SpecPrefixCache:
         # The snapshot is lazy until _eval_snapshot, and nbytes needs only
         # shapes, so the whole keep decision runs before any copy.
         kv_snaps = [_snapshot_entry(c) for c in prompt_cache]
-        entry = _PrefixEntry(_salt_at(salt, len(ids)), ids, kv_snaps, hidden)
+        entry = _PrefixEntry(_salt_at(salt, len(ids)), ids, kv_snaps, hidden,
+                             first_logits)
         key = entry.key
 
         refused = self._refusal(entry)
@@ -428,7 +446,7 @@ class SpecPrefixCache:
             self._evict_lru_for(1, entry.nbytes)
 
         _eval_snapshot(kv_snaps)
-        mx.eval(hidden)
+        mx.eval(hidden, *(() if first_logits is None else (first_logits,)))
 
         # No trim after the insert: only this engine thread stores, and
         # other threads only remove, so the room made above still holds.

@@ -1324,8 +1324,8 @@ def _run_bench(args) -> int:
     except argparse.ArgumentTypeError as e:
         print(str(e), file=sys.stderr)
         return 2
-    _check_cli_adapter(args)
-    with loadlog.load_ui(args.verbose, args.gguf):
+    scope = _check_cli_adapter(args)
+    with loadlog.load_ui(args.verbose, args.gguf), scope:
         model, _config, tok = load_model(
             args.gguf,
             arch=args.arch,
@@ -1419,9 +1419,9 @@ def _run_bench_depths(args) -> int:
                   streaming=getattr(args, "stream_experts", False),
                   kv_fp16=args_kv_fp16(args))
     drafter = None
-    _check_cli_adapter(args)
+    scope = _check_cli_adapter(args)
     if speculative:
-        with loadlog.load_ui(args.verbose, args.gguf):
+        with loadlog.load_ui(args.verbose, args.gguf), scope:
             model, drafter, _config, tok = load_mtp_model(
                 args.gguf,
                 arch=args.arch,
@@ -1434,7 +1434,7 @@ def _run_bench_depths(args) -> int:
                 before_wire=_cli_adapter_hook(args),
             )
     else:
-        with loadlog.load_ui(args.verbose, args.gguf):
+        with loadlog.load_ui(args.verbose, args.gguf), scope:
             model, _config, tok = load_model(
                 args.gguf,
                 arch=args.arch,
@@ -1510,12 +1510,17 @@ def _run_bench_depths(args) -> int:
     return 0
 
 
-def _check_cli_adapter(args) -> None:
+def _check_cli_adapter(args):
     """``--adapter`` on the run/chat/bench trunks: refuse, from the base and
     adapter headers and before the load, an adapter the base cannot take
-    (an embedding adapter on a tied model, say). Exits with the reason."""
+    (an embedding adapter on a tied model, say). Exits with the reason.
+    Returns the context the load runs in: no expert store when an adapter
+    takes a block's experts or shared expert (expert_store.adapter_scope)."""
+    import contextlib
+
     if not getattr(args, "adapter", None):
-        return
+        return contextlib.nullcontext()
+    from gmlx.load import expert_store
     from gmlx.load.adapter import adapter_load_refusal
 
     paths = [os.path.abspath(os.path.expanduser(p)) for p, _ in args.adapter]
@@ -1523,6 +1528,7 @@ def _check_cli_adapter(args) -> None:
         adapter_load_refusal(args.gguf, paths)
     except ValueError as e:
         raise SystemExit(f"error: {e}") from None
+    return expert_store.adapter_scope(paths)
 
 
 def _apply_cli_adapter(args, model, config, *, fold: bool = True) -> None:
@@ -1740,8 +1746,8 @@ def _run_generate(args) -> int:
         from gmlx.gen.generation import generate_speculative
         from gmlx.spec.mtp_load import load_mtp_model
 
-        _check_cli_adapter(args)
-        with loadlog.load_ui(args.verbose, args.gguf):
+        scope = _check_cli_adapter(args)
+        with loadlog.load_ui(args.verbose, args.gguf), scope:
             model, drafter, _config, tok = load_mtp_model(
                 args.gguf,
                 arch=args.arch,
@@ -1805,8 +1811,8 @@ def _run_generate(args) -> int:
 
     import gmlx.load.loadlog as loadlog
 
-    _check_cli_adapter(args)
-    with loadlog.load_ui(args.verbose, args.gguf):
+    scope = _check_cli_adapter(args)
+    with loadlog.load_ui(args.verbose, args.gguf), scope:
         model, config, tok = load_model(
             args.gguf,
             arch=args.arch,

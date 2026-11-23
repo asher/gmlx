@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import os
 from functools import partial
+from types import SimpleNamespace
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -213,3 +214,59 @@ def test_a_folded_gated_product_trains_where_its_projection_is_unadapted(monkeyp
     eval_logits(model, _batch(vocab_size(config), 24, [24, 24], seed=3)[0])
     # serve fuses at the same sites
     assert calls
+
+
+def test_train_loads_flash_next_without_the_expert_store(monkeypatch, tmp_path):
+    """gmlx train on a qwen4_exp base, whose loads get a full expert store
+    by default: the load builds none, so the training step runs the
+    experts' own gathers on the mapped stacks. The load is the loader's
+    order on a tiny model: the fused blocks install and register, then
+    the store builds."""
+    import contextlib
+
+    import mlx_kquant as kq
+
+    import gmlx._vendor.mlx_lm.tuner.datasets as datasets
+    import gmlx._vendor.mlx_lm.tuner.trainer as trainer
+    import gmlx.commands.train as train
+    import gmlx.load.adapter as adapter
+    import gmlx.load.expert_store as es
+    import gmlx.load.loader as loader
+    import gmlx.load.loadlog as loadlog
+    import gmlx.load.preflight as preflight
+
+    if not hasattr(kq, "moe_store_pack"):
+        pytest.skip("this mlx-kquant has no expert store")
+    monkeypatch.delenv("GMLX_MOE_EXPERT_STORE", raising=False)
+    # The store's process registry, for this test's loads only.
+    for name, empty in (("_BLOCKS", []), ("_DONE", []), ("_GONE", set()),
+                        ("_BUILT", [False])):
+        monkeypatch.setattr(es, name, empty)
+    seen = {}
+
+    def load_model(path, hf_source=None):
+        model, config, _ = build("qwen4_exp")
+        seen["stored"] = es.build_at_load(model, log=lambda s: None)
+        seen["config"] = config
+        return model, config, object()
+
+    def one_step(model, opt, train_set, val_set, args):
+        assert model.training
+        batch, lengths = _batch(vocab_size(seen["config"]), 9, [9], seed=2)
+        (loss, _), _ = nn.value_and_grad(model, _loss)(model, batch, lengths)
+        seen["loss"] = float(loss)
+
+    monkeypatch.setattr(preflight, "preflight",
+                        lambda p, hf_source=None: SimpleNamespace(arch="qwen4exp"))
+    monkeypatch.setattr(adapter, "base_tensor_names", lambda p: [])
+    monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(loader, "load_model", load_model)
+    monkeypatch.setattr(train, "adapter_refusals", lambda *a, **k: {})
+    monkeypatch.setattr(datasets, "load_dataset", lambda args, tok: ([], [], []))
+    monkeypatch.setattr(trainer, "train", one_step)
+    monkeypatch.setattr(train, "save_trained_adapter", lambda *a, **k: 0)
+    load_model("base.gguf")
+    assert seen["stored"] > 0  # a serving load stores the experts
+    train.train_lora("base.gguf", str(tmp_path), str(tmp_path / "out.gguf"),
+                     iters=1, rank=4)
+    assert seen["stored"] == 0 and math.isfinite(seen["loss"])

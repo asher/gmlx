@@ -52,6 +52,22 @@ def env_bool(name: str, default: bool, overlay=None) -> bool:
     return default
 
 
+def env_auto_bool(name: str) -> bool | None:
+    """True for a true word, False for a false word other than the empty
+    string, None (the caller's auto) when unset, empty or ``auto``. Any
+    other value warns and gives None."""
+    raw = os.environ.get(name) or ""
+    val = raw.strip().lower()
+    if val in _BOOL_TRUE:
+        return True
+    if val and val in _BOOL_FALSE:
+        return False
+    if val not in ("", "auto"):
+        warnings.warn(f"{name}={raw!r} is not 0, 1 or auto; using auto",
+                      stacklevel=2)
+    return None
+
+
 def env_switch(name: str, choices: tuple[str, ...], default: str = "1") -> str:
     """A switch that is on, off or one of ``choices``: ``"1"`` for a true
     word, ``"0"`` for a false word, a choice as it is, and ``default`` when

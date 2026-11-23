@@ -6,6 +6,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Qwen3.8-Flash-Next speculates with Inco AI's DFlash 2 drafter, and
+  `gmlx pull qwen3.8-flash-next` takes its Q6_K file beside the model.
+
+### Changed
+
+- With mlx-kquant 0.5.14 or later, Qwen3.8-Flash-Next prefills and decodes
+  faster.
+- A Qwen3.8-Flash-Next load spends about 10 more seconds packing its experts
+  into a copy; `GMLX_MOE_EXPERT_STORE=0` keeps them as zero-copy GGUF views.
+- A speculative reply sends its first token sooner, and its last token goes
+  out before the request is stored in the prompt cache.
+- An idle server keeps its model wired 10 minutes for a faster next request,
+  unless apps need memory. `GMLX_RESIDENCY_KEEPALIVE_S=0` turns it off.
+
 ## [0.5.7] - 2026-11-21
 
 ### Added

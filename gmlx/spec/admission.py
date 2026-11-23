@@ -10,6 +10,7 @@ import logging
 import mlx.core as mx
 
 from gmlx.envflags import env_bool
+from gmlx.gen import deferred_clear
 from gmlx.gen.thinking_budget import drop_mtp_hook
 from gmlx.spec.engine import _debug_note
 from gmlx.spec.kv_quant import batch_liftable, lift_single_cache
@@ -99,7 +100,9 @@ def install_continuous_batch_admission() -> None:
                     )
         setattr(self, _RELEASED_FLAG, True)
         setattr(self, _RELEASE_PENDING_FLAG, False)
-        mx.clear_cache()
+        if not env_bool("GMLX_SPEC_KEEP_BUFFERS", False):
+            mx.clear_cache()
+            deferred_clear.settled()
         return True
 
     # The tick guard drops a batch whose state a failed command buffer

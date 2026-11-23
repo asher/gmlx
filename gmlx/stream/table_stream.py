@@ -68,6 +68,9 @@ class ArchTables(NamedTuple):
     reads_ahead: bool = False
     # What the load's stream line calls the tables.
     label: str = "lookup tables"
+    # Bytes of rows a table keeps from its reads from the file (mlx-kquant
+    # KQ_FILE_ROWS_CACHE_BYTES), when the user set neither cache variable.
+    file_rows_cache_bytes: int = 0
 
 
 def _deepseek_v41_tiers(model, prefix: str = "") -> tuple[StreamableTable, ...]:
@@ -102,6 +105,7 @@ STREAMABLE_TABLES: dict[str, ArchTables] = {
         tiers=(StreamableTable("model.ple_embed",
                                "per_layer_token_embd.weight"),),
         label="per-layer embedding table",
+        file_rows_cache_bytes=256 << 20,
     ),
     "deepseek_v41": ArchTables(
         arch="deepseek41",
@@ -773,6 +777,57 @@ def table_stream() -> mx.Stream:
 
 _WRAP_CACHE: dict[tuple[type, bool], type] = {}
 
+# A decode step or a speculative verify gathers tens of rows, nearly all
+# on pages the page cache does not hold, and the gather over the mapped
+# table faults them in one at a time on the table stream while the GPU
+# waits for the rows. Gathers of at most GMLX_TABLE_FILE_ROWS rows (512;
+# 0 turns it off) of a table with a read-ahead attached, which knows its
+# place in the file, read their rows with mlx-kquant's file_rows instead:
+# the same bytes by parallel reads, a node on the same stream.
+_FILE_ROWS_MAX: int | None = None
+_FILE_ROWS_FAILED = 0
+_ROWS_CACHE_SET = False
+# The environment mlx-kquant reads its row cache bound from.
+_KQ_ENV = os.environ
+
+
+def _file_rows(mod, x, kq):
+    """The rows of ``x`` read from the table's file, or None for the
+    gather over the mapped table."""
+    global _FILE_ROWS_MAX, _FILE_ROWS_FAILED, _ROWS_CACHE_SET
+    if _FILE_ROWS_MAX is None:
+        from gmlx.envflags import env_int
+
+        _FILE_ROWS_MAX = (max(0, env_int("GMLX_TABLE_FILE_ROWS", 512))
+                          if hasattr(kq, "file_rows") else 0)
+        if _FILE_ROWS_MAX:
+            # Failures counted before the first gather here belong to
+            # another reader of the same counter.
+            _FILE_ROWS_FAILED = kq.file_rows_failures()
+    if not _FILE_ROWS_MAX or x.size > _FILE_ROWS_MAX:
+        return None
+    ra = getattr(mod, "_kq_table_readahead", None)
+    if ra is None or getattr(ra, "_closed", True):
+        return None
+    # A row file_rows cannot read comes back as zeros and is counted; the
+    # count moves one call late, since this call's reads have not run.
+    n = kq.file_rows_failures()
+    if n != _FILE_ROWS_FAILED:
+        bad, _FILE_ROWS_FAILED = n - _FILE_ROWS_FAILED, n
+        raise OSError(
+            f"{bad} table rows could not be read from "
+            f"{os.path.basename(ra.path)}; the output since the last "
+            "check is not valid")
+    want = getattr(mod, "_kq_rows_cache", 0)
+    if want and not _ROWS_CACHE_SET:
+        # mlx-kquant reads the bound once, at its first row read.
+        _ROWS_CACHE_SET = True
+        if not ({"KQ_FILE_ROWS_CACHE", "KQ_FILE_ROWS_CACHE_BYTES"}
+                & _KQ_ENV.keys()):
+            _KQ_ENV["KQ_FILE_ROWS_CACHE_BYTES"] = str(want)
+    return kq.file_rows(x, ra.path, ra.offset, ra.row_bytes, ra.rows,
+                        stream=table_stream())
+
 
 def _wrapped_class(cls, kquant: bool):
     """Per-instance ``__class__`` swap target (same pattern as the expert
@@ -796,8 +851,10 @@ def _wrapped_class(cls, kquant: bool):
             def __call__(self, x):
                 import mlx_kquant as kq
 
-                gathered = mx.take(
-                    self["weight"], x, axis=0, stream=table_stream())
+                gathered = _file_rows(self, x, kq)
+                if gathered is None:
+                    gathered = mx.take(
+                        self["weight"], x, axis=0, stream=table_stream())
                 flat = gathered.reshape(-1, gathered.shape[-1])
                 # As in KQuantEmbedding: a gather-only codec (mxfp8) can
                 # pass the float16 range, so it decodes to the output dtype.
@@ -848,6 +905,7 @@ def install_table_streaming(model) -> tuple[int, list[str]]:
 
     offloaded = tracked = 0
     names: list[str] = []
+    spec = STREAMABLE_TABLES.get(getattr(model, "model_type", None))
     for tier, mod in streamable_tables_for(model):
         if getattr(mod, "_hadamard", None) is not None:
             raise NotImplementedError(
@@ -856,6 +914,7 @@ def install_table_streaming(model) -> tuple[int, list[str]]:
         if not getattr(mod, "_kq_table_streamed", False):
             mod.__class__ = _wrapped_class(
                 mod.__class__, hasattr(mod, "kquant_type"))
+            mod._kq_rows_cache = spec.file_rows_cache_bytes
         offloaded += resident_table_bytes(mod)
         if not getattr(mod, "_kq_table_untracked", False):
             tracked += resident_table_bytes(mod)

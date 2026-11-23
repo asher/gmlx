@@ -665,3 +665,59 @@ def test_a_command_buffer_failure_drops_a_speculative_batch(monkeypatch):
     assert gen.removed == []
     assert _queue(gen) == [(0, [1, 5, 21]), (1, [2, 5, 31])]
     assert snapshot._RETIRE_BLOCKED[0] == 0
+
+
+@pytest.mark.parametrize("site", ["prefill", "mixed", "cold"])
+@pytest.mark.parametrize("lever, waiting, sent", [
+    ("0", False, []), ("1", False, [(0, 5)]), ("1", True, [])])
+def test_a_batch_that_starts_its_own_rounds_sends_its_first_token_at_once(
+        monkeypatch, site, lever, waiting, sent):
+    # GMLX_SPEC_FIRST_IN_PREFILL_STEP: the step that runs generate() sends
+    # the first token. Off: the next step sends it. The last token of a
+    # request that finished in the tick's decode step goes out either way.
+    # With another request waiting for its prefill the next step sends it
+    # too: sent now, it would wait out that prefill before the second. The
+    # same at each site that runs generate(): a prompt batch prefilled over
+    # steps, and one admitted with nothing to prefill, mixed or cold.
+    from types import SimpleNamespace
+
+    from gmlx._vendor.mlx_vlm.generate import ar
+
+    install_continuous_batch_admission()
+    monkeypatch.setenv("GMLX_SPEC_FIRST_IN_PREFILL_STEP", lever)
+    monkeypatch.setenv("GMLX_SPEC_KEEP_BUFFERS", "1")
+    batch = _make_batch(ar, max_tokens=8)
+    prompt = SimpleNamespace(
+        uids=[0], needs_processing=lambda: False, total_prompt_tokens=3,
+        generate=lambda *a, **kw: batch)
+    gen = object.__new__(ar.BatchGenerator)
+    gen._wire_stack = None
+    gen._generation_batch = []
+
+    def seq(uid):
+        return (uid, [2, 5, 31], 8, {"inputs_embeds": mx.zeros((1, 3, 4))},
+                None, None)
+
+    if site == "prefill":
+        gen._prompt_batch = prompt
+        gen._unprocessed_sequences = [seq(1)] if waiting else []
+    else:
+        gen._prompt_batch = None
+        gen._unprocessed_sequences = [seq(0)] + ([seq(1)] if waiting else [])
+        gen.completion_batch_size, gen.prefill_batch_size = 4, 1
+        gen._prompt_tokens_counter = 0
+        gen._build_mixed_prompt_batch = lambda seqs: (
+            prompt if site == "mixed" else None)
+        monkeypatch.setattr(ar, "_generate_module_override",
+                            lambda name, default: lambda **kw: prompt)
+        gen.model = gen.apc_manager = gen.apc_mode = None
+        gen.kv_bits = gen.kv_quant_scheme = None
+        gen.kv_group_size, gen.prefill_step_size = 64, 8
+    gen.sampler = gen.compute_logprobs = None
+    gen.top_logprobs_k = 0
+    gen.tokenizer = SimpleNamespace(stopping_criteria=None)
+    gen._prompt_time_counter = 0.0
+    done = SimpleNamespace(uid=9, token=7, finish_reason="stop")
+    _, responses = gen._prefill_arm([], [done])
+    assert [(r.uid, r.token) for r in responses] == [(9, 7)] + sent
+    assert gen._generation_batch is batch and batch._sent_first == bool(sent)

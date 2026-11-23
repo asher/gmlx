@@ -1812,6 +1812,31 @@ def test_a_student_adapter_the_base_cannot_take_is_refused_before_the_load(
         load_gguf_student(base, adapter=ad)
 
 
+def test_a_distill_student_loads_without_the_expert_store(tmp_path, monkeypatch):
+    """A student trains, or scores what it trained, on its experts' own
+    forwards: its load builds none of the expert store a qwen4_exp load
+    gets by default."""
+    import contextlib
+
+    import gmlx.distill.student as student
+    import gmlx.load.expert_store as es
+    import gmlx.load.loader as loader
+    import gmlx.load.loadlog as loadlog
+
+    monkeypatch.delenv("GMLX_MOE_EXPERT_STORE", raising=False)
+    seen = []
+
+    def load_model(path, hf_source=None):
+        seen.append(es.store_mode("qwen4_exp"))
+        return None, None, None
+
+    monkeypatch.setattr(loadlog, "load_ui", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(loader, "load_model", load_model)
+    monkeypatch.setattr(student, "llamacpp_bos_default", lambda tok, path: None)
+    student.load_gguf_student(str(tmp_path / "base.gguf"))
+    assert seen == [None] and es.store_mode("qwen4_exp") == ("full", 0)
+
+
 def test_adapter_disabled_reaches_expert_lora_stamps():
     """Expert adapters are objects stamped on the expert-stack leaf outside
     the module tree; the before-score toggle zeroes every slot's scale,

@@ -16,11 +16,13 @@ import os
 
 import numpy as np
 import mlx.core as mx
+import mlx.nn as nn
 import pytest
 
 from gmlx._vendor.mlx_vlm.models.cache import BufferedRotatingKVCache, KVCache
 
 import gmlx.models.qwen35.owned as qwen35_owned
+import gmlx.spec.dflash_drafter as dd
 from gmlx.spec.dflash_drafter import (
     DFlash2Drafter,
     DFlashConfig,
@@ -272,7 +274,8 @@ def test_make_cache_uses_temporal_rings_sized_to_the_window():
     drafter = _drafter(window=8, layer_types=["sliding_attention", "full_attention"])
     ring, full = drafter.make_cache()
     assert type(ring) is BufferedRotatingKVCache
-    assert ring.max_size == 7 and ring.keep == 0 and ring.buffer_size == 64
+    assert ring.max_size == 7 and ring.keep == 0
+    assert ring.buffer_size == dd._RING_SLACK
     assert type(full) is KVCache
     with pytest.raises(NotImplementedError):
         drafter.make_cache(left_padding=[0])
@@ -454,11 +457,12 @@ def _draft_hidden(drafter, block):
 
 
 @pytest.mark.parametrize("n_rows", [20, 200])
-def test_ring_is_temporal_and_the_window_trims_the_slack(n_rows):
+def test_ring_is_temporal_and_the_window_trims_the_slack(n_rows, monkeypatch):
     """With window 8 the ring keeps 7 rows plus 64 rows of rollback slack; a
     block row i must see exactly the 7-i most recent keys. A rotated ring, or
     a mask that ignores the slack rows, changes the draft hidden. Rows go in
     round-sized inserts, the way the engine commits them."""
+    monkeypatch.setattr(dd, "_RING_SLACK", 64)
     lm = _target()
     block = mx.array([[3, 7, 7, 7]])
     drafter = _drafter(lm, window=8)
@@ -486,21 +490,543 @@ def test_ring_is_temporal_and_the_window_trims_the_slack(n_rows):
     assert not np.allclose(want, _draft_hidden(drafter, block), atol=1e-4)
 
 
-def test_sliding_layers_mask_and_full_layers_do_not(monkeypatch):
+@pytest.mark.parametrize("in_place", [True, False])
+def test_sliding_layers_mask_and_full_layers_do_not(monkeypatch, in_place):
     lm = _target()
+    monkeypatch.setattr(dd, "_RING_IN_PLACE", in_place)
     drafter = _drafter(lm, window=8, layer_types=["sliding_attention", "full_attention"])
     _inject(drafter, 12, seed=1)
-    masks = []
+    masks, keys = [], []
     real = mx.fast.scaled_dot_product_attention
-    monkeypatch.setattr(
-        mx.fast, "scaled_dot_product_attention",
-        lambda *a, **k: (masks.append(k.get("mask")), real(*a, **k))[1])
+
+    def spy(*a, **k):
+        masks.append(k.get("mask"))
+        keys.append(a[1].shape[2])
+        return real(*a, **k)
+
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", spy)
     drafter._draft_hidden(mx.array([[3, 7, 7, 7]]))
     assert len(masks) == 2
-    # The sliding layer keeps only the window - 1 rows it can see.
-    assert masks[0] is not None and masks[0].shape == (4, 11)
+    # The sliding layer keeps only the window - 1 rows it can see. Read in
+    # place, a full ring orders its keys so the window is a causal mask.
+    assert keys[0] == 11
+    if in_place:
+        assert isinstance(masks[0], str) and masks[0] == "causal"
+    else:
+        assert masks[0] is not None and masks[0].shape == (4, 11)
     assert masks[1] is None
     assert [c.offset for c in drafter._cache] == [7, 12]
+
+
+@pytest.mark.parametrize("kw, n_rows", [
+    (dict(window=8), 2),            # open window: no mask
+    (dict(window=8), 5),            # the block crosses the window: array mask
+    (dict(window=8), 7),            # full ring: causal order
+    (dict(window=8), 30),           # full ring with slack rows held
+    (dict(window=8), 200),          # after compactions
+    (dict(window=8, is_causal=True), 30),
+    (dict(window=8, block_size=1, native_block_size=1), 30),
+    (dict(window=8, layer_types=["full_attention"] * 2,
+          context_window=6), 30),
+])
+def test_ring_read_in_place_matches_the_ring_copy(monkeypatch, kw, n_rows):
+    """The draft over the ring's own buffer equals the draft over a copy of
+    the ring, leaves the ring rows as they were, and a later commit and
+    draft agree too: the block rows parked after the ring never count."""
+    lm = _target()
+    width = int(kw.get("block_size", BLOCK))
+    block = mx.array([[3] + [7] * (width - 1)])
+    mx.random.seed(5)
+    caps = mx.random.normal((1, n_rows + BLOCK, _tcfg().hidden_size * len(CAPTURE)))
+    got = {}
+    for in_place in (False, True):
+        monkeypatch.setattr(dd, "_RING_IN_PLACE", in_place)
+        mx.random.seed(21)
+        drafter = _drafter(lm, **kw)
+        for i in range(0, n_rows, BLOCK):
+            drafter.append_context(caps[:, i:min(i + BLOCK, n_rows)])
+        mx.eval(drafter.draft_eval_state())
+        before = [(c._idx, np.array(c.state[0]), np.array(c.state[1]))
+                  for c in drafter._cache]
+        first = _draft_hidden(drafter, block)
+        again = _draft_hidden(drafter, block)
+        for c, (idx, k, v) in zip(drafter._cache, before):
+            assert c._idx == idx
+            assert np.array_equal(np.array(c.state[0]), k)
+            assert np.array_equal(np.array(c.state[1]), v)
+        drafter.append_context(caps[:, n_rows:])
+        got[in_place] = (first, again, _draft_hidden(drafter, block))
+    for a, b in zip(got[True], got[False]):
+        assert np.allclose(a, b, atol=5e-3), np.abs(a - b).max()
+    assert np.array_equal(got[True][0], got[True][1])
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float32])
+def test_ring_read_in_place_at_the_served_attention_shape(monkeypatch, dtype):
+    """Head dim 128 with 32 heads over 8 KV heads and a full 2047-row ring:
+    the shape the attention kernels route by. The in-place view is strided
+    and its mask is the causal string."""
+    cfg = DFlashConfig(
+        hidden_size=256, intermediate_size=64, num_hidden_layers=1,
+        num_attention_heads=32, num_key_value_heads=8, head_dim=128,
+        rms_norm_eps=1e-6, vocab_size=64, max_position_embeddings=8192,
+        rope_theta=10000.0, block_size=8, mask_token_id=7,
+        target_layer_ids=[0], num_target_layers=2,
+        layer_types=["sliding_attention"], sliding_window=2048)
+    drafter = DFlashDrafter(cfg)
+    drafter.set_dtype(dtype)
+    attn = drafter.layers[0].self_attn
+    mx.random.seed(3)
+    for lin in (attn.q_proj, attn.k_proj, attn.v_proj, attn.o_proj):
+        lin.weight = (mx.random.normal(lin.weight.shape) * 0.05).astype(dtype)
+    ctx = mx.random.normal((1, 2047 + 40, 256)).astype(dtype)
+    block = mx.random.normal((1, 8, 256)).astype(dtype)
+    out = {}
+    for in_place in (False, True):
+        monkeypatch.setattr(dd, "_RING_IN_PLACE", in_place)
+        (cache,) = drafter.make_cache()
+        attn.inject(ctx[:, :2047], drafter.rope, cache)
+        for i in range(2047, 2087, 8):
+            attn.inject(ctx[:, i:i + 8], drafter.rope, cache)
+        assert cache._idx == 2087
+        out[in_place] = np.array(
+            attn.draft(block, drafter.rope, cache).astype(mx.float32))
+    tol = 2e-2 if dtype == mx.bfloat16 else 2e-3
+    scale = np.abs(out[False]).max()
+    assert np.abs(out[True] - out[False]).max() <= tol * scale
+
+
+def _conv(hidden, kernel_size, dtype, seed):
+    mx.random.seed(seed)
+    conv = dd.GroupedDynamicConv(hidden, kernel_size, 16)
+    conv.base_kernel = mx.random.normal(conv.base_kernel.shape).astype(dtype)
+    conv.kernel_projection.weight = (
+        mx.random.normal(conv.kernel_projection.weight.shape) * 0.2).astype(dtype)
+    return conv
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16, mx.float32])
+@pytest.mark.parametrize("rows, kernel_size", [(1, 2), (4, 2), (8, 2), (8, 3)])
+def test_conv_kernel_matches_the_op_chain(monkeypatch, dtype, rows, kernel_size):
+    """One dispatch a side gives the op chain's values: bit for bit at 16
+    bits, where every product and add rounds as the chain's ops do."""
+    if dd._conv_kernels() is None:
+        pytest.skip("no Metal kernels on this device")
+    conv = _conv(64, kernel_size, dtype, seed=rows)
+    x = mx.random.normal((1, rows, 64)).astype(dtype)
+    y = mx.random.normal((1, rows, 64)).astype(dtype)
+    res = mx.random.normal((1, rows, 64)).astype(dtype)
+
+    def run():
+        a, proj = conv.prepare(x)
+        return [np.array(t.astype(mx.float32)) for t in (
+            a, conv.finish(y, proj), conv.finish(y, proj, res))]
+
+    calls = []
+    fused = dd.GroupedDynamicConv._fused
+
+    def counted(self, *a):
+        out = fused(self, *a)
+        calls.append(out is not None)
+        return out
+
+    monkeypatch.setattr(dd.GroupedDynamicConv, "_fused", counted)
+    got = run()
+    assert calls == [True, True, True]
+    monkeypatch.setattr(dd, "_conv_kerns", False)
+    want = run()
+    for a, b in zip(got, want):
+        if dtype == mx.float32:
+            assert np.allclose(a, b, rtol=1e-5, atol=1e-5)
+        else:
+            assert np.array_equal(a, b), np.abs(a - b).max()
+
+
+@_NEEDS_GPU
+def test_conv_kernel_leaves_a_mixed_dtype_to_the_op_chain():
+    """A projection in another dtype than the rows promotes in the op chain,
+    so the kernel declines it."""
+    if dd._conv_kernels() is None:
+        pytest.skip("no Metal kernels on this device")
+    conv = _conv(64, 2, mx.float32, seed=0)
+    x = mx.random.normal((1, 4, 64)).astype(mx.bfloat16)
+    proj = conv.kernel_projection(x.astype(mx.float32))
+    assert conv._fused(x, proj, 0, None) is None
+    assert conv._fused(x, proj.astype(mx.bfloat16), 0, None) is not None
+    assert conv.finish(x, proj, x).dtype == mx.float32
+
+
+def _lattice(rows, k, dtype, seed):
+    mx.random.seed(seed)
+    cands = mx.random.permutation(5000)[: rows * k].reshape(rows, k).astype(mx.int32)
+    first = (mx.random.normal((k,)) * 3).astype(dtype)
+    edges = (mx.random.normal((rows - 1, k, k)) * 3).astype(dtype)
+    return cands, first, edges
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float32])
+@pytest.mark.parametrize("rows, k, floor", [(7, 16, 0.5), (7, 16, 0.0),
+                                            (2, 4, 0.05), (15, 16, 0.01)])
+def test_walk_kernel_takes_the_argmax_path(dtype, rows, k, floor):
+    """The one-dispatch walk picks the argmax path's columns and tokens,
+    gives each pick's log-probability and cuts at the same row."""
+    cands, first, edges = _lattice(rows, k, dtype, seed=rows + k)
+    walked = dd.selector_walk(cands, first, edges, floor)
+    if walked is None:
+        pytest.skip("no Metal kernels on this device")
+    toks, sel, lp, keep, q = walked
+    want = dd.greedy_path(first, edges)
+    assert q is None
+    assert sel.tolist() == want.tolist()
+    assert toks.tolist() == greedy_walk(cands, first, edges).tolist()
+    want_lp = dd.path_logprobs(first, edges, want)
+    assert np.allclose(np.array(lp), np.array(want_lp), atol=1e-4)
+    want_keep = rows if floor <= 0 else int(dd.rows_over_floor(want_lp, floor).item())
+    assert int(keep.item()) == want_keep
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("proposal", [(0.6, 20, 0.95, 0.0), (1.0, 5, 0.9, 0.0),
+                                      (0.8, 0, 1.0, 0.1), (1.3, 3, 0.5, 0.02)])
+def test_walk_kernel_draws_from_the_sharpened_proposal(proposal):
+    """Each sampled pick comes with the proposal row it was drawn from: the
+    _pq_probs row of the realized predecessor's lattice row. The picks
+    follow that row's probabilities."""
+    from gmlx.spec.speculative import _pq_probs
+
+    rows, k = 7, 16
+    cands, first, edges = _lattice(rows, k, mx.bfloat16, seed=4)
+    if dd.selector_walk(cands, first, edges, 0.5, proposal) is None:
+        pytest.skip("no Metal kernels on this device")
+    mx.random.seed(8)
+    counts = np.zeros(k)
+    n = 1500
+    for i in range(n):
+        toks, sel, lp, keep, q = dd.selector_walk(cands, first, edges, 0.5, proposal)
+        sel_l = sel.tolist()
+        counts[sel_l[0]] += 1
+        if i % 100:
+            continue
+        row = first
+        for p in range(rows):
+            want = np.array(_pq_probs(row[None], *proposal)[0])
+            got = np.array(q[p])
+            assert np.allclose(got, want, atol=2e-4), (p, np.abs(got - want).max())
+            assert got[sel_l[p]] > 0
+            assert toks[p].item() == cands[p, sel_l[p]].item()
+            r = np.array(row.astype(mx.float32))
+            assert abs(float(lp[p].item()) - (r[sel_l[p]] - np.logaddexp.reduce(r))) < 1e-4
+            if p + 1 < rows:
+                row = edges[p][sel_l[p]]
+    want = np.array(_pq_probs(first[None], *proposal)[0])
+    sigma = np.sqrt(want * (1 - want) / n)
+    assert (np.abs(counts / n - want) <= 4.5 * sigma + 1e-9).all(), (counts / n, want)
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("on, scored", [(True, True), (True, False), (False, False)])
+def test_sampled_block_stashes_the_rows_it_drew_from(monkeypatch, on, scored):
+    """A sampled DFlash 2 block with a q stash: one full-width proposal row
+    per draft, each a distribution with mass on its drawn token, through
+    the walk kernel (scoring its own lattice rows or not) and through the
+    op chain alike."""
+    monkeypatch.setattr(dd, "_WALK_KERNEL", on)
+    monkeypatch.setattr(dd, "_LATTICE_WALK", scored)
+    lm = _target()
+    drafter = _drafter(lm, window=8, top_k=4)
+    _inject(drafter, 12, seed=1)
+    mx.random.seed(3)
+    stash = DraftStash(q=[])
+    toks = drafter.draft_block(3, None, None, BLOCK, None, greedy=False, stash=stash)
+    toks = toks.tolist()[0]
+    assert len(stash.q) == len(toks) == BLOCK - 1
+    for t, q in zip(toks, stash.q):
+        q = np.array(q)
+        assert q.shape == (_tcfg().vocab_size,)
+        assert abs(q.sum() - 1) < 1e-4 and q[t] > 0
+        assert (q > 0).sum() <= 4
+
+
+@_NEEDS_GPU
+def test_a_block_the_logs_record_is_not_cut():
+    """The sampled walk that feeds the p/q and top-2 logs has no test of a
+    cut draft, so a sampled block it records keeps every draft: a cut on
+    the draft's own pick would bias the token at the cut. A greedy block
+    the logs record keeps its cut."""
+    lm = _target()
+    drafter = _drafter(lm, window=8, top_k=4)
+    _inject(drafter, 12, seed=1)
+    object.__setattr__(drafter, "row_floor", 0.999)
+    mx.random.seed(3)
+    plain = drafter.draft_block(3, None, None, BLOCK, None, greedy=False,
+                                stash=DraftStash(q=[]))
+    assert plain.shape[1] < BLOCK - 1
+    for logged in (DraftStash(q=[], pq=[]), DraftStash(q=[], top2=[])):
+        mx.random.seed(3)
+        toks = drafter.draft_block(3, None, None, BLOCK, None, greedy=False,
+                                   stash=logged)
+        assert toks.shape[1] == BLOCK - 1
+    cut = drafter.draft_block(3, None, None, BLOCK, None, greedy=True)
+    assert cut.shape[1] < BLOCK - 1
+    logged = DraftStash(pq=[], top2=[])
+    toks = drafter.draft_block(3, None, None, BLOCK, None, greedy=True,
+                               stash=logged)
+    assert toks.tolist() == cut.tolist()
+    assert len(logged.pq) == len(logged.top2) == cut.shape[1]
+
+
+def _walk_rows(dtype, rows=7, seed=11):
+    mx.random.seed(seed)
+    drafter = _drafter(top_k=8)
+    H, V = _tcfg().hidden_size, _tcfg().vocab_size
+    hidden = mx.random.normal((rows, H)).astype(dtype)
+    logits = (mx.random.normal((rows, V)) * 4).astype(dtype)
+    return drafter.candidate_selector, hidden, logits, mx.array(5)
+
+
+def _path_rows(first, edges, sel):
+    rows = [first] + [edges[p - 1][int(sel[p - 1].item())] for p in range(1, len(sel))]
+    return [np.array(r.astype(mx.float32)) for r in rows]
+
+
+@_NEEDS_GPU
+@pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float32])
+@pytest.mark.parametrize("floor", [0.5, 0.0])
+def test_lattice_walk_takes_the_argmax_path_of_the_lattice(dtype, floor):
+    """The walk that scores its own lattice rows takes the argmax path of
+    the lattice the two-step form builds, with its pick log-probabilities
+    and row cut."""
+    sel, hidden, logits, anchor = _walk_rows(dtype)
+    fused = sel.walk(hidden, logits, anchor, None, floor)
+    if fused is None:
+        pytest.skip("no Metal kernels on this device")
+    cands, toks, cols, lp, keep, q = fused
+    ref_c, first, edges = sel.lattice(hidden, logits, anchor)
+    assert q is None and cands.tolist() == ref_c.tolist()
+    assert toks.tolist() == np.take_along_axis(
+        np.array(cands), np.array(cols)[:, None], axis=-1)[:, 0].tolist()
+    # f32 lattice GEMMs run at TF32 where available, so a pick may differ
+    # from the op chain's only within that precision.
+    tol = 2e-3 if dtype == mx.float32 else 0.0
+    for p, r in enumerate(_path_rows(first, edges, cols)):
+        assert r[int(cols[p].item())] >= r.max() - tol
+    assert np.allclose(np.array(lp), np.array(dd.path_logprobs(first, edges, cols)),
+                       atol=tol + 1e-4)
+    want_keep = 7 if floor <= 0 else int(dd.rows_over_floor(lp, floor).item())
+    assert int(keep.item()) == want_keep
+    if dtype == mx.bfloat16:
+        assert cols.tolist() == dd.greedy_path(first, edges).tolist()
+
+
+@_NEEDS_GPU
+def test_lattice_walk_draws_from_the_rows_it_scores():
+    """Sampled, each pick comes with the sharpened proposal of the lattice
+    row of its realized predecessor, and the first picks follow it."""
+    from gmlx.spec.speculative import _pq_probs
+
+    proposal = (0.6, 20, 0.95, 0.0)
+    sel, hidden, logits, anchor = _walk_rows(mx.bfloat16)
+    if sel.walk(hidden, logits, anchor, None, 0.0, proposal) is None:
+        pytest.skip("no Metal kernels on this device")
+    _, first, edges = sel.lattice(hidden, logits, anchor)
+    mx.random.seed(8)
+    n, k = 1500, sel.top_k
+    counts = np.zeros(k)
+    for i in range(n):
+        cands, toks, cols, lp, keep, q = sel.walk(hidden, logits, anchor, None, 0.0, proposal)
+        counts[int(cols[0].item())] += 1
+        if i % 100:
+            continue
+        for p, r in enumerate(_path_rows(first, edges, cols)):
+            want = np.array(_pq_probs(mx.array(r)[None], *proposal)[0])
+            assert np.allclose(np.array(q[p]), want, atol=2e-4), p
+            assert np.array(q[p])[int(cols[p].item())] > 0
+    want = np.array(_pq_probs(first[None], *proposal)[0])
+    sigma = np.sqrt(want * (1 - want) / n)
+    assert (np.abs(counts / n - want) <= 4.5 * sigma + 1e-9).all(), (counts / n, want)
+
+
+@_NEEDS_GPU
+def test_greedy_block_and_estimate_match_with_the_lattice_walk(monkeypatch):
+    """A greedy block drafts the same tokens, cut and round estimate whether
+    the walk scores its own lattice rows or the whole lattice is built."""
+    lm = _target()
+    drafter = _drafter(lm, window=8, top_k=4)
+    _inject(drafter, 12, seed=1)
+    object.__setattr__(drafter, "row_floor", 0.05)
+    got = {}
+    for scored in (True, False):
+        monkeypatch.setattr(dd, "_LATTICE_WALK", scored)
+        toks = drafter.draft_block(3, None, None, BLOCK, None, greedy=True)
+        got[scored] = (toks.tolist(), float(drafter.round_estimate.item()),
+                       drafter._round_path[0] is None)
+    assert got[True][0] == got[False][0]
+    assert abs(got[True][1] - got[False][1]) < 1e-4
+    assert got[False][2] is False
+    if dd._lattice_walk_kernels() is not None:
+        assert got[True][2] is True
+
+
+def _heads(out_dims, in_dims):
+    """One head of every form head_rows slices, with the float weight."""
+    mx.random.seed(17)
+    w = mx.random.normal((out_dims, in_dims)) * 0.1
+    lin = nn.Linear(in_dims, out_dims, bias=False)
+    lin.weight = w
+    emb = nn.Embedding(out_dims, in_dims)
+    emb.weight = w
+    forms = {"linear": lin, "tied": emb.as_linear,
+             "affine": nn.QuantizedLinear.from_linear(lin, group_size=32, bits=4)}
+    try:
+        import mlx_kquant as kq
+        from mlx_kquant.nn import KQuantEmbedding, KQuantLinear
+    except ImportError:
+        return forms
+    if dd.mx.default_device().type != mx.DeviceType.gpu:
+        return forms
+    for codec in ("q8_0", "q6_k", "q4_k"):
+        wire, scales = kq.quantize(w, codec)
+        ql = KQuantLinear(in_dims, out_dims, False, codec)
+        ql.weight, ql.scales = wire, scales
+        forms[codec] = ql
+    qe = KQuantEmbedding(out_dims, in_dims, "q6_k")
+    qe.weight, qe.scales = forms["q6_k"].weight, forms["q6_k"].scales
+    forms["tied q6_k"] = qe.as_linear
+    return forms
+
+
+@pytest.mark.parametrize("seed", [0, 2])
+@pytest.mark.parametrize("lo, hi", [(256, 768), (0, 512), (512, 1024)])
+def test_head_rows_are_the_head_without_the_skipped_ids(lo, hi, seed):
+    """Every head form gives the whole head's columns outside the range,
+    in id order. A K-quant kernel may take another route for the fewer
+    rows, so a column can differ in its last bfloat16 bit."""
+    mx.random.seed(seed)
+    x = mx.random.normal((1, 3, 256))
+    for name, head in _heads(1024, 256).items():
+        got = dd.head_rows(head, x, lo, hi)
+        assert got is not None, name
+        full = np.array(head(x).astype(mx.float32))
+        keep = np.r_[0:lo, hi:1024]
+        assert got.shape == (1, 3, keep.size), name
+        assert np.allclose(np.array(got.astype(mx.float32)), full[..., keep],
+                           rtol=2 ** -7, atol=1e-3), name
+
+
+def test_head_rows_leaves_unknown_heads_whole():
+    assert dd.head_rows(lambda x: x, mx.zeros((1, 2, 8)), 0, 4) is None
+
+    class Gated(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = mx.zeros((16, 8))
+            self.gate = mx.ones((16,))
+
+        def __call__(self, x):
+            return (x @ self.weight.T) * self.gate
+
+    assert dd.head_rows(Gated(), mx.zeros((1, 2, 8)), 0, 4) is None
+
+
+def test_longest_free_run_skips_the_unused_ids():
+    occ = np.zeros(64, dtype=bool)
+    occ[[0, 1, 2, 40, 63]] = True
+    assert dd._longest_free_run(occ, 64 * 128) == (3 * 128, 40 * 128)
+    occ[20] = True                      # the run splits: 41..62 is longest
+    assert dd._longest_free_run(occ, 64 * 128) == (41 * 128, 63 * 128)
+    occ[::4] = True                     # no run of an eighth of the ids
+    assert dd._longest_free_run(occ, 64 * 128) is None
+
+
+def _subset_drafter(lm, vocab_ids):
+    drafter = _drafter(lm, window=8)
+    _inject(drafter, 12, seed=1)
+    dd._open_ring(drafter._cache, int(drafter.config.vocab_size), vocab_ids)
+    return drafter
+
+
+def test_draft_head_skips_ids_the_context_has_not_used(monkeypatch):
+    """A context that has used only low ids drafts over a head without the
+    unused tail, maps the candidates back to ids, and widens the head
+    again once a commit uses an id inside the skipped run."""
+    lm = _target()
+    vocab = int(_tcfg().vocab_size)
+    monkeypatch.setattr(dd, "_HEAD_BLOCK", 8)
+    calls = []
+    real = dd.head_rows
+
+    def spy(head, x, lo, hi):
+        calls.append((lo, hi))
+        return real(head, x, lo, hi)
+
+    monkeypatch.setattr(dd, "head_rows", spy)
+    drafter = _subset_drafter(lm, list(range(0, 16)))
+    skip = drafter._head_skip()
+    assert skip == (16, vocab)
+    sel, seen = drafter.candidate_selector, []
+    real_walk, real_lattice = sel.walk, sel.lattice
+
+    def walk(*a):
+        out = real_walk(*a)
+        if out is not None:
+            seen.append(out[0])
+        return out
+
+    def lattice(*a):
+        out = real_lattice(*a)
+        seen.append(out[0])
+        return out
+
+    monkeypatch.setattr(sel, "walk", walk)
+    monkeypatch.setattr(sel, "lattice", lattice)
+    mx.random.seed(3)
+    toks = drafter.draft_block(3, None, None, BLOCK, None, greedy=True)
+    assert calls == [skip]
+    cands = np.array(seen[-1])
+    assert (cands < 16).all()
+    # The same block over the whole head picks the best ids below 16.
+    full = drafter._logits(drafter._draft_hidden(drafter._block_tokens(3, BLOCK, mx.int32))[:, 1:])[0]
+    full = np.array(full.astype(mx.float32))
+    for r in range(BLOCK - 1):
+        assert set(cands[r].tolist()) == set(np.argsort(-full[r, :16])[:TOP_K].tolist())
+    assert all(t < 16 for t in toks.tolist()[0])
+    drafter.accept_verified_tokens(
+        mx.zeros((1, 2, _packed_width(_tcfg()))), toks, 1, [40, 5], None)
+    assert drafter._head_skip() == (48, vocab)
+
+
+def test_draft_head_is_whole_without_prompt_ids(monkeypatch):
+    lm = _target()
+    drafter = _drafter(lm, window=8)
+    _inject(drafter, 12, seed=1)
+    assert drafter._head_skip() is None
+    monkeypatch.setattr(dd, "_HEAD_SUBSET", False)
+    assert _subset_drafter(lm, [0])._head_skip() is None
+
+
+def test_lattice_candidates_over_a_wide_vocabulary_are_the_top_k():
+    """From 8192 ids up the lattice takes its candidates from the
+    hierarchical top-k: the same ids as a full sort."""
+    from gmlx.spec.dflash_drafter import CandidateSelector
+
+    mx.random.seed(2)
+    sel = CandidateSelector(32, 9000, rank=8, top_k=16)
+    hidden = mx.random.normal((5, 32))
+    logits = mx.random.normal((5, 9000))
+    cands, first, edges = sel.lattice(hidden, logits, mx.array(3))
+    want = np.argsort(-np.array(logits), axis=-1)[:, :16]
+    assert [sorted(r) for r in np.array(cands).tolist()] == [
+        sorted(r) for r in want.tolist()]
+    assert first.shape == (16,) and edges.shape == (4, 16, 16)
+    unary = np.take_along_axis(np.array(logits), np.array(cands), axis=-1)
+    hp = np.array(sel.hidden_projection(hidden))
+    succ = np.array(sel.successor_codebook(cands))
+    pred0 = np.array(sel.predecessor_codebook(mx.array([3])))[0]
+    assert np.allclose(np.array(first), unary[0] + succ[0] @ (pred0 * hp[0]),
+                       atol=1e-4)
 
 
 def test_causal_flag_adds_the_block_triangle(monkeypatch):
@@ -581,6 +1107,87 @@ def test_a_long_seed_projects_only_each_layers_span():
     drafter.append_context(_caps(20, seed=6))
     held = [int(c.state[0].shape[2]) for c in drafter._cache]
     assert held == [7, 20]
+
+
+@pytest.mark.parametrize("rows", [1, 3, 12])
+def test_one_call_context_kv_writes_the_ring_each_layer_would(monkeypatch, rows):
+    """A commit that projects every layer's context K/V in one call writes
+    the ring each layer projecting its own writes, and a commit longer than
+    a ring leaves the projection to the layer."""
+    lm = _target()
+    rings = {}
+    for multi in (True, False):
+        monkeypatch.setattr(dd, "_QMM_MULTI", multi)
+        mx.random.seed(4)
+        drafter = _drafter(lm, window=8)
+        drafter.append_context(_caps(rows, seed=6))
+        rings[multi] = [np.array(x) for c in drafter._cache for x in c.state]
+    assert len(rings[True]) == len(rings[False])
+    for a, b in zip(rings[True], rings[False]):
+        assert np.array_equal(a, b)
+
+
+def test_a_commit_started_early_drafts_the_same_block(monkeypatch):
+    lm = _target()
+    mx.random.seed(2)
+    verify_hidden = mx.random.normal((1, 3, _packed_width(_tcfg())))
+    out = {}
+    for early in (True, False):
+        monkeypatch.setattr(dd, "_COMMIT_ASYNC", early)
+        mx.random.seed(4)
+        drafter = _drafter(lm, window=8)
+        _inject(drafter, 12, seed=1)
+        drafter.accept_verified_tokens(verify_hidden, None, 1, [40, 5], None)
+        out[early] = drafter.draft_block(3, None, None, BLOCK, None, greedy=True).tolist()
+    assert out[True] == out[False]
+
+
+def test_the_kept_hidden_is_the_hidden_of_the_rows_the_ring_holds(monkeypatch):
+    """Under GMLX_SPEC_APC_LONGER a request leaves the target hidden of its
+    last rows: the prompt capture and each accept's committed rows, less
+    the rows a counted accept or an undo took back, cut at the stored
+    length and at the capture limit."""
+    monkeypatch.setattr(dd, "_KEEP_TAIL", True)
+    lm = _target()
+    width = _packed_width(_tcfg())
+    mx.random.seed(3)
+    prompt = mx.random.normal((1, 12, width))
+    rounds = [mx.random.normal((1, BLOCK, width)) for _ in range(4)]
+    drafter = _drafter(lm, window=8)
+    limit = drafter.hidden_capture_limit
+    assert limit == 7
+    drafter.prefill_from_target_hidden(None, prompt, 0, None)
+    tail = drafter._tail
+    # A whole accept, a counted accept trimmed by two rows, an accept taken
+    # back whole, then one of two rows.
+    drafter.accept_verified_tokens(rounds[0], None, 3, [], None)
+    mark = drafter.accept_mark(4)
+    drafter.accept_verified_tokens(rounds[1], None, 3, [], None)
+    drafter.accept_trim(mark, 2)
+    mark = drafter.accept_mark(3)
+    drafter.accept_verified_tokens(rounds[2], None, 2, [], None)
+    drafter.accept_undo(mark)
+    drafter.accept_verified_tokens(rounds[3], None, 1, [], None)
+    want = mx.concatenate(
+        [prompt, rounds[0], rounds[1][:, :2], rounds[3][:, :2]], axis=1)
+    end = 12 + 8
+    assert tail.round_rows == 8
+    got = tail.take(12, end)
+    assert mx.array_equal(got, want[:, -limit:]).item()
+    # A record stored three tokens short of the request's end: the rows
+    # that end there, as many as the log still holds.
+    short = tail.take(12, end - 3)
+    n = int(short.shape[1])
+    assert 0 < n <= limit
+    assert mx.array_equal(short, want[:, -3 - n:-3]).item()
+    # A cache that holds a row the drafter was never fed: nothing to keep.
+    assert tail.take(12, end + 1) is None
+    # The next request's log is its own.
+    drafter.reset(lm)
+    assert drafter._tail is not tail and tail.round_rows == 8
+
+    monkeypatch.setattr(dd, "_KEEP_TAIL", False)
+    assert _drafter(lm, window=8)._tail is None
 
 
 # --- draw / stash -------------------------------------------------------------

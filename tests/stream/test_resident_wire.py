@@ -189,6 +189,21 @@ def test_overcommit_admits(monkeypatch):
     assert _check(82.5e9).fits
 
 
+def test_a_full_store_s_planes_count_in_the_resident_set(monkeypatch):
+    """A full expert store's planes stand where its stacks' placeholders
+    stood: MLX memory not wired yet, which the unwired count holds, so the
+    fit counts them as the wire inserts them."""
+    from gmlx.load import expert_store
+
+    monkeypatch.setattr(expert_store, "held",
+                        lambda m: (60 * GiB, {1, 2}))
+    monkeypatch.setattr(expert_store, "planes",
+                        lambda m: [SimpleNamespace(nbytes=59 * GiB)])
+    wire, skip = es._resident_set(object(), 100 * GiB, 20 * GiB)
+    assert (wire, skip) == (79 * GiB, {1, 2})
+    assert _check(wire, budget=70 * GiB).reason == "budget"
+
+
 def test_the_model_s_cached_pages_count_once():
     # The model's cached pages are in the unwired reading until the wire
     # takes them: an 87 GiB model fully cached in 90 GiB of unwired memory

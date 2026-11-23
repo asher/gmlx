@@ -226,6 +226,123 @@ def test_qsa_ragged_all_sparse_matches_dense_mask():
 
 
 @gpu_only
+def test_qsa_sparse_prefill_page_bound_has_the_bits_of_the_host_read(
+        monkeypatch):
+    """The page lists sized by the widest union a window can have against
+    the lists sized by a host read of the widest one
+    (GMLX_Q4_QSA_BS_STATIC_PAGES=0), at a second window past the sparse
+    boundary."""
+    if q4._kq_bs_prefill() is None:
+        pytest.skip("kq block-sparse prefill kernel unavailable")
+    layer = _qsa_layer()
+    mx.random.seed(23)
+    xs = [mx.random.normal((1, n, 128)).astype(mx.bfloat16) for n in (64, 40)]
+    monkeypatch.delenv("GMLX_Q4_QSA_BS_STATIC_PAGES", raising=False)
+    got = _run_arm(layer, xs, kernel=True)
+    monkeypatch.setenv("GMLX_Q4_QSA_BS_STATIC_PAGES", "0")
+    ref = _run_arm(layer, xs, kernel=True)
+    for g, r in zip(got, ref):
+        assert mx.array_equal(g, r).item()
+
+
+@gpu_only
+def test_prefill_forward_submits_each_layer_with_the_same_bits(monkeypatch):
+    """A forward of prefill width submits its table rows, then each layer
+    as it is built; a decode step does not; GMLX_Q4_PLE_EARLY=0 leaves the
+    rows to their layer and GMLX_Q4_PREFILL_PIPELINE=0 builds the forward
+    whole, each with the same output."""
+    m = _train_model()
+    m.eval()
+    assert sum("ple" in layer for layer in m.layers) == 1
+    mx.random.seed(31)
+    ids = mx.random.randint(0, 32, (1, 40))
+    calls = []
+    real = mx.async_eval
+    monkeypatch.setattr(q4.mx, "async_eval",
+                        lambda *a: calls.append(len(a)) or real(*a))
+    monkeypatch.delenv("GMLX_Q4_PREFILL_PIPELINE", raising=False)
+    monkeypatch.delenv("GMLX_Q4_PLE_EARLY", raising=False)
+    monkeypatch.setattr(q4, "_PLE_EARLY", None)
+    got = m(ids, cache=m.make_cache())
+    mx.eval(got)
+    assert len(calls) == len(m.layers) + 1
+    del calls[:]
+    monkeypatch.setenv("GMLX_Q4_PLE_EARLY", "0")
+    monkeypatch.setattr(q4, "_PLE_EARLY", None)
+    late = m(ids, cache=m.make_cache())
+    mx.eval(late)
+    assert len(calls) == len(m.layers)
+    assert mx.array_equal(got, late).item()
+    del calls[:]
+    c = m.make_cache()
+    mx.eval(m(ids[:, :1], cache=c))
+    assert not calls
+    monkeypatch.setenv("GMLX_Q4_PREFILL_PIPELINE", "0")
+    ref = m(ids, cache=m.make_cache())
+    mx.eval(ref)
+    assert not calls
+    assert mx.array_equal(got, ref).item()
+
+
+@gpu_only
+def test_prefill_forward_submits_a_drafter_tap_with_its_layer(monkeypatch):
+    """A layer the DFlash drafter taps is submitted with its stream mean,
+    which has the bits of the tap a forward built whole takes."""
+    m = _train_model()
+    m.eval()
+    mx.random.seed(31)
+    ids = mx.random.randint(0, 32, (1, 40))
+    taps = (1, 3)
+    subs = []
+    real = mx.async_eval
+    monkeypatch.setattr(q4.mx, "async_eval",
+                        lambda *a: subs.append(a) or real(*a))
+    monkeypatch.setenv("GMLX_Q4_PLE_EARLY", "0")
+    monkeypatch.setattr(q4, "_PLE_EARLY", None)
+    monkeypatch.delenv("GMLX_Q4_PREFILL_PIPELINE", raising=False)
+    caps = []
+    mx.eval(m.model(ids, m.make_cache(), capture=(taps, caps)))
+    assert [len(s) for s in subs] == [2 if i in taps else 1
+                                      for i in range(len(m.layers))]
+    assert all(subs[i][1] is cap for i, cap in zip(taps, caps))
+    monkeypatch.setenv("GMLX_Q4_PREFILL_PIPELINE", "0")
+    whole = []
+    mx.eval(m.model(ids, m.make_cache(), capture=(taps, whole)))
+    assert len(whole) == len(caps) == len(taps)
+    for g, r in zip(caps, whole):
+        assert mx.array_equal(g, r).item()
+
+
+@gpu_only
+def test_prefill_forward_runs_a_deferred_clear_after_its_first_submit(
+        monkeypatch):
+    """A cache clear a chunk left for the GPU's next work runs once, after
+    the first layer of the next prefill forward is submitted. A decode
+    step leaves it waiting."""
+    from gmlx.gen import deferred_clear
+
+    m = _train_model()
+    m.eval()
+    mx.random.seed(31)
+    ids = mx.random.randint(0, 32, (1, 40))
+    events = []
+    real = mx.async_eval
+    monkeypatch.setattr(q4.mx, "async_eval",
+                        lambda *a: events.append("submit") or real(*a))
+    monkeypatch.setattr(deferred_clear, "clear_now",
+                        lambda: (events.append("clear"),
+                                 deferred_clear.settled()))
+    monkeypatch.setattr(deferred_clear, "_pending", True)
+    mx.eval(m(ids[:, :1], cache=m.make_cache()))
+    assert events == [] and deferred_clear.pending()
+    monkeypatch.setenv("GMLX_Q4_PLE_EARLY", "0")
+    monkeypatch.setattr(q4, "_PLE_EARLY", None)
+    mx.eval(m(ids, cache=m.make_cache()))
+    assert events[:3] == ["submit", "clear", "submit"]
+    assert events.count("clear") == 1 and not deferred_clear.pending()
+
+
+@gpu_only
 @pytest.mark.parametrize("L", [1, 3])
 def test_qsa_gathered_decode_batches_rows(L):
     """Two rows decoded together past the sparse boundary take the gathered

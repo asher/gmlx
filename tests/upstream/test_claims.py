@@ -496,6 +496,7 @@ _CENSUSED = (
     "gmlx.serve.cb_phase",
     "gmlx.serve.engine_jobs",
     "gmlx.serve.governor",
+    "gmlx.serve.idle_release",
     "gmlx.serve.live_requests",
     "gmlx.serve.media_sinks",
     "gmlx.serve.mem_preflight",

@@ -6,6 +6,8 @@ over one buffer. The pooled block keys are split the same way."""
 
 from __future__ import annotations
 
+import functools
+
 import mlx.core as mx
 import numpy as np
 import pytest
@@ -304,6 +306,93 @@ def test_two_segment_scores_match_one_buffer(monkeypatch):
     assert cache._bt is not None and cache.n_blocks > cache._nbb >= 512
     for a, b in zip(got[1:], ref[1:]):
         assert mx.array_equal(a, b).item()
+
+
+@gpu_only
+@pytest.mark.parametrize("L", [5, 8])
+def test_fused_scorer_past_four_queries_selects_the_chain_blocks(monkeypatch, L):
+    """The fused scorer takes 4 queries a call. A wider verify block scores
+    in two calls and selects the blocks the matmul chain selects, but for
+    ties at the 16-bit threshold."""
+    if q4._kq_score() is None or q4._kq_topk() is None:
+        pytest.skip("kq indexer kernels unavailable")
+    layer = _layer(256, mx.bfloat16, budget=2048)
+    mx.random.seed(5)
+    cache = QSAKVCache(ratio=4)
+    layer(mx.random.normal((1, 2301, 128)).astype(mx.bfloat16), mask=None,
+          cache=cache)
+    x = mx.random.normal((1, L, 128)).astype(mx.bfloat16)
+    _, _, k, v, ik = layer._project(x)
+    offset = cache.offset
+    cache.append_qsa(k, v, ik)
+
+    def select():
+        sel, complete = layer.indexer.select(x, None, cache, offset,
+                                             key_len=cache.offset)
+        return np.asarray(sel[0]), np.asarray(complete)
+
+    fused, complete = select()
+    monkeypatch.setattr(q4, "_kq_score", lambda: None)
+    chain, _ = select()
+    for j in range(L):
+        assert len(set(fused[j].tolist())) == 512
+        assert fused[j].max() < complete[j]
+        assert len(set(fused[j].tolist()) ^ set(chain[j].tolist())) <= 8
+
+
+@gpu_only
+@pytest.mark.parametrize("L", [1, 4, 8])
+def test_float32_layer_input_takes_the_fused_scorer(monkeypatch, L):
+    """A float32 layer input over 16-bit block keys scores through the fused
+    kernel: the queries are built in float32 and only then narrowed. It
+    selects the blocks the float32 chain selects, but for blocks whose
+    float32 score sits at the 512th score."""
+    if q4._kq_score() is None or q4._kq_topk() is None:
+        pytest.skip("kq indexer kernels unavailable")
+    layer = _layer(256, mx.bfloat16, budget=2048)
+    mx.random.seed(5)
+    cache = QSAKVCache(ratio=4)
+    layer(mx.random.normal((1, 2301, 128)).astype(mx.bfloat16), mask=None,
+          cache=cache)
+    x = mx.random.normal((1, L, 128))
+    _, _, k, v, ik = layer._project(x.astype(mx.bfloat16))
+    offset = cache.offset
+    cache.append_qsa(k, v, ik)
+    assert x.dtype == mx.float32
+
+    fused_fn, calls, scores = q4._kq_score(), [], []
+
+    @functools.wraps(fused_fn)
+    def counted(q, *args, **kw):
+        calls.append(q.dtype)
+        return fused_fn(q, *args, **kw)
+
+    chain_scores = q4.QSAIndexer.scores
+
+    def kept(self, *args, **kw):
+        scores.append(chain_scores(self, *args, **kw))
+        return scores[-1]
+
+    def select():
+        sel, complete = layer.indexer.select(x, None, cache, offset,
+                                             key_len=cache.offset)
+        return np.asarray(sel[0]), np.asarray(complete)
+
+    monkeypatch.setattr(q4, "_kq_score", lambda: counted)
+    fused, complete = select()
+    assert calls and all(dt == mx.bfloat16 for dt in calls)
+    monkeypatch.setattr(q4, "_kq_score", lambda: None)
+    monkeypatch.setattr(q4.QSAIndexer, "scores", kept)
+    chain, _ = select()
+    s = np.asarray(scores[-1].astype(mx.float32))[0]
+    for j in range(L):
+        got, ref = set(fused[j].tolist()), set(chain[j].tolist())
+        assert len(got) == 512 and fused[j].max() < complete[j]
+        sj = s[j, :complete[j]]
+        kth = np.sort(sj)[-512]
+        for b in got ^ ref:
+            assert abs(sj[b] - kth) <= 0.02 * abs(kth)
+        assert len(got ^ ref) <= 16
 
 
 def test_restored_streams_can_be_read_from_another_thread():

@@ -942,6 +942,15 @@ def preload_gate(weight_bytes: float, model_id: str, *,
         fix = "for MoE models --stream-experts serves the experts from disk."
     from gmlx.gen.prefill_decay import headroom_bytes
 
+    from .idle_release import before_load_gate
+    from .residency_keepalive import yield_for_load
+
+    # Buffers GMLX_SPEC_KEEP_BUFFERS holds read as used below; the load is
+    # measured without them, as it is with the lever off.
+    before_load_gate()
+    # The memory the residency keep-alive holds wired reads as used by the
+    # kernel gate; the load waits until it has lapsed.
+    yield_for_load()
     head = headroom_bytes()
     engaged = cap_applies()
     budget = working_budget_bytes()

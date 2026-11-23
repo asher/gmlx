@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Dict, List, Optional, Protocol, runtime_checkable
 
 import mlx.core as mx
@@ -37,6 +38,20 @@ class StateHandle(Protocol):
 # evicting it frees one buffer where it freed two a layer.
 def _owned_copy(x: mx.array) -> mx.array:
     return mx.contiguous(mx.array(x, dtype=x.dtype))
+
+
+class ByteTally:
+    """Resident bytes of the nodes that share it, kept as they change."""
+
+    __slots__ = ("bytes", "_lock")
+
+    def __init__(self):
+        self.bytes = 0
+        self._lock = threading.Lock()
+
+    def add(self, n: int) -> None:
+        with self._lock:
+            self.bytes += int(n)
 
 
 class KVBlockHandle:
@@ -115,11 +130,23 @@ class APCNode:
             return handle
         return None
 
+    # gmlx: a pool's blocks share one ByteTally, so the pool's resident
+    # bytes are a read. set_kv and release_components are the only writers
+    # of a node's storage, and both keep it.
+    _tally: Optional["ByteTally"] = None
+
     def set_kv(self, keys: List[mx.array], values: List[mx.array]) -> None:
         """Store copies of one block's per-layer keys and values, stacked."""
+        tally = self._tally
+        before = self.resident_bytes() if tally is not None else 0
         self.components[self.KV_COMPONENT] = KVBlockHandle.stack(keys, values)
+        if tally is not None:
+            tally.add(self.resident_bytes() - before)
 
     def release_components(self) -> None:
+        tally = self._tally
+        if tally is not None and self.components:
+            tally.add(-self.resident_bytes())
         for handle in self.components.values():
             handle.release()
         self.components.clear()

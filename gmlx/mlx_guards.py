@@ -1,8 +1,8 @@
 """Guards in owned code against defects of stock mlx.
 
 Each function here stands in for one stock op where a supported mlx
-version computes it wrong, or loses digits, and is that op everywhere
-else.
+version computes it wrong, loses digits, or runs it as more kernels
+than it needs, and is that op everywhere else.
 docs/upstream-defects.md has the defect, its repro and the test of each.
 """
 
@@ -101,6 +101,24 @@ def pad(x: mx.array, pad_width, constant_values=0) -> mx.array:
         return mx.pad(x, pad_width, constant_values=constant_values)
     index = tuple(slice(lo, lo + n) for n, (lo, _) in zip(x.shape, pairs))
     return _written(shape, constant_values, x.dtype, [(index, x)])
+
+
+_FLOOR_DIV: dict = {}
+
+
+def floor_divide(a: mx.array, k: int) -> mx.array:
+    """``a // k`` for an integer array and a Python int.
+
+    mlx 0.32.3 builds integer floor division as a divide and a sign fix
+    of seven more ops, each its own GPU kernel. For an unsigned ``a``
+    and a positive ``k`` the same ops run here as one compiled kernel,
+    so the values are the stock op's. Anything else is the stock op."""
+    if k <= 0 or not mx.issubdtype(a.dtype, mx.unsignedinteger):
+        return a // k
+    f = _FLOOR_DIV.get(k)
+    if f is None:
+        f = _FLOOR_DIV[k] = mx.compile(lambda v: v // k, shapeless=True)
+    return f(a)
 
 
 def layer_norm(x: mx.array, eps: float) -> mx.array:

@@ -710,18 +710,31 @@ def test_apc_warm_start(mtp_model):
                             salt=(0, None, None))
     assert hit is not None, "turn-2 prompt did not hit the prefix cache"
     # The entry ends one token before the prompt, so the prompt sent
-    # again finds it too.
-    assert hit[0] == len(prefix_ids) - 1, (
-        f"hit prefix_len {hit[0]} != stored prefix {len(prefix_ids) - 1}"
+    # again finds it too. Where the last prefill chunk runs the last token
+    # (GMLX_SPEC_LAST_IN_CHUNK), it holds the whole prompt and the first
+    # token's logits, and the prompt sent again forwards nothing.
+    from gmlx.spec import mtp_prefill
+
+    lm = getattr(model, "language_model", model)
+    whole = (mtp_prefill._LAST_IN_CHUNK if mtp_prefill._LAST_IN_CHUNK is not None
+             else bool(getattr(lm, "prefill_last_in_chunk", False)))
+    whole = whole and not getattr(drafter, "uses_shared_kv", True)
+    stored = len(prefix_ids) - (0 if whole else 1)
+    assert (hit[1].first_logits is not None) == whole
+    assert hit[0] == stored, (
+        f"hit prefix_len {hit[0]} != stored prefix {stored}"
     )
     resend = spec_cache.lookup(mx.array([prefix_ids], dtype=mx.int32),
-                               salt=(0, None, None))
-    assert resend is not None and resend[0] == len(prefix_ids) - 1, (
+                               salt=(0, None, None), whole=whole)
+    assert resend is not None and resend[0] == stored, (
         "the same prompt sent again did not hit the prefix cache")
     with _capture_spec_log() as messages:
         toks_again = _run_mtp(model, drafter, tokenizer, [prefix_ids],
                               N_DECODE)[0]
-    assert any(m.startswith("APC hit:") and "suffix=1" in m
+    want = (f"APC hit: the whole prompt, {len(prefix_ids)} tokens" if whole
+            else None)
+    assert any(m == want if whole
+               else m.startswith("APC hit:") and "suffix=1" in m
                for m in messages), messages
     assert toks_again[0] == toks_cold[0], (
         f"resend first token {toks_again[0]} != cold {toks_cold[0]}")

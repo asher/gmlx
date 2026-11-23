@@ -60,7 +60,12 @@ def _copy_rng_state() -> list[mx.array]:
 def _restore_rng_state(state: list[mx.array]) -> None:
     live = _rng_state()
     for i, value in enumerate(state):
-        live[i] = value
+        try:
+            live[i] = value
+        except TypeError:
+            # mlx 0.32's state object takes no item assignment; the key
+            # array it hands out is the live one and takes a slice write.
+            live[i][:] = value
 
 
 def _append_arrays(value: Any, arrays: list[mx.array]) -> None:

@@ -190,6 +190,17 @@ def test_replay_boundary_appends_after_terminal():
     assert meta["ckpt_boundaries"] == [(4096, "boundary"), (4999, "replay")]
 
 
+def test_no_replay_boundary_where_the_last_chunk_runs_the_last_token():
+    # An MTP batch whose last chunk runs the last token does not pause at
+    # N-1: its first cache level holds the whole prompt for the resend.
+    batch = SimpleNamespace(
+        prefill_step_size=2048, _kq_last_in=True,
+        model=SimpleNamespace(_kq_apc_ckpt_layout=("kv", "arr")))
+    meta = {"full_input_ids": list(range(5000))}
+    ckpt._ckpt_arm_schedule(batch, meta, 5000, 0, block_size=16)
+    assert meta["ckpt_boundaries"] == [(4096, "boundary")]
+
+
 def test_replay_boundary_grid_collision_keeps_boundary_kind():
     # N-1 landing exactly on the terminal column: one boundary, plain
     # kind. A grid-aligned boundary record adopts freely -- identical
@@ -678,6 +689,87 @@ def test_second_request_hits_first_requests_checkpoint():
         prefill_step_size=32, _prompt_length_aware_keys=())
     mtp_prefill._mtp_prefill_init(batch_b)
     assert batch_b._mtp_l1_prefix_len == boundary
+
+
+def test_the_longer_record_of_the_two_levels_restores_under_its_lever(
+        monkeypatch):
+    """A next turn both levels hold a prefix of: the first level wins by
+    default; under GMLX_SPEC_APC_LONGER the shared cache's longer
+    checkpoint record does."""
+    se._bind_l1_view()
+    monkeypatch.setattr(se, "_SPEC_APC_DISABLED", False)
+    man = APCManager(num_blocks=256, block_size=16)
+    p_a, boundary, short = 120, 96, 64
+    shared = list(range(900, 900 + boundary))
+    ids_a = shared + list(range(50, 50 + p_a - boundary))
+    model = SimpleNamespace(
+        _kq_apc_manager=man, _kq_apc_mode="exact",
+        config=SimpleNamespace(),
+        make_cache=lambda: make_hybrid_cache(0))
+    batch_a = SimpleNamespace(
+        model=model, _input_ids=mx.array([ids_a]),
+        _inputs_embeds=mx.zeros((1, p_a, 4)),
+        prompt_cache=make_hybrid_cache(p_a), _prompt_kwargs={},
+        prefill_step_size=32)
+    mtp_prefill._mtp_prefill_init(batch_a)
+    cl = int(batch_a._apc_meta[0]["checkpoint_len"])
+    assert cl == boundary
+    batch_a.prompt_cache = make_hybrid_cache(cl, seed=1)
+    batch_a._row_real_tokens_processed = lambda idx: cl
+    ckpt._ckpt_mid_prefill_store(batch_a)
+
+    ids_b = shared + list(range(700, 700 + 40))
+
+    def batch_b():
+        return SimpleNamespace(
+            model=model, _input_ids=mx.array([ids_b]),
+            _inputs_embeds=mx.zeros((1, len(ids_b), 4)),
+            prompt_cache=make_hybrid_cache(len(ids_b)), _prompt_kwargs={},
+            prefill_step_size=32, _prompt_length_aware_keys=())
+
+    # The first level holds a shorter prefix of the same prompt.
+    l0 = se._get_spec_prefix_cache(model)
+    monkeypatch.setattr(l0, "_min_prefix", 1)
+    l0.store(mx.array([shared[:short]]), make_hybrid_cache(short, seed=2),
+             mx.zeros((1, short, 4)), salt=mtp_prefill._l0_salt(batch_b()))
+
+    monkeypatch.setattr(mtp_prefill, "_APC_LONGER", False)
+    b = batch_b()
+    mtp_prefill._mtp_prefill_init(b)
+    assert (b._mtp_l1_prefix_len, b._mtp_apc_prefix_len) == (0, short)
+
+    monkeypatch.setattr(mtp_prefill, "_APC_LONGER", True)
+    b = batch_b()
+    mtp_prefill._mtp_prefill_init(b)
+    assert (b._mtp_l1_prefix_len, b._mtp_apc_prefix_len) == (
+        boundary, boundary)
+    assert not b._mtp_chunk_hiddens
+
+    # The hidden a finished request left for exactly that record seeds the
+    # drafter ahead of the suffix; one left for another prefix does not.
+    salt = b._apc_meta[0]["extra_hash"]
+    seed = mx.ones((1, 8, 4))
+    ckpt.tail_seed_store(man, shared[:-1], salt, mx.zeros((1, 8, 4)))
+    b = batch_b()
+    mtp_prefill._mtp_prefill_init(b)
+    assert not b._mtp_chunk_hiddens
+    ckpt.tail_seed_store(man, shared, salt, seed)
+    b = batch_b()
+    mtp_prefill._mtp_prefill_init(b)
+    assert b._mtp_chunk_hiddens == [seed] and b._mtp_l1_seeded
+    for i in range(ckpt._TAIL_SEEDS):
+        ckpt.tail_seed_store(man, [i], salt, seed)
+    assert ckpt.tail_seed_lookup(man, shared, salt) is None
+
+    # No longer shared record: the first level still serves the turn.
+    ids_c = shared[:short] + list(range(300, 340))
+    c = SimpleNamespace(
+        model=model, _input_ids=mx.array([ids_c]),
+        _inputs_embeds=mx.zeros((1, len(ids_c), 4)),
+        prompt_cache=make_hybrid_cache(len(ids_c)), _prompt_kwargs={},
+        prefill_step_size=32, _prompt_length_aware_keys=())
+    mtp_prefill._mtp_prefill_init(c)
+    assert (c._mtp_l1_prefix_len, c._mtp_apc_prefix_len) == (0, short)
 
 
 # -- formation: ckpt-tier models serialize prompt admission --

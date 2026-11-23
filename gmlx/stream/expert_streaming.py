@@ -322,11 +322,19 @@ def _install_gpu_residency(model, moe_modules, *,
     nbytes = 0
     pending = 0
     left_out = left_out_bytes = 0
+    # A full expert store's planes stand where the mapped stacks did: they
+    # are wired with the stacks' share of the set.
+    planes = []
+    if include_expert_stacks:
+        from gmlx.load import expert_store
+
+        planes = expert_store.planes(model)
+    plane_ids = {id(a) for a in planes}
     try:
-        for _, a in tree_flatten(model.parameters()):
+        for a in [a for _, a in tree_flatten(model.parameters())] + planes:
             if id(a) in skip:
                 continue
-            if (not include_expert_stacks
+            if (not include_expert_stacks and id(a) not in plane_ids
                     and a.ndim == 3 and a.nbytes > (1 << 30)):
                 continue  # belt: any GB-scale stack is an expert container
             if room is not None and nbytes + a.nbytes > room:
@@ -376,6 +384,20 @@ def _unwire(model) -> int:
         kq.residency_commit()
     object.__setattr__(model, "_kq_resident_arrays", [])
     return sum(a.nbytes for a in arrays)
+
+
+def _resident_set(model, total_bytes: int, table_offloaded: int):
+    """``(bytes, skip ids)`` of the set the table-only install wires: the
+    model's arrays but the streamed tables, with a full expert store's
+    planes in place of the placeholders that stand for its stacks. The
+    planes are MLX memory not wired yet, which the unwired count still
+    holds, so the fit counts them as the wire inserts them."""
+    from gmlx.load import expert_store
+
+    stored_bytes, stored_ids = expert_store.held(model)
+    plane_bytes = sum(a.nbytes for a in expert_store.planes(model))
+    return (total_bytes - table_offloaded - stored_bytes + plane_bytes,
+            stored_ids)
 
 
 def _wire_resident_experts(model, gguf_path, wire_bytes: int, *,
@@ -713,15 +735,25 @@ def install_expert_streaming(
     if table_only:
         from gmlx.stream.table_stream import streamed_table_array_ids
 
+        wire_bytes, stored_ids = _resident_set(model, total_bytes,
+                                               table_offloaded)
         early_wired = _wire_resident_experts(
-            model, gguf_path, total_bytes - table_offloaded, budget=budget,
-            prefill_step=prefill_step,
-            skip_ids=frozenset(streamed_table_array_ids(model)),
+            model, gguf_path, wire_bytes,
+            budget=budget, prefill_step=prefill_step,
+            skip_ids=frozenset(streamed_table_array_ids(model)) | stored_ids,
             keep=wire_keep)
         if not early_wired:
             table_only = False
             compose = bool(plan.tables)
             force_stream = fell_back = True
+    if force_stream or (over_budget and not table_only):
+        # A full expert store cannot serve streamed experts: the stacks go
+        # back on the blocks, mapped, and the load streams them as it would
+        # with the lever off. Before the registration below is read: the
+        # stacks mapped again join it.
+        from gmlx.load import expert_store
+
+        expert_store.release(model, "this load streams its experts")
     # The weights' untracked registration before any deduct: the table and
     # expert credits both split total into tracked and untracked from it.
     # Read after the table deduct, a compose install sees the table as

@@ -608,10 +608,10 @@ FACTS: dict = {
         'license_url': 'https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE',
         'license_name': 'qwen-community-1.0',
         'mmproj_bytes': 904004000,
-        'drafter': ('qwen4exp', 2786568256),
+        'drafter': ('dflash2', 506078624),
         'heads': 24,
         'trained_ctx': 262144,
-        'kv_cost': (('rows', 1, 3207168.0, 36), ('full', 0, 2048.0, 12)),
+        'kv_cost': (('rows', 1, 3207168.0, 36), ('full', 0, 2048.0, 12), ('full', 0, 320.0, 12)),
         'rungs': (
             ('UD-IQ1_S', '', 'UD-IQ1_S/Qwen3.8-Flash-Next-UD-IQ1_S-00001-of-00003.gguf', 66379180698, 66368156160, 28800138240, 32, False),
             ('UD-IQ1_M', '', 'UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf', 68007094938, 67996070400, 28800138240, 32, False),

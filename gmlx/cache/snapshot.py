@@ -87,6 +87,18 @@ def _clone_single_row(cache: Any, eval_targets: list | None = None) -> Any | Non
     return _clone_row(cache, rot_canonical=True, eval_targets=eval_targets)
 
 
+def _held_state(cache: Any, eval_targets: list) -> Any:
+    """An inline-state layer for a record that holds the live arrays rather
+    than copies. A chunk replaces these arrays and never writes them, so
+    they stay as they were at the store. mx.contiguous copies only a view
+    of a larger buffer, which a record must not pin."""
+    import mlx.core as mx
+
+    held = [None if a is None else mx.contiguous(a) for a in cache.state]
+    eval_targets.extend(a for a in held if a is not None)
+    return type(cache).from_state(held, cache.meta_state)
+
+
 def _clone_row_faithful(cache: Any,
                         eval_targets: list | None = None) -> Any | None:
     """Deep-copy a single-row cache bitwise, rotating rings included.
@@ -1438,6 +1450,9 @@ def _record_room(manager) -> tuple[int, bool]:
 
 
 def _committed_block_bytes(manager) -> int:
+    tally = getattr(manager, "_pool_bytes", None)
+    if tally is not None:
+        return int(tally.bytes)
     return sum(int(b.resident_bytes())
                for b in getattr(manager, "pool", None) or ())
 
@@ -1759,6 +1774,7 @@ def ckpt_store(
     kind: str = "boundary",
     grid_truncate: bool = False,
     keep: int | None = None,
+    eval_async: bool = False,
 ) -> int:
     """Store a hybrid checkpoint at ``p = len(token_ids)``.
 
@@ -1777,12 +1793,15 @@ def ckpt_store(
     (the live cache's offset would stamp a mismatched skeleton).
     ``keep``: the request's p_stable, which the record's strip-on-extend
     honors (see _record_insert).
+    ``eval_async``: the copies are submitted, not waited for, where the
+    manager is memory-only and every K/V layer fences its next write.
+    The next chunk then queues behind them.
     Returns the stored length in tokens, 0 when nothing stored. Never
     raises.
     """
     if manager is None or token_ids is None:
         return 0
-    from .kv_cache import KVCache, RotatingKVCache
+    from .kv_cache import ArraysCache, KVCache, RotatingKVCache
     from .kvarn_cache import KVarNKVCache
 
     main_blocks: list[Any] = []
@@ -1902,6 +1921,22 @@ def ckpt_store(
                          if not isinstance(c, (KVCache, RotatingKVCache))]
 
         store_blocks = getattr(manager, "store_ckpt_blocks", None)
+        # The disk writer thread reads evaluated arrays only. A copy in
+        # flight holds the buffer it reads, so a layer the next chunk
+        # writes in place waits for the copies first (hold_writes), or
+        # MLX copies its whole buffer instead.
+        if eval_async and (
+                store_blocks is None
+                or getattr(manager, "disk", None) is not None
+                or rot_caches or not kv_caches
+                or not all(hasattr(c, "hold_writes") for c in kv_caches)
+                or not all(isinstance(c, ArraysCache)
+                           for c in inline_caches)):
+            eval_async = False
+        fence: list[Any] = []
+        if eval_async:
+            for c in kv_caches:
+                c.hold_writes(fence)
 
         def _chained(span_ids, ks, vs, *, extra, disk, need, what):
             # A short chain means the pool ran out of evictable blocks
@@ -1926,7 +1961,10 @@ def ckpt_store(
                     victims, note = _fit_chain_room(
                         manager, span_ids, ks, vs, extra, need,
                         (tuple(ids), int(extra_hash)))
-                    if store_blocks is not None:
+                    if eval_async:
+                        got = store_blocks(span_ids, ks, vs, extra_hash=extra,
+                                           disk=disk, eval_async=True)
+                    elif store_blocks is not None:
                         got = store_blocks(
                             span_ids, ks, vs, extra_hash=extra, disk=disk)
                     else:
@@ -1974,13 +2012,18 @@ def ckpt_store(
             # own pending graph rides the same tape; the guard drains
             # before the store's except path releases and declines.
             from gmlx.eval_guard import guard
-            guard.eval(*(lk + lv), site="ckpt-store-main", owner="owned")
+            if not eval_async:
+                guard.eval(*(lk + lv), site="ckpt-store-main",
+                           owner="owned")
             got_main = _chained(
                 ids[:b_full], lk, lv, extra=salted, disk=True,
                 need=b_full // bs, what="main")
             if got_main is None:
                 return 0
             main_blocks = got_main
+            if eval_async:
+                fence.extend(a for b in main_blocks
+                             for a in (b.kv_handle().parts or ()))
 
         rot_meta = None
         if rot_caches:
@@ -2023,7 +2066,10 @@ def ckpt_store(
         # The payload clones stay lazy and sync once, inside the insert,
         # after the bounds have made room for the record.
         pending: list[Any] = []
-        states = [_clone_single_row(c, pending) for c in inline_caches]
+        # The async path holds the recurrent states (_held_state), which
+        # its gate keeps to ArraysCache layers.
+        states = [_held_state(c, pending) if eval_async
+                  else _clone_single_row(c, pending) for c in inline_caches]
         if any(s is None for s in states):
             _ckpt_decline(manager, "clone")
             _release_blocks(manager, main_blocks)
@@ -2073,8 +2119,15 @@ def ckpt_store(
                 # Owned survivors, as on the main chain: the clones read
                 # the live prompt cache and its pending graph.
                 from gmlx.eval_guard import guard
-                guard.eval(*pending, site="ckpt-store-clones",
-                           owner="owned")
+                if eval_async:
+                    from gmlx.serve.cb_phase import one_buffer
+                    with one_buffer():
+                        guard.async_eval(*pending, site="ckpt-store-clones",
+                                         owner="owned")
+                    fence.extend(pending)
+                else:
+                    guard.eval(*pending, site="ckpt-store-clones",
+                               owner="owned")
 
         rec = _CkptRecord(
             ids=tuple(ids), extra_hash=int(extra_hash), p=p, b_full=b_full,

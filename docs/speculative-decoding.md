@@ -36,6 +36,9 @@ On the server, a model speculates when its `speculative` key is `true` or
 a [discover](config.md#model-discovery) scan pair a drafter that they find
 with its model. A model pulled by name, as in `gmlx pull qwen3.8-27b`,
 comes with its drafter and registers it, unless you pass `--no-drafter`.
+`gmlx pull qwen3.8-flash-next` takes the Q6_K file of Inco AI's DFlash 2
+drafter, which accepts as many drafts as its Q8_0 file and is the smaller
+download.
 For a model already in the config,
 [`gmlx sync-models --add-companions`](cli.md#gmlx-sync-models) adds the
 drafter to its entry.
@@ -82,10 +85,10 @@ easier to predict. [Benchmarks](benchmarks.md) has each model's speedup
 curves, and `--bench-depths` measures your own model, as in the example
 above.
 
-Qwen3.8-Flash-Next sizes each round by how sure its head is of the first
-draft: five drafts when it is sure, three when it is fairly sure, and one
-when it is not, with at most three after a round where the model rejected
-a draft. Code decodes up to a fifth faster this way than with a fixed
+With its MTP head, Qwen3.8-Flash-Next sizes each round by how sure the
+head is of the first draft: five drafts when it is sure, three when it is
+fairly sure, and one when it is not, with at most three after a round
+where the model rejected a draft. Code decodes up to a fifth faster this way than with a fixed
 three drafts, and prose about as fast.
 
 The native head of [Nemotron 3.5 Transcribe](nemotron-transcribe.md)

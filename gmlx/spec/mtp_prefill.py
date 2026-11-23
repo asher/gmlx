@@ -10,14 +10,15 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+from types import SimpleNamespace
 
 import mlx.core as mx
 
 import gmlx.lora_rows as lora_rows
 import gmlx.gen.prefill_decay as prefill_decay
 from gmlx.cache.media_salt import as_salt
-from gmlx.envflags import env_int
-from gmlx.serve.capacity import note_own_before_clear
+from gmlx.envflags import env_auto_bool, env_bool, env_int
+from gmlx.gen import deferred_clear
 from gmlx.serve.short_rows import all_short_lived
 from gmlx.spec.ckpt import (
     _install_ckpt_checkpoint_store,
@@ -92,6 +93,87 @@ def _carries_media(batch) -> bool:
     return row_carries_media(batch._prompt_kwargs,
                              batch._input_ids[0].tolist(),
                              media_token_ids(batch.model))
+
+
+# GMLX_SPEC_APC_LONGER=1: a prompt both cache levels hold a prefix of
+# restores from the shared cache when its record is the longer one. Off:
+# the first level wins whenever it hits. The shared record carries no
+# prompt hiddens, so the drafter starts from the suffix alone.
+_APC_LONGER = env_bool("GMLX_SPEC_APC_LONGER", False)
+
+# GMLX_SPEC_LAST_IN_CHUNK=1: the last prefill chunk runs the prompt's last
+# token too and its row gives the first token's logits, so no one-row
+# forward follows the chunks. 0: the last token runs alone. Unset or
+# empty: on for a target that sets prefill_last_in_chunk, off for the rest.
+_LAST_IN_CHUNK = env_auto_bool("GMLX_SPEC_LAST_IN_CHUNK")
+
+# GMLX_SPEC_L0_AFTER_FIRST: where the last chunk ran the last token, the
+# prompt's first-level cache entry is stored once the serve step has
+# queued the first token. 0: it is stored before the first token.
+_L0_AFTER_FIRST = env_bool("GMLX_SPEC_L0_AFTER_FIRST", True)
+
+# GMLX_SPEC_CKPT_ASYNC=1: a mid-prefill checkpoint store runs before the
+# chunk's end of forward wait and submits its copies without waiting for
+# them. Off: it runs after that wait and waits for its copies.
+_CKPT_ASYNC = env_bool("GMLX_SPEC_CKPT_ASYNC", False)
+
+
+def _last_in_chunk_ok(batch) -> bool:
+    """Whether this prompt batch's last chunk may run the last token: one
+    row with no padding and no media, a drafter that keeps its own KV, and
+    a target that projects logits from the hidden it returns."""
+    lm = getattr(batch.model, "language_model", batch.model)
+    on = (_LAST_IN_CHUNK if _LAST_IN_CHUNK is not None
+          else bool(getattr(lm, "prefill_last_in_chunk", False)))
+    if not on or batch._inputs_embeds is None:
+        return False
+    if (int(batch._input_ids.shape[0]) != 1
+            or batch._right_pad_per_row is not None
+            or any(getattr(batch, "_left_padding_per_row", None) or ())):
+        return False
+    if getattr(batch.draft_model, "uses_shared_kv", True):
+        return False
+    if not callable(getattr(lm, "speculative_logits_from_hidden", None)):
+        return False
+    return not _carries_media(batch)
+
+
+def _last_out(logits, hidden):
+    """What generate() reads of the last column's forward."""
+    return SimpleNamespace(logits=logits, hidden_states=[hidden],
+                           shared_kv_states={})
+
+
+def _l1_tail_seed(batch, manager, prefix: int) -> None:
+    """After a shared cache hit of ``prefix`` tokens: hand the drafter the
+    target hidden a finished request left for exactly that prefix, so its
+    context starts as after a first level hit, not from the suffix."""
+    from gmlx.spec.ckpt import tail_seed_lookup
+
+    ids = batch._mtp_full_input_ids[0, :prefix].tolist()
+    meta = (getattr(batch, "_apc_meta", None) or [{}])[0] or {}
+    hidden = tail_seed_lookup(manager, ids, meta.get("extra_hash", 0))
+    if hidden is None:
+        return
+    batch._mtp_chunk_hiddens = [hidden]
+    batch._mtp_l1_seeded = True
+    _log.info("APC drafter seed: %d rows ahead of the suffix",
+              int(hidden.shape[1]))
+
+
+def _l1_deeper(batch, floor: int) -> int:
+    """Length of a shared cache checkpoint record longer than ``floor``
+    that the L1 lookup would restore for this batch, or 0. Never raises."""
+    try:
+        manager, mode = _resolve_l1(batch.model)
+        if manager is None:
+            return 0
+        from gmlx.spec.ckpt import l1_peek
+
+        return l1_peek(batch, manager, mode, int(floor))
+    except Exception:  # noqa: BLE001
+        _log.debug("APC shared cache peek failed", exc_info=True)
+        return 0
 
 
 def _l0_salt(batch):
@@ -238,28 +320,56 @@ def _mtp_prefill_init(batch) -> None:
         return
 
     restored = 0
+    total = int(batch._input_ids.shape[1])
+    # Read by the checkpoint schedule below: with the last token in the
+    # chunk no boundary sits one token short of the prompt.
+    batch._kq_last_in = _last_in_chunk_ok(batch)
     spec_cache = _get_spec_prefix_cache(batch.model)
     if spec_cache is not None and batch._mtp_l0_salt is not None:
         # The media guard the L1 tiers apply: a turn that adds an image
         # finds the last turn's entry under its per-prefix salt.
         hit = spec_cache.lookup(
             batch._input_ids, salt=batch._mtp_l0_salt,
-            accept=_media_safe(batch, batch._input_ids[0].tolist()))
+            accept=_media_safe(batch, batch._input_ids[0].tolist()),
+            whole=batch._kq_last_in)
+        if hit is not None and _APC_LONGER and hit[0] < total:
+            # A next turn that resends the reply as it was written finds
+            # prompt plus reply in the shared cache; this level holds the
+            # last prompt less one token.
+            deeper = _l1_deeper(batch, hit[0])
+            if deeper:
+                _log.info(
+                    "APC first level passed over: prefix=%d, the shared "
+                    "cache holds %d", hit[0], deeper)
+                hit = None
         if hit is not None:
             restored, entry = hit
             spec_cache.restore(entry, batch.prompt_cache)
-            batch._mtp_chunk_hiddens = [entry.hidden]
-            _log.info(
-                "APC hit: prefix=%d suffix=%d",
-                restored,
-                int(batch._input_ids.shape[1]) - restored,
-            )
+            if restored == total:
+                # The entry holds this prompt whole, with its first token's
+                # logits: nothing is forwarded. The last column stays in
+                # the batch for generate(), which reads the logits here,
+                # so the rest of the request sees a hit one token short.
+                rows = int(entry.hidden.shape[1])
+                batch._mtp_chunk_hiddens = (
+                    [entry.hidden[:, :-1]] if rows > 1 else [])
+                batch._kq_last_out = _last_out(
+                    entry.first_logits, entry.hidden[:, -1:])
+                batch._kq_l0_whole = True
+                restored = total - 1
+                _log.info("APC hit: the whole prompt, %d tokens", total)
+            else:
+                batch._mtp_chunk_hiddens = [entry.hidden]
+                _log.info("APC hit: prefix=%d suffix=%d", restored,
+                          total - restored)
 
     manager, mode = _resolve_l1(batch.model)
     if manager is not None:
         try:
             l1_prefix = _l1_lookup_and_arm_store(batch, manager, mode, restored)
             restored = max(restored, l1_prefix)
+            if _APC_LONGER and l1_prefix > 0:
+                _l1_tail_seed(batch, manager, l1_prefix)
         except Exception:
             _log.warning("APC L1 failed; continuing cold", exc_info=True)
 
@@ -302,8 +412,20 @@ def _mtp_prefill_init(batch) -> None:
         batch._mtp_apc_prefix_len = restored
 
 
-def _l0_store(batch) -> None:
-    """Store the prompt's target KV and hidden in L0, one token short.
+def _store_after_clear(job) -> None:
+    """Run a store that copies the prompt's KV, after the clear the last
+    prefill chunk left waiting (gmlx.gen.deferred_clear): the copy then
+    takes memory the chunk's freed buffers gave back, not memory beside
+    them."""
+    deferred_clear.run()
+    job()
+
+
+def _l0_store_job(batch):
+    """The store of the prompt's target KV and hidden in L0, one token
+    short, as a call; None when no store is due. The call reads the cache
+    entries and hidden taken here, so it may run after generate() as long
+    as nothing has forwarded the target since.
 
     Runs as generate() starts: prefill has forwarded every column but the
     last, so the snapshot ends one token before the prompt does. A lookup
@@ -311,6 +433,11 @@ def _l0_store(batch) -> None:
     recurrent layer's state cannot be rolled back a token, so an entry
     that held the whole prompt could never serve the same prompt sent
     again. A next turn reuses one token less than the prompt.
+
+    Where the last chunk ran the last token (GMLX_SPEC_LAST_IN_CHUNK), the
+    snapshot holds the whole prompt and the entry keeps the first token's
+    logits beside it: the same prompt sent again forwards nothing, and a
+    next turn reuses all of it.
 
     B=1 only, the same gate as the lookup. The stored single-row snapshot
     is valid for injection into a B>1 batch: SpecPrefixCache.restore
@@ -347,23 +474,39 @@ def _l0_store(batch) -> None:
             "set" if full_ids is not None else "None",
             "set" if chunk_hiddens else "None",
         )
-        return
+        return None
+    if getattr(batch, "_kq_l0_whole", False):
+        # Restored whole from the entry that is this state already.
+        return None
+    # The last column's output when the last chunk ran it: generate()
+    # forwards nothing and the cache holds the whole prompt.
+    last = getattr(batch, "_kq_last_out", None)
     # The columns the cache holds: all but the ones generate() forwards.
-    held = int(full_ids.shape[1]) - int(batch._input_ids.shape[1])
+    held = int(full_ids.shape[1]) - int(batch._input_ids.shape[1]) + (
+        0 if last is None else 1)
     if held <= 0 or held == int(getattr(batch, "_mtp_apc_prefix_len", 0) or 0):
         # Nothing forwarded past an L0 hit: the entry it restored from is
         # this state already.
-        return
-    hidden = (chunk_hiddens[0] if len(chunk_hiddens) == 1
-              else mx.concatenate(chunk_hiddens, axis=1))
+        return None
+    parts = list(chunk_hiddens) if last is None else (
+        list(chunk_hiddens) + [last.hidden_states[-1]])
     # Window-limited heads only use the trailing capture window (an
-    # uncapped entry pins the whole prompt's hidden for nothing).
+    # uncapped entry pins the whole prompt's hidden for nothing). A whole
+    # entry keeps the window ahead of its last row, as the chunks do.
     limit = getattr(batch.draft_model, "hidden_capture_limit", None)
-    if limit:
-        hidden = hidden[:, -int(limit):]
-    spec_cache.store(full_ids[:, :held], batch.prompt_cache, hidden,
-                     salt=l0_salt)
-    _log.info("APC store: tokens=%d layers=%d", held, len(batch.prompt_cache))
+    cache = list(batch.prompt_cache)
+    ids = full_ids[:, :held]
+    first_logits = None if last is None else last.logits
+
+    def store():
+        hidden = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)
+        if limit:
+            hidden = hidden[:, -(int(limit) + (0 if last is None else 1)):]
+        spec_cache.store(ids, cache, hidden, salt=l0_salt,
+                         first_logits=first_logits)
+        _log.info("APC store: tokens=%d layers=%d", held, len(cache))
+
+    return store
 
 
 def _mtp_seed_stream_init(batch) -> None:
@@ -695,6 +838,16 @@ def install_full_prompt_mtp_prefill() -> None:
         n = prefill_decay.fit_cut(self, n_span) if n_span < n else n_span
         if n <= 0:
             return 0
+        # The chunk that ends one column short of the prompt runs that
+        # column too. A checkpoint due there keeps the split.
+        last_in = (getattr(self, "_kq_last_in", False)
+                   and checkpoint_col is None
+                   and n == int(self._inputs_embeds.shape[1]) - 1)
+        if last_in:
+            n += 1
+        # The columns this chunk takes off the prompt: the last one stays
+        # for generate(), which reads its output from _kq_last_out.
+        nb = n - 1 if last_in else n
         # The table rows the chunk reads go to the page cache beside its
         # forward, after the restore above trimmed what the cache holds.
         read_ahead(self, n)
@@ -710,6 +863,14 @@ def install_full_prompt_mtp_prefill() -> None:
                 **prompt_kwargs,
             )
         chunk_hidden = out.hidden_states[-1]
+        last_arrays = []
+        if last_in:
+            last_hidden = chunk_hidden[:, -1:]
+            chunk_hidden = chunk_hidden[:, :-1]
+            lm = getattr(self.model, "language_model", self.model)
+            self._kq_last_out = _last_out(
+                lm.speculative_logits_from_hidden(last_hidden), last_hidden)
+            last_arrays = [self._kq_last_out.logits, last_hidden]
         finished = []
         if self._right_pad_per_row is not None:
             finished = [i for i, e in enumerate(self._suffix_lens)
@@ -720,9 +881,10 @@ def install_full_prompt_mtp_prefill() -> None:
                     mx.array(logits[i, self._suffix_lens[i] - start - 1]))
         # Seed streaming: teacher-force this chunk into the request-scoped
         # head KV at the head's running offset. The shifted span for
-        # columns [c0, c0+n) is prompt[c0+1 : c0+n+1], always in range
+        # columns [c0, c0+nb) is prompt[c0+1 : c0+nb+1], always in range
         # because generate() keeps at least one residual column (the n-1
-        # cap above). A failure or a widened batch stops streaming but
+        # cap above, or the last column a chunk that ran it leaves to
+        # generate()). A failure or a widened batch stops streaming but
         # keeps the partial KV: the owned round adopts it at its true
         # offset and seeds only the remainder.
         seed_ctx = getattr(self, "_mtp_seed_ctx", None)
@@ -734,9 +896,9 @@ def install_full_prompt_mtp_prefill() -> None:
                 c0 = int(self._processed_prompt_columns)
                 try:
                     self.draft_model.seed_chunk(
-                        self._mtp_full_input_ids[:, c0 + 1:c0 + n + 1],
+                        self._mtp_full_input_ids[:, c0 + 1:c0 + nb + 1],
                         chunk_hidden, seed_ctx["kv"])
-                    seed_ctx["len"] += n
+                    seed_ctx["len"] += nb
                     streamed = True
                 except Exception:
                     _log.warning("seed streaming failed at column %d; "
@@ -774,10 +936,25 @@ def install_full_prompt_mtp_prefill() -> None:
                         self._mtp_chunk_hiddens = [merged[:, -limit:]]
         else:
             self._mtp_chunk_hiddens = [chunk_hidden]
-        mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden]
-                + [self._finished_prompt_logits[i] for i in finished]
-                + ([c.state for c in seed_ctx["kv"]] if streamed else []))
-        self._processed_prompt_columns += n
+        # A forward that submitted nothing as it was built clears here,
+        # ahead of its evaluation.
+        deferred_clear.run()
+        # With _CKPT_ASYNC the checkpoint store runs before the wait below:
+        # its copies queue behind this chunk's forward, and the host builds
+        # them while the GPU runs the forward's tail. The hidden the drafter
+        # reads is submitted first, so its build is not left to that wait.
+        if _CKPT_ASYNC:
+            from gmlx.serve.cb_phase import one_buffer
+            with one_buffer():
+                mx.async_eval([chunk_hidden] + last_arrays
+                              + [self._finished_prompt_logits[i]
+                                 for i in finished])
+        else:
+            mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden]
+                    + last_arrays
+                    + [self._finished_prompt_logits[i] for i in finished]
+                    + ([c.state for c in seed_ctx["kv"]] if streamed else []))
+        self._processed_prompt_columns += nb
         # Stock prompt_step reports the cache after each chunk to the APC
         # memory plan, which evicts idle entries ahead of the growth.
         coordinator = getattr(self, "_apc_coordinator", None)
@@ -788,27 +965,58 @@ def install_full_prompt_mtp_prefill() -> None:
                 + self._processed_prompt_columns,
                 batch_size=len(self.uids))
         # The ckpt cursor rides the wrapped stock store (see
-        # _install_ckpt_checkpoint_store).
-        self._store_apc_exact_checkpoints()
-        _trim_prompt_columns(self, n)
+        # _install_ckpt_checkpoint_store). A chunk that ran the last
+        # column has no checkpoint due (checked above), and the cache is
+        # one column past the count the store keys on.
+        if not last_in:
+            self._kq_ckpt_async = _CKPT_ASYNC
+            try:
+                self._store_apc_exact_checkpoints()
+            finally:
+                self._kq_ckpt_async = False
+        # Nor does a chunk that ran neither the prompt's last column nor a
+        # row's end wait at all: the next chunk queues behind its work.
+        if _CKPT_ASYNC and (last_in or finished or streamed):
+            mx.eval([c.state for c in self.prompt_cache] + [chunk_hidden]
+                    + last_arrays
+                    + [self._finished_prompt_logits[i] for i in finished]
+                    + ([c.state for c in seed_ctx["kv"]] if streamed else []))
+        _trim_prompt_columns(self, nb)
         # What the process held before the clear prices the next count of
         # memory wired outside it.
-        note_own_before_clear()
-        mx.clear_cache()
+        from .speculative import _KEEP_BUFFERS
+
+        if not _KEEP_BUFFERS:
+            deferred_clear.at_chunk_end()
         return n
 
     def _mtp_generate(
         self, sampler, stop_criteria, compute_logprobs=True, top_logprobs_k=0,
         rows=None,
     ):
+        l0_queue = l0_job = None
         if self.draft_kind == "mtp":
             # A one-column prompt never enters prompt_step, so the APC
             # lookup/store arming runs here instead. Idempotent otherwise.
             _mtp_prefill_init(self)
-            # Before the last column runs, so the entry serves a resend of
-            # this prompt (see _l0_store).
+            # Taken before the last column runs, so the entry serves a
+            # resend of this prompt (see _l0_store_job). Where generate()
+            # forwards nothing, the serve step may store it after the
+            # first token is queued.
             try:
-                _l0_store(self)
+                l0_job = _l0_store_job(self)
+                if (l0_job is not None and _L0_AFTER_FIRST
+                        and getattr(self, "_kq_last_out", None) is not None):
+                    from .speculative import step_end_queue
+
+                    l0_queue = step_end_queue()
+                if l0_job is not None and l0_queue is None:
+                    # One clear before the first token: the first round's
+                    # end clears what the copy leaves, as it would have.
+                    waiting = deferred_clear.pending()
+                    _store_after_clear(l0_job)
+                    if waiting:
+                        deferred_clear.at_chunk_end()
             except Exception:
                 _log.warning("APC store failed; continuing", exc_info=True)
         result = _orig_generate(
@@ -819,11 +1027,21 @@ def install_full_prompt_mtp_prefill() -> None:
             top_logprobs_k=top_logprobs_k,
             rows=rows,
         )
+        if l0_queue is not None:
+            stream = mx.default_stream(mx.default_device())
+
+            def l0_after_first():
+                with mx.stream(stream):
+                    _store_after_clear(l0_job)
+
+            l0_queue.append(l0_after_first)
         from gmlx._vendor.mlx_vlm.generate.ar import SpeculativeGenerationBatch
 
         if self.draft_kind != "mtp" or not isinstance(
             result, SpeculativeGenerationBatch
         ):
+            # No owned round follows to run the last chunk's clear.
+            deferred_clear.run()
             # Stock-path ckpt batches store the full prompt here, the
             # moment the MTP path stores it at rounds entry: prefill just
             # finished, the first token is out, its KV not yet appended.
@@ -866,8 +1084,12 @@ def install_full_prompt_mtp_prefill() -> None:
             # teacher-forcing (token, hidden) pair must stay positionally
             # aligned. The missing prefix can only affect draft acceptance,
             # never correctness -- verify catches every draft.
+            # A drafter seed (_l1_tail_seed) puts the hidden of the rows
+            # ahead of the suffix back, as a trimmed capture has them.
             result.prompt_tokens = (
-                full_ids[:, l1_prefix:] if l1_prefix > 0 else full_ids
+                full_ids[:, l1_prefix:]
+                if l1_prefix > 0 and not getattr(self, "_mtp_l1_seeded", False)
+                else full_ids
             )
 
         return result

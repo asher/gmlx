@@ -71,11 +71,14 @@ def load_gguf_student(gguf_path: str, adapter: str | None = None, hf_source: str
     """(model, config, tokenizer) from a GGUF base plus an optional GGUF
     LoRA adapter applied live."""
     import gmlx.load.loadlog as loadlog
+    from gmlx.load import expert_store
     from gmlx.load.loader import load_model
     if adapter:
         from gmlx.load.adapter import adapter_load_refusal
         adapter_load_refusal(gguf_path, [adapter])
-    with loadlog.load_ui(False, gguf_path):
+    # A student trains, or scores the adapter it trained: the experts' own
+    # forwards, on the mapped stacks.
+    with loadlog.load_ui(False, gguf_path), expert_store.off("a distill student"):
         model, config, tokenizer = load_model(gguf_path, hf_source=hf_source)
     llamacpp_bos_default(tokenizer, gguf_path)
     if adapter:

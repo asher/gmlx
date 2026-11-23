@@ -43,7 +43,7 @@ def _ropes(model):
     return out
 
 
-def _head(monkeypatch, cfg, target, arch):
+def _head(monkeypatch, cfg, target, arch, **kw):
     import gmlx.spec.mtp_load as mtp_load
 
     seen = {}
@@ -57,7 +57,7 @@ def _head(monkeypatch, cfg, target, arch):
     monkeypatch.setattr(mtp_load, "_install_and_load", install)
     with pytest.raises(_Built):
         mtp_load._load_mtp_drafter({}, {}, arch, cfg, target,
-                                   log=lambda *a, **k: None)
+                                   log=lambda *a, **k: None, **kw)
     return seen["drafter"]
 
 
@@ -83,3 +83,32 @@ def test_mtp_head_rotates_as_its_target(monkeypatch, arch, meta, shapes):
         table, mag = _rope_state(r)
         assert mag == pytest.approx(want_mag)
         np.testing.assert_allclose(table, want_table, rtol=1e-6)
+
+
+def test_an_in_file_head_names_its_block_for_the_expert_store(monkeypatch):
+    """The head's layer 0 is the file's block num_hidden_layers: its expert
+    store reads, and a release maps back, that block and not the trunk's
+    first."""
+    meta = {**_q35_meta(), "qwen35.block_count": 5,
+            "qwen35.nextn_predict_layers": 1}
+    target, cfg = build_model(synthesize_config(meta, dict(_Q35_SHAPES)),
+                              mtp=True)
+    head = _head(monkeypatch, cfg, target, "qwen35")
+    assert head.__dict__.get("_kq_store_blk_base") == 4
+    assert cfg["num_hidden_layers"] == 4
+
+
+def test_a_nemotron_head_names_its_block_for_the_expert_store(monkeypatch):
+    import dataclasses
+
+    import gmlx.models.nemotron_h.mtp as nemotron_mtp
+    import gmlx.spec.mtp_load as mtp_load
+    from test_nemotron_h import _tiny_args
+
+    cfg = dataclasses.asdict(_tiny_args())
+    monkeypatch.setattr(nemotron_mtp, "remap_nemotron_mtp_arrays",
+                        lambda *a, **k: ({}, {}, {}))
+    monkeypatch.setattr(mtp_load, "_nemotron_verify_route", lambda *a: None)
+    head = _head(monkeypatch, cfg, None, "nemotron_h", n_head=4, n_head_kv=2)
+    assert head.__dict__.get("_kq_store_blk_base") == 5
+    assert cfg["num_hidden_layers"] == 5

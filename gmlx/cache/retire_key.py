@@ -35,6 +35,7 @@ import json
 import logging
 import re
 import threading
+import weakref
 
 _log = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ _IDS_MEMO: collections.OrderedDict = collections.OrderedDict()
 # degrades retirement to a full-depth store.
 _TEXT_MEMO_CAP = 64
 _IDS_MEMO_CAP = 64
+# System-prefix probe heads, by what shapes the probe renders.
+_SYS_MEMO: collections.OrderedDict = collections.OrderedDict()
+_SYS_MEMO_CAP = 16
 
 # Mirrors the endpoint's control-token scrub of post-tool-call text.
 _CONTROL_TOKEN_RE = re.compile(r"<\|[^>]+\|>|<[^>]+>")
@@ -332,6 +336,46 @@ def _lcp_len(seq, nxt) -> int:
     return lcp
 
 
+def _system_probe_key(ctx: dict, lead: list):
+    """What shapes the probe renders: the template (render, processor,
+    config), the leading system messages and the template kwargs. None
+    where one of them cannot be keyed."""
+    render, processor = ctx.get("render"), ctx.get("processor")
+    try:
+        refs = (weakref.ref(render), weakref.ref(processor))
+        text = json.dumps([lead, ctx.get("kw") or {}], sort_keys=True,
+                          default=repr)
+    except TypeError:
+        return None
+    return (id(render), id(processor), id(ctx.get("config")), text), refs
+
+
+def _system_probe_head(ctx: dict, lead: list) -> list[int] | None:
+    """The ids the two probe renders share (see ``system_prefix_lcp``).
+    The requests of a session send one system prompt and one tool list,
+    so the last few heads are kept across requests and a repeat renders
+    and tokenizes nothing."""
+    keyed = _system_probe_key(ctx, lead)
+    if keyed is not None:
+        with _LOCK:
+            hit = _SYS_MEMO.get(keyed[0])
+            if hit is not None and hit[0]() is ctx.get("render") \
+                    and hit[1]() is ctx.get("processor"):
+                _SYS_MEMO.move_to_end(keyed[0])
+                return hit[2]
+    p1 = _render_ids(ctx, lead + [{"role": "user", "content": "0"}])
+    p2 = _render_ids(ctx, lead + [{"role": "user", "content": "1"}])
+    if not (p1 and p2):
+        return None
+    head = p1[:_lcp_len(p1, p2)]
+    if keyed is not None:
+        with _LOCK:
+            _SYS_MEMO[keyed[0]] = (*keyed[1], head)
+            while len(_SYS_MEMO) > _SYS_MEMO_CAP:
+                _SYS_MEMO.popitem(last=False)
+    return head
+
+
 def system_prefix_lcp(ctx: dict, prompt_ids) -> int | None:
     """Token length of the prefix every sibling request shares: the LCP
     of two probe renders that differ only in a dummy first user turn.
@@ -367,10 +411,9 @@ def system_prefix_lcp(ctx: dict, prompt_ids) -> int | None:
         # No leading system block, or nothing after it (a system-only
         # prompt is covered by the terminal checkpoint already).
         if lead and len(lead) < len(msgs):
-            p1 = _render_ids(ctx, lead + [{"role": "user", "content": "0"}])
-            p2 = _render_ids(ctx, lead + [{"role": "user", "content": "1"}])
-            if p1 and p2:
-                lcp = min(_lcp_len(p1, p2), _lcp_len(p1, prompt_ids))
+            head = _system_probe_head(ctx, lead)
+            if head is not None:
+                lcp = _lcp_len(head, prompt_ids)
     except Exception:
         _log.debug("system-prefix prediction failed", exc_info=True)
         lcp = None
@@ -503,3 +546,4 @@ def _reset_for_tests() -> None:
     with _LOCK:
         _TEXT_MEMO.clear()
         _IDS_MEMO.clear()
+        _SYS_MEMO.clear()

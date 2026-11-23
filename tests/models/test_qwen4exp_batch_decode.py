@@ -245,7 +245,8 @@ def _route(monkeypatch, kernels):
     """``kernels=False`` takes the stock-op route: scores by matmul,
     argpartition, the take gather and stock SDPA."""
     if not kernels:
-        for name in ("_kq_topk", "_kq_score", "_kq_paged", "_kv_gather"):
+        for name in ("_kq_topk", "_kq_score", "_kq_paged", "_kq_paged_rows",
+                     "_kv_gather", "_norm_rope"):
             monkeypatch.setattr(q4, name, lambda: None)
 
 

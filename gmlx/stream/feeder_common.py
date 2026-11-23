@@ -9,6 +9,7 @@ from __future__ import annotations
 import mmap
 import os
 import queue
+import sys
 import threading
 from concurrent.futures import Future
 from contextlib import contextmanager
@@ -322,6 +323,10 @@ def swapped_weights(entry: dict, views: dict, slot_owner=None):
     the whole stack in expert order) leaves the ids as they are."""
     saved = []
     marked = []
+    q4 = sys.modules.get("gmlx.models.qwen4_exp.model")
+    if q4 is not None and not q4._VERIFY_BLOCKED:
+        # A compiled verify body would freeze the weights bound here.
+        q4.invalidate_verify_compile(block=True)
     try:
         for kind, (mod, *_) in entry.items():
             proj = getattr(mod, ATTRS[kind])

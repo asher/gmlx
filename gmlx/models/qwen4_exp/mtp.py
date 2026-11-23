@@ -153,9 +153,44 @@ class Qwen4ExpSpecHooks:
     MTP compose on one model. Contract: the carrier exposes ``self.model``
     (a ``Qwen4ExpModel``) and ``self._head``."""
 
+    # Set by the DFlash drafter loader. While set, every engine-facing
+    # hidden is ``[out | cap ...]``: the mixed final hidden, then the
+    # stream mean of each captured layer's output. Unset, it is the four
+    # pre-mixer streams the native head reads.
+    _dflash_capture: Optional[tuple] = None
+    # rollback_speculative_cache may run again on one verify with a shorter
+    # prefix and the width the first call kept: the trims add up and the
+    # recurrent leaves are set from the sink.
+    speculative_rollback_repeatable = True
+    # A speculative prefill's last chunk runs the prompt's last token too
+    # (mtp_prefill, GMLX_SPEC_LAST_IN_CHUNK unset).
+    prefill_last_in_chunk = True
+
+    def set_dflash_capture(self, layer_ids) -> None:
+        # nn.Module.__setattr__ would put the tuple in the parameter dict.
+        object.__setattr__(self, "_dflash_capture",
+                           tuple(int(i) for i in layer_ids) or None)
+
+    def _spec_forward(self, inputs, cache, **kwargs):
+        """``(out, hidden)``: the mixed final hidden and the engine-facing
+        one."""
+        ids = self._dflash_capture
+        if ids is None:
+            return self.model(inputs, cache, return_streams=True, **kwargs)
+        caps: list = []
+        out, _ = self.model(inputs, cache, return_streams=True,
+                            capture=(ids, caps), **kwargs)
+        if len(caps) != len(ids):
+            raise RuntimeError(
+                f"dflash capture collected {len(caps)} of {len(ids)} layers")
+        # The lead keeps out's dtype, so the head reads the bits plain
+        # decode reads.
+        return out, mx.concatenate(
+            [out, *(c.astype(out.dtype) for c in caps)], axis=-1)
+
     def chunked_prefill_policy(self, **kwargs):
-        # The drafter teacher-forces from the retained per-chunk hiddens, so
-        # chunked prefill is always safe for this target.
+        # Either drafter reads the retained per-chunk hiddens, so chunked
+        # prefill is always safe for this target.
         return True
 
     def _spec_verify_positions(self, verify_input: mx.array, prompt_cache,
@@ -166,23 +201,48 @@ class Qwen4ExpSpecHooks:
         return None
 
     def speculative_logits_from_hidden(self, hidden: mx.array) -> mx.array:
-        """(B,S,4,D) pre-mixer streams -> (B,S,V)."""
+        """(B,S,4,D) pre-mixer streams -> (B,S,V); the packed hidden's
+        lead while the DFlash capture is armed."""
+        if self._dflash_capture is not None:
+            # The quantized head reads its input buffer directly, so the
+            # strided lead is made contiguous first.
+            return self._head(mx.contiguous(
+                hidden[..., : int(self.model.args.hidden_size)]))
         return self._head(self.model.hc_head(hidden))
 
     def speculative_argmax_from_hidden(self, hidden: mx.array) -> mx.array:
         return mx.argmax(self.speculative_logits_from_hidden(hidden), axis=-1)
 
+    def reuse_verify_rows(self, prompt_cache) -> None:
+        """Tell the model that the next verify on ``prompt_cache`` runs a
+        leading part of the block its last verify ran, from the same cache
+        state (a deferred row cut that missed, after the cache restore).
+        The PLE layers then take the table rows that verify read in place
+        of a second read. One verify only."""
+        for layer, c in zip(self.model.layers, prompt_cache):
+            if "ple" in layer:
+                object.__setattr__(layer.ple, "_take_rows", id(c))
+
+    def hold_verify_rows(self, on: bool) -> None:
+        """While on, a verify built on this model does not submit its
+        table rows as its PLE layers are built: they are read when the
+        verify itself is submitted. For a verify built ahead that may be
+        dropped unevaluated. Same bits."""
+        for layer in self.model.layers:
+            if "ple" in layer:
+                object.__setattr__(layer.ple, "_hold_rows", bool(on))
+
     def speculative_verify_hidden(self, verify_input: mx.array, prompt_cache,
                                   rope_deltas=None):
-        """The single verify forward (qL = drafts + 1). Returns the streams
+        """The single verify forward (qL = drafts + 1). Returns the hidden
         plus the rollback sink in the ``gdn_states`` slot. ``rope_deltas`` is
         the rounds loop's per-row mrope delta."""
         sink: list = []
-        _, streams = self.model(
-            verify_input, prompt_cache, return_streams=True, gdn_sink=sink,
+        _, hidden = self._spec_forward(
+            verify_input, prompt_cache, gdn_sink=sink,
             position_ids=self._spec_verify_positions(
                 verify_input, prompt_cache, rope_deltas))
-        return streams, {}, sink
+        return hidden, {}, sink
 
     def rollback_speculative_cache(
         self, prompt_cache, gdn_states, accepted, block_size: int
@@ -232,15 +292,16 @@ class Qwen4ExpSpecLM(Qwen4ExpSpecHooks, q4.Model):
         # projects the returned streams.
         skip_logits = kwargs.pop("skip_logits", False)
         del n_to_process, kwargs
-        want_hidden = return_hidden or return_shared_kv
-        out, streams = self.model(
-            inputs, cache, input_embeddings=inputs_embeds, return_streams=True)
-        logits = None if skip_logits else self._head(out)
-        if not want_hidden:
+        if not (return_hidden or return_shared_kv):
             from gmlx._vendor.mlx_vlm.models.base import LanguageModelOutput
 
-            return LanguageModelOutput(logits=logits)
-        return _SpecOutput(logits=logits, hidden_states=[streams])
+            out = self.model(inputs, cache, input_embeddings=inputs_embeds)
+            return LanguageModelOutput(
+                logits=None if skip_logits else self._head(out))
+        out, hidden = self._spec_forward(
+            inputs, cache, input_embeddings=inputs_embeds)
+        logits = None if skip_logits else self._head(out)
+        return _SpecOutput(logits=logits, hidden_states=[hidden])
 
 
 class Qwen4ExpMTPDrafter(QwenMTPDrafter):

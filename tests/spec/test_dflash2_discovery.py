@@ -218,3 +218,63 @@ def test_dflash2_supersedes_only_a_non_dflash2_incumbent():
                              path="/m/dflash-kquant.gguf")
     mc.draft_gguf = "/d/other-DFlash2.gguf"
     assert disc._drafter_targets(v1, [(mc, target)], drafter_kinds=kinds) == []
+
+
+# Qwen3.8-Flash-Next as `gmlx pull qwen3.8-flash-next` leaves it: the target
+# shards in the unsloth repo's quant folder, the DFlash 2 drafter in Inco
+# AI's repo, and, from a pull before the drafter changed, llama.cpp's NextN
+# sidecar in the unsloth repo's MTP/ folder. Header facts as the files carry.
+FLASH_NEXT_HEADERS = {
+    "Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00004": {
+        "general.architecture": "qwen4exp", "general.name": "Qwen3.8 Flash Next",
+        "general.size_label": "512x56B", "qwen4exp.block_count": 48,
+        "qwen4exp.embedding_length": 2560},
+    "mtp-Qwen3.8-Flash-Next-shared-Q8_0": {
+        "general.architecture": "qwen4exp", "general.name": "Ckpt_Q38",
+        "general.size_label": "512x1.4B", "qwen4exp.block_count": 49,
+        "qwen4exp.nextn_predict_layers": 1, "qwen4exp.embedding_length": 2560},
+    "Qwen3.8-Flash-Next-DFlash2-Q6_K": {
+        "general.architecture": "dflash", "general.basename": "Qwen3.8-Flash-Next",
+        "general.size_label": "603M", "general.name": "Qwen3.8-Flash-Next-DFlash2",
+        "general.base_model.0.name": "Qwen3.8 Flash Next",
+        "dflash.selector_top_k": 16, "dflash.embedding_length": 2560},
+}
+
+
+@pytest.mark.parametrize("old_mtp", [False, True])
+def test_pulled_flash_next_pairs_with_its_dflash2_drafter(tmp_path, monkeypatch, old_mtp):
+    """The pulled Flash-Next target pairs with the DFlash 2 Q6_K drafter,
+    also when an MTP sidecar from an earlier pull still sits in the repo,
+    and the drafter loads with the qwen4_exp row floor."""
+    from gmlx.load.config_synth import GGUF_ARCH_TO_MODEL_TYPE
+    from gmlx.spec.mtp_load import _dflash2_row_floor
+
+    def _f(path):
+        name = os.path.basename(path)
+        stem = name[:-len(".gguf")]
+        return disc._classify_meta(
+            dict(FLASH_NEXT_HEADERS[stem]), basename=name, path=path,
+            mtp_only=stem.startswith("mtp-"),
+            container="dflash2" if "DFlash2" in stem else None)
+
+    monkeypatch.setattr(disc, "classify_gguf", _f)
+    monkeypatch.setattr(disc, "_fit_in_memory", lambda mc, c: None)
+    monkeypatch.delenv("GMLX_DFLASH_ROW_FLOOR", raising=False)
+    repo = tmp_path / "unsloth__Qwen3.8-Flash-Next-GGUF"
+    (repo / "UD-IQ4_XS").mkdir(parents=True)
+    (repo / "UD-IQ4_XS" / "Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00004.gguf").write_bytes(b"x")
+    if old_mtp:
+        (repo / "MTP").mkdir()
+        (repo / "MTP" / "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf").write_bytes(b"x")
+        # alone, the sidecar pairs
+        m = _scan(tmp_path)["qwen3.8-flash-next-ud-iq4"]
+        assert _base(m.draft_gguf) == "mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+    drafts = tmp_path / "incoai__Qwen3.8-Flash-Next-DFlash2-GGUF"
+    drafts.mkdir()
+    (drafts / "Qwen3.8-Flash-Next-DFlash2-Q6_K.gguf").write_bytes(b"x")
+    models = _scan(tmp_path)
+    assert list(models) == ["qwen3.8-flash-next-ud-iq4"]
+    m = models["qwen3.8-flash-next-ud-iq4"]
+    assert _base(m.draft_gguf) == "Qwen3.8-Flash-Next-DFlash2-Q6_K.gguf"
+    assert m.speculative is True
+    assert _dflash2_row_floor(GGUF_ARCH_TO_MODEL_TYPE["qwen4exp"]) == 0.5

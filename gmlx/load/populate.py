@@ -179,6 +179,8 @@ def start_populate(paths: list[str], log=print) -> None:
     started = 0
     skipped = 0
     tables = _streamed_tables(paths)
+    for key, ranges in _stored_stacks(paths).items():
+        tables[key] = sorted(tables.get(key, []) + ranges)
     with _lock:
         for path in paths:
             key = os.path.realpath(path)
@@ -225,6 +227,18 @@ def _streamed_tables(paths: list[str]) -> dict[str, list[tuple[int, int]]]:
     except Exception:
         return {}
     return {os.path.realpath(p): r for p, r in ranges.items()}
+
+
+def _stored_stacks(paths: list[str]) -> dict[str, list[tuple[int, int]]]:
+    """The byte ranges of the expert stacks a full expert store reads from
+    the file past the page cache (``expert_store.stored_file_ranges``);
+    empty with the lever off."""
+    try:
+        from .expert_store import stored_file_ranges
+
+        return stored_file_ranges(list(paths))
+    except Exception:
+        return {}
 
 
 def wait_for(paths: list[str], log=print) -> None:

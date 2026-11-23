@@ -410,6 +410,44 @@ def test_evict_bytes_takes_the_coldest_idle_blocks_then_a_clone(monkeypatch):
     assert m.reclaimable_bytes() == 0
 
 
+def test_pool_bytes_follow_stores_evictions_growth_and_a_clear(monkeypatch):
+    """The pool's resident bytes are kept as its blocks change, where a
+    scan of the pool read them: the figure equals the scan after a store,
+    an eviction, an overwrite of a block, pool growth and a clear."""
+    import mlx.core as mx
+
+    m, block = _full_manager(monkeypatch)
+
+    def scan():
+        return sum(b.resident_bytes() for b in m.pool)
+
+    assert m._pool_bytes.bytes == scan()
+    held = scan()
+    k = mx.zeros((1, 2, 64, 16), mx.float16)
+    m.release(m.store_kv_blocks(list(range(1000, 1064)), [k, k], [k, k]))
+    leased = m.store_kv_blocks(list(range(2000, 2064)), [k, k], [k, k])
+    assert m._pool_bytes.bytes == scan() >= max(held, 8 * block)
+    assert m.resident_bytes() == scan() and m.governor_bytes() >= scan()
+
+    assert m.evict_bytes(3 * block) == 3 * block
+    assert m._pool_bytes.bytes == scan()
+
+    leased[0].set_kv([k[..., :8, :]], [k[..., :8, :]])
+    assert m._pool_bytes.bytes == scan()
+
+    n = len(m.pool)
+    monkeypatch.delenv("APC_NUM_BLOCKS", raising=False)
+    monkeypatch.delenv("APC_MAX_POOL_TENSORS", raising=False)
+    _autosize_rig(monkeypatch, budget=100 * GB)
+    m.autosize(_fake_model())
+    assert len(m.pool) > n
+    assert all(b._tally is m._pool_bytes for b in m.pool)
+
+    m.release(leased)
+    m.clear()
+    assert m._pool_bytes.bytes == scan() == 0
+
+
 def test_an_eviction_by_bytes_gives_the_headroom_its_bytes(monkeypatch):
     """The admission gate reads the headroom again after it evicts and
     clears the buffer cache (``governor.cover_admission_shortfall``). Each

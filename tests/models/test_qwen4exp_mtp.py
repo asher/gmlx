@@ -389,7 +389,8 @@ def test_arch_table_and_loader_rows():
     from gmlx.load.mtp_target import _MTP_TARGET_HOOKS_BY_TYPE, _mtp_target_classes
     from gmlx.spec.mtp_load import _assistant_kind
 
-    assert arch_table.drafter_arches("qwen4_exp") == (MTP_ARCH, "qwen4exp")
+    assert arch_table.drafter_arches("qwen4_exp") == (
+        MTP_ARCH, "qwen4exp", "dflash")
     assert arch_table.drafter_serves(MTP_ARCH, "qwen4exp") is True
     assert arch_table.drafter_serves("qwen4exp", "qwen4exp") is True
     cls, build = _mtp_target_classes("qwen4_exp")

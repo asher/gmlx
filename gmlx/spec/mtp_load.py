@@ -21,11 +21,12 @@ import mlx.nn as nn
 import mlx_kquant as kq
 
 import gmlx.load.loadlog as loadlog
+from gmlx.load import expert_store
 import gmlx.load.rope_scaling as rope_mod
 import gmlx.load.rope_swap as rope_swap
 from gmlx.load.dtypes import activation_dtype, activation_dtype_name
 from gmlx.device import cpu_default_device, metal_value
-from gmlx.envflags import env_int
+from gmlx.envflags import env_float, env_int
 from gmlx.upstream.gdn_patches import (
     _patch_dense_head_verify,
     require_tiled_gdn,
@@ -261,6 +262,14 @@ def _nemotron_verify_route(env=os.environ) -> None:
         env.setdefault("KQ_VERIFY_EXT", "0")
 
 
+def _stamp_store_block(drafter, first_block: int) -> None:
+    # An in-file head's layer 0 is the file's block num_hidden_layers: its
+    # expert store reads, and a release maps back, that block.
+    object.__setattr__(drafter, "_kq_store_blk_base", int(first_block))
+
+
+# A drafter's expert store needs its block in the file (expert_store).
+@expert_store.drafter_load()
 def _load_mtp_drafter(
     arrays: dict,
     kquant_meta: dict,
@@ -380,6 +389,7 @@ def _load_mtp_drafter(
             n_head=n_head, n_head_kv=n_head_kv,
         )
         log(f"[mtp] drafter remap (block {first_mtp_block}): {d_stats}")
+        _stamp_store_block(drafter, first_mtp_block)
         _install_and_load(
             drafter,
             d_weights,
@@ -439,6 +449,7 @@ def _load_mtp_drafter(
     )
     log(f"[mtp] drafter remap (block {first_mtp_block}+): {d_stats}")
 
+    _stamp_store_block(drafter, first_mtp_block)
     _install_and_load(
         drafter,
         d_weights,
@@ -941,6 +952,11 @@ def _load_qwen4exp_mtp_drafter(
         d_weights, d_meta, d_stats = remap_qwen4exp_mtp_arrays(
             arrays, kquant_meta)
     log(f"[mtp] drafter remap: {d_stats}")
+    # The file's block of the drafter's layer 0, for an expert store's
+    # reads and remaps (gmlx.load.expert_store): the sidecar's block
+    # num_hidden_layers; the companion names no blocks.
+    object.__setattr__(drafter, "_kq_store_blk_base",
+                       first_block if sidecar else None)
     _install_and_load(
         drafter,
         d_weights,
@@ -1560,7 +1576,8 @@ def _wire_dflash_capture(target, layer_ids) -> None:
     if not callable(getattr(lm, "set_dflash_capture", None)):
         raise RuntimeError(
             "DFlash drafters need a target carrying the _dflash_capture seam "
-            f"(muse_glimmer, gemma4, owned qwen3_5, ricursive, inkling2); got {type(lm).__name__}"
+            "(muse_glimmer, gemma4, owned qwen3_5, ricursive, inkling2, "
+            f"qwen4_exp); got {type(lm).__name__}"
         )
     lm.set_dflash_capture(layer_ids)
 
@@ -1621,6 +1638,22 @@ def _load_plain_dflash_drafter(
     return drafter
 
 
+# DFlash 2 row cut by target family (DFlash2Drafter.row_floor): the chance
+# under which a draft is not worth its verify row. A row costs most where
+# the target is a mixture of experts, since each row routes its own.
+_DFLASH2_ROW_FLOOR = {
+    "qwen4_exp": 0.5,
+}
+
+
+def _dflash2_row_floor(model_type) -> float:
+    """GMLX_DFLASH_ROW_FLOOR, else the family's row, else 0 (no cut)."""
+    floor = env_float("GMLX_DFLASH_ROW_FLOOR", -1.0)
+    if floor < 0:
+        floor = _DFLASH2_ROW_FLOOR.get(str(model_type), 0.0)
+    return min(max(float(floor), 0.0), 1.0)
+
+
 def _load_dflash2_drafter(
     draft_gguf_path: str,
     target,
@@ -1664,11 +1697,13 @@ def _load_dflash2_drafter(
     )
     drafter.bind(target)
     _wire_dflash_capture(target, layer_ids)
+    drafter.row_floor = _dflash2_row_floor(target_config_dict.get("model_type"))
 
     from .drafter_protocol import validate_drafter
 
     validate_drafter(drafter)
-    log("[mtp] dflash2 drafter bound; target capture layers wired")
+    log("[mtp] dflash2 drafter bound; target capture layers wired"
+        + (f"; row floor {drafter.row_floor:g}" if drafter.row_floor else ""))
     _patch_draft_head_quantized(drafter, "lm_head")
     _stamp_mtp_width_cap(
         drafter, str(target_config_dict.get("model_type") or "dflash2"),
@@ -1903,9 +1938,9 @@ def _assistant_kind(model_type: str | None, draft_gguf_path: str) -> str:
     the pairing it is handed."""
     if model_type == "deepseek_v4":
         return "deepseek4"
-    if model_type == "qwen4_exp":
-        return "qwen4exp"
     header_arch = _drafter_header_arch(draft_gguf_path)
+    if model_type == "qwen4_exp" and header_arch != "dflash":
+        return "qwen4exp"
     if model_type == "nemotron_h" and header_arch != "dflash":
         return "nemotron"
     if model_type == "muse_glimmer" or header_arch == "dflash":
@@ -2174,6 +2209,7 @@ def _resolve_companion_drafter(model_type: str | None, gguf_path: str, *, log):
     return path
 
 
+@expert_store.drafter_load()
 def _load_assistant_drafter(draft_gguf_path: str, model, text_config_dict: dict,
                             *, zero_copy: bool, log, target_gguf_path=None):
     """Kind-dispatched companion (``--draft-gguf``) loader, shared by the
@@ -2338,6 +2374,10 @@ def load_mtp_model(
             deferred_tables=deferred_tables(pf.shards, arch),
             hadamard=hadamard_targets_for(meta, arch, tensor_shapes),
         )
+    from gmlx.load import expert_store
+
+    # The stacks a full expert store replaced: this dict still names them.
+    expert_store.drop_mapped(arrays, last=True)
 
     # 2b. post-install arming: the tiled-V check + the fused gated-delta verify kernel
     #     (the MTP round's roofline; measured ~7% at M=5, ~15% at M=8 on the

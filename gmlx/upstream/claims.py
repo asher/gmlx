@@ -746,8 +746,10 @@ CLAIMS: tuple[Claim, ...] = (
           "ResponseGenerator._collect_pending_requests",
           "engine_jobs.install_engine_jobs (wrapped: step jobs run "
           "between batch steps; active=True never blocks, capacity 0 "
-          "reads nothing)",
-          wrappers=("gmlx.serve.engine_jobs",)),
+          "reads nothing); idle_release.install_idle_release (wrapped: an "
+          "idle pass checks for memory pressure and keeps the GPU memory "
+          "resident)",
+          wrappers=("gmlx.serve.engine_jobs", "gmlx.serve.idle_release")),
     # --- mlx-lm ---
     Claim("gmlx._vendor.mlx_lm.server", "ModelProvider._load",
           "bridge_lm (GGUF ModelProvider)",

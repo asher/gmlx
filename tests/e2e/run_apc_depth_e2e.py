@@ -820,10 +820,16 @@ def main() -> int:
         # An identical replay must adopt the deepest boundary below the
         # resend, not a shallower interval point.
         m0 = tick(K["matched"])
+        h0 = tick("spec_prefix_hit_tokens")
         st, text, content, ptok, warm_wall = chat(
             base, mid, mk_msgs(prefix + q), max_tokens=256
         )
         dm = tick(K["matched"]) - m0
+        # A speculative first-level entry serves the replay before the ckpt
+        # tier: one token short, or the whole prompt where the last prefill
+        # chunk runs the last token (GMLX_SPEC_LAST_IN_CHUNK).
+        dh = tick("spec_prefix_hit_tokens") - h0
+        spec = ck and dm == 0 and dh > 0
         if ck:
             warm_floor = prefix_tok - 8  # N-1 replay, small tokenizer slack
         elif a.tier == "exact":
@@ -835,8 +841,9 @@ def main() -> int:
         )
         rep.check(
             "warm.matched",
-            warm_floor <= dm <= prefix_tok,
-            f"{K['matched']} +{dm}, expected [{warm_floor}, {prefix_tok}]",
+            warm_floor <= (dh if spec else dm) <= prefix_tok,
+            f"{'spec_prefix_hit_tokens' if spec else K['matched']} "
+            f"+{dh if spec else dm}, expected [{warm_floor}, {prefix_tok}]",
         )
         rep.check(
             "warm.faster",
@@ -1942,7 +1949,9 @@ def main() -> int:
     # cannot serve the resend, and the system message stays short even
     # under --system-words: an agent-shaped system block arms the anchor,
     # which then serves the resends exactly as designed and leaves this
-    # phase with nothing to refuse.
+    # phase with nothing to refuse. The speculative first level keeps no
+    # entries (GMLX_SPEC_APC_ENTRIES=0) for the same reason: its entry
+    # serves a resend before the ckpt tier is asked.
     if ck and not a.no_tripwire:
         trip_prefix, n_trip = deep_prefix(1050)
         trip_q = (
@@ -1955,6 +1964,7 @@ def main() -> int:
         trip_env["GMLX_APC_CKPT_REPLAY"] = "0"
         trip_env["GMLX_APC_CKPT_TURN"] = "0"
         trip_env["GMLX_APC_CKPT_TRIPWIRE"] = "2"
+        trip_env["GMLX_SPEC_APC_ENTRIES"] = "0"
         trip_log = os.path.join(out_dir, "server-c.log")
         with ServerProc(
             serve_args(a.model, a.speculative, a.draft_gguf),

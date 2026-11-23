@@ -476,7 +476,11 @@ def _load(src: Source, args, slots=()) -> tuple[object, argparse.Namespace]:
     if _streams(ns):
         relift()
     _ensure_stream_cb_caps(ns)
-    with loadlog.load_ui(args.verbose, src.path):
+    from gmlx.load import expert_store
+
+    # No store for the blocks the adapters take: the install gives it up.
+    scope = expert_store.adapter_scope([path for path, _ in slots or ()])
+    with loadlog.load_ui(args.verbose, src.path), scope:
         model, config, _tok = load_model(src.path)
     if slots:
         from gmlx import lora_rows

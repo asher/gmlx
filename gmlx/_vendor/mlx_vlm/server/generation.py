@@ -1,6 +1,7 @@
 import gc
 import logging
 import os
+import sys
 import time
 from collections import deque
 from contextlib import nullcontext
@@ -45,11 +46,16 @@ from ..structured import ThinkingAwareLogitsProcessor
 from ..tokenizer_utils import _ServerTokenStreamer, make_streaming_detokenizer
 from ..utils import ThinkingBudgetCriteria, load, prepare_inputs, resolve_eos_token_ids
 from .runtime import runtime
+from gmlx.envflags import env_float
 
 if TYPE_CHECKING:
     from gmlx.gen.thinking_budget import ThinkMarkers
 
 logger = logging.getLogger("gmlx._vendor.mlx_vlm.server")
+
+# gmlx: how long the worker waits after a step that queued a request's
+# first token, so the client gets it before more Python runs (0: off).
+_FIRST_YIELD_S = max(0.0, env_float("GMLX_SERVE_FIRST_YIELD_US", 200.0)) / 1e6
 
 DEFAULT_SPECULATIVE_BATCH_COALESCE_MS = 5.0
 DEFAULT_LOG_PROGRESS_INTERVAL = 10
@@ -1072,6 +1078,9 @@ class ResponseGenerator:
         self._kq_unremoved: set = set()
         self._kq_next_uid = 0
         self._tokenizer_lock = Lock()
+        # gmlx: requests inside generate() that are not queued yet.
+        self._kq_arriving = 0
+        self._kq_arriving_lock = Lock()
         self._thread = Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -1289,15 +1298,15 @@ class ResponseGenerator:
                 "streamed model: prefill chunk defaults to %d tokens "
                 "(prefill_step_size sets it)", step)
 
-    def generate(
-        self,
-        prompt: str,
-        images: Optional[List] = None,
-        audio: Optional[List] = None,
-        args: Optional[GenerationArguments] = None,
-        videos: Optional[List] = None,
-    ) -> Tuple[GenerationContext, "_TokenIterator"]:
-        self.wait_until_ready()
+    def _kq_note_arriving(self, n: int) -> None:
+        lock = getattr(self, "_kq_arriving_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._kq_arriving += n
+
+    def _kq_prepare_request(self, prompt, images, audio, args, videos):
+        """gmlx: generate()'s caller-side work, up to the request it queues."""
         args = args or GenerationArguments(max_tokens=get_server_max_tokens())
         if self.draft_model is not None and args.logits_processors is not None:
             raise ValueError(
@@ -1367,7 +1376,28 @@ class ResponseGenerator:
             len(audio or []),
             len(videos or []),
         )
-        self.requests.put(queued_request)
+        return queued_request
+
+    def generate(
+        self,
+        prompt: str,
+        images: Optional[List] = None,
+        audio: Optional[List] = None,
+        args: Optional[GenerationArguments] = None,
+        videos: Optional[List] = None,
+    ) -> Tuple[GenerationContext, "_TokenIterator"]:
+        self.wait_until_ready()
+        # gmlx: counted as arriving until it is queued, so an idle worker
+        # runs no held store while one is being prepared.
+        # Through the class: a stand-in for self runs the same body.
+        ResponseGenerator._kq_note_arriving(self, 1)
+        try:
+            queued_request = ResponseGenerator._kq_prepare_request(
+                self, prompt, images, audio, args, videos)
+            rqueue = queued_request.rqueue
+            self.requests.put(queued_request)
+        finally:
+            ResponseGenerator._kq_note_arriving(self, -1)
 
         # Block until the GPU thread sends back the context
         ctx = rqueue.get()
@@ -1980,6 +2010,9 @@ class ResponseGenerator:
             self._run_impl()
         finally:
             try:
+                spec = sys.modules.get("gmlx.spec.speculative")
+                if spec is not None and spec.has_held_stores():
+                    spec.run_held_stores("shutdown")
                 # The worker can outlive stop_and_join's timeout. Retire its
                 # disk writer only after its final request/store has finished.
                 manager = getattr(self, "apc_manager", None)
@@ -2028,11 +2061,20 @@ class ResponseGenerator:
                 capacity = (
                     None if max_num_seqs is None else max(0, max_num_seqs - len(active))
                 )
+                # gmlx: a held prompt cache store (gmlx.spec.speculative)
+                # waits out a short idle grace, for a request on its way.
+                # Each worker runs only the stores it held.
+                spec = sys.modules.get("gmlx.spec.speculative")
+                held = spec is not None and spec.has_held_stores()
                 new_items, should_stop = self._collect_pending_requests(
                     active=active_batch,
                     capacity=capacity,
                     coalesce_s=coalesce_s,
+                    idle_timeout=spec.held_store_grace_s() if held else 0.1,
                 )
+                if (held and not new_items and not active
+                        and getattr(self, "_kq_arriving", 0) <= 0):
+                    spec.run_held_stores("idle")
                 if should_stop and not active:
                     break
 
@@ -2122,6 +2164,11 @@ class ResponseGenerator:
                             )
                             if max_tokens is not None:
                                 max_tokens = max_tokens + 1
+                        # gmlx: a held store this prompt can use lands
+                        # before its lookup.
+                        spec = sys.modules.get("gmlx.spec.speculative")
+                        if spec is not None and spec.has_held_stores():
+                            spec.run_held_stores_for(prompt_ids)
                         (uid,) = batch_gen.insert(
                             [prompt_ids],
                             max_tokens=max_tokens,
@@ -2339,6 +2386,39 @@ class ResponseGenerator:
 
     def _step(self, batch_gen, active, gen_kwargs=None):
         """One batch generation step: prefill + decode."""
+        # gmlx: numbered for the held store rule below.
+        step = getattr(self, "_kq_step_no", 0) + 1
+        self._kq_step_no = step
+        spec = sys.modules.get("gmlx.spec.speculative")
+        if spec is not None:
+            spec.begin_step()
+        try:
+            # gmlx: through the class, so a caller that passes a stand-in
+            # for self (the engine thread tests do) runs the same body.
+            ResponseGenerator._step_body(self, batch_gen, active, gen_kwargs)
+        finally:
+            # gmlx: work the step left for after its responses, and a
+            # request's close and prompt cache store deferred past its last
+            # token (GMLX_SPEC_RETIRE_AFTER_FINAL), run here, once the
+            # step's responses are queued and before the worker takes
+            # anything else.
+            spec = sys.modules.get("gmlx.spec.speculative")
+            # A first token this step queued goes out to its client before
+            # the worker runs more Python (GMLX_SERVE_FIRST_YIELD_US).
+            if _FIRST_YIELD_S and any(
+                info.get("kq_first_step") == step for info in active.values()
+            ):
+                time.sleep(_FIRST_YIELD_S)
+            if spec is not None:
+                spec.run_step_end()
+            # A held store runs a step after every row's first token, so
+            # the first token goes out before it.
+            if (spec is not None and spec.has_held_stores() and active
+                    and all(info.get("kq_first_step", step) < step
+                            for info in active.values())):
+                spec.run_held_stores("decode")
+
+    def _step_body(self, batch_gen, active, gen_kwargs=None):
         kwargs = gen_kwargs or {}
         prompt_responses, responses = batch_gen.next(**kwargs)
         self._log_prefill_progress(batch_gen, active)
@@ -2419,6 +2499,9 @@ class ResponseGenerator:
                     audio=None if speech is None else speech.audio,
                 )
             )
+            # gmlx: the step of the row's first token (_step).
+            if token_count and "kq_first_step" not in info:
+                info["kq_first_step"] = getattr(self, "_kq_step_no", 0)
 
             if r.finish_reason is not None:
                 rqueue.put(None)

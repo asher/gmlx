@@ -508,10 +508,16 @@ def load_teacher(opts: CacheOptions):
     teacher_is_gguf = Path(opts.teacher).is_file() and opts.teacher.endswith(".gguf")
     offloaded = 0
     if teacher_is_gguf:
+        import contextlib
+
         import gmlx.load.loadlog as loadlog
+        from gmlx.load import expert_store
         from gmlx.load.loader import load_model
         from gmlx.load.preflight import preflight
-        with loadlog.load_ui(False, opts.teacher):
+        # Streamed experts are read from the file: no store to build.
+        off = (expert_store.off("streamed experts") if opts.stream_experts
+               else contextlib.nullcontext())
+        with loadlog.load_ui(False, opts.teacher), off:
             model, config, _tok = load_model(opts.teacher, hf_source=opts.hf_source)
         arch = preflight(opts.teacher).arch
         if opts.stream_experts:

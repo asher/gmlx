@@ -43,6 +43,7 @@ from mlx_kquant.nn import (
 
 from .native_fp import NATIVE_FP_CODECS, NATIVE_FP_GEOMETRY
 from .out_scale import wrapped_scale
+from . import expert_store
 import gmlx.lora_rows as lora_rows
 from gmlx import mlx_guards
 from .dtypes import activation_dtype
@@ -999,7 +1000,11 @@ def _make_fused_kquant(base_cls, caps):
             elif rows:
                 y = glu_unsorted_call(self, x, indices)
             else:
-                y = self._kq_prefill_gate_up(x, indices, scores)
+                # A full expert store has no mapped stacks: its wide form
+                # reads the planes.
+                y = expert_store.wide_glu(self, x, indices)
+                if y is None:
+                    y = self._kq_prefill_gate_up(x, indices, scores)
                 if y is None:
                     y = self._kq_prefill_sorted(x, indices, scores)
                 if y is None:
@@ -1110,10 +1115,11 @@ def _sorted_rows(x, indices, projs):
     flat = indices.flatten()
     order = mx.argsort(flat)
     inv_order = mx.argsort(order)
+    rows = mlx_guards.floor_divide(order, k)
     if _ROW_MAP_ENABLED and all(
             getattr(p, "takes_x_rows", False) for p in projs):
-        return x, flat[order], inv_order, {"x_rows": order // k}
-    xs = mx.expand_dims(x, (-2, -3)).flatten(0, -3)[order // k]
+        return x, flat[order], inv_order, {"x_rows": rows}
+    xs = mx.expand_dims(x, (-2, -3)).flatten(0, -3)[rows]
     return xs, flat[order], inv_order, {}
 
 
@@ -1425,6 +1431,14 @@ def _make_fused_block(base_cls, caps):
             from gmlx.stream.moe_experts import expert_controls_active
 
             expert_ctl = expert_controls_active(self)
+            store_only = self.__dict__.get("_kq_store_only")
+            # A down store: gate and up are the mapped stacks, the down
+            # stack is in the store.
+            down_only = store_only and self.__dict__.get("_kq_store_down")
+            if expert_ctl and store_only:
+                raise RuntimeError(
+                    "GMLX_MOE_EXPERT_STORE=full dropped this block's mapped "
+                    "experts; expert controls need a bounded store or none")
             if getattr(self, "_kq_route_replay", None) is not None:
                 # Replay recomputes the mixing weights at the replayed ids
                 # on the eager path; the fused router epilogue has no seam
@@ -1440,21 +1454,44 @@ def _make_fused_block(base_cls, caps):
                 fold = False
             projs = None
             router_only = False
-            if (
+            fused_ok = (
                 _FUSED_MOE_ENABLED
                 and _FUSED_MOE_BLOCK_ENABLED
-                and t * self.top_k < 64
                 and x.dtype in (mx.bfloat16, mx.float16, mx.float32)
                 and not self.training
                 and getattr(self, "sharding_group", None) is None
                 and _kq_fused_device_ok(self, self.switch_mlp)
-            ):
+            )
+            # A full store's wide forward (prefill) is the stock block with
+            # the members' sorted path reading the planes.
+            wide = (store_only and fused_ok and expert_store.wide(self, t)
+                    and self.switch_mlp.__dict__.get("_kq_wide_store")
+                    is not None)
+            if wide:
+                return super().__call__(x)
+            narrow = fused_ok and (
+                t * self.top_k < 64
+                or t <= getattr(self, "kq_block_rows", 0)
+                or (store_only and not down_only))
+            if narrow:
                 if fold:
                     projs = self._kq_fold_projs()
                 if projs is None:
                     # An adapted member with a slot on runs its own
                     # forward behind the fused router.
                     router_only = self._kq_router() is not None
+            # A down store's wider forward is the stock block: the members'
+            # sorted path in place for gate and up, and the down leaf
+            # reading the store planes.
+            if projs is None and store_only and not (
+                    down_only and fused_ok and not narrow):
+                # Every in-place form below reads the mapped stacks, which
+                # a full store let go.
+                raise RuntimeError(
+                    "GMLX_MOE_EXPERT_STORE=full holds this block's experts "
+                    "in the store only; this forward (an adapter slot on, "
+                    "training, a sharded or CPU run) needs the mapped "
+                    "stacks: load without the store")
             if projs is None and not router_only:
                 if expert_ctl:
                     # Stock forward with the fan-out hook at the selection
@@ -1510,6 +1547,31 @@ def _make_fused_block(base_cls, caps):
                 y = (y * w[..., :k].reshape(*rows, k, 1)).sum(axis=-2)
                 return y + w[..., k:].reshape(*rows, 1) * self.shared_expert(x)
             wg, wu, wd, sg, su, sd = projs
+            store = None if expert_ctl else expert_store.lookup(self, t)
+            if store is None and store_only:
+                raise RuntimeError(
+                    "GMLX_MOE_EXPERT_STORE=full: the block's store does not "
+                    "serve this forward")
+            if store is not None:
+                # GMLX_MOE_EXPERT_STORE: routed experts from the store's
+                # planes; an expert with no slot and the shared expert from
+                # their GGUF blocks. Below the store GLU's width the
+                # in-place GLU feeds the store down.
+                if store.serves_glu(t):
+                    h = kq.moe_store_glu(
+                        xf, store.gw, store.uw, sg.weight, su.weight,
+                        wg.kquant_type, inds, store.slots, store.g, store.u,
+                        shexp_kquant_type=sg.kquant_type)
+                else:
+                    h = kq.moe_glu_gather_shexp_kq(
+                        xf, wg.weight, wu.weight, sg.weight, su.weight,
+                        wg.kquant_type, inds, act="silu",
+                        **({} if sg.kquant_type == wg.kquant_type
+                           else {"shexp_kquant_type": sg.kquant_type}))
+                y = kq.moe_store_down(
+                    h, store.dw, sd.weight, wd.kquant_type, inds, sc,
+                    store.slots, store.d, shexp_kquant_type=sd.kquant_type)
+                return y.reshape(x.shape)
             skw = {}
             if sg.kquant_type != wg.kquant_type:
                 skw = {"shexp_kquant_type": sg.kquant_type}
@@ -1543,6 +1605,8 @@ def _install_kq_block_fusion(model, caps) -> int:
             continue
         _swap_class(m, classes, _make_fused_block, caps)
         object.__setattr__(m, "_kq_router_want", caps.router_ok)
+        if fold:
+            expert_store.register(m, expert_store.model_type_of(model))
         if not fold:
             object.__setattr__(m, "_kq_shexp_fold", False)
         elif _kq_split_fold_skips(m, caps):
@@ -2901,10 +2965,10 @@ def _lora_container_blocked(*mods) -> str | None:
     return None
 
 
-def _stamp_gate_slots(by_path: dict, paths, slot: int) -> None:
-    """Record ``slot`` on the nearest ancestor of each path whose class
-    names the child the path runs through in ``_kq_lora_gate``, so its
-    fused path can tell when an adapted member has a slot on."""
+def _gate_owners(by_path: dict, paths) -> list:
+    """The nearest ancestor of each path whose class names the child the
+    path runs through in ``_kq_lora_gate``, once each."""
+    out: dict = {}
     for path in paths:
         parts = path.split(".")
         for i in range(len(parts) - 1, -1, -1):
@@ -2913,10 +2977,31 @@ def _stamp_gate_slots(by_path: dict, paths, slot: int) -> None:
             if gate is None:
                 continue
             if parts[i] in gate:
-                slots = set(owner.__dict__.get("_kq_lora_slots", ()))
-                slots.add(int(slot))
-                object.__setattr__(owner, "_kq_lora_slots", tuple(sorted(slots)))
+                out[id(owner)] = owner
             break
+    return list(out.values())
+
+
+def _release_stores(by_path: dict, paths) -> None:
+    """Map the expert stacks back on the store-only blocks ``paths`` run
+    through, in one release: an adapted member needs them, and one release
+    maps each shard once."""
+    owners = [o for o in _gate_owners(by_path, paths)
+              if o.__dict__.get("_kq_store_only")]
+    if owners:
+        expert_store.release_blocks(
+            owners, "an adapter is attached to this block")
+
+
+def _stamp_gate_slots(by_path: dict, paths, slot: int) -> None:
+    """Record ``slot`` on the nearest ancestor of each path whose class
+    names the child the path runs through in ``_kq_lora_gate``, so its
+    fused path can tell when an adapted member has a slot on."""
+    _release_stores(by_path, paths)
+    for owner in _gate_owners(by_path, paths):
+        slots = set(owner.__dict__.get("_kq_lora_slots", ()))
+        slots.add(int(slot))
+        object.__setattr__(owner, "_kq_lora_slots", tuple(sorted(slots)))
 
 
 def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
@@ -2927,6 +3012,7 @@ def _install_expert_lora(model: nn.Module, targets: dict, *, slot: int) -> int:
     lin_types, glu_types = switch_layer_types()
     by_path = dict(model.named_modules())
     classes: dict = {}
+    _release_stores(by_path, list(targets))
     for path, lm in targets.items():
         leaf = by_path.get(path)
         if leaf is None:
@@ -3048,6 +3134,13 @@ def install_lora_adapter(model: nn.Module, plan,
     subtly wrong model): a target that names an unwrappable module and a
     target with no matching module at all.
     """
+    import sys
+
+    q4 = sys.modules.get("gmlx.models.qwen4_exp.model")
+    if q4 is not None:
+        # Recorded verify graphs were taken over the unwrapped modules.
+        q4.invalidate_verify_compile()
+
     targets = dict(plan.modules)   # module_path -> LoraModule
     wrapped: set[str] = set()
     expert_targets = {p: lm for p, lm in targets.items() if lm.experts}
