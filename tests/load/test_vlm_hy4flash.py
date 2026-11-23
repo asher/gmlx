@@ -17,6 +17,7 @@ from gmlx.load.vlm import (
     HY4FLASH_IMAGE_PAD_PREFIX,
     HY4FLASH_IMAGE_PAD_TOKEN_ID,
     HY4FLASH_VISION,
+    HY4_VISION,
     UnsupportedVLMError,
     _HyV4FlashGgufImageProcessor,
     _synthesize_hy4flash_processor,
@@ -104,6 +105,48 @@ def test_the_projector_resolves_onto_the_container():
     assert resolve_vlm_model_type("hy_v4_flash", MM_META) == HY4FLASH_VISION
     with pytest.raises(UnsupportedVLMError, match="hy_v4_flash.*'hyv4'"):
         resolve_vlm_model_type("hyv4", MM_META)
+
+
+def test_the_hy4_projector_resolves_onto_its_container():
+    meta = dict(MM_META, **{"clip.projector_type": "hy_v4_vl"})
+    assert resolve_vlm_model_type("hy_v4", meta) == HY4_VISION
+    with pytest.raises(UnsupportedVLMError, match="hy_v4_vl.*'hy_v4_flash'"):
+        resolve_vlm_model_type("hy_v4_flash", meta)
+
+
+def _hy4_config(sections=True):
+    from gmlx.models.hy_v4.vlm_model import ensure_registered
+    from test_config_synth import _HYV4_SHAPES, _hy_v4_meta
+
+    ensure_registered()
+    meta = _hy_v4_meta()
+    if not sections:
+        del meta["hy_v4.rope.dimension_sections"]
+    arrays = _mmproj_arrays()
+    mm_meta = dict(MM_META, **{"clip.projector_type": "hy_v4_vl"})
+    return synthesize_vlm_config(
+        HY4_VISION, meta, _HYV4_SHAPES, mm_meta,
+        mm_shapes={k: tuple(v.shape) for k, v in arrays.items()})
+
+
+def test_hy4_config_builds_the_hy4_container():
+    cfg = _hy4_config()
+    assert cfg["model_type"] == "hy_v4_vl"
+    assert cfg["vision_config"]["model_type"] == "hy_v4_vl"
+    assert cfg["text_config"]["model_type"] == "hy_v4"
+    assert cfg["text_config"]["rope_sections"] == [2, 1, 1]
+    model, _ = build_vlm_model(cfg)
+    assert type(model).__module__ == "gmlx.models.hy_v4.vlm_model"
+    out, skipped, _ = remap_vision_arrays(_mmproj_arrays(), HY4_VISION)
+    assert skipped == []
+    params = dict(mu.tree_flatten(model.parameters()))
+    assert sorted(out) == sorted(
+        k for k in params if not k.startswith("language_model."))
+
+
+def test_hy4_text_without_rope_sections_is_refused():
+    with pytest.raises(ValueError, match="dimension_sections"):
+        _hy4_config(sections=False)
 
 
 def test_config_synth_fields():

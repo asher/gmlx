@@ -53,11 +53,11 @@ def image_advance(rows: int, cols: int) -> int:
 
 
 @functools.cache
-def pair_axes(n_pairs: int) -> mx.array:
+def pair_axes(n_pairs: int, sections: tuple = ROPE_SECTIONS) -> mx.array:
     """The axis (0 t, 1 h, 2 w) each rope pair reads: h on pairs 1, 4, ...
     and w on pairs 2, 5, ..., as many as their sections hold, t on the
-    rest."""
-    _, sec_h, sec_w = ROPE_SECTIONS
+    rest. Pair i is the i-th frequency in either rope layout."""
+    _, sec_h, sec_w = (tuple(sections) + (0, 0))[:3]
     return mx.array(
         [1 if i % 3 == 1 and i < 3 * sec_h
          else 2 if i % 3 == 2 and i < 3 * sec_w else 0

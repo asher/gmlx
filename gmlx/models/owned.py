@@ -73,6 +73,7 @@ OWNED_VLM_MODELS = {
     "deepseek_v41_vl": "gmlx.models.deepseek_v41.vlm_model",
     "glm5_next": "gmlx.models.glm5_next.vlm_model",
     "hy_v4_flash_vl": "gmlx.models.hy_v4_flash.vlm_model",
+    "hy_v4_vl": "gmlx.models.hy_v4.vlm_model",
     "inkling2_vl": "gmlx.models.inkling2.vlm_model",
     "lfm3_omni": "gmlx.models.lfm3.vlm_model",
     "lfm3_vl": "gmlx.models.lfm3.vlm_model",

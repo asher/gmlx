@@ -35,6 +35,7 @@ The model has no MTP block: the converter drops the nextn layers, so this
 family cannot drive speculative decoding.
 """
 
+import math
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -51,8 +52,9 @@ from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 from gmlx.cache import refusals
 from gmlx.cache.attention import create_attention_mask
 from gmlx.cache.kv_append import depends_keys
-from gmlx.cache.kv_cache import CacheList, KVCache
+from gmlx.cache.kv_cache import ArraysCache, CacheList, KVCache
 from gmlx.models.deepseek_v4.hyper_connection import HyperHead
+from gmlx.models.hy_v4_flash import positions as rope_positions
 from gmlx.models.deepseek_v4.model import (
     LimitedSwiGLU,
     _expert_select,
@@ -105,6 +107,9 @@ class ModelArgs(BaseModelArgs):
     # config key because transformers 5.15 switched hy_v4 to rotate_half;
     # the GGUF supports either, so the convention is a graph-side choice.
     rope_traditional: bool = True
+    # The VL conversion's M-RoPE sections (t, h, w). Its rope rows are in
+    # NeoX order, so the synth turns rope_traditional off with them.
+    rope_sections: List[int] = field(default_factory=list)
     max_position_embeddings: int = 1048576
     attention_bias: bool = False
     tie_word_embeddings: bool = False
@@ -135,6 +140,60 @@ class HyV4KVCache(KVCache):
     to_batch = refusals.refuse_batch
     preserve_auxiliary_kv_state = True
     extract = refusals.no_extract
+
+
+def positions_slot(cache):
+    """The image-position walk of a VL cache: a third member on layer 0's
+    entry (``vlm_model.LanguageModel.make_cache``). None for a text cache."""
+    if not cache or cache[0] is None:
+        return None
+    inner = getattr(cache[0], "caches", None)
+    if inner is None or len(inner) < 3:
+        return None
+    member = inner[2]
+    return member if isinstance(member, ArraysCache) else None
+
+
+def rope_at(x: mx.array, positions: mx.array, base: float,
+            sections, traditional: bool) -> mx.array:
+    """Rope of ``x`` [..., N, D] at explicit ``positions``: [N], or [N, 3]
+    (t, h, w) per row with each rope pair reading its own axis
+    (``positions.pair_axes``, llama.cpp's IMROPE). ``traditional`` rotates
+    consecutive pairs, else the NeoX halves, as ``mx.fast.rope`` does."""
+    d = x.shape[-1]
+    half = d // 2
+    freqs = mx.exp(
+        -mx.arange(0, half, dtype=mx.float32) * (math.log(base) / half))
+    at = positions.astype(mx.float32)
+    if at.ndim == 2:
+        axes = rope_positions.pair_axes(half, tuple(sections))
+        ang = mx.take(at, axes, axis=1) * freqs
+    else:
+        ang = at[:, None] * freqs
+    cos, sin = mx.cos(ang), mx.sin(ang)
+    xf = x.astype(mx.float32)
+    if traditional:
+        x1, x2 = xf[..., 0::2], xf[..., 1::2]
+        out = mx.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos],
+                       axis=-1).flatten(-2)
+    else:
+        x1, x2 = xf[..., :half], xf[..., half:]
+        out = mx.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos],
+                             axis=-1)
+    return out.astype(x.dtype)
+
+
+def _rope_pe(rope, args, x: mx.array, offset, pos) -> mx.array:
+    """``x`` rotated at the cache offset, or at a call's image-aware
+    positions (``positions.RopePositions``): consecutive from ``pos.start``
+    for text, explicit rows where the call holds image slots."""
+    if pos is None:
+        return rope(x, offset)
+    if pos.start is not None:
+        return rope(x, pos.start)
+    return rope_at(x, pos.rows, args.rope_theta,
+                   args.rope_sections or rope_positions.ROPE_SECTIONS,
+                   args.rope_traditional)
 
 
 def split_cache(cache):
@@ -264,6 +323,7 @@ class HyV4Indexer(nn.Module):
         self.weights_proj = nn.Linear(
             args.hidden_size, self.n_heads, bias=False)
         self.weight_scale = (self.head_dim * self.n_heads) ** -0.5
+        self.args = args
         self.rope = initialize_rope(
             dims=args.qk_rope_head_dim,
             base=args.rope_theta,
@@ -272,9 +332,10 @@ class HyV4Indexer(nn.Module):
             scaling_config=args.rope_scaling,
         )
 
-    def _rope_tail(self, x: mx.array, offset) -> mx.array:
+    def _rope_tail(self, x: mx.array, offset, pos=None) -> mx.array:
         nope, pe = mx.split(x, [self.nope_head_dim], axis=-1)
-        return mx.concatenate([nope, self.rope(pe, offset)], axis=-1)
+        return mx.concatenate(
+            [nope, _rope_pe(self.rope, self.args, pe, offset, pos)], axis=-1)
 
     def __call__(
         self,
@@ -282,6 +343,7 @@ class HyV4Indexer(nn.Module):
         qr: mx.array,
         mask: Optional[mx.array],
         cache: Optional[Any] = None,
+        pos=None,
     ) -> Optional[mx.array]:
         B, L, _ = x.shape
         q = self.wq_b(qr).reshape(
@@ -289,8 +351,8 @@ class HyV4Indexer(nn.Module):
         k = self.k_norm(self.wk(x)).reshape(B, 1, L, self.head_dim)
 
         offset = cache.offset if cache is not None else 0
-        q = self._rope_tail(q, offset)
-        k = self._rope_tail(k, offset)
+        q = self._rope_tail(q, offset, pos)
+        k = self._rope_tail(k, offset, pos)
 
         if cache is not None:
             k, _ = cache.update_and_fetch(k, mx.zeros([B, 1, L, 0], k.dtype))
@@ -408,6 +470,7 @@ class HyV4Attention(nn.Module):
 
     def __init__(self, args: ModelArgs, layer_idx: int):
         super().__init__()
+        self.args = args
         self.num_heads = args.num_attention_heads
         self.qk_nope_head_dim = args.qk_nope_head_dim
         self.qk_rope_head_dim = args.qk_rope_head_dim
@@ -459,6 +522,7 @@ class HyV4Attention(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
         top_k: Optional[mx.array] = None,
+        pos=None,
     ):
         B, L, _ = x.shape
 
@@ -478,14 +542,14 @@ class HyV4Attention(nn.Module):
         kv_cache, idx_cache = split_cache(cache)
 
         offset = kv_cache.offset if kv_cache is not None else 0
-        q_pe = self.rope(q_pe, offset)
-        k_pe = self.rope(k_pe, offset)
+        q_pe = _rope_pe(self.rope, self.args, q_pe, offset, pos)
+        k_pe = _rope_pe(self.rope, self.args, k_pe, offset, pos)
 
         if kv_cache is not None:
             latent, k_pe = kv_cache.update_and_fetch(latent, k_pe)
 
         if self.indexer is not None:
-            top_k = self.indexer(x, qr, mask, cache=idx_cache)
+            top_k = self.indexer(x, qr, mask, cache=idx_cache, pos=pos)
         if _sparse_disabled():
             # Drop the selection, but only after the indexer has written its
             # cache: skipping the call would leave the slot unwritten, and
@@ -666,9 +730,11 @@ class HyV4DecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
         top_k: Optional[mx.array] = None,
+        pos=None,
     ):
         x, post = self.attn_hc.pre_norm(h, self.input_layernorm)
-        x, top_k = self.self_attn(x, mask=mask, cache=cache, top_k=top_k)
+        x, top_k = self.self_attn(x, mask=mask, cache=cache, top_k=top_k,
+                                  pos=pos)
         h = self.attn_hc.expand(x, h, post)
 
         x, post = self.ffn_hc.pre_norm(h, self.post_attention_layernorm)
@@ -691,7 +757,13 @@ class HyV4Model(nn.Module):
         inputs: mx.array,
         cache: Optional[List[Any]] = None,
         input_embeddings: Optional[mx.array] = None,
+        slot_kinds: Optional[List[int]] = None,
     ) -> mx.array:
+        """``slot_kinds`` is each row's kind where the call holds image
+        slots (``positions``): TEXT, or an image kind on a row whose
+        embedding is an image's. Image slots rotate at their (t, h, w),
+        and every row after an image at its moved-on position."""
+        have_cache = cache is not None
         if input_embeddings is not None:
             h = input_embeddings
         else:
@@ -702,6 +774,18 @@ class HyV4Model(nn.Module):
         latent_cache, _ = split_cache(cache[0])
         mask = create_attention_mask(h, latent_cache, return_array=True)
 
+        slot = positions_slot(cache)
+        pos = None
+        if slot_kinds is not None or rope_positions.active(slot):
+            if have_cache and slot is None:
+                raise ValueError(
+                    "hy_v4: image slots need the vision model's cache to "
+                    "carry their positions")
+            pos = rope_positions.plan(
+                slot, slot_kinds,
+                latent_cache.offset if latent_cache is not None else 0,
+                h.shape[1], 0)
+
         # hc_mult exact copies of the embedding: no scaling, no one-hot.
         h = mx.contiguous(mx.broadcast_to(
             h[:, :, None, :],
@@ -709,7 +793,7 @@ class HyV4Model(nn.Module):
 
         top_k = None
         for layer, layer_cache in zip(self.layers, cache):
-            h, top_k = layer(h, mask, layer_cache, top_k=top_k)
+            h, top_k = layer(h, mask, layer_cache, top_k=top_k, pos=pos)
 
         return self.norm(self.hc_head(h))
 
