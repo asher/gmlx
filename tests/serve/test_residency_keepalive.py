@@ -1,5 +1,6 @@
 """An idle server renews its GPU residency for the keep-alive window, stops
-under memory pressure, and a model load waits out the lapse first."""
+under memory pressure and when other apps are being squeezed, and a model
+load waits out the lapse first."""
 
 import queue
 
@@ -12,8 +13,13 @@ from gmlx._vendor.mlx_vlm.server import generation as _GEN
 
 @pytest.fixture
 def rig(monkeypatch):
-    state = {"beats": [], "level": 1, "unwired": 60e9}
+    state = {"beats": [], "level": 1, "unwired": 60e9,
+             "compressor": 10e9, "reclaimable": 40e9}
     monkeypatch.setattr(rk, "_beat", lambda: state["beats"].append(1))
+    monkeypatch.setattr(rk, "_compressor", lambda: state["compressor"])
+    monkeypatch.setattr(rk, "_reclaimable", lambda: state["reclaimable"])
+    monkeypatch.setattr(rk, "_ram", lambda: 128e9)
+    monkeypatch.setattr(rk, "_baseline", None)
     monkeypatch.setattr(ir, "_pressure_level", lambda: state["level"])
     monkeypatch.setattr(ir, "_unwired", lambda: state["unwired"])
     monkeypatch.setattr(ir, "_floor", lambda: 4e9)
@@ -54,6 +60,35 @@ def test_memory_pressure_stops_the_beats(rig, change):
     assert _ticks([11.0, 12.0]) == []
     rig.update(level=1, unwired=60e9)
     assert _ticks([13.0]) == [13.0]
+
+
+def test_a_growing_compressor_stops_the_beats_until_the_next_step(rig):
+    # 128 GB of RAM: growth past 1.28 GB since the first beat means other
+    # apps are being compressed to make room beside the wired memory.
+    rk.note_active(now=10.0)
+    assert _ticks([11.0]) == [11.0]
+    rig["compressor"] = 11.2e9
+    assert _ticks([12.0]) == [12.0]
+    rig["compressor"] = 11.4e9
+    assert _ticks([13.0, 14.0]) == []
+    # Back down, the window stays stopped: the memory has unwired.
+    rig["compressor"] = 10e9
+    assert _ticks([15.0]) == []
+    # The next step starts a window with its own first reading.
+    rig["compressor"] = 20e9
+    rk.note_active(now=30.0)
+    assert _ticks([31.0, 32.0]) == [31.0, 32.0]
+
+
+def test_free_memory_under_the_floor_stops_the_beats(rig):
+    rk.note_active(now=10.0)
+    assert _ticks([11.0]) == [11.0]
+    rig["reclaimable"] = 3e9
+    assert _ticks([12.0]) == []
+    rig["reclaimable"] = 40e9
+    assert _ticks([13.0]) == []
+    rk.note_active(now=20.0)
+    assert _ticks([21.0]) == [21.0]
 
 
 def test_a_load_waits_out_the_lapse_and_stops_the_beats(rig):
