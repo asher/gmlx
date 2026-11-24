@@ -125,6 +125,8 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # 78 layers, sigmoid MoE with clamped routed experts, and 4-stream
     # independent hyper-connections. Vendored gmlx.models.hy_v4.
     "hyv4": "hy_v4",
+    # Hy4 (llama.cpp 'hy_v4', the name the HY4 PR merged under).
+    "hy_v4": "hy_v4",
     # Hy4-flash (llama.cpp arch 'hy_v4_flash'): the HY4 skeleton as a hybrid
     # sparse / sliding-window stack with a pooled indexer, latent-width
     # routed experts and engram. Owned gmlx.models.hy_v4_flash.
@@ -4594,10 +4596,10 @@ def _synth_hy_v4_flash(meta, shapes, config: dict) -> None:
     config["engram_table_rows"] = n_rows
 
 
-# hyv4 (HY4-preview 256x29B)
+# hyv4 (HY4-preview 256x29B) and hy_v4 (Hy4, the name llama.cpp merged)
 
-def _synth_hyv4(meta, shapes, config: dict) -> None:
-    """Synthesize a hy_v4 config from a 'hyv4'-arch GGUF.
+def _synth_hyv4(meta, shapes, config: dict, arch: str = "hyv4") -> None:
+    """Synthesize a hy_v4 config from a 'hyv4' or 'hy_v4' GGUF.
 
     Absorbed MLA in the DeepSeek-V3.2 shape (q_a/q_b, a kv_lora latent plus
     a rope half, per-head k_b/v_b) with a per-token DSA lightning indexer,
@@ -4606,8 +4608,13 @@ def _synth_hyv4(meta, shapes, config: dict) -> None:
     rope_theta/ctx/vocab and intermediate_size (the dense block's MLP
     width); this adds the MLA decomposition, the indexer, the MoE block and
     the iHC parameters.
+
+    The 'hy_v4' files list indexer ownership as the bool array
+    ``indexer.types`` where the preview wrote ``indexer.is_full``. The VL
+    conversion writes ``rope.dimension_sections`` and stores each head's
+    rope rows in NeoX order, so the rope runs non-traditional there: q and
+    k share the order, so the scores match the consecutive-pair rope.
     """
-    arch = "hyv4"
 
     # The universal default set head_dim from key_length (= kv_lora +
     # qk_rope), which is the latent width, not a head dim.
@@ -4640,6 +4647,18 @@ def _synth_hyv4(meta, shapes, config: dict) -> None:
     config["qk_nope_head_dim"] = q_b[1] // num_heads - qk_rope
     config["v_head_dim"] = v_b[1]
 
+    sections = _read_int_array(meta, f"{arch}.rope.dimension_sections")
+    if sections and any(sections):
+        sections = [int(v) for v in sections]
+        while sections and sections[-1] == 0:
+            sections.pop()
+        if 2 * sum(sections) != qk_rope:
+            raise ValueError(
+                f"hyv4 synth: {arch}.rope.dimension_sections {sections} must "
+                f"sum to half the rope width {qk_rope}.")
+        config["rope_traditional"] = False
+        config["rope_sections"] = sections
+
     # DSA lightning indexer. is_full is written explicitly by the converter -
     # never inferred from tensor presence - and layer 0 must own one because
     # nothing precedes it to share a selection from.
@@ -4653,11 +4672,15 @@ def _synth_hyv4(meta, shapes, config: dict) -> None:
             _read_int(meta, f"{arch}.attention.indexer.key_length"),
             arch=arch, gguf_field=f"{arch}.attention.indexer.key_length")
         is_full = _read_int_array(meta, f"{arch}.attention.indexer.is_full")
+        if is_full is None:
+            is_full = _read_bool_array(
+                meta, f"{arch}.attention.indexer.types")
         n_layer = config["num_hidden_layers"]
         if not is_full or len(is_full) < n_layer:
             raise ValueError(
-                f"hyv4 synth: {arch}.attention.indexer.is_full has "
-                f"{len(is_full or [])} entries, need {n_layer}.")
+                f"hyv4 synth: {arch}.attention.indexer.is_full (or "
+                f".types) has {len(is_full or [])} entries, need "
+                f"{n_layer}.")
         is_full = [int(v) for v in is_full[:n_layer]]
         if not is_full[0]:
             raise ValueError(
@@ -4992,6 +5015,7 @@ _SYNTH = {
     "glm5-next": lambda m, s, c: _synth_glm5next(m, s, c, "glm5-next"),
     "glm5next": lambda m, s, c: _synth_glm5next(m, s, c, "glm5next"),
     "hyv4": _synth_hyv4,
+    "hy_v4": functools.partial(_synth_hyv4, arch="hy_v4"),
     "hy_v4_flash": _synth_hy_v4_flash,
     "kimi-k3": _synth_kimi_k3,
     "deepseek4": _synth_deepseek4,

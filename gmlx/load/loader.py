@@ -559,6 +559,8 @@ _STREAMING_PREFILL_STEP = 8192
 _STREAMING_PREFILL_STEP_BY_MODEL_TYPE: dict[str, int] = {
     "hy_v4": 4096,
     "hy_v4_flash": 4096,
+    "hy_v4_vl": 4096,
+    "hy_v4_flash_vl": 4096,
 }
 
 
@@ -1026,6 +1028,9 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
                        ".weights_proj.", ".indexer.ape", ".engram.kv_bias",
                        ".engram.gate_weight", ".engram.lookup_norm",
                        ".engram.pre_gamma", ".engram.hc_scale"),
+    # hy_v4_vl: the hy_v4 set under language_model.*.
+    "hy_v4_vl": ("_hc.", "hc_head.", ".sinks", ".e_score_correction_bias",
+                 ".mlp.gate.weight", ".weights_proj."),
     # muse_spark: sigmoid top-8-of-256 routing with a selection bias is
     # near-tie-heavy, and the residual alpha/beta scale every layer's stream.
     # Kept in step with the model class's cast_predicate.
@@ -1361,7 +1366,7 @@ def _install_text_patches(model, log) -> None:
     gemma4_dispatch.configure(model, log)
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
-        log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+        log(f"[install] fused MoE GLU decode on {n_fused_moe} layers")
     n_routed = install_switch_glu_block_routing(model)
     if n_routed:
         log(f"[install] SwitchGLU block routing (one gather per verify block) on {n_routed} layers")
@@ -2012,7 +2017,7 @@ def load_model(
     gemma4_dispatch.configure(model, _log)
     n_fused_moe = install_fused_moe_glu(model)
     if n_fused_moe:
-        _log(f"[install] fused mxfp4 MoE GLU decode on {n_fused_moe} layers")
+        _log(f"[install] fused MoE GLU decode on {n_fused_moe} layers")
     n_routed = install_switch_glu_block_routing(model)
     if n_routed:
         _log(f"[install] SwitchGLU block routing (one gather per verify block) on {n_routed} layers")

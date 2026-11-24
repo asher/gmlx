@@ -167,6 +167,10 @@ class Model(nn.Module):
         self.vision_tower = VisionModel(config.vision_config)
         self.language_model = LanguageModel(
             config.text_config, config.image_token_id)
+        # The serve engine reads media ids off the language model's config
+        # (gmlx.cache.apc_media).
+        self.language_model.config.media_token_ids = list(
+            config.media_token_ids)
 
     # Image features.
 

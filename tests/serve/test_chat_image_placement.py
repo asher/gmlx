@@ -305,7 +305,7 @@ def test_the_gemma4_processor_keeps_the_client_order(route, model_type):
 # message holds it and whose processor expands the image markers in prompt
 # order.
 _IN_PLACE = ("deepseek_v41_vl", "deepseek_v4_vl", "gemma4", "gemma4_unified",
-             "glm5_next", "hy_v4_flash_vl", "inkling2_vl", "kimi_k25",
+             "glm5_next", "hy_v4_flash_vl", "hy_v4_vl", "inkling2_vl", "kimi_k25",
              "lfm3_omni",
              "lfm3_vl", "minicpmv4_6",
              "minicpmv4_7", "minimax_m3_vision", "mistral3", "muse_glimmer",

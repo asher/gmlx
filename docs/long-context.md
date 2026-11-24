@@ -80,7 +80,7 @@ flags refuses.
 | `glm4`, `glm4moe` | |
 | `gpt-oss` | Sliding window layers keep the header's factor 32. |
 | `granite`, `granitehybrid`, `graniteswitch` | |
-| `hy_v3`, `hyv4` | |
+| `hy_v3`, `hyv4`, `hy_v4` | |
 | `k2-horizon` | |
 | `llama` | |
 | `minimax-m2`, `minimax-m3` | |

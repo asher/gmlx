@@ -185,6 +185,14 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
                 "not supported (only Hy4-flash text GGUFs, arch "
                 "'hy_v4_flash')")
         return HY4FLASH_VISION
+    if proj == "hy_v4_vl":
+        # Tencent Hy4: the Hy4-flash vision tower and projector onto the
+        # hy_v4 text tower (gmlx.models.hy_v4.vlm_model).
+        if llm_arch != "hy_v4":
+            raise UnsupportedVLMError(
+                f"mmproj projector 'hy_v4_vl' on LLM arch {llm_arch!r} is "
+                "not supported (only Hy4 text GGUFs, arch 'hy_v4')")
+        return HY4_VISION
     if proj == "inkling2v":
         # Inkling 2: a 20 px patch ViT with a class token and 2D rope, a 2x2
         # merge and a GELU MLP onto the inkling2 text model
@@ -1315,6 +1323,7 @@ _DEEPSEEK41V_TOP_MAP = {
 
 
 HY4FLASH_VISION = "hy_v4_flash_vl"
+HY4_VISION = "hy_v4_vl"
 _HY4FLASH_V_BLK_SUBMAP = {
     "attn_q": "attn.q_proj",
     "attn_k": "attn.k_proj",
@@ -1894,7 +1903,7 @@ def _remap_float_arrays(
             out[f"vision_tower.blocks.{bid}.{tgt}.{leaf}"] = arr
         return out, skipped
 
-    if model_type == HY4FLASH_VISION:
+    if model_type in (HY4FLASH_VISION, HY4_VISION):
         _remap_hy4flash_vision(arrays, out, skipped)
         return out, skipped
 
@@ -3367,7 +3376,7 @@ def _hy4flash_image_pad_id(llm_meta: dict) -> int:
 
 def _synthesize_hy4flash_vlm_config(
     text_config: dict, mm_meta: dict, llm_meta: dict,
-    mm_shapes: dict | None,
+    mm_shapes: dict | None, model_type: str = HY4FLASH_VISION,
 ) -> dict:
     """Hy4-flash VLM config: the hy_v4_flash text synth plus the vision
     tower, read from ``clip.vision.*``. The merge width is the one size the
@@ -3381,7 +3390,7 @@ def _synthesize_hy4flash_vlm_config(
             "hy_v4_flash mmproj: mm.0.bias is missing, so the merge width "
             "is unknown")
     vision_config: dict = {
-        "model_type": HY4FLASH_VISION,
+        "model_type": model_type,
         "depth": _mm_int(mm_meta, "clip.vision.block_count"),
         "hidden_size": _mm_int(mm_meta, "clip.vision.embedding_length"),
         "intermediate_size": _mm_int(
@@ -3402,7 +3411,7 @@ def _synthesize_hy4flash_vlm_config(
     vocab = int(text_config["vocab_size"])
     pad_id = _hy4flash_image_pad_id(llm_meta)
     return {
-        "model_type": HY4FLASH_VISION,
+        "model_type": model_type,
         "text_config": text_config,
         "vision_config": vision_config,
         "vocab_size": vocab,
@@ -3534,9 +3543,13 @@ def synthesize_vlm_config(
         return _synthesize_deepseek41v_vlm_config(
             text_config, mm_meta, llm_meta)
 
-    if model_type == HY4FLASH_VISION:
+    if model_type in (HY4FLASH_VISION, HY4_VISION):
+        if model_type == HY4_VISION and not text_config.get("rope_sections"):
+            raise ValueError(
+                "hy_v4_vl: the text GGUF carries no rope.dimension_sections, "
+                "so image positions are unknown; use the VL text GGUF")
         return _synthesize_hy4flash_vlm_config(
-            text_config, mm_meta, llm_meta, mm_shapes)
+            text_config, mm_meta, llm_meta, mm_shapes, model_type)
 
     if model_type == INKLING2_VISION:
         return _synthesize_inkling2_vlm_config(
@@ -3759,6 +3772,7 @@ _OWNED_VLM_REGISTRARS = {
     "deepseek_v4_vl": ("gmlx.models.deepseek_v4.vlm_model",),
     "deepseek_v41_vl": ("gmlx.models.deepseek_v41.vlm_model",),
     HY4FLASH_VISION: ("gmlx.models.hy_v4_flash.vlm_model",),
+    HY4_VISION: ("gmlx.models.hy_v4.vlm_model",),
     INKLING2_VISION: ("gmlx.models.inkling2.vlm_model",),
     MINIMAX_M3_VISION: ("gmlx.models.minimax_m3",),
 }
@@ -3873,7 +3887,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     if model_type == "deepseek_v41_vl":
         return _synthesize_deepseek41v_processor(
             tokenizer, mm_meta, config or {})
-    if model_type == HY4FLASH_VISION:
+    if model_type in (HY4FLASH_VISION, HY4_VISION):
         return _synthesize_hy4flash_processor(
             tokenizer, mm_meta, config or {})
     if model_type == INKLING2_VISION:
@@ -6416,12 +6430,13 @@ def load_vlm_model(
     # text tower's transforms (kquant scale placeholders, wo_a 2D->3D) under
     # language_model.*, which the text path gets from sanitize=True.
     # minimax_m3_vision: the same, for the indexer gating and narrowing.
-    # hy_v4_flash_vl: the same, to drop the draft block past the trunk.
+    # hy_v4_flash_vl, hy_v4_vl: the same, to drop the blocks past the trunk.
     # inkling2_vl: the same, to split the packed loop message queries.
     _install_and_load(model, hf_weights, hf_kquant_meta, log=_log,
                       sanitize=(model_type in ("deepseek_v4_vl",
                                                  "deepseek_v41_vl",
                                                  HY4FLASH_VISION,
+                                                 HY4_VISION,
                                                  INKLING2_VISION,
                                                  MINIMAX_M3_VISION)),
                       no_alias=owned_names,

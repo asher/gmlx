@@ -213,9 +213,9 @@ def test_shared_layer_reuses_the_preceding_selection(monkeypatch):
     seen: dict[int, object] = {}
     real = HyV4Attention.__call__
 
-    def wrap(self, x, mask=None, cache=None, top_k=None):
+    def wrap(self, x, mask=None, cache=None, top_k=None, pos=None):
         seen[order[id(self)]] = top_k
-        return real(self, x, mask=mask, cache=cache, top_k=top_k)
+        return real(self, x, mask=mask, cache=cache, top_k=top_k, pos=pos)
 
     monkeypatch.setattr(HyV4Attention, "__call__", wrap)
 

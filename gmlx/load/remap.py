@@ -129,6 +129,8 @@ ARCH_ALIAS = {
     # override block. Targets follow gmlx.models.hy_v4. The converter drops
     # the nextn layers, so there are no MTP tensors to skip.
     "hyv4": "HYV4",
+    # Hy4 (llama.cpp 'hy_v4'): the same block under the merged arch name.
+    "hy_v4": "HYV4",
     # Hy4-flash (llama.cpp 'hy_v4_flash'): the HYV4 block with a pooled
     # indexer, sandwich norms, latent-width routed experts and engram.
     "hy_v4_flash": "HYV4FLASH",

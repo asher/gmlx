@@ -1153,8 +1153,7 @@ def test_glm5next_mla_shapes_probe_walks_past_kda_layers():
                           tensor_shapes={"output.weight": [64, VOCAB]})
 
 
-def _hyv4_meta() -> dict:
-    arch = "hyv4"
+def _hyv4_meta(arch: str = "hyv4") -> dict:
     m = _base_meta(arch)
     m[f"{arch}.block_count"] = 4
     # Absorbed MLA: one latent "head" on the wire.
@@ -1228,6 +1227,35 @@ def test_hyv4_synth_fields():
     assert c["rope_theta"] == 1e7
     assert c["vocab_size"] == VOCAB
     assert "hc_sinkhorn_iters" not in c            # iHC has no comb term
+
+
+def _hy_v4_meta() -> dict:
+    """Hy4 under the name llama.cpp merged: indexer ownership as a bool
+    array, and the VL conversion's rope sections."""
+    m = _hyv4_meta("hy_v4")
+    del m["hy_v4.attention.indexer.is_full"]
+    m["hy_v4.attention.indexer.types"] = [True, True, False, True]
+    m["hy_v4.rope.dimension_sections"] = [2, 1, 1, 0]
+    return m
+
+
+def test_hy_v4_synth_reads_indexer_types_and_rope_sections():
+    c = synthesize_config(_hy_v4_meta(), tensor_shapes=_HYV4_SHAPES)
+    assert c["model_type"] == "hy_v4"
+    assert c["index_is_full"] == [1, 1, 0, 1]
+    # NeoX-order rope rows: the rope runs non-traditional.
+    assert c["rope_sections"] == [2, 1, 1]
+    assert c["rope_traditional"] is False
+    preview = synthesize_config(_hyv4_meta(), tensor_shapes=_HYV4_SHAPES)
+    assert "rope_sections" not in preview
+    assert "rope_traditional" not in preview
+
+
+def test_hy_v4_rope_sections_must_fill_the_rope():
+    m = _hy_v4_meta()
+    m["hy_v4.rope.dimension_sections"] = [2, 1, 0, 0]
+    with pytest.raises(ValueError, match="dimension_sections"):
+        synthesize_config(m, tensor_shapes=_HYV4_SHAPES)
 
 
 def test_hyv4_synth_instantiates():

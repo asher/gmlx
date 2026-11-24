@@ -82,16 +82,17 @@ def test_iq_codecs_now_pass(tmp_path):
         assert pf.codec_histogram.get(gt.name) == 1
 
 
-def _mint_fallback(path, codec_name, kv=None):
+def _mint_fallback(path, codec_name, kv=None, type_id=None):
     """A GGUF whose only weight declares a codec newer than the installed
     gguf-py (STQ1_0, PQ2_0, PTQ1_0, Q2_0): the type id comes from headerscan's
     QUANT_TYPE_FALLBACK and the writer takes a sentinel dtype because
     gguf-py's enum has no member for it."""
     from gmlx.load.headerscan import QUANT_TYPE_FALLBACK
 
-    (type_id, (name, (wpb, tsize))), = [
-        (k, v) for k, v in QUANT_TYPE_FALLBACK.items() if v[0] == codec_name
-    ]
+    type_id, (name, (wpb, tsize)) = min(
+        (k, v) for k, v in QUANT_TYPE_FALLBACK.items()
+        if v[0] == codec_name and type_id in (None, k)
+    )
 
     class _Sentinel:
         def __int__(self):
@@ -121,6 +122,13 @@ def test_fallback_codecs_pass(tmp_path, codec):
     _mint_fallback(p, codec)
     pf = preflight(str(p))                          # must not raise
     assert pf.codec_histogram.get(codec) == 1
+
+
+def test_hy4_stq1_0_type_id_passes(tmp_path):
+    """Hy4 files store STQ1_0 as type 44 (43 is F8_E4M3 in their tree)."""
+    p = tmp_path / "hy4.gguf"
+    _mint_fallback(p, "STQ1_0", type_id=44)
+    assert preflight(str(p)).codec_histogram.get("STQ1_0") == 1
 
 
 def test_hadamard_folded_file_refused_outside_allowlist(tmp_path):
