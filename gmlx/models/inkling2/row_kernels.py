@@ -173,7 +173,8 @@ _ROUTER = """
             float denom = total + 1e-20f;
             for (int r = 0; r < K; r++) {
                 inds[row * K + r] = picked[r];
-                weights[row * K + r] = static_cast<O>((w[r] / denom) * scale[0]);
+                weights[row * K + r] = static_cast<O>(
+                    static_cast<R>((w[r] / denom) * scale[0]));
             }
         }
 """
@@ -213,6 +214,26 @@ def _scalar(value: float) -> mx.array:
 
 
 _held: list = [None]
+# A gradient may be taken through the kernels: each call carries its rule.
+_grad: list = [True]
+
+
+class _Kernel:
+    """A kernel call and its gradient rule (``@_Kernel`` in place of
+    ``@mx.custom_function``). Inside ``held(grad=False)`` it calls the
+    kernel itself: the custom function adds two graph nodes a call, a
+    third of a decode step's graph."""
+
+    def __init__(self, forward):
+        self.forward = forward
+        self.run = mx.custom_function(forward)
+
+    def vjp(self, rule):
+        self.run.vjp(rule)
+        return rule
+
+    def __call__(self, *args):
+        return (self.run if _grad[0] else self.forward)(*args)
 
 
 def _live() -> bool:
@@ -228,15 +249,17 @@ def enabled() -> bool:
 
 
 @contextlib.contextmanager
-def held():
+def held(grad: bool = True):
     """Read the switch and device once for a forward, which asks
-    ``enabled`` several hundred times."""
-    saved = _held[0]
+    ``enabled`` several hundred times. ``grad=False`` drops the gradient
+    rules for the forward (a model in eval mode)."""
+    saved = _held[0], _grad[0]
     _held[0] = _live()
+    _grad[0] = grad
     try:
         yield
     finally:
-        _held[0] = saved
+        _held[0], _grad[0] = saved
 
 
 def clip_eligible(x: mx.array, scale, tau) -> bool:
@@ -267,7 +290,7 @@ def _clip_kernel(x, scale, threshold, tau, dtype, scaled, tb):
 @functools.lru_cache(maxsize=None)
 def _clip_fn(ops, threshold: float, dtype, scaled: bool, tb: int):
     # A kernel has no VJP: training differentiates the ops path instead.
-    @mx.custom_function
+    @_Kernel
     def run(x, scale, tau):
         return _clip_kernel(x, scale, threshold, tau, dtype, scaled, tb)
 
@@ -316,7 +339,7 @@ def _norm_kernel(x, weight, eps, dtype, weighted):
 
 @functools.lru_cache(maxsize=None)
 def _norm_fn(eps: float, dtype, weighted: bool):
-    @mx.custom_function
+    @_Kernel
     def run(x, weight):
         return _norm_kernel(x, weight, eps, dtype, weighted)
 
@@ -349,7 +372,7 @@ def router_eligible(logits: mx.array, k: int) -> bool:
             and enabled())
 
 
-def _router_kernel(logits, bias, k, scale, dtype, biased):
+def _router_kernel(logits, bias, k, scale, dtype, biased, out_dtype):
     E = logits.shape[-1]
     n = logits.size // E
     rows_per_group = 4
@@ -357,19 +380,21 @@ def _router_kernel(logits, bias, k, scale, dtype, biased):
     return _kernels()[2](
         inputs=[logits.astype(mx.float32).reshape(n, E), bias,
                 _scalar(float(scale))],
-        template=[("O", dtype), ("E", E), ("K", k), ("BIASED", biased)],
+        template=[("O", out_dtype), ("R", dtype), ("E", E), ("K", k),
+                  ("BIASED", biased)],
         grid=(-(-n // rows_per_group) * rows_per_group * 32, 1, 1),
         threadgroup=(rows_per_group * 32, 1, 1),
         output_shapes=[shape, shape],
-        output_dtypes=[mx.uint32, dtype],
+        output_dtypes=[mx.uint32, out_dtype],
     )
 
 
 @functools.lru_cache(maxsize=None)
-def _router_fn(k: int, scale: float, dtype, biased: bool):
-    @mx.custom_function
+def _router_fn(k: int, scale: float, dtype, biased: bool, out_dtype):
+    @_Kernel
     def run(logits, bias):
-        return tuple(_router_kernel(logits, bias, k, scale, dtype, biased))
+        return tuple(_router_kernel(logits, bias, k, scale, dtype, biased,
+                                    out_dtype))
 
     @run.vjp
     def run_vjp(primals, cotangents, outputs):
@@ -381,7 +406,7 @@ def _router_fn(k: int, scale: float, dtype, biased: bool):
             scores = mx.sigmoid(logits.astype(mx.float32))
             w = mx.take_along_axis(scores, inds, axis=-1)
             w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
-            return (w * scale).astype(dtype)
+            return (w * scale).astype(dtype).astype(out_dtype)
 
         _, (g,) = mx.vjp(weights, [logits], [cotangents[1]])
         return g, mx.zeros_like(bias)
@@ -389,13 +414,16 @@ def _router_fn(k: int, scale: float, dtype, biased: bool):
     return run
 
 
-def router(logits: mx.array, bias, k: int, scale: float, dtype):
+def router(logits: mx.array, bias, k: int, scale: float, dtype,
+           out_dtype=None):
     """The top-``k`` expert ids of sigmoid routing (selected on score plus
-    ``bias``) and their normalized weights times ``scale``, in one
+    ``bias``) and their normalized weights times ``scale``, rounded to
+    ``dtype`` and stored as ``out_dtype`` (default ``dtype``), in one
     dispatch. Ids within a row come in score order, not argpartition's."""
-    run = _router_fn(k, float(scale), dtype, bias is not None)
+    run = _router_fn(k, float(scale), dtype, bias is not None,
+                     dtype if out_dtype is None else out_dtype)
     inds, weights = run(logits, _scalar(0.0) if bias is None else bias)
-    return mx.stop_gradient(inds), weights
+    return (mx.stop_gradient(inds) if _grad[0] else inds), weights
 
 
 # Depth mix: one threadgroup per row. Pass one sums cur^2 and every query
@@ -527,7 +555,7 @@ def _mix_kernel(blocks, cur, query, eps, dtype):
 
 @functools.lru_cache(maxsize=None)
 def _mix_fn(ops, eps: float, n_blocks: int, dtype):
-    @mx.custom_function
+    @_Kernel
     def run(*args):
         *blocks, cur, query = args
         return _mix_kernel(blocks, cur, query, eps, dtype)
@@ -691,7 +719,7 @@ def _control_kernel(cur, msg, down, gain, forget, eps):
 
 @functools.lru_cache(maxsize=None)
 def _control_fn(ops, eps: float):
-    @mx.custom_function
+    @_Kernel
     def run(cur, msg, down, gain, forget):
         return _control_kernel(cur, msg, down, gain, forget, eps)
 
@@ -755,29 +783,38 @@ _CONV = """
                 out = out + pv * static_cast<float>(tr[lag]);
             }
         }
-        out_y[(b * L + l) * C + c] = static_cast<T>((v + out) * scale);
+        T y = static_cast<T>((v + out) * scale);
+        RES_ADD
+        out_y[(b * L + l) * C + c] = y;
 """
+
+# With a residual, the output row adds it in float32 after the rounding to
+# T, as _residual adds it to the rounded conv output.
+_RES_ADD = ("y = static_cast<T>(static_cast<float>(res[(b * L + l) * C + c])"
+            " + static_cast<float>(y));")
 
 
 def _strip_dyn(src: str) -> str:
     """``src`` without the dynamic-tap block, which names an input the
     static kernel lacks."""
     start = src.index("        DYN_BEGIN {")
-    end = src.index("        out_y[")
+    end = src.index("        T y = ")
     return src[:start] + src[end:]
 
 
 @functools.lru_cache(maxsize=None)
-def _conv_kernel_for(dyn: bool, with_window: bool):
-    names = ["state", "x", "w", "sc"] + (["dyn"] if dyn else [])
+def _conv_kernel_for(dyn: bool, with_window: bool, res: bool = False):
+    names = (["state", "x", "w", "sc"] + (["dyn"] if dyn else [])
+             + (["res"] if res else []))
     outs = ["out_y", "kept"] + (["window"] if with_window else [])
     src = _CONV.replace("DYN_BEGIN", "if (true)") if dyn else _strip_dyn(_CONV)
     return mx.fast.metal_kernel(
-        name=f"inkling2_conv_{int(dyn)}{int(with_window)}",
+        name=f"inkling2_conv_{int(dyn)}{int(with_window)}{int(res)}",
         input_names=names,
         output_names=outs,
         source=src.replace("WINDOW_STORE",
-                           "window[i] = v;" if with_window else ""),
+                           "window[i] = v;" if with_window else "")
+        .replace("RES_ADD", _RES_ADD if res else ""),
         ensure_row_contiguous=True,
     )
 
@@ -798,7 +835,7 @@ def conv_eligible(state, x: mx.array, w: mx.array, dynamic) -> bool:
             and enabled())
 
 
-def _conv_kernel(state, x, w, dynamic, with_window: bool):
+def _conv_kernel(state, x, w, dynamic, with_window: bool, res=None):
     B, L, C = x.shape
     width = w.shape[1]
     dyn = dynamic is not None
@@ -807,9 +844,9 @@ def _conv_kernel(state, x, w, dynamic, with_window: bool):
     n = B * (width - 1 + L) * C
     shapes = [x.shape, state.shape] + ([(B, width - 1 + L, C)]
                                         if with_window else [])
-    return _conv_kernel_for(dyn, with_window)(
+    return _conv_kernel_for(dyn, with_window, res is not None)(
         inputs=[state, x, w, _scalar(float(scale))]
-        + ([dynamic] if dyn else []),
+        + ([dynamic] if dyn else []) + ([] if res is None else [res]),
         template=[("T", x.dtype), ("C", C), ("WIDTH", width), ("NH", nh)],
         grid=(-(-n // 256) * 256, 1, 1),
         threadgroup=(256, 1, 1),
@@ -820,16 +857,20 @@ def _conv_kernel(state, x, w, dynamic, with_window: bool):
 
 
 @functools.lru_cache(maxsize=None)
-def _conv_fn(ops, dyn: bool, with_window: bool):
-    def from_ops(state, x, w, *dynamic):
-        window, out = ops(state, x, w, *dynamic)
+def _conv_fn(ops, dyn: bool, with_window: bool, res: bool = False):
+    def from_ops(state, x, w, *rest):
+        window, out = ops(state, x, w, *rest[:int(dyn)])
+        if res:
+            r = rest[-1]
+            out = (r.astype(mx.float32) + out.astype(mx.float32)).astype(
+                r.dtype)
         kept = window[:, x.shape[1]:]
         return (out, kept, window) if with_window else (out, kept)
 
-    @mx.custom_function
-    def run(state, x, w, *dynamic):
-        return tuple(_conv_kernel(state, x, w, dynamic[0] if dyn else None,
-                                  with_window))
+    @_Kernel
+    def run(state, x, w, *rest):
+        return tuple(_conv_kernel(state, x, w, rest[0] if dyn else None,
+                                  with_window, rest[-1] if res else None))
 
     @run.vjp
     def run_vjp(primals, cotangents, _outputs):
@@ -839,13 +880,17 @@ def _conv_fn(ops, dyn: bool, with_window: bool):
     return run
 
 
-def conv(state, x, w, dynamic, with_window: bool, ops):
+def conv(state, x, w, dynamic, with_window: bool, ops, res=None):
     """The short convolution plus its residual, scaled, in ``x``'s dtype;
     the kept state (the last ``width - 1`` window rows, float32); and with
     ``with_window`` the whole float32 window, in one dispatch. ``ops`` is
-    ``_conv_static`` or ``_conv_dynamic``, which gives the gradient."""
-    args = (state, x, w) + (() if dynamic is None else (dynamic,))
-    return _conv_fn(ops, dynamic is not None, with_window)(*args)
+    ``_conv_static`` or ``_conv_dynamic``, which gives the gradient. A
+    ``res`` in ``x``'s shape and dtype is added to the output in float32
+    (the layer's residual stream)."""
+    args = ((state, x, w) + (() if dynamic is None else (dynamic,))
+            + (() if res is None else (res,)))
+    return _conv_fn(ops, dynamic is not None, with_window,
+                    res is not None)(*args)
 
 
 # Attention bias mask at decode and verify widths: one thread per mask
@@ -948,7 +993,7 @@ def _mask_ops(r, sink, table, params, n_keys, window, ring, dtype):
 def _mask_fn(window: int, ring: bool, dtype):
     # ``keys`` only carries the key count, which grows every step; reading
     # it from a shape keeps one function for every length.
-    @mx.custom_function
+    @_Kernel
     def run(r, sink, table, params, keys):
         return _mask_kernel(r, sink, table, params, keys.shape[2], window,
                             ring, dtype)
@@ -1338,7 +1383,7 @@ def _attend_ops(q, k, v, r, sink, table, params, window, ring, scale):
 
 @functools.lru_cache(maxsize=None)
 def _attend_fn(window: int, ring: bool, scale: float):
-    @mx.custom_function
+    @_Kernel
     def run(q, k, v, r, sink, table, params):
         return _attend_kernel(q, k, v, r, sink, table, params, window, ring)
 
@@ -1418,7 +1463,7 @@ def gate_eligible(attn: mx.array, g: mx.array) -> bool:
 
 @functools.lru_cache(maxsize=None)
 def _gate_fn(ops):
-    @mx.custom_function
+    @_Kernel
     def run(attn, g):
         B, H, L, D = attn.shape
         n = B * L * H * D

@@ -1064,12 +1064,16 @@ def test_a_live_plan_downloads_the_files_main_holds_now():
         catalog.live_plan(plan, no_drafter.get)
 
 
-def test_inkling_drafter_fit_counts_the_folded_head():
-    """The Inkling 2 drafter builds a folded head beyond its file, so its
-    add-on prices both; the download size stays the file."""
+def test_inkling_drafter_fit_counts_the_head_copies():
+    """The Inkling 2 drafter builds 4-bit copies of its folded head and of
+    the target's head beyond its file, so its add-on prices both; the
+    download size stays the file."""
     m = catalog.model("inkling-2-mini")
     d = m.drafter
-    assert d.derived_bytes == 256 * 201024 * 2 + 201024 * 4
+    # Rank 256 and hidden 2304 over the 200058 drawn rows: 4-bit weights
+    # with a bf16 scale and bias per 64 columns.
+    assert d.derived_bytes == 200058 * (256 // 2 + 256 // 16
+                                        + 2304 // 2 + 2304 // 16)
     assert (catalog.addon_bytes(m, False, True)
             == d.bytes + d.derived_bytes + (m.asr.bytes if m.asr else 0))
 

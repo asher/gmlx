@@ -1410,15 +1410,25 @@ def text_tensor_bytes(path: str) -> int | None:
 
 
 def drafter_derived_bytes(scan) -> int:
-    """Bytes a drafter builds at bind beyond its file: the Inkling 2
-    DSpark drafter folds the target's head into its recurrent head, a
-    [markov_rank, vocab] bf16 map plus a float32 bias row
-    (``Inkling2DSparkDrafter._folded_head``). 0 for every other drafter."""
-    if not any(t.name == "dspark_hidden_out.weight" for t in scan.tensors):
+    """Bytes a drafter builds beyond its file: the Inkling 2 DSpark
+    drafter derives its folded head and a draft copy of the target's head
+    (``gmlx.models.inkling2.dspark.derived_bytes``); in llama.cpp's
+    mainline layout the file carries the folded head (``markov_w2``,
+    [rank, unpadded vocab]). 0 for every other drafter."""
+    names = {t.name: t for t in scan.tensors}
+    w2 = names.get("markov_w2.weight")
+    mainline = w2 is not None and "markov_ctx_mix.weight" in names
+    if not mainline and "dspark_hidden_out.weight" not in names:
         return 0
-    rank = read_int(scan.kv, "dflash.dspark.markov_rank") or 0
-    vocab = read_int(scan.kv, "dflash.vocab_size") or 0
-    return rank * vocab * 2 + vocab * 4
+    from gmlx.models.inkling2.dspark import derived_bytes
+
+    hidden = read_int(scan.kv, "dflash.embedding_length") or 0
+    if mainline:
+        rank, vocab = (int(n) for n in names["markov_w2.weight"].shape[:2])
+        return derived_bytes(hidden, rank, vocab, mainline=True)
+    return derived_bytes(hidden,
+                         read_int(scan.kv, "dflash.dspark.markov_rank") or 0,
+                         read_int(scan.kv, "dflash.vocab_size") or 0)
 
 
 def drafter_resident_bytes(path: str) -> int:

@@ -169,6 +169,10 @@ _FUSED_MOE_SKINNY_ROUTER = env_bool("GMLX_KQ_SKINNY", True)
 # The half dtype the fused block computes in when its input is float32.
 _FUSED_MOE_F32_ACT = mx.bfloat16
 
+# An expert id that names no expert, in a fused switch call with
+# absent=True (absent_ok): its pairs read no weights and add nothing.
+ABSENT_ID = 0x80000000
+
 
 def _router_logits(kq, xf: mx.array, rc: mx.array) -> mx.array:
     """``xf @ rc.T`` in float32 for the fused router, ``xf`` [t, D]."""
@@ -369,6 +373,12 @@ class _FusedMoeCaps:
         # situ (Kimi K3, Inkling 2) on the routed gathers only; same sniff
         self.has_situ = self.has_kq_fused and re.search(
             r"\bsitu\b", glu_doc) is not None
+        # Expert ids with bit 31 set name no expert (absent=True on the
+        # routed GLU and the score-mixed down); same sniff.
+        mix_ns_doc = (getattr(getattr(kq, "gather_qmv_mix_ns_kq", None),
+                              "__doc__", "") or "")
+        self.has_absent = ("absent (bool)" in glu_doc
+                           and "absent (bool)" in mix_ns_doc)
         self.router_ok = (
             os.environ.get("GMLX_FUSED_MOE_ROUTER", "1") != "0"
             and hasattr(kq, "moe_router_topk")
@@ -859,6 +869,44 @@ def _make_fused_kquant(base_cls, caps):
 
         _kq_mix_scores = _has_mix_ns
 
+        def absent_ok(self, x, indices) -> bool:
+            """Whether ``__call__(x, indices, scores, absent=True)`` takes
+            this call: the fused gate/up and score-mixed down kernels,
+            where an id with bit 31 set (ABSENT_ID) reads no expert."""
+            return (self.absent_ready(indices.size)
+                    and self._fused_ok(x, indices))
+
+        def absent_ready(self, pairs: int) -> bool:
+            """``absent_ok`` for a call of ``pairs`` (row, expert) pairs,
+            short of the input's dtype. Not for a subclass with its own
+            forward (LoRA), a shared-expert fold, streamed or arena
+            weights."""
+            down = self.down_proj
+            return (caps.has_absent and _has_mix_ns
+                    and type(self).__call__ is _FusedKQuantSwitchGLU.__call__
+                    and _FUSED_MOE_ENABLED
+                    and pairs < getattr(self, "_kq_fused_pairs", 64)
+                    and not self.training
+                    and _kq_fused_device_ok(self)
+                    and not getattr(self, "_kq_arena_rows", False)
+                    and not getattr(self, "_kq_weights_swapped", False)
+                    and getattr(self, "_kq_shexp_mod", None) is None
+                    and getattr(self, "_kq_glu_act", "silu") != "swiglu_clamp"
+                    and "bias" not in down)
+
+        def dedupes_rows(self, rows: int, pairs: int) -> bool:
+            """Whether a call of ``rows`` rows and ``pairs`` (row, expert)
+            pairs reads an expert named by several rows once: kq's generic
+            (non-qf) gate/up kernels dedupe from 2 to 8 rows."""
+            return (_has_mix_ns
+                    and type(self).__call__ is _FusedKQuantSwitchGLU.__call__
+                    and _FUSED_MOE_ENABLED and 2 <= rows <= 8
+                    and pairs < getattr(self, "_kq_fused_pairs", 64)
+                    and not self.training
+                    and _kq_fused_device_ok(self)
+                    and isinstance(self.gate_proj.kquant_type, str)
+                    and not caps.qf_codec(self.gate_proj.kquant_type))
+
         def _fused_ok(self, x, indices) -> bool:
             """The fused-vs-stock gate, one source of truth for this class
             and any subclass that owns its own forward (the LoRA wrap)."""
@@ -898,7 +946,7 @@ def _make_fused_kquant(base_cls, caps):
             object.__setattr__(self, slot, (bias, b32))
             return b32
 
-        def _fused_h(self, x, idx, scores=None):
+        def _fused_h(self, x, idx, scores=None, absent=False):
             """The gate/up gather: ``[t, k, I]`` activated hidden (``k`` plus
             the shared expert's slots when the shexp fold rides along with
             scores).
@@ -909,7 +957,7 @@ def _make_fused_kquant(base_cls, caps):
             act = getattr(self, "_kq_glu_act", "silu")
             # extra kwargs only where the act needs them so silu/gelu
             # calls stay byte-identical against older kq builds.
-            akw = {"act": act}
+            akw = {"act": act, "absent": True} if absent else {"act": act}
             if act == "silu_limit":
                 akw["limit"] = self._kq_glu_limit
             elif act in ("swiglu_oai", "situ"):
@@ -938,7 +986,7 @@ def _make_fused_kquant(base_cls, caps):
                 gate.kquant_type, idx, **akw, **ukw,
                 **_glu_scale_kw(self, gate, up))
 
-        def _fused_down(self, h, idx, scores=None, lora=None):
+        def _fused_down(self, h, idx, scores=None, lora=None, absent=False):
             """The down gather, three exits, all flat: shexp fold (mixed,
             shexp slot weight 1) and score mix in the kernel (mixed) return
             ``(t, N)``; the plain gather returns unmixed ``(t, k, N)``. The
@@ -969,9 +1017,11 @@ def _make_fused_kquant(base_cls, caps):
                 return y.reshape(t, y.shape[-1])
             if (scores is not None and _has_mix_ns
                     and "bias" not in down):
+                akw = {"absent": True} if absent else {}
                 y = kq.gather_qmv_mix_ns_kq(
                     h, down.weight, down.kquant_type, idx,
-                    scores.reshape(t, k), **lkw, **_down_scale_kw(down))
+                    scores.reshape(t, k), **lkw, **akw,
+                    **_down_scale_kw(down))
                 return y.reshape(t, y.shape[-1])
             dkw = ({"bias": self._kq_bias32("_kq_db32", down)}
                    if "bias" in down else {})
@@ -998,7 +1048,19 @@ def _make_fused_kquant(base_cls, caps):
             y = self._fused_down(self._fused_h(xf, idx), idx)
             return y[:t] if pad > 0 else y
 
-        def __call__(self, x, indices, scores=None):
+        def __call__(self, x, indices, scores=None, absent=False):
+            """``absent=True`` (where ``absent_ok``) takes ids with bit 31
+            set as naming no expert: their pairs add nothing to the mix."""
+            if absent:
+                if scores is None:
+                    raise ValueError("absent=True needs the routing scores")
+                k = indices.shape[-1]
+                idx = indices.reshape(indices.size // k, k)
+                xa = (x.astype(_FUSED_MOE_F32_ACT) if x.dtype == mx.float32
+                      else x)
+                y = self._fused_down(self._fused_h(xa, idx, absent=True),
+                                     idx, scores, absent=True)
+                return y.reshape(*indices.shape[:-1], y.shape[-1])
             rows = getattr(self, "_kq_arena_rows", False)
             if self._fused_ok(x, indices):
                 if x.dtype == mx.float32:  # the hc models' residual dtype
@@ -3169,6 +3231,9 @@ def install_lora_adapter(model: nn.Module, plan,
     if q4 is not None:
         # Recorded verify graphs were taken over the unwrapped modules.
         q4.invalidate_verify_compile()
+    ink = sys.modules.get("gmlx.models.inkling2.records")
+    if ink is not None:
+        ink.invalidate()
 
     targets = dict(plan.modules)   # module_path -> LoraModule
     wrapped: set[str] = set()

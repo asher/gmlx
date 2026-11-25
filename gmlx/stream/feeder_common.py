@@ -327,6 +327,10 @@ def swapped_weights(entry: dict, views: dict, slot_owner=None):
     if q4 is not None and not q4._VERIFY_BLOCKED:
         # A compiled verify body would freeze the weights bound here.
         q4.invalidate_verify_compile(block=True)
+    ink = sys.modules.get("gmlx.models.inkling2.records")
+    if ink is not None and not ink._BLOCKED[0]:
+        # Inkling's layer records would freeze them too.
+        ink.invalidate(block=True)
     try:
         for kind, (mod, *_) in entry.items():
             proj = getattr(mod, ATTRS[kind])

@@ -11,6 +11,7 @@ import pytest
 from mlx.utils import tree_flatten
 from f32_exact import f32_exact  # noqa: E402
 
+import gmlx.models.inkling2.dspark as ds
 from gmlx.models.inkling2.dspark import Inkling2DSparkDrafter, first_argmax
 from gmlx.spec.mtp_load import (
     _dflash_config_from_meta,
@@ -35,6 +36,13 @@ ROOT_LEAVES = (
     "markov_w1.weight", "mask_embd.weight", "output_norm.weight",
 )
 SHAPES = {"markov_w1.weight": (RANK, PADDED)}
+
+
+@pytest.fixture(autouse=True)
+def _target_head(monkeypatch):
+    # The reference tests read the target's head itself; the tests of the
+    # draft head copy set its bits.
+    monkeypatch.setattr(ds, "_HEAD_BITS", 0)
 
 
 def _meta(**over):
@@ -164,8 +172,9 @@ def test_config_refuses_another_family():
 
 # --- the drafter -------------------------------------------------------------
 
-def _drafter(seed=0):
-    config, _ = _config()
+def _drafter(seed=0, rank=RANK):
+    config, _ = _config(meta=_meta(**{"dflash.dspark.markov_rank": rank}),
+                        shapes={"markov_w1.weight": (rank, PADDED)})
     d = Inkling2DSparkDrafter(config)
     rng = np.random.default_rng(seed)
     d.update(_random_like(d.parameters(), rng))
@@ -264,6 +273,91 @@ def test_a_sampled_draft_is_the_token_the_next_row_reads():
     np.testing.assert_allclose(np.stack(seen), want, atol=2e-4, rtol=2e-4)
 
 
+@f32_exact
+def test_the_keep_count_is_the_prefix_over_the_floor():
+    # A block keeps the leading drafts whose prefix the drafter gives at
+    # least row_floor of chance; with no floor it leaves no keep count.
+    d = _drafter()
+    d.append_context(mx.ones((1, 3, 4 * HIDDEN)))
+    toks = d.draft_block(3, None, None, 4, sampler=None, greedy=True)
+    assert d.take_row_keep() is None
+    hidden = _np(d._draft_hidden(mx.array([[3]])))[0]
+    context = _np(d._cache[-1][0]).reshape(-1)
+    rows = _reference_chain(d, hidden, 3, context, 3)
+    picks = np.array(toks).reshape(-1)
+    prefix = np.cumprod([_softmax(r)[t] for r, t in zip(rows, picks)])
+    for want in range(4):
+        hi = 1.0 if want == 0 else prefix[want - 1]
+        lo = prefix[want] if want < 3 else 0.0
+        if hi - lo < 1e-3:
+            continue
+        object.__setattr__(d, "row_floor", float((hi + lo) / 2))
+        d.draft_block(3, None, None, 4, sampler=None, greedy=True)
+        assert int(d.take_row_keep().item()) == want
+        assert d.take_row_keep() is None
+
+
+def test_unset_the_floor_follows_the_target():
+    # With GMLX_INKLING2_ROW_CUT unset, a block leaves a keep count only
+    # where the bound target's cut rows read no experts at its width.
+    from types import SimpleNamespace
+
+    for saves in (True, False):
+        d = _drafter()
+        object.__setattr__(d, "_row_target", SimpleNamespace(
+            row_cut_saves=lambda rows, saves=saves: saves and rows == 4))
+        d.append_context(mx.ones((1, 3, 4 * HIDDEN)))
+        d.draft_block(3, None, None, 4, sampler=None, greedy=True)
+        assert (d.take_row_keep() is not None) == saves
+
+
+@f32_exact
+def test_draft_head_bits_read_an_affine_copy_of_the_head(monkeypatch):
+    # GMLX_INKLING2_DRAFT_HEAD_BITS: the draft rows read an 8-bit copy of
+    # the target's head and of the folded correction, close to the head's
+    # own rows; the target's head, which the verify reads, is unchanged.
+    d = _drafter(rank=32)
+    rng = np.random.default_rng(2)
+    hidden = mx.array(rng.standard_normal((1, BLOCK, HIDDEN)), dtype=mx.float32)
+    d._cache[-1][0] = mx.array(rng.standard_normal((1, 1, HIDDEN)),
+                               dtype=mx.float32)
+    head = np.array(d.lm_head.weight)
+    want, _ = d.chain(hidden, mx.array(9), BLOCK - 1)
+    monkeypatch.setattr(ds, "_HEAD_BITS", 8)
+    object.__setattr__(d, "_fold", None)
+    got, _ = d.chain(hidden, mx.array(9), BLOCK - 1)
+    assert d._qhead[3] == 32 and isinstance(d._fold[0], tuple)
+    diff = np.abs(_np(got) - _np(want))
+    assert 0 < diff.max() < 0.1
+    np.testing.assert_array_equal(np.array(d.lm_head.weight), head)
+
+
+def test_a_rebind_keeps_the_derived_heads_until_the_head_changes(
+        monkeypatch):
+    # A server binds the drafter once a request: the folded head and the
+    # draft head copy are built once and kept while the head's arrays stay.
+    from types import SimpleNamespace
+
+    from gmlx.spec.dflash_drafter import DFlashDrafter
+
+    monkeypatch.setattr(ds, "_HEAD_BITS", 8)
+    monkeypatch.setattr(DFlashDrafter, "bind", lambda self, t: setattr(
+        self, "lm_head", t.lm_head))
+    d = _drafter(rank=32)
+    target = SimpleNamespace(model=SimpleNamespace(embed_norm=d.embed_norm),
+                             lm_head=d.lm_head)
+    d._cache[-1][0] = mx.ones((1, 1, HIDDEN))
+    for _ in range(2):
+        d.bind(target)
+        d.chain(mx.ones((1, BLOCK, HIDDEN)), mx.array(3), 2)
+        if _ == 0:
+            fold, copy = d._fold, d._qhead
+    assert d._fold is fold and d._qhead is copy
+    target.lm_head = nn.Linear(HIDDEN, PADDED, bias=False)
+    d.bind(target)
+    assert d._fold is None and d._qhead is None
+
+
 def test_drafts_never_pick_a_padded_row():
     d = _drafter()
     # The padded rows of the head would win every row.
@@ -294,6 +388,33 @@ def test_the_block_rows_commit_once_and_leave_the_drafts_unchanged(
                         lambda *a: (committed.append(a), real(*a)))
     assert drafts() == want
     assert len(committed) == 1
+
+
+def test_an_accept_commits_the_rings_and_the_context_feature(monkeypatch):
+    from gmlx.spec import dflash_drafter as dd
+
+    monkeypatch.setattr(dd, "_COMMIT_ASYNC", True)
+    rng = np.random.default_rng(5)
+    packed = mx.array(rng.standard_normal((1, 6, 5 * HIDDEN)),
+                      dtype=mx.float32)
+    whole = _drafter()
+    whole.prefill_from_target_hidden(None, packed, None, None, None)
+    d = _drafter()
+    d.prefill_from_target_hidden(None, packed[:, :4], None, None, None)
+    committed = []
+    real = mx.async_eval
+    monkeypatch.setattr(mx, "async_eval",
+                        lambda *a: (committed.append(a[0]), real(*a)))
+    # Accepting one draft commits verify rows 0 and 1.
+    d.accept_verified_tokens(packed[:, 4:], mx.array([[7]]), 1, [7, 9],
+                             sampler=None)
+    assert any(x is d._cache[-1][0] for x in committed[-1])
+    np.testing.assert_array_equal(_np(d._cache[-1][0]),
+                                  _np(whole._cache[-1][0]))
+    anchor = mx.array([[5]])
+    np.testing.assert_allclose(_np(d._draft_hidden(anchor)),
+                               _np(whole._draft_hidden(anchor)),
+                               atol=1e-5, rtol=1e-5)
 
 
 def test_first_argmax_takes_the_first_of_a_tie():
@@ -358,12 +479,13 @@ def test_chunked_seeding_matches_one_shot_and_counts_every_row():
                                   _np(one._cache[-1][0]))
 
 
-def _write_header_only(path, names):
-    """A drafter GGUF with the released header keys and tiny tensors."""
+def _write_header_only(path, names, meta=None, shapes=None):
+    """A drafter GGUF with the released header keys (or ``meta``) and tiny
+    tensors, or zeros of their numpy shapes in ``shapes``."""
     from gguf import GGUFWriter
 
     w = GGUFWriter(str(path), "dflash")
-    for key, val in _meta().items():
+    for key, val in (meta or _meta()).items():
         if key == "general.architecture":
             continue
         if isinstance(val, bool):
@@ -375,30 +497,40 @@ def _write_header_only(path, names):
         else:
             w.add_array(key, val)
     for name in names:
-        w.add_tensor(name, np.zeros((2, 4), np.float32))
+        w.add_tensor(name, np.zeros((shapes or {}).get(name, (2, 4)),
+                                    np.float32))
     w.write_header_to_file()
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
 
 
-def test_pricing_counts_the_folded_head(tmp_path):
-    """A loaded drafter holds its file plus the folded head it builds on
-    the first draft: [markov_rank, padded vocab] in bf16 and a float32
-    bias row. Other drafters hold their file only."""
+@pytest.mark.parametrize("bits", [0, 4])
+def test_pricing_counts_what_the_drafter_derives(tmp_path, monkeypatch,
+                                                 bits):
+    """A loaded drafter holds its file plus what it derives from the
+    target's head on its first draft: the folded head with a float32 bias
+    row and, at draft head bits, the head's affine copy. Other drafters
+    hold their file only."""
     import os
 
     from gmlx.load.discovery import drafter_resident_bytes
 
-    d = _drafter()
-    fold_w, fold_b = d._folded_head()
-    assert fold_w.shape == (RANK, PADDED) and fold_b.shape == (PADDED,)
+    monkeypatch.setattr(ds, "_HEAD_BITS", bits)
+    d = _drafter(rank=32)
+    d.set_dtype(mx.bfloat16)
+    d._cache[-1][0] = mx.ones((1, 1, HIDDEN), mx.bfloat16)
+    d.chain(mx.ones((1, BLOCK, HIDDEN), mx.bfloat16), mx.array(3), 2)
+    fold_w, fold_b = d._fold
     assert fold_b.dtype == mx.float32
+    built = sum(a.nbytes for a in (
+        [fold_b] + (list(fold_w[:3]) if bits else [fold_w])
+        + (list(d._qhead[:3]) if bits else [])))
 
     path = tmp_path / "dspark.gguf"
-    _write_header_only(path, ("dspark_hidden_out.weight", "markov_w1.weight"))
-    assert (drafter_resident_bytes(str(path)) - os.path.getsize(path)
-            == RANK * PADDED * 2 + PADDED * 4)
+    _write_header_only(path, ("dspark_hidden_out.weight", "markov_w1.weight"),
+                       _meta(**{"dflash.dspark.markov_rank": 32}))
+    assert drafter_resident_bytes(str(path)) - os.path.getsize(path) == built
     other = tmp_path / "plain.gguf"
     _write_header_only(other, ("markov_w1.weight",))
     assert drafter_resident_bytes(str(other)) == os.path.getsize(other)
@@ -442,3 +574,142 @@ def test_the_full_layer_reads_the_block_rows_in_place(monkeypatch):
     assert got_drafts == want_drafts
     for g, w in zip(got_kv, want_kv):
         np.testing.assert_array_equal(g, w)
+
+
+# --- llama.cpp mainline layout -------------------------------------------------
+
+MAINLINE_ROOT = (
+    "joint_proj.bias", "joint_proj.weight", "markov_ctx_mix.weight",
+    "markov_ctx_norm.weight", "markov_w1.weight", "markov_w2.bias",
+    "markov_w2.weight", "mask_embd.weight", "output_norm.weight",
+    "token_embd_norm.weight",
+)
+MAINLINE_BLK = tuple(n for n in BLK_LEAVES if n != "dflare_norm.weight") + (
+    "ctx_mix.weight", "ctx_norm.weight")
+
+
+def _mainline_names(n_layers=3):
+    return {n: None for n in MAINLINE_ROOT + tuple(
+        f"blk.{i}.{leaf}" for i in range(n_layers) for leaf in MAINLINE_BLK)}
+
+
+def _mainline_meta():
+    # The mainline converter writes no vocabulary or rank keys and stores
+    # the window with the anchor's own row.
+    meta = _meta(**{"dflash.attention.sliding_window": WINDOW + 1,
+                    "dflash.has_markov_context": True})
+    for key in ("dflash.vocab_size", "dflash.vocab_size_unpadded",
+                "dflash.dspark.markov_rank", "dflash.attention.causal"):
+        del meta[key]
+    return meta
+
+
+def _as_mainline(d) -> dict:
+    """Drafter ``d``'s weights as llama.cpp's mainline converter writes
+    them: softmaxed tap mixes, renamed norms, one mask row per draft slot,
+    the unpadded markov table and the correction folded through the head."""
+    params = dict(tree_flatten(d.parameters()))
+    gguf = {}
+    for name in _names():
+        (target,), _, _ = remap_dflash_arrays({name: None}, {}, C)
+        gguf[name] = params[target]
+    out = {}
+    for name, a in gguf.items():
+        leaf = name.split(".", 2)[-1] if name.startswith("blk.") else name
+        if leaf == "dflare_norm.weight":
+            out[name.replace("dflare_norm", "ctx_norm")] = a
+        elif name not in ("dspark_fuse.weight", "dspark_norm.weight",
+                          "mask_embd.weight", "markov_w1.weight") \
+                and not name.startswith("dspark_hidden_out"):
+            out[name] = a
+    mix = mx.softmax(gguf["dspark_fuse.weight"], axis=-1)
+    for i in range(3):
+        out[f"blk.{i}.ctx_mix.weight"] = mix[i]
+    out["markov_ctx_mix.weight"] = mix[3]
+    out["markov_ctx_norm.weight"] = gguf["dspark_norm.weight"]
+    out["mask_embd.weight"] = mx.broadcast_to(gguf["mask_embd.weight"],
+                                              (BLOCK - 1, HIDDEN))
+    out["markov_w1.weight"] = gguf["markov_w1.weight"][:VOCAB]
+    head = d.lm_head.weight[:VOCAB]
+    out["markov_w2.weight"] = head @ gguf["dspark_hidden_out.weight"]
+    out["markov_w2.bias"] = head @ gguf["dspark_hidden_out.bias"]
+    out["token_embd_norm.weight"] = d.embed_norm.weight
+    return out
+
+
+def _mainline_drafter(d, rank=RANK):
+    from gmlx.spec.mtp_load import inkling2_mainline_arrays
+
+    arrays = inkling2_mainline_arrays("d.gguf", _as_mainline(d), 3)
+    config, _ = _config(meta=_mainline_meta(), arrays=_mainline_names(),
+                        shapes={"markov_w1.weight": (rank, VOCAB)})
+    m = Inkling2DSparkDrafter(config)
+    weights, _, stats = remap_dflash_arrays(arrays, {}, C)
+    m.load_weights(list(weights.items()), strict=True)
+    m.embed_tokens, m.lm_head, m.embed_norm = d.embed_tokens, d.lm_head, d.embed_norm
+    m._cache = m.make_cache()
+    return m
+
+
+def test_the_mainline_layout_is_its_own_container_too():
+    assert dflash_container(_mainline_names()) == C
+    # Qwen's DSpark has a markov table and its own head, no tap mixes.
+    assert dflash_container({"markov_w1.weight": None, "markov_w2.weight": None,
+                             "blk.0.attn_q_norm.weight": None}) == "dflash_dspark"
+
+
+def test_the_mainline_layout_drafts_what_the_unsloth_layout_drafts():
+    """The same weights in llama.cpp's mainline layout: the same window,
+    the same block rows, and the same corrected logits and picks."""
+    d = _drafter()
+    m = _mainline_drafter(d)
+    assert m.config.sliding_window == d.config.sliding_window == WINDOW + 1
+    rng = np.random.default_rng(5)
+    caps = mx.array(rng.standard_normal((1, 9, 4 * HIDDEN)), dtype=mx.float32)
+    for x in (d, m):
+        x.append_context(caps)
+    hd, hm = d._draft_hidden(mx.array([[3]])), m._draft_hidden(mx.array([[3]]))
+    np.testing.assert_allclose(_np(hm), _np(hd), rtol=1e-5, atol=1e-5)
+    rd, td = d.chain(hd, mx.array(3), BLOCK - 1)
+    rm, tm = m.chain(hd, mx.array(3), BLOCK - 1)
+    assert rm.shape == rd.shape == (BLOCK - 1, VOCAB)
+    np.testing.assert_allclose(_np(rm), _np(rd), rtol=1e-4, atol=1e-4)
+    assert tm.tolist() == td.tolist()
+
+
+def test_mainline_mask_rows_must_be_one_trained_mask():
+    from gmlx.spec.mtp_load import inkling2_mainline_arrays
+
+    arrays = _as_mainline(_drafter())
+    arrays["mask_embd.weight"] = mx.arange(
+        (BLOCK - 1) * HIDDEN, dtype=mx.float32).reshape(BLOCK - 1, HIDDEN)
+    with pytest.raises(ValueError, match="mask"):
+        inkling2_mainline_arrays("d.gguf", arrays, 3)
+
+
+@pytest.mark.parametrize("bits", [0, 4])
+def test_pricing_counts_what_a_mainline_drafter_derives(tmp_path, monkeypatch,
+                                                        bits):
+    """The mainline file carries the folded head, so the drafter derives
+    nothing at bits 0 and only the affine copies at draft head bits."""
+    import os
+
+    from gmlx.load.discovery import drafter_resident_bytes
+
+    monkeypatch.setattr(ds, "_HEAD_BITS", bits)
+    m = _mainline_drafter(_drafter(rank=32), rank=32)
+    m.set_dtype(mx.bfloat16)
+    m.markov_w2.bias = m.markov_w2.bias.astype(mx.float32)  # fp32_keep
+    m._cache[-1][0] = mx.ones((1, 1, HIDDEN), mx.bfloat16)
+    m.chain(mx.ones((1, BLOCK, HIDDEN), mx.bfloat16), mx.array(3), 2)
+    fold_w, fold_b = m._fold
+    assert fold_b is m.markov_w2.bias
+    built = (sum(a.nbytes for a in list(fold_w[:3]) + list(m._qhead[:3]))
+             if bits else 0)
+
+    meta = _mainline_meta()
+    path = tmp_path / "dspark.gguf"
+    _write_header_only(path, tuple(_mainline_names()), meta,
+                       shapes={"markov_w1.weight": (VOCAB, 32),
+                               "markov_w2.weight": (VOCAB, 32)})
+    assert drafter_resident_bytes(str(path)) - os.path.getsize(path) == built

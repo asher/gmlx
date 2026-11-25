@@ -1645,6 +1645,16 @@ def _owned_decode_rounds(
                  and callable(getattr(drafter, "pending_row_cut_array", None)))
     _counted_ok = (_assume_ok and _ACCEPT_COUNTED
                    and callable(getattr(drafter, "counted_ok", None)))
+    # GPU row cut: a drafter that leaves its block's keep count as an array
+    # (take_row_keep) and a target that takes it into the verify
+    # (verify_row_keep). The verify runs the whole block, the rows past the
+    # keep reading the kept rows' experts, and the round emits only what
+    # the kept rows decide: no host read before the verify.
+    _row_keep_cm = getattr(lm, "verify_row_keep", None)
+    _gpu_cut = (callable(_row_keep_cm)
+                and callable(getattr(drafter, "take_row_keep", None))
+                and not (_early_ok or _assume_ok or _ahead_ok or stoch)
+                and row_procs is None and not want_lp)
     # The next round's block, drafted before this round's tokens went out.
     pre_draft = None
     # The next round's verify, built ahead and taken up after the walk:
@@ -1707,6 +1717,8 @@ def _owned_decode_rounds(
             draft_src = None
             # The lazy row cut of a round whose verify went ahead of it.
             keep_late = None
+            # The keep count of a GPU row cut (_gpu_cut).
+            row_keep = None
             if forced is not None:
                 # ^T forced close: commit the known close ids as a fully
                 # accepted round (the drafts ARE the forced ids, the bonus is
@@ -1756,6 +1768,8 @@ def _owned_decode_rounds(
                     draft_tokens = sampler_rng.draft_tokens(
                         _draft_block, b, hidden, None, bs, draft_sampler,
                         token_dtype, **draft_kwargs, **_cut_kwargs)
+                    if _gpu_cut:
+                        row_keep = drafter.take_row_keep()
                 # The drafter may return fewer drafts than requested (e.g. the
                 # deepseek-v4 confidence-gated rollout); every downstream bs
                 # consumer (rollback width, accept bookkeeping, finish seams)
@@ -1827,6 +1841,9 @@ def _owned_decode_rounds(
                         pre_verify[0] = None
                         verify, held[0], held = held[1], None, None
                         _assume_stats["prebuilt"] += 1
+                    elif row_keep is not None:
+                        with _row_keep_cm(row_keep):
+                            verify = _build_verify(draft_tokens)
                     else:
                         verify = _build_verify(draft_tokens)
                     if cut_snap is not None:
@@ -2114,6 +2131,13 @@ def _owned_decode_rounds(
                               else None),
                         pq=list(pq_stash) if pq_stash and not copied else None,
                         base_pos=emitted, process=process)
+            if row_keep is not None and not gated:
+                # Evaluated with the verify: no wait. The rows past the keep
+                # read other experts, so nothing they decide is emitted.
+                kept = int(row_keep.item())
+                if accepted > kept:
+                    accepted = kept
+                    new_tokens = new_tokens[:kept + 1]
             if forced is not None or not assumed:
                 # After an assumed accept that held, the stash is the next
                 # block's.

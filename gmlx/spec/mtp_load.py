@@ -1218,7 +1218,35 @@ _INKLING2_DSPARK_ROOT = {
     "markov_w1": "markov_w1.weight",
     "joint_proj": "joint_proj.weight",
     "dspark_hidden_out": "hidden_out.weight",
+    "markov_w2": "markov_w2.weight",
 }
+
+
+def inkling2_mainline_arrays(draft_gguf_path: str, arrays: dict,
+                             n_layers: int) -> dict:
+    """An Inkling 2 DSpark in llama.cpp's mainline layout under the Unsloth
+    layout's names. The per-layer ``ctx_mix`` rows and the head's
+    ``markov_ctx_mix`` stack into ``dspark_fuse`` (as weights, see
+    ``DFlashConfig.inkling2_mainline``), ``ctx_norm`` and
+    ``markov_ctx_norm`` are ``dflare_norm`` and ``dspark_norm``. The mask
+    rows, one per draft slot, must be one trained mask. ``token_embd_norm``
+    is the target's embed norm, which the drafter borrows."""
+    out = dict(arrays)
+    mix = [out.pop(f"blk.{i}.ctx_mix.weight") for i in range(n_layers)]
+    mix.append(out.pop("markov_ctx_mix.weight"))
+    out["dspark_fuse.weight"] = mx.stack([m.astype(mx.float32) for m in mix])
+    for i in range(n_layers):
+        out[f"blk.{i}.dflare_norm.weight"] = out.pop(f"blk.{i}.ctx_norm.weight")
+    out["dspark_norm.weight"] = out.pop("markov_ctx_norm.weight")
+    mask = out["mask_embd.weight"]
+    if mask.ndim == 2:
+        if not bool(mx.all(mask == mask[:1]).item()):
+            raise ValueError(
+                f"{draft_gguf_path}: mask_embd has a different row per draft "
+                "slot; the Inkling 2 DSpark drafter takes one trained mask")
+        out["mask_embd.weight"] = mask[0]
+    out.pop("token_embd_norm.weight", None)
+    return out
 _DFLASH_CONTAINER_MAPS = {
     "dflash": (_DFLASH_BLK, _DFLASH_ROOT),
     "dflash2": ({**_DFLASH_BLK, **_DFLASH2_BLK}, {**_DFLASH_ROOT, **_DFLASH2_ROOT}),
@@ -1363,16 +1391,21 @@ def _dflash_config_from_meta(
         )
     vocab = int(target_config_dict["vocab_size"])
     padded_vocab = None
+    mainline = inkling2 and "markov_w2.weight" in arrays
     if inkling2:
-        # Drafts are drawn over the unpadded vocabulary; the head and the
-        # markov table keep the padded rows.
+        # Drafts are drawn over the unpadded vocabulary; the head keeps the
+        # padded rows, and so does the Unsloth layout's markov table.
         padded_vocab = vocab
         vocab = int(target_config_dict.get("unpadded_vocab_size") or vocab)
-        ne = (shapes or {}).get("markov_w1.weight")
-        if ne is not None and int(ne[-1]) != padded_vocab:
-            raise ValueError(
-                f"{draft_gguf_path}: markov_w1 has {ne[-1]} rows, the target "
-                f"head has {padded_vocab}")
+        rows = vocab if mainline else padded_vocab
+        for name in ("markov_w1", "markov_w2"):
+            ne = (shapes or {}).get(name + ".weight")
+            if ne is not None and int(ne[-1]) != rows:
+                raise ValueError(
+                    f"{draft_gguf_path}: {name} has {ne[-1]} rows, the "
+                    f"drafter needs {rows}")
+        if mainline:
+            padded_vocab = None
     if container == "dflash2" and shapes:
         for name in ("selector_predecessor.weight", "selector_successor.weight"):
             ne = shapes.get(name)
@@ -1443,8 +1476,10 @@ def _dflash_config_from_meta(
                 "non-causal block of 8 with a non-drafting anchor, a sliding "
                 "window, a logit softcap, the final hidden state as its last "
                 "tap and no confidence or log-SNR head")
-        # The anchor row sees the window before it as well.
-        window += 1
+        # The anchor row sees the window before it as well; the mainline
+        # converter writes the window with that row counted.
+        if not mainline:
+            window += 1
     config = DFlashConfig(
         hidden_size=hidden,
         intermediate_size=int(meta["dflash.feed_forward_length"]),
@@ -1484,6 +1519,7 @@ def _dflash_config_from_meta(
         log_snr_range=snr_range,
         sample_from_anchor=anchor,
         padded_vocab_size=padded_vocab,
+        inkling2_mainline=mainline,
         attention_sinks=any(n.endswith(".attn_sinks.weight") for n in arrays),
         **(_lilicorr_head_keys(draft_gguf_path, meta)
            if container == "lilicorr" else {}),
@@ -1790,7 +1826,11 @@ def _load_inkling2_dspark_drafter(
         f"taps={layer_ids} block_total={config.block_size} "
         f"(native {config.native_block_size}) window={config.sliding_window} "
         f"markov_rank={config.markov_rank}"
+        + (" layout=mainline" if config.inkling2_mainline else "")
     )
+    if config.inkling2_mainline:
+        arrays = inkling2_mainline_arrays(draft_gguf_path, arrays,
+                                          config.num_hidden_layers)
     d_weights, d_meta, d_stats = remap_dflash_arrays(
         arrays, kquant_meta, "dflash_dspark_inkling2")
     log(f"[mtp] drafter remap: {d_stats}")
@@ -1804,7 +1844,8 @@ def _load_inkling2_dspark_drafter(
         active_before=active_before,
         # The tap mix and the recurrent head run in fp32, as the
         # reference's F32 tensors do.
-        fp32_keep=("dspark_fuse", "mask_embd", "norm.weight"),
+        fp32_keep=("dspark_fuse", "mask_embd", "norm.weight",
+                   "markov_w2.bias"),
     )
     drafter.bind(target)
     _wire_dflash_capture(target, layer_ids)
