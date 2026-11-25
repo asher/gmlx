@@ -287,9 +287,24 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
 
     # Which files make the rungs.
     chosen: list = []                 # (quant, tier, first shard path)
+    other: dict = {}                  # first shard path -> (repo, revision, groups entry)
+    away = {t: (r, q) for t, r, q in seed.tier_files}
     if tiered:
         for tier in TIERS:
             if tier in seed.skip_tiers:
+                continue
+            if tier in away:
+                repo, quant = away[tier]
+                oc = card(repo)
+                if oc["gated"] not in (False, None):
+                    problems.append(f"{repo} is gated ({oc['gated']!r}); a pull needs a login")
+                o_groups = model_files(listing(repo, oc["sha"]))
+                first = file_for_quant(o_groups, quant)
+                if first is None:
+                    problems.append(f"{seed.name}: {repo} has no {quant} file")
+                else:
+                    other[first] = (repo, oc["sha"], o_groups[first])
+                    chosen.append((quant, tier, first))
                 continue
             first, quant, note = resolve_tier(
                 groups, tier, moe, dict(seed.tier_quants).get(tier))
@@ -329,8 +344,9 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
     rungs: list = []
     scans_by_quant: dict = {}
     for quant, tier, first in chosen:
-        _q, _ud, shards, nbytes = groups[first]
-        scans = scans_for(seed.repo, first, revision, cache)
+        repo, rev, group = other.get(first) or (seed.repo, revision, groups[first])
+        _q, _ud, shards, nbytes = group
+        scans = scans_for(repo, first, rev, cache)
         scans_by_quant[quant] = scans
         mp = model_plan(scans)
         nextn = read_int(scans[0].kv, f"{arch}.nextn_predict_layers") or 0
@@ -344,7 +360,8 @@ def record_entry(seed: Seed, recorded: dict | None, cache: str | None) -> tuple:
             notes.append(f"{seed.name} {quant}: " + "  ".join(
                 f"{cls}:{v}" for cls, v in ladder.items()))
         rungs.append((quant, tier, first, int(nbytes), int(mp.total_bytes),
-                      int(mp.table_bytes), streams_from, bool(head)))
+                      int(mp.table_bytes), streams_from, bool(head))
+                     + ((repo,) if repo != seed.repo else ()))
     rungs.sort(key=lambda r: r[3])
     if tiered:
         tiers_ = [r for r in rungs if r[1]]

@@ -52,6 +52,7 @@ class Rung:
     table_bytes: int = 0             # lookup tables a load reads from the file
     streams_from_gib: int | None = None   # MoE only; None = never streams
     head: bool = False               # this file carries a native speculation head
+    repo: str = ""                   # the repo holding the file, when not the entry's
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,7 @@ class Seed:
     head_from_class: int = 0  # the smallest memory class that keeps the native head on
     tier_quants: tuple = ()   # (tier, quant) pairs over the quant-name rule, when names mislead
     skip_tiers: tuple = ()    # tiers the entry leaves empty until a timed run picks them
+    tier_files: tuple = ()    # (tier, repo, quant): a tier from another repo's file
 
 
 _LFM_LICENSE = dict(
@@ -323,8 +325,8 @@ _SEED = (
          # describe the other layers. Q4_K_XL keeps those at Q8_0.
          tier_quants=(("high", "Q4_K_XL"),),
          # IQ4_XS decodes no faster than the balanced Q4_K_M: both keep
-         # the experts NVFP4. No fastest tier.
-         skip_tiers=("fastest",),
+         # the experts NVFP4. bartowski's Q4_0 decodes faster.
+         tier_files=(("fastest", "bartowski/Inkling-2-Mini-GGUF", "Q4_0"),),
          use="reasoning chat with images"),
     Seed("qwen3.8-27b", "Qwen3.8-27B", "unsloth/Qwen3.8-27B-GGUF", "high",
          "Strong at long documents, code and tool calls.",
@@ -496,8 +498,9 @@ def _params_label(seed: Seed, facts: dict) -> str:
 
 def _build(seed: Seed, facts: dict) -> Model:
     rungs = tuple(sorted((Rung(quant=q, tier=t, path=p, bytes=b, text_bytes=tb,
-                               table_bytes=lb, streams_from_gib=s, head=h)
-                          for q, t, p, b, tb, lb, s, h in facts.get("rungs", ())),
+                               table_bytes=lb, streams_from_gib=s, head=h,
+                               repo=repo[0] if repo else "")
+                          for q, t, p, b, tb, lb, s, h, *repo in facts.get("rungs", ())),
                          key=lambda r: r.bytes))
     drafter = None
     if seed.drafter_file:
@@ -1196,8 +1199,12 @@ def plan_bytes(plan: PullPlan) -> int:
     return plan.rung.bytes + plan_addon_bytes(plan)
 
 
+def rung_repo(m: Model, r: Rung) -> str:
+    return r.repo or m.repo
+
+
 def rung_ref(m: Model, r: Rung) -> str:
-    return f"hf:{m.repo}/{r.path}"
+    return f"hf:{rung_repo(m, r)}/{r.path}"
 
 
 class GoneFromRepo(Exception):
@@ -1215,14 +1222,17 @@ def live_plan(plan: PullPlan, listing) -> PullPlan:
 
     m, rung = plan.model, plan.rung
     files = listing(m.repo)
-    if files is not None:
-        groups = model_files(files)
+    repo = rung_repo(m, rung)
+    rfiles = files if repo == m.repo else listing(repo)
+    if rfiles is not None:
+        groups = model_files(rfiles)
         first = find_recorded(groups, rung.path, rung.quant)
         if first is None:
             have = ", ".join(sorted({q for q, *_rest in groups.values()})) or "no model files"
-            raise GoneFromRepo(f"{m.repo} has no {rung.quant} file at main now (it has: {have}); "
+            raise GoneFromRepo(f"{repo} has no {rung.quant} file at main now (it has: {have}); "
                                "pick another --quant")
         rung = replace(rung, path=first, bytes=groups[first][3])
+    if files is not None:
         tower = mmproj_file(m)
         if plan.mmproj and tower:
             if tower not in files:
@@ -1277,7 +1287,7 @@ def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
     from gmlx.load.preflight import shard_names
 
     first = shard_names(os.path.basename(plan.rung.path))[0]
-    model_path = dest_path(m.repo, first, base_dir, nest)
+    model_path = dest_path(rung_repo(m, plan.rung), first, base_dir, nest)
     pairs: dict = {"alias": m.name}
     if plan.mmproj and m.mmproj:
         pairs["mmproj"] = dest_path(m.repo, mmproj_file(m), base_dir, nest)
@@ -1293,7 +1303,7 @@ def plan_pairs(plan: PullPlan, base_dir: str, nest: bool) -> dict:
 def _plan_items(plan: PullPlan) -> list:
     """``(ref, repo, path_in_repo, bytes)`` of each file a plan pulls."""
     m = plan.model
-    items = [(rung_ref(m, plan.rung), m.repo, plan.rung.path, plan.rung.bytes)]
+    items = [(rung_ref(m, plan.rung), rung_repo(m, plan.rung), plan.rung.path, plan.rung.bytes)]
     if plan.mmproj and m.mmproj:
         tower = mmproj_file(m)
         items.append((f"hf:{m.repo}/{tower}", m.repo, tower, m.mmproj_bytes))

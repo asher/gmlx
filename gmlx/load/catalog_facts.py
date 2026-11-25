@@ -368,6 +368,7 @@ FACTS: dict = {
             ('UD-Q2_K_XL', '', 'Inkling-2-Mini-UD-Q2_K_XL.gguf', 9138716608, 9126736640, 0, 16, False),
             ('UD-IQ3_XXS', '', 'Inkling-2-Mini-UD-IQ3_XXS.gguf', 11663310784, 11651330816, 0, 24, False),
             ('UD-Q3_K_XL', '', 'Inkling-2-Mini-UD-Q3_K_XL.gguf', 13631779296, 13619799296, 0, 24, False),
+            ('Q4_0', 'fastest', 'Inkling-2-Mini-Q4_0.gguf', 15064977088, 15052999296, 0, 24, False, 'bartowski/Inkling-2-Mini-GGUF'),
             ('UD-Q4_K_M', 'balanced', 'Inkling-2-Mini-UD-Q4_K_M.gguf', 16610544608, 16598564864, 0, 24, False),
             ('UD-Q4_K_XL', 'high', 'Inkling-2-Mini-UD-Q4_K_XL.gguf', 17629760736, 17617780736, 0, 24, False),
             ('UD-Q8_K_XL', 'xhigh', 'Inkling-2-Mini-UD-Q8_K_XL.gguf', 22867452896, 22855473152, 0, 24, False),

@@ -1078,7 +1078,31 @@ def test_inkling_drafter_fit_counts_the_head_copies():
             == d.bytes + d.derived_bytes + (m.asr.bytes if m.asr else 0))
 
 
-def test_inkling_offers_no_untimed_fastest_pick():
+def test_a_tier_from_another_repo_pulls_and_pairs_from_there(tmp_path):
+    """Inkling's fastest tier is bartowski's Q4_0: the model file comes
+    from that repo and lands in its folder, the projector and drafter come
+    from Unsloth's, and registration pairs them across the two."""
     m = catalog.model("inkling-2-mini")
-    assert "fastest" not in {r.tier for r in m.rungs}
-    assert {"balanced", "high", "xhigh"} <= {r.tier for r in m.rungs}
+    fast = next(r for r in m.rungs if r.tier == "fastest")
+    assert (fast.quant, fast.repo) == ("Q4_0", "bartowski/Inkling-2-Mini-GGUF")
+    assert all(r.repo == "" for r in m.rungs if r is not fast)
+    plan = catalog.PullPlan(m, fast, True, True, False)
+    assert catalog.plan_refs(plan) == [
+        "hf:bartowski/Inkling-2-Mini-GGUF/Inkling-2-Mini-Q4_0.gguf",
+        "hf:unsloth/Inkling-2-Mini-GGUF/mmproj-BF16.gguf",
+        "hf:unsloth/Inkling-2-Mini-GGUF/dspark-Inkling-2-Mini-Q8_0.gguf"]
+    base = str(tmp_path)
+    (model_path, pairs), = catalog.plan_pairs(plan, base, True).items()
+    assert model_path == os.path.join(base, "bartowski__Inkling-2-Mini-GGUF",
+                                      "Inkling-2-Mini-Q4_0.gguf")
+    assert pairs["mmproj"] == os.path.join(base, "unsloth__Inkling-2-Mini-GGUF", "mmproj-BF16.gguf")
+    # The live listing of the file is the other repo's, the projector's the entry's.
+    repos = {"bartowski/Inkling-2-Mini-GGUF": {"Inkling-2-Mini-Q4_0.gguf": G(14.5)},
+             "unsloth/Inkling-2-Mini-GGUF": {"mmproj-BF16.gguf": G(0.7),
+                                             "dspark-Inkling-2-Mini-Q8_0.gguf": G(0.5)}}
+    live = catalog.live_plan(plan, repos.get)
+    assert live.rung.bytes == G(14.5) and live.rung.repo == fast.repo
+    assert live.model.mmproj_bytes == G(0.7)
+    gone = {**repos, "bartowski/Inkling-2-Mini-GGUF": {}}
+    with pytest.raises(catalog.GoneFromRepo, match="bartowski/Inkling-2-Mini-GGUF has no Q4_0"):
+        catalog.live_plan(plan, gone.get)
