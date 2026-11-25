@@ -86,7 +86,7 @@ def load_gguf_wire_bytes(
             if "unsupported type 44" in str(e):
                 raise RuntimeError(
                     f"{e}. Type 44 is STQ1_0 in Hy4 GGUF files; reading it "
-                    "needs mlx-kquant 0.5.14 or later") from e
+                    "needs mlx-kquant 0.5.15 or later") from e
             raise
         if "stq1_0" in s_codecs.values():
             _check_type43(shard, s_codecs, skip)

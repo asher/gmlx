@@ -67,7 +67,7 @@ from gmlx.envflags import env_bool, env_int
 
 from . import loadlog
 
-# mlx-kquant's store ops (moe_store_*), from 0.5.14 on and probed at run
+# mlx-kquant's store ops (moe_store_*), from 0.5.15 on and probed at run
 # time: one loosely typed name, so the module checks against releases
 # without them.
 _kq_store: Any = kq
