@@ -239,6 +239,23 @@ def test_install_and_probe_end_to_end(monkeypatch):
     assert cells[K] == [float(K), float(K)]
 
 
+@pytest.mark.parametrize("block_type,has_ratio", [("E", True), ("M", False)])
+def test_nemotron_h_moe_block_norm_scales_the_prediction(
+        monkeypatch, block_type, has_ratio):
+    """A Nemotron-H block has one pre-mixer ``norm`` and no
+    post_attention_layernorm; on an MoE block ("E") that norm makes the MoE
+    input, so the predictor takes its gains. Another block's ``norm`` does
+    not."""
+    model = _streaming_model(monkeypatch)
+    for layer in model.layers:
+        layer.norm = layer.post_attention_layernorm
+        del layer.post_attention_layernorm
+        layer.block_type = block_type
+    install_lookahead(model, model.layers, probe=True)
+    pred = model.layers[0].mlp.switch_mlp._kq_lookahead.predictor
+    assert (pred._ratio is not None) == has_ratio
+
+
 def test_bf16_router_scores_reach_numpy(monkeypatch):
     """A bf16 router's scores have no numpy buffer format; the predictor
     hands them over as float32 so the hook's host copy works."""

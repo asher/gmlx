@@ -135,6 +135,16 @@ def _norm_gains(norm) -> mx.array | None:
     return norm(mx.ones_like(w))
 
 
+def _moe_input_norm(layer):
+    """The norm whose output is the layer's MoE input: the post-attention
+    norm of a decoder block, or the one pre-mixer norm of a Nemotron-H MoE
+    block (``block_type == "E"``), which has no post-attention norm."""
+    norm = getattr(layer, "post_attention_layernorm", None)
+    if norm is None and getattr(layer, "block_type", None) == "E":
+        norm = getattr(layer, "norm", None)
+    return norm
+
+
 def _gate_module_select(gate):
     """Ranked-ids selection through a DeepSeek-family gate submodule
     (deepseek_v2/v3/v4, glm_moe_dsa, glm4_moe). Calls the unwrapped
@@ -543,7 +553,7 @@ def install_lookahead(model, layers, *, probe: bool = False,
     unsupported: set = set()
     for pos, li in enumerate(lis):
         predictors = []
-        src_norm = getattr(layers[li], "post_attention_layernorm", None)
+        src_norm = _moe_input_norm(layers[li])
         src_g = _norm_gains(src_norm) if src_norm is not None else None
         for d in range(1, depth + 1):
             if pos + d >= len(lis):
@@ -553,9 +563,7 @@ def install_lookahead(model, layers, *, probe: bool = False,
             if router_fn is None:
                 unsupported.add(_base_block_name(owners[dst_li]))
                 continue
-            dst_norm = getattr(
-                layers[dst_li], "post_attention_layernorm", None
-            )
+            dst_norm = _moe_input_norm(layers[dst_li])
             ratio = None
             dst_g = _norm_gains(dst_norm) if dst_norm is not None else None
             if src_g is not None and dst_g is not None:
