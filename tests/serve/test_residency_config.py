@@ -794,6 +794,16 @@ needs_metal = pytest.mark.skipif(
     reason="reads MLX's own wired limit on a Metal device")
 
 
+@pytest.fixture
+def this_mac():
+    """This Mac, not the module's 64 GB one: the chat turn sets the real
+    Metal wired limit to the working set it reads, and Metal refuses one
+    past this Mac's own."""
+    import host_box
+
+    host_box.use_real()
+
+
 @contextlib.contextmanager
 def _chat_turn_left_open():
     """A chat engine's generator after its turn, as the server keeps it
@@ -838,7 +848,7 @@ def _mlx_wired_limit(real):
 
 @needs_metal
 def test_an_image_request_after_a_chat_turn_holds_mlxs_wired_limit_at_0_from_its_build_to_its_release(
-        monkeypatch, mixed_cfg):
+        monkeypatch, mixed_cfg, this_mac):
     """The order of a served edit with prompt upsampling: the chat turn's
     generator raises MLX's wired limit to the working set and stays open,
     then the image request acquires its entry, which builds on the image
@@ -887,7 +897,7 @@ def test_an_image_request_after_a_chat_turn_holds_mlxs_wired_limit_at_0_from_its
 @pytest.mark.parametrize("path", ["the build fails",
                                   "refused after the build"])
 def test_an_image_request_that_ends_without_its_job_gives_the_wired_limit_back(
-        monkeypatch, mixed_cfg, path):
+        monkeypatch, mixed_cfg, path, this_mac):
     """A build that raises (an image part of another family, the 400) and
     a request refused after its build, which releases with no job (a fit
     refusal, a client gone before the submit): the generator's limit is
