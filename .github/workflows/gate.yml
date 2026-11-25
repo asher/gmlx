@@ -12,9 +12,14 @@ name: gate
 # The results come from this repository's refs, never a fork's, and the
 # decision is scripts/gate.py decide, which docs/internals/testing.md
 # describes.
+#
+# pull_request_target runs main's copy of this file and of gate.py with a
+# token that can post a status, so a fork's pull request gets one too. The
+# job only reads the pull request's commits with git. Never check out or
+# run its code here.
 
 on:
-  pull_request:
+  pull_request_target:
   workflow_call:
   workflow_dispatch:
     inputs:
@@ -33,6 +38,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # The token stays out of .git/config; the fetches below are public.
+          persist-credentials: false
       - name: The pull request and its results
         id: pr
         env:
@@ -49,20 +56,16 @@ jobs:
         run: |
           python3 scripts/gate.py decide --head "$HEAD_SHA" --base "$BASE" | tee status.json
       - name: Post
-        # A fork's token is read-only, so a fork pull request gets no status
-        # and its required check blocks the merge.
-        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        # Called from test.yml, the job runs with a fork pull request's
+        # read-only token and cannot post. The pull_request_target run and
+        # a dispatch post for a fork.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ steps.pr.outputs.head }}
-          HEAD_REPO: ${{ steps.pr.outputs.repo }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "$HEAD_REPO" != "$GH_REPO" ]; then
-            echo "::notice::$HEAD_REPO is a fork; no status posted"
-            exit 0
-          fi
           python3 - <<'EOF'
           import json, os, subprocess
           s = json.load(open("status.json"))
