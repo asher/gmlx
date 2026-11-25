@@ -19,6 +19,9 @@ import numpy as np
 
 KINDS = ("gate", "up", "down")
 ATTRS = {k: f"{k}_proj" for k in KINDS}
+# A layer's stacks are gate/up/down (SwitchGLU) or up/down with no gate
+# (SwitchMLP: nemotron_h, phixtral). Callers loop over a layer's own kinds.
+KIND_SETS = (tuple(sorted(KINDS)), ("down", "up"))
 
 
 class FeederRange(NamedTuple):
@@ -62,9 +65,9 @@ def ranges_or_reason(ranges) -> tuple[list[FeederRange] | None, str | None]:
         else:
             out.append(FeederRange(path, off, step, step, n_exp, kind,
                                    off, None))
-    if sorted(r.kind for r in out) != sorted(KINDS):
+    if tuple(sorted(r.kind for r in out)) not in KIND_SETS:
         kinds = "/".join(sorted(r[4] for r in ranges))
-        return None, f"expert stacks {kinds}, not gate/up/down"
+        return None, f"expert stacks {kinds}, not gate/up/down or up/down"
     if len({r.n_exp for r in out}) != 1:
         return None, "expert stacks with different expert counts"
     return out, None
@@ -93,7 +96,7 @@ def kind_bytes(ranges) -> dict[str, int] | None:
             if k in out:
                 return None
             out[k] = nb
-    return out if sorted(out) == sorted(KINDS) else None
+    return out if tuple(sorted(out)) in KIND_SETS else None
 
 
 def read_range(fd, mv, off: int) -> None:
@@ -263,7 +266,10 @@ def verify_zero_copy(li: int, entries, fds: dict[str, int]) -> None:
             per *= d
         lead = min(w.shape[0], -(-4096 // max(per, 1)))
         with mx.stream(mx.cpu):
-            head = bytes(np.array(w[:lead].reshape(-1)[:min(4096, length)]))
+            sample = w[:lead].reshape(-1)[:min(4096, length)]
+            if sample.dtype == mx.bfloat16:  # numpy has no bfloat16
+                sample = sample.view(mx.uint16)
+            head = bytes(np.array(sample))
         if os.pread(fds[path], len(head), off) != head:
             raise RuntimeError(
                 f"layer {li} {kind} stack is not a zero-copy view of its "
@@ -287,17 +293,41 @@ def slot_itemsize(nbytes_max: int, last_dims) -> int:
     return 0
 
 
-def slot_view(arr, nbytes: int, shape):
-    """First ``nbytes`` of a flat arena array as a zero-copy uint8 view of
-    ``shape``. Wide arenas (uint16/32/64, from ``slot_itemsize``) slice at
-    their granule and view back - still buffer-sharing."""
+def _itemsize(dtype) -> int:
+    """Bytes per element of an MLX weight dtype; 1 for None or anything
+    else (uint8 wire bytes, a host array's dtype), which the views keep as
+    raw bytes."""
+    import mlx.core as mx
+
+    return dtype.size if isinstance(dtype, mx.Dtype) else 1
+
+
+def typed_view(u8, shape, dtype=None):
+    """A flat uint8 byte array as a zero-copy view of a weight of ``shape``
+    and ``dtype``. K-quant stacks are uint8 already; a BF16/F16/F32 stack
+    reshapes its bytes with the last dim scaled by the itemsize and views
+    them back as the element type."""
+    import mlx.core as mx
+
+    if _itemsize(dtype) == 1:
+        return u8.reshape(shape)
+    raw = u8.reshape(tuple(shape[:-1]) + (shape[-1] * dtype.size,))
+    return mx.view(raw, dtype)
+
+
+def slot_view(arr, nbytes: int, shape, dtype=None):
+    """First ``nbytes`` of a flat arena array as a zero-copy view of
+    ``shape``: uint8, or ``dtype`` for an unquantized stack. Wide arenas
+    (uint16/32/64, from ``slot_itemsize``) slice at their granule and view
+    back - still buffer-sharing."""
     import mlx.core as mx
 
     w = arr.itemsize
     if w == 1:
-        return arr[:nbytes].reshape(shape)
-    wide = arr[: nbytes // w].reshape(tuple(shape[:-1]) + (shape[-1] // w,))
-    return mx.view(wide, mx.uint8)
+        return typed_view(arr[:nbytes], shape, dtype)
+    last = shape[-1] * _itemsize(dtype)
+    wide = arr[: nbytes // w].reshape(tuple(shape[:-1]) + (last // w,))
+    return typed_view(mx.view(wide, mx.uint8), shape, dtype)
 
 
 def _expert_loras(proj):

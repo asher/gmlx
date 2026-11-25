@@ -521,8 +521,9 @@ class PrefillFeeder:
             slot = self._slots[self._slot_of[li]]
             views = {}
             for kind, (mod, _, _, nbytes, _) in entry.items():
-                shape = getattr(mod, ATTRS[kind]).weight.shape
-                views[kind] = slot_view(slot[kind][0], nbytes, shape)
+                w = getattr(mod, ATTRS[kind]).weight
+                views[kind] = slot_view(
+                    slot[kind][0], nbytes, w.shape, w.dtype)
             self._views[(li, self._slot_of[li])] = views
         with swapped_weights(entry, views):
             yield

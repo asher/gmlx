@@ -9,7 +9,10 @@ from __future__ import annotations
 
 
 import mlx.core as mx  # noqa: E402
-from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU  # noqa: E402
+from gmlx._vendor.mlx_lm.models.switch_layers import (  # noqa: E402
+    SwitchGLU,
+    SwitchMLP,
+)
 from gmlx._vendor.mlx_lm.utils import _get_classes  # noqa: E402
 
 from gmlx.load.config_synth import synthesize_config  # noqa: E402
@@ -55,6 +58,84 @@ def test_offload_wrapper_is_numerically_transparent():
     out = glu(x, inds)
     mx.eval(out)
     assert mx.allclose(ref, out, atol=1e-6, rtol=1e-6)
+
+
+def test_offload_wraps_switch_mlp_as_up_down_stacks():
+    # nemotron_h's experts: fc1 -> relu2 -> fc2, no gate.
+    mx.random.seed(2)
+    mlp = SwitchMLP(16, 32, 4, activation=lambda h: mx.square(mx.maximum(h, 0)))
+    mx.eval(mlp.parameters())
+    x = mx.random.normal((2, 3, 16))
+    inds = mx.array(
+        [[[0, 2], [2, 1], [1, 3]], [[3, 0], [0, 1], [2, 3]]], dtype=mx.uint32
+    )
+    ref = mlp(x, inds)
+    mx.eval(ref)
+
+    class _Holder:
+        pass
+
+    layer = _Holder()
+    layer.modules = lambda: [mlp]
+    model = _Holder()
+    model.layers = [layer]
+    n, nbytes = install_expert_streaming(model)
+    assert n == 1 and nbytes > 0
+    assert mlp.__class__.__name__ == "SwitchMLP_CPUOffload"
+    # The feeders address the stacks as up_proj / down_proj.
+    assert mlp.up_proj is mlp.fc1 and mlp.down_proj is mlp.fc2
+    assert not hasattr(mlp, "gate_proj")
+    out = mlp(x, inds)
+    mx.eval(out)
+    assert mx.allclose(ref, out, atol=1e-6, rtol=1e-6)
+
+
+def test_offload_runs_bf16_switch_mlp_on_the_cpu_stream():
+    # MLX's CPU gather_mm is float32-only. An unquantized (BF16) SwitchMLP
+    # has no kquant kernel to fall back on, so the CPU branch upcasts the
+    # routed experts' slices and matches a float32 forward.
+    mx.random.seed(3)
+
+    def relu2(h):
+        return mx.square(mx.maximum(h, 0))
+
+    ref_mlp = SwitchMLP(16, 32, 4, activation=relu2, bias=True)
+    mx.eval(ref_mlp.parameters())
+    mlp = SwitchMLP(16, 32, 4, activation=relu2, bias=True)
+    mlp.update(ref_mlp.parameters())
+    mlp.set_dtype(mx.bfloat16)
+    ref_mlp.update(mlp.parameters())
+    ref_mlp.set_dtype(mx.float32)
+    x = mx.random.normal((1, 3, 16)).astype(mx.bfloat16)
+    inds = mx.array([[[0, 2], [2, 1], [1, 3]]], dtype=mx.uint32)
+    with mx.stream(mx.cpu):
+        ref = ref_mlp(x.astype(mx.float32), inds)
+        mx.eval(ref)
+
+    class _Holder:
+        pass
+
+    layer = _Holder()
+    layer.modules = lambda: [mlp]
+    model = _Holder()
+    model.layers = [layer]
+    model.parameters = lambda: {"mlp": mlp.parameters()}
+    import importlib
+
+    mlg = importlib.import_module("gmlx._vendor.mlx_lm.generate")
+    real_set_wired = mx.set_wired_limit
+    real_wired_ctx = mlg.wired_limit
+    try:
+        # Streaming mode: expert calls stay on the CPU stream.
+        assert install_expert_streaming(model, force_stream=True)[0] == 1
+        assert getattr(mlp, "_kq_cpu_only", False)
+        out = mlp(x, inds)
+        mx.eval(out)
+    finally:
+        mx.set_wired_limit = real_set_wired
+        mlg.wired_limit = real_wired_ctx
+    assert out.dtype == mx.bfloat16 and out.shape == ref.shape
+    assert mx.allclose(ref, out.astype(mx.float32), atol=2e-2, rtol=2e-2)
 
 
 def test_offload_model_wide_counts_and_idempotence():
