@@ -285,6 +285,33 @@ def test_visit_commits_leave_the_logits_unchanged(model, monkeypatch):
     np.testing.assert_array_equal(on, run(0))
 
 
+def test_an_eval_forward_leaves_out_the_gradient_rules(model, monkeypatch):
+    # The row kernels' gradient rules are graph nodes only training needs.
+    # A forward of a model in eval mode builds without them, to the bit.
+    import io
+
+    from gmlx.models.inkling2 import row_kernels
+
+    if not row_kernels.enabled():
+        pytest.skip("the row kernels run on the GPU")
+
+    def run():
+        cache = model.make_cache()
+        _logits(model, IDS[:7], cache)
+        out = model(mx.array([IDS[7:8]]), cache=cache)
+        f = io.StringIO()
+        mx.export_to_dot(f, out)
+        return np.array(out.astype(mx.float32)), f.getvalue().count("CustomTransforms")
+
+    assert not model.training
+    got, n_eval = run()
+    real = row_kernels.held
+    monkeypatch.setattr(row_kernels, "held", lambda grad=True: real(True))
+    want, n_rules = run()
+    assert n_eval == 0 < n_rules
+    np.testing.assert_array_equal(got, want)
+
+
 def test_route_counts_name_each_visit_kind(model):
     # A route check at depth reads these tags: the model builds its own
     # bias, so the wrapper alone counts every call as stock.
@@ -395,6 +422,187 @@ def test_speculative_rollback_matches_a_plain_run(model, reference, accepted):
     finally:
         spec.__class__ = plain
     np.testing.assert_allclose(got, reference[keep:], atol=2e-4, rtol=2e-4)
+
+
+def test_recorded_visits_match_the_plain_call(model, monkeypatch):
+    # Verify and decode visits replay kq records from a layout's third use,
+    # past the sliding window and across rollbacks. The logits match the
+    # plain call's to the bit.
+    from types import SimpleNamespace
+
+    kq = pytest.importorskip("mlx_kquant")
+    if not (hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")):
+        pytest.skip("kq build without records")
+
+    from gmlx.models.inkling2 import records
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    def logits(h):
+        return np.array(spec.head(h)[0].astype(mx.float32))
+
+    def run(on):
+        monkeypatch.setattr(records, "_ON", [on])
+        records.invalidate()
+        cache = spec.make_cache()
+        spec.model(mx.array([IDS[:20]]), cache)
+        _buffer_mtp_target_cache(
+            cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+        out, pos = [], 20
+        for accepted in (1, 0, 2, 3):
+            h, _, sink = spec.speculative_verify_hidden(
+                mx.array([IDS[pos:pos + 4]]), cache)
+            out.append(logits(h))
+            spec.rollback_speculative_cache(cache, sink, accepted, 4)
+            pos += accepted + 1
+        for t in IDS[pos:pos + 4]:
+            out.append(logits(spec.model(mx.array([[t]]), cache)))
+        return out
+
+    # The record machinery on any kq, direct replay or not, and unblocked
+    # by a weight swap in an earlier test (feeder_common.swapped_weights).
+    monkeypatch.setattr(records, "DIRECT_ONLY", [False])
+    monkeypatch.setattr(records, "_BLOCKED", [False])
+    spec, plain = model, type(model)
+    spec.__class__ = Inkling2SpecLM
+    try:
+        want = run(False)
+        replayed = records.STATS["replayed"]
+        got = run(True)
+    finally:
+        spec.__class__ = plain
+    assert records.STATS["replayed"] > replayed
+    for g, w in zip(got, want):
+        np.testing.assert_array_equal(g, w)
+
+
+def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
+    # Under verify_row_keep the rows past the keep route to the experts of
+    # the last kept row. The kept rows' logits, and every step after a
+    # rollback into them, match the plain verify's to the bit.
+    from types import SimpleNamespace
+
+    import gmlx.models.inkling2.model as im
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    seen: list = []
+    real = im.MoE._fused_down
+
+    def fused_down(self, x, inds):
+        if inds.shape[-2] == 4:
+            seen.append(np.array(inds).reshape(4, -1))
+        return real(self, x, inds)
+
+    monkeypatch.setattr(im.MoE, "_fused_down", fused_down)
+
+    def logits(h):
+        return np.array(spec.head(h)[0].astype(mx.float32))
+
+    def run(cut):
+        cache = spec.make_cache()
+        spec.model(mx.array([IDS[:20]]), cache)
+        _buffer_mtp_target_cache(
+            cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+        out, ids, pos = [], [], 20
+        for keep, accepted in ((1, 1), (0, 0), (2, 1), (3, 3)):
+            block = mx.array([IDS[pos:pos + 4]])
+            seen.clear()
+            if cut:
+                with spec.verify_row_keep(mx.array(keep)):
+                    h, _, sink = spec.speculative_verify_hidden(block, cache)
+            else:
+                h, _, sink = spec.speculative_verify_hidden(block, cache)
+            out.append(logits(h)[:keep + 1])
+            ids.append((keep, list(seen)))
+            spec.rollback_speculative_cache(cache, sink, accepted, 4)
+            pos += accepted + 1
+        for t in IDS[pos:pos + 4]:
+            out.append(logits(spec.model(mx.array([[t]]), cache)))
+        return out, ids
+
+    spec, plain = model, type(model)
+    spec.__class__ = Inkling2SpecLM
+    try:
+        # BF16 experts take no fused gathers: cut rows reuse row keep's ids.
+        assert not spec.row_cut_saves(4)
+        want, plain_ids = run(False)
+        got, cut_ids = run(True)
+    finally:
+        spec.__class__ = plain
+    for g, w in zip(got, want):
+        np.testing.assert_array_equal(g, w)
+    moved = False
+    for (keep, cut), (_, whole) in zip(cut_ids, plain_ids):
+        assert cut and len(cut) == len(whole)
+        for c, w in zip(cut, whole):
+            np.testing.assert_array_equal(c[:keep + 1], w[:keep + 1])
+            assert (c[keep + 1:] == c[keep]).all()
+            moved |= not (w[keep + 1:] == w[keep]).all()
+    assert moved
+
+
+@pytest.mark.parametrize("experts", ["Q4_0", "Q8_0"])
+def test_a_cut_verify_reads_no_experts_past_the_keep(tmp_path, monkeypatch,
+                                                     experts):
+    # On K-quant expert stacks the rows past the keep name no expert (kq
+    # absent=True), on the qf (Q4_0) and generic (Q8_0) kernels. The kept
+    # rows' logits, and every step after a rollback into them, match the
+    # plain verify's to the bit.
+    from types import SimpleNamespace
+
+    import mlx_kquant as kq
+
+    import gmlx
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    if "absent (bool)" not in (kq.gather_qmv_mix_ns_kq.__doc__ or ""):
+        pytest.skip("this kq build has no absent expert ids")
+    path = tmp_path / "tiny.gguf"
+    T.write(path, "root", T.values(seed=3), experts_type=experts)
+    spec = gmlx.load_model(str(path), verbose=False)[0]
+    spec.__class__ = Inkling2SpecLM
+    assert spec.row_cut_saves(4)
+    calls: list = []
+    real = kq.gather_qmv_mix_ns_kq
+
+    def mix_ns(*a, **kw):
+        calls.append(kw.get("absent", False))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(kq, "gather_qmv_mix_ns_kq", mix_ns)
+
+    def logits(h):
+        return np.array(spec.head(h)[0].astype(mx.float32))
+
+    def run(cut):
+        cache = spec.make_cache()
+        spec.model(mx.array([IDS[:20]]), cache)
+        _buffer_mtp_target_cache(
+            cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+        out, pos = [], 20
+        for keep, accepted in ((1, 1), (0, 0), (2, 1), (3, 3)):
+            block = mx.array([IDS[pos:pos + 4]])
+            if cut:
+                with spec.verify_row_keep(mx.array(keep)):
+                    h, _, sink = spec.speculative_verify_hidden(block, cache)
+            else:
+                h, _, sink = spec.speculative_verify_hidden(block, cache)
+            out.append(logits(h)[:keep + 1])
+            spec.rollback_speculative_cache(cache, sink, accepted, 4)
+            pos += accepted + 1
+        for t in IDS[pos:pos + 4]:
+            out.append(logits(spec.model(mx.array([[t]]), cache)))
+        return out
+
+    want = run(False)
+    assert calls and not any(calls)
+    calls.clear()
+    got = run(True)
+    assert any(calls)
+    for g, w in zip(got, want):
+        np.testing.assert_array_equal(g, w)
 
 
 def test_drafter_taps_are_visit_inputs(model):
@@ -625,3 +833,24 @@ def test_clearing_the_fused_slots_falls_back_to_the_members(
     assert _groups(model) == [{}] * T.LAYERS
     np.testing.assert_allclose(_logits(model, IDS), before, atol=1e-5,
                                rtol=1e-5)
+
+
+@pytest.mark.skipif(not mx.metal.is_available(), reason="kq kernels need Metal")
+def test_the_skinny_router_routes_a_verify_like_decode(monkeypatch):
+    """With GMLX_INKLING2_SKINNY_ROUTER, each row of a 4-row router call
+    has the logits of that row alone, to float32 rounding."""
+    import mlx.nn as nn
+
+    import gmlx.models.inkling2.model as im
+
+    monkeypatch.setattr(im, "_SKINNY_ROUTER", True)
+    rng = np.random.default_rng(3)
+    gate = nn.Linear(256, 128, bias=False)
+    gate.weight = mx.array(rng.standard_normal((128, 256)) * 0.05,
+                           dtype=mx.float32)
+    x = mx.array(rng.standard_normal((1, 4, 256)), dtype=mx.float32)
+    rows = im._gate_logits(gate, x)
+    for i in range(4):
+        one = im._gate_logits(gate, x[:, i:i + 1])
+        np.testing.assert_allclose(np.array(rows[:, i:i + 1]),
+                                   np.array(one), rtol=0, atol=2e-6)

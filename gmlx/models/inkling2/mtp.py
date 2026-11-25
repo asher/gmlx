@@ -20,6 +20,7 @@ after the accepted prefix is a slice of the recorded window.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -95,6 +96,24 @@ class SpecHooks:
         sink: list = []
         _, packed = self._forward(verify_input, prompt_cache, conv_sink=sink)
         return packed, {}, sink
+
+    @contextlib.contextmanager
+    def verify_row_keep(self, keep: mx.array):
+        """A verify built inside this gives the rows past ``keep`` drafts
+        (a lazy scalar) the experts of row ``keep``. The rows up to it are
+        unchanged; the caller uses none of the rows past it."""
+        prev = (getattr(im._ROW_KEEP, "keep", None),
+                getattr(im._ROW_KEEP, "src", None))
+        im._ROW_KEEP.keep, im._ROW_KEEP.src = keep, {}
+        try:
+            yield
+        finally:
+            im._ROW_KEEP.keep, im._ROW_KEEP.src = prev
+
+    def row_cut_saves(self, rows: int) -> bool:
+        """Whether a ``rows``-row verify under ``verify_row_keep`` reads no
+        expert for its cut rows (:func:`model.row_cut_saves`)."""
+        return im.row_cut_saves(self.model, rows)
 
     def rollback_speculative_cache(
         self, prompt_cache, gdn_states, accepted, block_size: int

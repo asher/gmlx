@@ -274,13 +274,15 @@ def dflash_container(names) -> str | None:
     DFlash 2 the candidate selector, plain DFlash ``attn_q`` with per-head
     QK-norms and no hyper-connections. The Inkling 2 DSpark adds a
     recurrent head whose correction runs through the target's head
-    (``dspark_hidden_out``)."""
+    (``dspark_hidden_out``), or in llama.cpp's mainline layout through its
+    own ``markov_w2`` beside the head's context mix (``markov_ctx_mix``)."""
     names = list(names)
     if any(n.startswith("output_hc_") or ".attn_q_a" in n for n in names):
         return "dspark"
     if any(n.startswith("lilicorr.") for n in names):
         return "lilicorr"
-    if any(n.startswith("dspark_hidden_out") for n in names):
+    if any(n.startswith(("dspark_hidden_out", "markov_ctx_mix"))
+           for n in names):
         return "dflash_dspark_inkling2"
     if any(n.startswith("markov_w1") for n in names):
         return "dflash_dspark"

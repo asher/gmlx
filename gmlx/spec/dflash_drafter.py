@@ -130,6 +130,17 @@ class _Ring(list):
     skip: Optional[tuple] = None
 
 
+def _cache_arrays(caches) -> list:
+    """The arrays of a drafter's caches: each KV cache's keys and values,
+    and the entries of the rest (an Inkling 2 DSpark context feature)."""
+    out = []
+    for c in caches:
+        parts = ((c.keys, c.values) if hasattr(c, "keys")
+                 else getattr(c, "cache", ()))
+        out.extend(x for x in parts if x is not None)
+    return out
+
+
 def _note_tokens(ring, tokens) -> None:
     """Mark the blocks of ``tokens`` used in ``ring``. Drops the skipped run
     when a token lands inside it, so the next draft picks a new one."""
@@ -355,6 +366,10 @@ class DFlashConfig:
     # Rows of the target's head and token tables when they pad past
     # vocab_size (Inkling 2); None means vocab_size.
     padded_vocab_size: Optional[int] = None
+    # An Inkling 2 DSpark in llama.cpp's mainline layout: tap mixes stored
+    # as weights, not logits, and a correction head of its own (markov_w2)
+    # in place of hidden_out through the target's head.
+    inkling2_mainline: bool = False
     # Per-head attention sinks in every draft layer (Nemotron drafters).
     attention_sinks: bool = False
     # Per layer, whether it rotates; empty means every layer does.
@@ -1620,8 +1635,7 @@ class DFlashDrafter(nn.Module):
             self._tail.accept(verify_hidden, int(accepted) + 1)
         self.append_context(self._captures(verify_hidden[:, : int(accepted) + 1]))
         if _COMMIT_ASYNC:
-            mx.async_eval([x for c in self._cache for x in (c.keys, c.values)
-                           if x is not None])
+            mx.async_eval(_cache_arrays(self._cache))
 
     def accept_mark(self, rows: int):
         """What ``accept_undo`` needs to take back the next accept of

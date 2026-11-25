@@ -120,6 +120,21 @@ def test_the_router_picks_the_ops_paths_experts(biased, rows, dtype):
     assert (np.diff(picked, axis=-1) <= 0).all()
 
 
+def test_the_router_writes_float32_weights_with_the_dtypes_bits():
+    # A kq score mix reads float32: the weights rounded to the model dtype
+    # first, as a cast after the router gives them.
+    mx.random.seed(4)
+    logits = mx.random.normal((1, 4, 128)) * 3
+    bias = mx.random.normal((128,)) * 0.1
+    inds, weights = row_kernels.router(logits, bias, 8, 8.0, mx.bfloat16)
+    inds32, weights32 = row_kernels.router(logits, bias, 8, 8.0, mx.bfloat16,
+                                           mx.float32)
+    assert weights32.dtype == mx.float32
+    np.testing.assert_array_equal(np.array(inds32), np.array(inds))
+    np.testing.assert_array_equal(np.array(weights32),
+                                  np.array(weights.astype(mx.float32)))
+
+
 def test_the_router_gradient_comes_from_the_ops_path():
     mx.random.seed(5)
     logits = mx.random.normal((1, 3, 128))
@@ -225,6 +240,30 @@ def test_the_short_conv_matches_the_ops_path(L, dynamic, dtype):
     np.testing.assert_array_equal(np.array(window), np.array(want_window))
     np.testing.assert_array_equal(np.array(kept),
                                   np.array(want_window[:, L:]))
+
+
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_the_short_conv_adds_a_residual_with_its_bits(dynamic):
+    # The residual form gives the bits of _residual after the plain kernel,
+    # and its gradient passes straight to the residual.
+    mx.random.seed(12)
+    B, L, C, width = 1, 4, 64, 4
+    state = mx.random.normal((B, width - 1, C))
+    x = mx.random.normal((B, L, C)).astype(mx.bfloat16)
+    res = (mx.random.normal((B, L, C)) * 4).astype(mx.bfloat16)
+    w = mx.random.normal((C, width))
+    dyn = (mx.random.normal((B, L, 4 * width)).astype(mx.bfloat16)
+           if dynamic else None)
+    ops = M._conv_dynamic if dynamic else M._conv_static
+    out, kept = row_kernels.conv(state, x, w, dyn, False, ops)
+    got, got_kept = row_kernels.conv(state, x, w, dyn, False, ops, res)
+    want = M._residual(res, out)
+    np.testing.assert_array_equal(np.array(got.view(mx.uint16)),
+                                  np.array(want.view(mx.uint16)))
+    np.testing.assert_array_equal(np.array(got_kept), np.array(kept))
+    g = mx.grad(lambda r: row_kernels.conv(
+        state, x, w, dyn, False, ops, r)[0].astype(mx.float32).sum())(res)
+    np.testing.assert_array_equal(_f32(g), np.ones((B, L, C), np.float32))
 
 
 def test_the_short_conv_gradient_comes_from_the_ops_path():

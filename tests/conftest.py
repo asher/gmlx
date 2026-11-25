@@ -370,6 +370,16 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _kq_env_reads_live():
+    # A model that records kq graphs turns on kq's cache of KQ_* reads for
+    # the process; the next test reads its levers fresh.
+    yield
+    kq = sys.modules.get("mlx_kquant")
+    if kq is not None and hasattr(kq, "env_cache"):
+        kq.env_cache(False)
+
+
+@pytest.fixture(autouse=True)
 def _no_hf_cache_writes():
     # The guard refuses each write; this fails the test that tried one,
     # even when its code caught the error.

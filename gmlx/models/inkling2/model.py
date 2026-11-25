@@ -23,6 +23,7 @@ through four cross-pass messages, gated into the Q, K, V and FFN inputs.
 Every layer visit keeps its own KV and convolution state.
 """
 
+import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,7 @@ from gmlx._vendor.mlx_lm.models.base import BaseModelArgs
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
 
 from gmlx.cache.attention import create_ssm_mask
+from gmlx.envflags import env_bool
 from gmlx.cache.kv_cache import (
     ArraysCache,
     BatchKVCache,
@@ -43,7 +45,7 @@ from gmlx.cache.kv_cache import (
     RotatingKVCache,
 )
 from gmlx.load.row_fusion import fuse_float_rows, fuse_kquant_rows, split_rows
-from gmlx.models.inkling2 import row_kernels
+from gmlx.models.inkling2 import records, row_kernels
 from gmlx.models.kimi_k3 import SituActivation
 from gmlx.upstream.attn_hd512 import note_route
 
@@ -69,6 +71,76 @@ _BANDED_ELEMENTS = 1 << 26
 
 # The epsilon of the unweighted norms in the depth mix and the controllers.
 _MIX_EPS = 1e-6
+
+# The router's float32 gate matmul at 2 to 16 rows runs on kq.skinny_matmul,
+# which keeps float32 where MLX's matmul rounds its inputs and is faster at
+# verify widths; one row keeps MLX's matrix-vector kernel.
+# GMLX_INKLING2_SKINNY_ROUTER=0 keeps MLX's matmul.
+_SKINNY_ROUTER = env_bool("GMLX_INKLING2_SKINNY_ROUTER", True)
+
+# A verify built inside SpecHooks.verify_row_keep: the drafts it keeps (a
+# lazy scalar) and the row maps of each width. Rows past the keep name no
+# expert where the fused gathers take absent ids, and otherwise read the
+# experts of the last kept row, so the gathers read only the kept rows'
+# experts. Per thread: the round builds on its own thread.
+_ROW_KEEP = threading.local()
+# GMLX_INKLING2_ROW_CUT_ABSENT=0 gives the rows past the keep the last kept
+# row's experts even where the gathers take absent ids.
+_ROW_CUT_ABSENT = env_bool("GMLX_INKLING2_ROW_CUT_ABSENT", True)
+
+
+def _row_keep_set() -> bool:
+    return getattr(_ROW_KEEP, "keep", None) is not None
+
+
+def _cut_rows(inds: mx.array) -> mx.array:
+    """``inds`` [..., L, k] with rows past the keep given the ids of the
+    last kept row; unchanged outside a cut verify."""
+    keep = getattr(_ROW_KEEP, "keep", None)
+    if keep is None or inds.ndim < 2 or inds.shape[-2] < 2:
+        return inds
+    L = inds.shape[-2]
+    src = _ROW_KEEP.src.get(L)
+    if src is None:
+        src = mx.minimum(mx.arange(L, dtype=mx.int32), keep.astype(mx.int32))
+        _ROW_KEEP.src[L] = src
+    return mx.take(inds, src, axis=-2)
+
+
+def row_cut_saves(model, rows: int) -> bool:
+    """Whether a ``rows``-row verify under ``verify_row_keep`` costs less
+    for its cut rows in every MoE layer: kq reads no expert for an absent
+    id, or its gate/up kernels read the kept row's experts once for the
+    rows that repeat them. A layer with neither reads every repeated
+    expert again (a kq without absent ids, on q4_0 or the k-quants)."""
+    from gmlx.stream.moe_experts import expert_controls_active
+
+    found = False
+    for m in model.modules():
+        if not isinstance(m, MoE):
+            continue
+        sw = m.switch_mlp
+        pairs = rows * m.args.num_experts_per_tok
+        ready = getattr(sw, "absent_ready", None)
+        dedupes = getattr(sw, "dedupes_rows", None)
+        if expert_controls_active(m) or not (
+                (_ROW_CUT_ABSENT and callable(ready) and ready(pairs))
+                or (callable(dedupes) and dedupes(rows, pairs))):
+            return False
+        found = True
+    return found
+
+
+def _absent_rows(inds: mx.array) -> mx.array:
+    """``inds`` [..., L, k] with the rows past the keep set to ABSENT_ID."""
+    from gmlx.load.modules import ABSENT_ID
+
+    L = inds.shape[-2]
+    gone = _ROW_KEEP.src.get(-L)
+    if gone is None:
+        gone = (mx.arange(L) > _ROW_KEEP.keep)[:, None]
+        _ROW_KEEP.src[-L] = gone
+    return mx.where(gone, mx.array(ABSENT_ID, dtype=inds.dtype), inds)
 
 
 @dataclass
@@ -118,11 +190,14 @@ class ModelArgs(BaseModelArgs):
                 "inkling2: variable loop counts are not supported")
 
 
-def _rms(x: mx.array, eps: float = _MIX_EPS) -> mx.array:
-    """Unweighted RMS norm in float32."""
+def _rms(x: mx.array, eps: float = _MIX_EPS, dtype=mx.float32) -> mx.array:
+    """Unweighted RMS norm in float32, cast to ``dtype``."""
     if row_kernels.norm_eligible(x, None):
-        return row_kernels.rms_norm(x, None, eps, mx.float32)
-    return mx.fast.rms_norm(x.astype(mx.float32), None, eps)
+        return row_kernels.rms_norm(x, None, eps, dtype)
+    if dtype == x.dtype:
+        # Sums in float32 and rounds once: the bits of the cast form.
+        return mx.fast.rms_norm(x, None, eps)
+    return mx.fast.rms_norm(x.astype(mx.float32), None, eps).astype(dtype)
 
 
 # Decode runs these small chains about a hundred times per token each, so
@@ -624,11 +699,12 @@ class Layer(nn.Module):
             self.loop = LoopControl(dim, loop["gate_rank"])
 
     def _convolve(self, x, weight, dynamic, cache, slot, pad_mask,
-                  sink=None):
+                  sink=None, res=None):
         """Causal short convolution with a residual. ``dynamic`` adds
         per-head input-dependent taps. ``cache`` slot ``slot`` keeps the
         last ``width - 1`` inputs. ``sink`` receives (cache, slot, window)
-        for a speculative rollback."""
+        for a speculative rollback. ``res`` is then added as
+        ``_residual(res, out)`` does, in the conv kernel where it runs."""
         B, L, C = x.shape
         n_keep = self.width - 1
         if pad_mask is not None:
@@ -640,13 +716,18 @@ class Layer(nn.Module):
                                    and not cache.history_capacity)
         if direct and row_kernels.conv_eligible(state, x, weight, dynamic):
             ops = _conv_static if dynamic is None else _conv_dynamic
+            fold = res is not None and res.shape == x.shape and (
+                res.dtype == x.dtype)
             outs = row_kernels.conv(state, x, weight, dynamic,
-                                    sink is not None, ops)
+                                    sink is not None, ops,
+                                    res if fold else None)
             if cache is not None:
                 cache[slot] = outs[1]
                 if sink is not None:
                     sink.append((cache, slot, outs[2]))
-            return outs[0]
+            if res is None or fold:
+                return outs[0]
+            return _residual(res, outs[0])
         if dynamic is None:
             window, out = _conv_static(state, x, weight)
         else:
@@ -655,16 +736,35 @@ class Layer(nn.Module):
             cache.update_window(slot, window, n_keep, lengths=cache.lengths)
             if sink is not None:
                 sink.append((cache, slot, window))
-        return out
+        return out if res is None else _residual(res, out)
 
     def __call__(self, h, ip, blocks, cache, pad_mask, positions,
                  messages=None, conv_sink=None):
         """Run this layer as physical layer ``ip`` of the block schedule.
         ``cache`` is (conv ArraysCache, attention cache) for this visit."""
         conv_cache, kv_cache = cache if cache is not None else (None, None)
+        L = h.shape[1]
+        out = (None if _row_keep_set() else
+               records.visit(self, h, ip, blocks, conv_cache, kv_cache,
+                             pad_mask, positions, messages, conv_sink))
+        if out is None:
+            q, k, v, r, sink, gate = self.attn_inputs(
+                h, blocks, conv_cache, pad_mask, positions, messages,
+                conv_sink)
+            att = self.attn_core(q, k, v, r, sink, kv_cache)
+            out = self.tail(h, ip, blocks, att, gate, conv_cache, pad_mask,
+                            messages, conv_sink)
+        if conv_cache is not None:
+            conv_cache.advance(L)
+        return out
+
+    def attn_inputs(self, h, blocks, conv_cache, pad_mask, positions,
+                    messages, conv_sink):
+        """The attention operands of ``h``: q, k and v as [B, H, L, D],
+        the bias rows r and sink in float32, and the output gate. Writes
+        the K and V convolution states (slots 0 and 1)."""
         attn = self.self_attn
         B, L, D = h.shape
-        inp_sa = h
 
         if hasattr(self, "attn_res_query"):
             mixed = mix_rows(blocks, h, self.attn_res_query, h.dtype)
@@ -710,34 +810,47 @@ class Layer(nn.Module):
                  attn.qk_clip, tau, dtype)
         k = clip(k.reshape(B, L, self.n_kv_heads, self.head_dim), None,
                  attn.qk_clip, None, dtype)
-        v = _rms(v.reshape(B, L, self.n_kv_heads, self.head_dim), attn.eps)
+        v = _rms(v.reshape(B, L, self.n_kv_heads, self.head_dim), attn.eps,
+                 dtype)
         r = clip(r.reshape(B, L, self.n_heads, attn.rel_length),
                  attn.rel_clip, attn.rel_clip_threshold, tau)
         sink = sink.astype(mx.float32)
 
         q = q.transpose(0, 2, 1, 3)
         k = k.transpose(0, 2, 1, 3)
-        v = v.astype(dtype).transpose(0, 2, 1, 3)
+        v = v.transpose(0, 2, 1, 3)
+        return q, k, v, r, sink, gate
+
+    def attn_core(self, q, k, v, r, sink, kv_cache) -> mx.array:
+        """The cache append and the attention of ``attn_inputs``'s
+        operands: [B, H, L, D]."""
         _refuse_quantized(kv_cache)
         key_mask = None
         if kv_cache is not None:
             # A batch cache's mask covers the keys the update returns, so
             # it is built before the update.
-            key_mask = _pad_key_mask(kv_cache, L)
+            key_mask = _pad_key_mask(kv_cache, q.shape[2])
             k, v = kv_cache.update_and_fetch(k, v)
-        out = attn.attend(q, k, v, r, sink, kv_cache, key_mask)
+        return self.self_attn.attend(q, k, v, r, sink, kv_cache, key_mask)
+
+    def tail(self, inp_sa, ip, blocks, out, gate, conv_cache, pad_mask,
+             messages, conv_sink) -> mx.array:
+        """The rest of the visit from the attention output ``out``: the
+        gate, the output projection, the residual or a new block, and the
+        FFN. Writes convolution slots 2 and 3."""
+        attn = self.self_attn
+        B, L, _ = inp_sa.shape
+        dtype = inp_sa.dtype
         if row_kernels.gate_eligible(out, gate):
             out = row_kernels.gate(out, gate, _gate)
         else:
             out = _gate(out.transpose(0, 2, 1, 3).reshape(B, L, -1), gate)
-        out = self._convolve(attn.o_proj(out), attn.post_conv, None,
-                             conv_cache, 2, pad_mask, conv_sink)
-
-        if ip % self.block_size == 0:
+        new_block = ip % self.block_size == 0
+        h = self._convolve(attn.o_proj(out), attn.post_conv, None,
+                           conv_cache, 2, pad_mask, conv_sink,
+                           None if new_block else inp_sa)
+        if new_block:
             push_block(blocks, inp_sa)
-            h = out
-        else:
-            h = _residual(inp_sa, out)
         ffn_inp = h
 
         x = mix_rows(blocks, h, self.ffn_res_query, dtype)[0]
@@ -745,11 +858,8 @@ class Layer(nn.Module):
             x = self.loop.ffn(x, messages[3])
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
-        x = self._convolve(x, self.ffn_post_conv, None, conv_cache, 3,
-                           pad_mask, conv_sink)
-        if conv_cache is not None:
-            conv_cache.advance(L)
-        return _residual(ffn_inp, x)
+        return self._convolve(x, self.ffn_post_conv, None, conv_cache, 3,
+                              pad_mask, conv_sink, ffn_inp)
 
 
 def _pad_key_mask(cache, n_queries: int):
@@ -781,6 +891,23 @@ def _router(k: int, scale: float, biased: bool, dtype):
     return mx.compile(run)
 
 
+def _gate_logits(gate: nn.Linear, x: mx.array) -> mx.array:
+    """The router logits of ``x`` in float32 (see ``_SKINNY_ROUTER``),
+    which reads a half ``x`` as is."""
+    rows = x.size // x.shape[-1]
+    w = getattr(gate, "weight", None)
+    if (_SKINNY_ROUTER and 2 <= rows <= 16 and "bias" not in gate
+            and w is not None and w.dtype == mx.float32
+            and x.shape[-1] % 4 == 0
+            and mx.default_device() == mx.gpu):
+        import mlx_kquant as kq
+
+        if hasattr(kq, "skinny_matmul"):
+            y = kq.skinny_matmul(x.reshape(rows, x.shape[-1]), w)
+            return y.reshape(*x.shape[:-1], w.shape[0])
+    return gate(x.astype(mx.float32))
+
+
 class MoE(nn.Module):
     """Sigmoid-routed experts with a selection bias, normalized weights
     times ``expert_weights_scale``, and situ."""
@@ -800,16 +927,31 @@ class MoE(nn.Module):
         from gmlx.stream.moe_experts import expert_controls_active
 
         args = self.args
-        logits = self.gate(x.astype(mx.float32))
+        logits = _gate_logits(self.gate, x)
         bias = self.e_score_correction_bias if args.use_gate_bias else None
         route = _router(args.num_experts_per_tok, args.expert_weights_scale,
                         bias is not None, x.dtype)
         if row_kernels.router_eligible(logits, args.num_experts_per_tok):
+            # A kq score mix reads float32 weights: the router writes them
+            # rounded to x's dtype, the bits of a cast after it.
+            sw = self.switch_mlp
+            mix32 = (getattr(sw, "_kq_mix_scores", False)
+                     and not getattr(sw, "_kq_scores_sink", False)
+                     and not expert_controls_active(self))
             inds, weights = row_kernels.router(
                 logits, bias, args.num_experts_per_tok,
-                args.expert_weights_scale, x.dtype)
+                args.expert_weights_scale, x.dtype,
+                mx.float32 if mix32 else None)
         else:
             inds, weights = route(logits, bias)
+        if _row_keep_set() and inds.shape[-2] > 1:
+            sw = self.switch_mlp
+            absent_ok = getattr(sw, "absent_ok", None)
+            if (_ROW_CUT_ABSENT and absent_ok is not None
+                    and not expert_controls_active(self)
+                    and absent_ok(x, inds)):
+                return sw(x, _absent_rows(inds), weights, absent=True)
+            inds = _cut_rows(inds)
 
         if expert_controls_active(self):
             from gmlx.stream.moe_experts import _apply_expert_controls
@@ -915,7 +1057,7 @@ class Inkling2Model(nn.Module):
         trunk_sink: Optional[list] = None,
         conv_sink: Optional[list] = None,
     ):
-        with row_kernels.held():
+        with row_kernels.held(grad=self.training):
             return self._forward(inputs, cache, input_embeddings,
                                  capture_layer_ids, hidden_sink, embed_mask,
                                  trunk_sink, conv_sink)

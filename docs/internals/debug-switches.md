@@ -260,7 +260,13 @@ fusions.
 | `GMLX_HY4_SWA_ROLL=0` | Keep every key on Hy4-flash sliding-window layers instead of the window alone. Their memory then grows with the context. |
 | `GMLX_HY4_KEYS_DENSE=0` | Expand Hy4-flash per-head keys through the K-quant gather instead of a matmul on the dequantized stack. |
 | `GMLX_HY4_ROW_KERNEL=0` | Build a Hy4-flash decode step's key and query rows on the op chain instead of one kernel each. Output is bit-identical. |
+| `GMLX_INKLING2_DRAFT_HEAD_BITS=<n>` | Bits of the head copy the Inkling 2 DSpark draft rows read (default 4); 0 reads the target's head. Verify keeps the target's head. |
+| `GMLX_INKLING2_RECORDS=1` | Replay each Inkling 2 decode and verify layer visit as two kq records instead of building it. Less host time, more GPU time. Bit-identical. |
+| `GMLX_INKLING2_RECORDS_MAX=<n>` | Cap the kq record handles Inkling 2 holds (default 2048). Layouts past the cap run plain. |
 | `GMLX_INKLING2_ROW_KERNEL=0` | Run Inkling 2's decode and verify kernels, the fused verify attention among them, as op chains. Output matches to rounding. |
+| `GMLX_INKLING2_ROW_CUT=<p>` | Keep only the leading drafts whose DSpark chance stays at or above `p`; 0 is off. Default 0.3 where every expert layer can skip or share cut rows, else 0. |
+| `GMLX_INKLING2_ROW_CUT_ABSENT=0` | With `GMLX_INKLING2_ROW_CUT` on, give cut verify rows the last kept row's experts instead of no experts. |
+| `GMLX_INKLING2_SKINNY_ROUTER=0` | Compute Inkling 2 router logits at 2 to 16 rows with MLX's matmul, which rounds its float32 inputs, instead of the float32 skinny kernel. |
 | `GMLX_HY4_KQ_ROUTER=0` | Run a Hy4-flash decode step's expert routing as an op chain instead of one mlx-kquant dispatch. |
 | `GMLX_HY4_ROUTER_SPLIT=0` | Compute Hy4-flash router logits at decode widths with the stock matmul instead of the split-sum kernel. |
 | `GMLX_HY4_IMAGE_POS_1D=1` | Rotate Hy4-flash image slots at their slot index, as llama.cpp does, instead of the reference's (t, h, w) positions. |
