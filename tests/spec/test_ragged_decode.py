@@ -96,12 +96,19 @@ def unified():
     [
         (4096, [0, 0, 0]),            # uniform, unpadded
         (14772, [248, 217, 0]),       # ragged pads, one bucket (live d14k c3 shape)
-        (4096, [0, 1000, 2000]),      # wide pad spread, still one bucket
+        # Wide pad spread, one bucket on every GPU family. At 4096 the
+        # shorter rows drop under the GQA two-pass threshold on base-class
+        # GPUs and the batch straddles plans.
+        (8192, [0, 1000, 2000]),
     ],
 )
 @_NEEDS_GPU
 def test_same_bucket_is_bit_exact(unified, k_size, pads):
     """Buckets agree -> seam keeps the stock plan -> no drift at all."""
+    from gmlx.models.qwen35.attn import _qwen3_5_sdpa_vector_plan
+
+    plans = {_qwen3_5_sdpa_vector_plan(k_size - p, Q_HEADS, KV_HEADS) for p in pads}
+    assert len(plans) == 1, f"case straddles plans on this GPU: {plans}"
     got, ref = _run(k_size, pads)
     assert got is not None, "kernel declined a same-bucket batch"
     assert mx.array_equal(got, ref), "same-bucket ragged decode drifted from per-row SDPA"
