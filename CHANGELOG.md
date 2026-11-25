@@ -12,6 +12,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `gmlx pull qwen3.8-flash-next` takes its Q6_K file beside the model.
 - Hy4 GGUFs run, including the STQ1_0 build, and take image input through
   the Hy4 VL mmproj. STQ1_0 files need mlx-kquant 0.5.14 or later.
+- `gmlx pull inkling-2-mini --quant fastest` pulls bartowski's Q4_0 file,
+  which decodes faster than the balanced tier.
 
 ### Changed
 
