@@ -10,14 +10,18 @@ import mlx_kquant as kq
 import numpy as np
 import pytest
 
+from helpers import _real_apple_gpu
 from mlx.utils import tree_flatten
 
 import gmlx.models.qwen4_exp.model as q4
 
 from test_qwen4exp_gdn_verify_v2 import _lm
 
-pytestmark = pytest.mark.skipif(
-    not hasattr(kq, "fuse_graph"), reason="kq build without fuse_graph")
+pytestmark = [
+    pytest.mark.skipif(
+        not hasattr(kq, "fuse_graph"), reason="kq build without fuse_graph"),
+    pytest.mark.skipif(not _real_apple_gpu(), reason="GPU kernels"),
+]
 
 # (rows, kept rows): full accepts and rollbacks of each width often enough
 # that every input layout is recorded and then replayed.
