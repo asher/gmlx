@@ -4283,6 +4283,12 @@ class Qwen4ExpModel(nn.Module):
         h = input_embeddings if input_embeddings is not None else self.embed_tokens(inputs)
         B, T, D = h.shape
         h = mx.broadcast_to(h[:, :, None, :], (B, T, self.hc, D))
+        # A verify whose records go to command buffers of ours as they are
+        # reached (verify_bound), or None. Its input goes to the GPU first:
+        # after a row cut the GPU idles until this submission.
+        vb = _vb.current() if gdn_sink is not None else None
+        if vb is not None:
+            vb.submit([h])
         if cache is None:
             cache = [None] * len(self.layers)
         if self._qsa_dense_batch:
@@ -4307,15 +4313,14 @@ class Qwen4ExpModel(nn.Module):
             for layer, c in zip(self.layers, cache):
                 if "ple" in layer:
                     layer.ple.rows_ahead(inputs, c, table)
-        # A verify whose records go to command buffers of ours as they are
-        # reached (verify_bound), or None.
-        vb = _vb.current() if gdn_sink is not None else None
-        if vb is not None:
-            _vb.prepare(_bound_prepare, self, cache, h, vb)
         for li, (layer, c) in enumerate(zip(self.layers, cache)):
             mask = ssm_mask if layer.is_linear else fa_mask
             if vb is not None:
                 vb.layer(li)
+                if li == self.fa_idx:
+                    # Here, not ahead of the first layer: the GPU runs the
+                    # layers below while the host prepares.
+                    _vb.prepare(_bound_prepare, self, cache, h, vb)
             if (_VERIFY_LAYER_HOOK is not None and gdn_sink is not None
                     and not (vb is not None and vb.live)):
                 # Not under a bound verify: a mark is a lazy node, and the
