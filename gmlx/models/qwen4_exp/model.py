@@ -3804,7 +3804,8 @@ def _fused_qsa_whole(layer, h, c, mask, positions, table):
             a = layer.self_attn
             r, topk = a.ratio, a.indexer.block_topk
             _vb.note(layer, f"topk {topk}" if topk != 512 else
-                     "dense depth" if (c.offset + 1) // r <= topk else "state")
+                     "dense depth" if (c.offset + 1) // r <= topk else
+                     "state: " + W._state(a, c, L))
         return _fused_qsa_whole_dense(layer, h, c, table)
     vals, nb_new = st
     key = _whole_key(h.shape, h.dtype, c, L)

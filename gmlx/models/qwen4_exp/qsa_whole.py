@@ -132,27 +132,38 @@ def state(attn, cache, L: int):
     it mirrors is the paged rows attention over a base and a tail, with
     the fused scorer, every query sparse and the new block keys in the
     block tail."""
+    st = _state(attn, cache, L)
+    return None if isinstance(st, str) else st
+
+
+def _state(attn, cache, L: int):
+    """``state``, or a word for why not (the stats of verify_bound)."""
     idx = attn.indexer
     r, topk = attn.ratio, idx.block_topk
     off, tl = cache.offset, cache._tl
     kb, kt = cache._kb, cache._kt
     cap = cache._tail_rows()
-    if (kb is None or kt is None or cache._ib is None
-            or cache.pos is not None or not 1 <= L <= 8
-            or L > cap or kt.shape[0] != 1 or kt.dtype != kb.dtype
-            or tl + L > cap or cache.blocks is None):
-        return None
+    if kb is None or kt is None or cache._ib is None:
+        return "no tail"
+    if (cache.pos is not None or not 1 <= L <= 8
+            or L > cap or kt.shape[0] != 1 or kt.dtype != kb.dtype):
+        return "form"
+    if tl + L > cap:
+        return "tail full"
+    if cache.blocks is None:
+        return "no blocks"
     if (off + 1) // r <= topk or topk != 512:
-        return None
+        return "dense"
     nbb, nb_old = cache._nbb, cache.n_blocks
     nb_new = (off + L) // r
     nt = nb_old - nbb
     m = nb_new - nb_old
-    if (nbb < 1 or nbb != cache.blocks.shape[1] or nt < 0 or m < 0
-            or m > MAX_NEW or nt + m > cap // r):
-        return None
+    if nbb < 1 or nbb != cache.blocks.shape[1]:
+        return "block base"
+    if nt < 0 or m < 0 or m > MAX_NEW or nt + m > cap // r:
+        return "block tail"
     if cache._bt is None and nt:
-        return None
+        return "no block tail"
     if L == 1:
         return (off, tl, off - tl, nt, nb_old, off - 1), nb_new
     return (off, tl, off - tl, nt, nb_old), nb_new
