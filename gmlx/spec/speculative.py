@@ -1559,10 +1559,14 @@ def _owned_decode_rounds(
     if not callable(_hold_rows):
         _hold_rows = None
 
-    def _build_verify(drafts: mx.array, first: mx.array | None = None):
-        """``first`` is the round's bonus as a [1, 1] array not yet read."""
+    def _build_verify(drafts: mx.array, first: mx.array | None = None,
+                      now: bool = False):
+        """``first`` is the round's bonus as a [1, 1] array not yet read.
+        ``now``: the caller submits this verify at once and never drops it
+        unevaluated."""
         with mx.stream(generation_stream), lora_rows.published([row_uid]), \
-                _verify_marks():
+                _verify_marks(), \
+                (_verify_submit.now() if now else contextlib.nullcontext()):
             verify_input = mx.concatenate(
                 [mx.array([[b]], dtype=token_dtype) if first is None
                  else first, drafts], axis=1)
@@ -1845,7 +1849,9 @@ def _owned_decode_rounds(
                         with _row_keep_cm(row_keep):
                             verify = _build_verify(draft_tokens)
                     else:
-                        verify = _build_verify(draft_tokens)
+                        verify = _build_verify(
+                            draft_tokens,
+                            now=cut_snap is None and snap is None)
                     if cut_snap is not None:
                         draft_src = draft_tokens
                         n_cut = drafter.pending_row_cut()     # waits for the draft
@@ -1861,7 +1867,8 @@ def _owned_decode_rounds(
                                 _reuse_rows(prompt_cache)
                             draft_tokens = _cut_drafts(draft_tokens, n_cut)
                             bs = n_cut + 1
-                            verify = _build_verify(draft_tokens)
+                            verify = _build_verify(draft_tokens,
+                                                   now=snap is None)
                         # Dropped before the verify runs: a live handle on a
                         # cache buffer keeps a layer's write from reusing it.
                         cut_snap = None

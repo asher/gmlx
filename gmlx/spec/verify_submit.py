@@ -135,5 +135,27 @@ def submit(*arrays) -> None:
         _state["submits"] += 1
 
 
+_tl = threading.local()
+
+
+class now:
+    """The verify built inside is submitted by its caller at once and is
+    never dropped unevaluated. A model may then run parts of it as they
+    are built (qwen4_exp ``GMLX_SPEC_VERIFY_BOUND``)."""
+
+    def __enter__(self):
+        self.prev = getattr(_tl, "now", False)
+        _tl.now = True
+        return self
+
+    def __exit__(self, *exc):
+        _tl.now = self.prev
+        return False
+
+
+def is_now() -> bool:
+    return getattr(_tl, "now", False)
+
+
 def stats() -> dict:
     return {k: v for k, v in _state.items() if k != "kq"}

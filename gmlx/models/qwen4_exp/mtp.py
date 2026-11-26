@@ -53,6 +53,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from . import model as q4
+from . import verify_bound as _vb
 from gmlx.cache.attention import create_attention_mask
 from gmlx.envflags import env_bool, env_int
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
@@ -238,10 +239,18 @@ class Qwen4ExpSpecHooks:
         plus the rollback sink in the ``gdn_states`` slot. ``rope_deltas`` is
         the rounds loop's per-row mrope delta."""
         sink: list = []
-        _, hidden = self._spec_forward(
-            verify_input, prompt_cache, gdn_sink=sink,
-            position_ids=self._spec_verify_positions(
-                verify_input, prompt_cache, rope_deltas))
+        # GMLX_SPEC_VERIFY_BOUND: the records of the forward run as they
+        # are reached, on command buffers of a kq session.
+        vb = (_vb.begin(int(verify_input.shape[0]))
+              if _vb.mode() > 0 else None)
+        try:
+            _, hidden = self._spec_forward(
+                verify_input, prompt_cache, gdn_sink=sink,
+                position_ids=self._spec_verify_positions(
+                    verify_input, prompt_cache, rope_deltas))
+        finally:
+            if vb is not None:
+                _vb.end(vb)
         return hidden, {}, sink
 
     def rollback_speculative_cache(
