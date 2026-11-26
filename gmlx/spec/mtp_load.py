@@ -1731,6 +1731,12 @@ def _load_dflash2_drafter(
         source_key=weights_source_key(draft_gguf_path),
         active_before=active_before,
     )
+    from . import dflash_drafter as _dd
+
+    if _dd._LAYER_CODEC:
+        nbytes = drafter.layer_codec(_dd._LAYER_CODEC)
+        log(f"[mtp] drafter layers re-encoded in {_dd._LAYER_CODEC}: "
+            f"{nbytes / 2**20:.1f} MiB")
     drafter.bind(target)
     _wire_dflash_capture(target, layer_ids)
     drafter.row_floor = _dflash2_row_floor(target_config_dict.get("model_type"))

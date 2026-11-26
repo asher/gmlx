@@ -73,7 +73,7 @@ from gmlx._vendor.mlx_vlm.models.rope_utils import initialize_rope
 from . import topk
 from .drafter_protocol import DraftStash, native_block_size
 from gmlx.cache.kv_cache import BufferedRotatingKVCache, KVCache
-from gmlx.envflags import env_bool, env_float, env_int
+from gmlx.envflags import env_bool, env_choice, env_float, env_int
 
 _LAYER_TYPES = ("full_attention", "sliding_attention")
 # Rollback slack rows the temporal ring keeps beyond its window.
@@ -119,6 +119,9 @@ _LATTICE_TOPK = env_bool("GMLX_DFLASH_LATTICE_TOPK", True)
 # the request's context has not used (DFlash2Drafter._head_skip).
 # GMLX_DFLASH_HEAD_SUBSET=0 reads the whole head every round.
 _HEAD_SUBSET = env_bool("GMLX_DFLASH_HEAD_SUBSET", True)
+# The drafter's own quantized linears re-encoded at load in this kq codec
+# (q4_k, say) where theirs holds more bits. Empty keeps the file's.
+_LAYER_CODEC = env_choice("GMLX_DFLASH_DRAFT_CODEC", "", ("q4_k", "q5_k", "q4_0"))
 # GMLX_SPEC_APC_LONGER=1: the drafter keeps the target hidden of the rows
 # its ring was fed, so a finished request can leave the last
 # hidden_capture_limit of them beside its retire record.
@@ -1574,6 +1577,42 @@ class DFlashDrafter(nn.Module):
             else:
                 caches.append(KVCache())
         return caches
+
+    def layer_codec(self, codec: Optional[str], keep: bool = False) -> int:
+        """Re-encode the drafter's own quantized linears (not the target's
+        embed or head) in kq codec ``codec`` where theirs holds more bits;
+        None puts back the weights the codec replaced, which ``keep`` held.
+        Returns the bytes of the weights now read."""
+        import mlx_kquant as kq
+        from mlx_kquant.codec_geometry import CODEC_GEOMETRY
+        from mlx_kquant.nn import KQuantLinear
+
+        held = self.__dict__.setdefault("_codec_held", {})
+        total = 0
+        for name, mod in self.named_modules():
+            if (not isinstance(mod, KQuantLinear)
+                    or name.split(".")[0] in ("embed_tokens", "lm_head")):
+                continue
+            was = held.get(name)
+            if codec is None:
+                if was is not None:
+                    mod.weight, mod.scales, mod.kquant_type = was
+                    mod.group_size, mod.bits = CODEC_GEOMETRY[was[2]][:2]
+            elif (mod.kquant_type != codec and mod.kquant_type in CODEC_GEOMETRY
+                    and CODEC_GEOMETRY[mod.kquant_type][1]
+                    > CODEC_GEOMETRY[codec][1]):
+                w = kq.dequantize(mod.weight, mod.scales, mod.kquant_type,
+                                  dtype=mx.float32)
+                wq, sc = kq.quantize(w, codec)
+                mx.eval(wq, sc)
+                if keep:
+                    held[name] = (mod.weight, mod.scales, mod.kquant_type)
+                mod.weight, mod.scales, mod.kquant_type = wq, sc, codec
+                mod.group_size, mod.bits = CODEC_GEOMETRY[codec][:2]
+            total += int(mod.weight.nbytes)
+        if codec is None:
+            held.clear()
+        return total
 
     def reset(self, target_model, left_padding: Optional[List[int]] = None) -> list:
         if left_padding is not None:

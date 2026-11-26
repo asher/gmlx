@@ -916,6 +916,44 @@ def test_head_rows_are_the_head_without_the_skipped_ids(lo, hi, seed):
                            rtol=2 ** -7, atol=1e-3), name
 
 
+def test_layer_codec_re_encodes_the_drafter_layers_and_puts_them_back():
+    """GMLX_DFLASH_DRAFT_CODEC: the drafter's Q6_K linears read as q4_k,
+    the head and the embedding it borrows keep theirs, a linear already
+    at 4 bits is left alone, and None puts back the arrays it replaced."""
+    kq = pytest.importorskip("mlx_kquant")
+    if mx.default_device().type != mx.DeviceType.gpu:
+        pytest.skip("kq K-quant linears need the GPU")
+    from mlx_kquant.nn import KQuantLinear
+
+    def ql(codec, seed):
+        mx.random.seed(seed)
+        lin = KQuantLinear(256, 256, False, codec)
+        lin.weight, lin.scales = kq.quantize(mx.random.normal((256, 256)) * 0.1, codec)
+        return lin
+
+    m = nn.Module()
+    m.layers = [ql("q6_k", 1), ql("q4_0", 2)]
+    m.lm_head = ql("q6_k", 3)
+    m.embed_tokens = ql("q6_k", 4)
+    mods = dict(m.named_modules())
+    before = {n: (mods[n].weight, mods[n].scales, mods[n].kquant_type)
+              for n in ("layers.0", "layers.1", "lm_head", "embed_tokens")}
+
+    nbytes = DFlashDrafter.layer_codec(m, "q4_k", keep=True)
+    l0 = m.layers[0]
+    assert (l0.kquant_type, l0.bits) == ("q4_k", 4)
+    want = kq.quantize(kq.dequantize(*before["layers.0"], dtype=mx.float32), "q4_k")
+    assert mx.array_equal(l0.weight, want[0]) and mx.array_equal(l0.scales, want[1])
+    for n in ("layers.1", "lm_head", "embed_tokens"):
+        w, s, c = before[n]
+        assert mods[n].weight is w and mods[n].scales is s and mods[n].kquant_type == c, n
+    assert nbytes == l0.weight.nbytes + m.layers[1].weight.nbytes
+
+    DFlashDrafter.layer_codec(m, None)
+    assert l0.weight is before["layers.0"][0] and l0.scales is before["layers.0"][1]
+    assert (l0.kquant_type, l0.bits) == ("q6_k", 6)
+
+
 def test_head_rows_leaves_unknown_heads_whole():
     assert dd.head_rows(lambda x: x, mx.zeros((1, 2, 8)), 0, 4) is None
 
