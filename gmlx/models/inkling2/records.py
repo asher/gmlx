@@ -170,7 +170,9 @@ def _record(inputs: list, outputs: list):
         used = kq.fused_info(probe)[2]
         kq.fuse_release(probe)
         pick = [i for i, u in enumerate(used) if u or i == 0]
-        handle = kq.fuse_graph([inputs[i] for i in pick], outs, direct=True)
+        # Barrier groups: fewer barriers than the walk's order, same bits.
+        handle = kq.fuse_graph([inputs[i] for i in pick], outs, direct=True,
+                               level=2)
     except (ValueError, RuntimeError, TypeError):
         return None
     if (DIRECT_ONLY[0]

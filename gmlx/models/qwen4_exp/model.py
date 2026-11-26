@@ -3301,8 +3301,9 @@ def _verify_fused_cap() -> bool:
 
 
 def _fused_kw() -> dict:
-    """Keywords of a record that replays its Metal calls."""
-    return {"direct": True}
+    """Keywords of a record that replays its Metal calls, its kernels in
+    barrier groups (fewer barriers than the walk's order, same bits)."""
+    return {"direct": True, "level": 2}
 
 
 # Record handles held by the process, handles made since the last bound
