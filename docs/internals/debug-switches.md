@@ -79,6 +79,8 @@ is already running does not see a variable you export later.
 | `GMLX_SPEC_ACCEPT_COUNTED=0` | Read a B=1 round's accepted count on the host before its commit and next draft go out. On, a DFlash 2 draft on Flash-Next reads it on the GPU. |
 | `GMLX_DFLASH_COUNTED_F32=0` | A counted draft (GMLX_SPEC_ACCEPT_COUNTED) keeps the ring's stored dtype in its attention in place of float32. |
 | `GMLX_DFLASH_COUNTED_GATHER=0` | A counted draft masks the ring buffer rows (stock attention) in place of reading them by row index in the plain key order. |
+| `GMLX_DFLASH_COUNTED_IN_PLACE=0` | A counted draft gathers its ring rows per layer, not reading the ring in place within bounds the GPU holds. Rounding differs. |
+| `GMLX_DFLASH_COUNTED_ONE_TAKE=0` | The counted gather takes the ring rows and joins the block to them, not reading both with one take. Same bits. |
 | `GMLX_SPEC_VERIFY_AHEAD=N` | Submit a B=1 verify whole before the row cut is read: 1 after a whole round, 2 always, 0 never. Default 1 where the verify is one submission, else 0. |
 | `GMLX_SPEC_VERIFY_PREBUILT=N` | With a counted commit and VERIFY_AHEAD=2: the next verify is built ahead for the N likeliest accept counts; the others are dropped. |
 | `GMLX_SPEC_APC_LONGER=1` | A prompt both prefix cache levels hold restores the longer record; a DFlash request keeps its last hidden rows to seed that turn. |

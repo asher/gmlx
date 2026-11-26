@@ -224,6 +224,7 @@ def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, gather
     from test_dflash2_drafter import BLOCK, CAPTURE
 
     monkeypatch.setattr(dd, "_COUNTED_GATHER", gather)
+    monkeypatch.setattr(dd, "_COUNTED_IN_PLACE", False)
 
     lm = _target()
     drafter = _drafter(lm, window=8)
@@ -253,6 +254,58 @@ def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, gather
         else:
             # Same sums in another key order: equal to rounding.
             assert np.allclose(g, w, rtol=2e-3, atol=2e-4)
+        drafter.accept_undo(kept)
+
+
+def test_a_counted_block_read_in_place_is_the_plain_block_to_rounding(
+        monkeypatch):
+    """The counted draft that reads the ring in place, its bounds on the
+    GPU (GMLX_DFLASH_COUNTED_IN_PLACE, kq.sdpa_fa_verify), against the
+    plain draft of the same ring, for every count of dead rows, at a head
+    size and dtype the kq kernel takes. The keys split elsewhere: equal to
+    rounding."""
+    import dataclasses
+
+    import numpy as np
+
+    import gmlx.spec.dflash_drafter as dd
+    from gmlx.spec.dflash_drafter import DFlash2Drafter
+    from test_dflash2_drafter import BLOCK, CAPTURE, _config, _tcfg
+
+    if dd._kq_bounds() is None:
+        pytest.skip("kq.sdpa_fa_verify with key bounds needs Metal and kq")
+    calls = []
+    real = dd._bounded_sdpa
+    monkeypatch.setattr(dd, "_bounded_sdpa",
+                        lambda *a: calls.append(1) or real(*a))
+    lm = _target()
+    lm.set_dtype(mx.bfloat16)
+    cfg = dataclasses.replace(_config(_tcfg(), window=40), head_dim=128)
+    drafter = DFlash2Drafter(cfg)
+    drafter.set_dtype(mx.bfloat16)
+    mx.eval(lm.parameters(), drafter.parameters())
+    lm.set_dflash_capture(CAPTURE)
+    drafter.reset(lm)
+    hidden = int(drafter._hidden) * (1 + drafter._n_targets)
+    mx.random.seed(3)
+    drafter.append_context(drafter._captures(
+        mx.random.normal((1, 43, hidden)).astype(mx.bfloat16)))
+    rows = mx.random.normal((1, BLOCK, hidden)).astype(mx.bfloat16)
+    block = mx.array([[5] + [int(drafter.config.mask_token_id)] * (BLOCK - 1)])
+    most = BLOCK - 1
+    mark = drafter.accept_mark(BLOCK)
+    assert mark is not None and drafter.counted_ok(BLOCK, most, BLOCK)
+    for dead in range(BLOCK):
+        drafter.append_context(drafter._captures(rows))
+        n = len(calls)
+        got = drafter._draft_hidden(block, (mx.array(dead), most))
+        mx.eval(got)
+        assert len(calls) > n
+        kept = drafter.accept_trim(mark, dead)
+        want = drafter._draft_hidden(block)
+        assert np.allclose(np.array(got.astype(mx.float32)),
+                           np.array(want.astype(mx.float32)),
+                           rtol=2e-2, atol=2e-2)
         drafter.accept_undo(kept)
 
 

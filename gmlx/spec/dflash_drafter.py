@@ -87,6 +87,14 @@ _COUNTED_F32 = env_bool("GMLX_DFLASH_COUNTED_F32", True)
 # order (1), which keeps the plain attention kernel; 0 is the array mask
 # over the buffer rows.
 _COUNTED_GATHER = env_bool("GMLX_DFLASH_COUNTED_GATHER", True)
+# The counted gather writes the block into the ring's spare rows and reads
+# the whole view with one gather, in place of a gather and a join.
+_COUNTED_ONE_TAKE = env_bool("GMLX_DFLASH_COUNTED_ONE_TAKE", True)
+# A counted draft reads the ring in place: the plain draft's layout goes in
+# after the live rows, at a row the GPU computes, and kq.sdpa_fa_verify
+# takes the bounds of the view as GPU scalars. Equal to the gather to
+# rounding, as the key splits fall elsewhere. 0 keeps the gather.
+_COUNTED_IN_PLACE = env_bool("GMLX_DFLASH_COUNTED_IN_PLACE", True)
 # The counted draft on a ring still shorter than the sliding window (a
 # context under about one window): masked rows in place of the plain key
 # count, equal to the plain draft to rounding only.
@@ -300,6 +308,68 @@ def head_rows(head, x: mx.array, lo: int, hi: int) -> Optional[mx.array]:
     else:
         return None
     return mx.concatenate([run(a, b) for a, b in parts if b > a], axis=-1)
+
+
+_KQ_BOUNDS: list = []
+
+
+def _kq_bounds():
+    """kq.sdpa_fa_verify when it takes key bounds on this device, else None."""
+    if not _KQ_BOUNDS:
+        fn = None
+        try:
+            import mlx_kquant as kq
+            if mx.metal.is_available():
+                z = mx.zeros((1, 1, 2, 64), dtype=mx.float16)
+                b = mx.array([0], dtype=mx.int32)
+                kq.sdpa_fa_verify(z, z, z, 1.0, 2, starts=b, ends=b)
+                fn = kq.sdpa_fa_verify
+        except (ImportError, TypeError, ValueError, RuntimeError):
+            fn = None
+        _KQ_BOUNDS.append(fn)
+    return _KQ_BOUNDS[0]
+
+
+def _bounded_ok(q: mx.array, k: mx.array, v: mx.array) -> bool:
+    """Whether ``_bounded_sdpa`` takes these shapes."""
+    B, hq, L, D = q.shape
+    kv = int(k.shape[1])
+    return (B == 1 and q.dtype in (mx.float16, mx.bfloat16)
+            and k.dtype == q.dtype and v.dtype == q.dtype and D in (64, 128, 256)
+            and kv > 0 and hq % kv == 0 and 2 <= L <= 8
+            and (hq // kv) * L <= 64 and _kq_bounds() is not None)
+
+
+def _bounded_sdpa(q, k, v, scale: float, starts: mx.array,
+                  ends: mx.array) -> mx.array:
+    """Attention of ``q`` [1, Hq, L, D] over keys ``[starts, ends)`` of
+    ``k``/``v``, causal at the end: row ``i`` sees keys below
+    ``ends - L + 1 + i``."""
+    B, hq, L, D = q.shape
+    kv = int(k.shape[1])
+    qf = mx.contiguous(q).reshape(B, kv, (hq // kv) * L, D)
+    o = _kq_bounds()(qf, k, v, scale, L, starts=starts, ends=ends)
+    return o.reshape(B, hq, L, D)
+
+
+_PLACES: list = [None]
+
+
+def _counted_places(counted, idx: int, L: int, w1: int) -> tuple:
+    """GPU scalars of a counted draft's in-place layout, shared by its
+    layers: the live end of the ring, the ``L - 1`` oldest rows of the
+    window newest first, and the view's key bounds."""
+    dead, most = counted
+    key = (idx, L, w1, most)
+    m = _PLACES[0]
+    if m is not None and m[0] is dead and m[1] == key:
+        return m[2]
+    d = mx.array(dead).astype(mx.int32).reshape(1)
+    live = idx - d
+    rows = (live - w1) + mx.arange(L - 2, -1, -1, dtype=mx.int32)
+    out = (live, rows, most - d, (w1 + most + L) - d)
+    _PLACES[0] = (dead, key, out)
+    return out
 
 
 def _shared_input(linears, x: mx.array) -> list:
@@ -1226,6 +1296,22 @@ class DFlashAttention(nn.Module):
             return (q, mx.concatenate([cache.keys[..., :idx, :], k], axis=2),
                     mx.concatenate([cache.values[..., :idx, :], v], axis=2),
                     mask, False)
+        if (_COUNTED_IN_PLACE and L > 1 and w1 >= L - 1
+                and idx + 2 * L - 1 <= int(cache.keys.shape[2])
+                and _bounded_ok(q, k, v)):
+            # The plain layout of _ring_in_place at ring index
+            # ``live = idx - dead``: the block and the L - 1 oldest rows,
+            # newest first, written after the live rows. The view spans
+            # every place that layout can take; ``dead`` enters only the
+            # bounds. The rows past ``live`` it writes are not live.
+            live, rows, starts, ends = _counted_places(counted, idx, L, w1)
+            for name, blk in (("keys", k), ("values", v)):
+                buf = getattr(cache, name)
+                tail = mx.concatenate([blk, mx.take(buf, rows, axis=2)], axis=2)
+                setattr(cache, name, mx.slice_update(buf, tail, live, axes=(2,)))
+            a, b = idx - most - w1 + L - 1, idx + 2 * L - 1
+            return (q[:, :, ::-1, :], cache.keys[..., a:b, :],
+                    cache.values[..., a:b, :], (starts, ends), True)
         if _COUNTED_GATHER and L > 1 and w1 >= L - 1:
             # The plain layout of _ring_in_place at ring index
             # ``idx - dead``, read by row index: the rows every block row
@@ -1233,6 +1319,14 @@ class DFlashAttention(nn.Module):
             # Same keys in the same order as the plain draft, so the same
             # attention kernel and the same bits; the ring is not written.
             lo = (idx - w1) - dead
+            if _COUNTED_ONE_TAKE and idx + L <= int(cache.keys.shape[2]):
+                cache.keys[..., idx:idx + L, :] = k
+                cache.values[..., idx:idx + L, :] = v
+                rows = mx.concatenate([lo + mx.arange(L - 1, w1),
+                                       mx.arange(idx, idx + L),
+                                       lo + mx.arange(L - 2, -1, -1)])
+                return (q[:, :, ::-1, :], mx.take(cache.keys, rows, axis=2),
+                        mx.take(cache.values, rows, axis=2), "causal", True)
             rows = mx.concatenate([lo + mx.arange(L - 1, w1),
                                    lo + mx.arange(L - 2, -1, -1)])
             n_a = w1 - (L - 1)
@@ -1294,8 +1388,11 @@ class DFlashAttention(nn.Module):
                 v = mx.concatenate([cv, v], axis=2)
             mask = block_attention_mask(ctx_len, L, self.sliding_window,
                                         self.is_causal, self.context_window)
-        o = mx.fast.scaled_dot_product_attention(
-            q, k, v, scale=self.scale, mask=mask, sinks=sinks)
+        if isinstance(mask, tuple):
+            o = _bounded_sdpa(q, k, v, self.scale, *mask)
+        else:
+            o = mx.fast.scaled_dot_product_attention(
+                q, k, v, scale=self.scale, mask=mask, sinks=sinks)
         if flipped:
             o = o[:, :, ::-1, :]
         if o.dtype != x.dtype:
