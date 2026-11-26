@@ -2060,6 +2060,12 @@ class QSAKVCache(KVCache):
         self._tl = max(0, self._tl - n)
         self.n_blocks = min(self.n_blocks, self.offset // self.ratio)
         self._nbb = min(self._nbb, self.n_blocks)
+        if self.blocks is not None and self._nbb < self.blocks.shape[1]:
+            # Blocks of the rolled back rows were in the base: the base
+            # keeps its live blocks alone, as a rebuild leaves it (the
+            # whole-layer record reads the base whole).
+            self.blocks = (mx.contiguous(self.blocks[:, :self._nbb])
+                           if self._nbb else None)
         return n
 
     def to_quantized(self, group_size: int = 64, bits: int = 4):

@@ -57,9 +57,10 @@ def _lm(dtype):
 
 
 def _walk(monkeypatch, mode, dtype=mx.bfloat16, passes=6, tail=64,
-          rounds=None, steps_at=(), prompt=PROMPT):
+          rounds=None, steps_at=(), prompt=PROMPT, restore=False):
     """mode: "plain", "split" (two records and the Python middle) or
-    "whole"."""
+    "whole". restore: the attention caches are set from their state after
+    the prefill, as a prompt cache restore sets them."""
     monkeypatch.setenv("GMLX_Q4_KV_TAIL", str(tail))
     monkeypatch.setattr(q4, "_VERIFY_FUSED", mode != "plain")
     monkeypatch.setattr(q4, "_FUSED_WHOLE", mode == "whole")
@@ -80,6 +81,10 @@ def _walk(monkeypatch, mode, dtype=mx.bfloat16, passes=6, tail=64,
     cache = lm.make_cache()
     mx.eval(lm(mx.random.randint(0, args.vocab_size, (1, prompt)),
                cache=cache).logits)
+    if restore:
+        for c in cache:
+            if isinstance(c, q4.QSAKVCache):
+                c.state = c.state
     out = []
     for i, (S, kept) in enumerate(rounds or PASS * passes):
         if i in steps_at:
@@ -134,6 +139,17 @@ def test_whole_layer_records_equal_the_plain_path(monkeypatch, dtype):
     _equal(plain, whole)
     _, split = _walk(monkeypatch, "split", dtype)
     _equal(plain, split)
+
+
+def test_a_restored_cache_keeps_the_whole_form_past_a_rollback(monkeypatch):
+    # A restored cache has no block base: the first verify builds it with
+    # the blocks its own rows finish, and the rollback drops two of them.
+    # The base the rounds after it see must still be one the record reads.
+    rounds = [(8, 1)] + PASS * 2
+    _, plain = _walk(monkeypatch, "plain", rounds=rounds, restore=True)
+    lm, whole = _walk(monkeypatch, "whole", rounds=rounds, restore=True)
+    assert _whole(lm)[1] >= 8
+    _equal(plain, whole)
 
 
 def test_decode_steps_between_whole_layer_rounds(monkeypatch):
