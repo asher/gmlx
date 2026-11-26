@@ -14,11 +14,14 @@ MIT) and the Hugging Face remote code ``modeling_sensenova_loop.py``.
 - mHC: layers ``[mhc.start, mhc.end)`` carry two residual streams. The
   first mHC layer of a pass starts both streams from its input, every mHC
   layer reads and writes them through its routers (``mhc.MHCRouter``),
-  and the last one hands the next layer their mean.
+  and the last one hands the next layer their mean. The streams are
+  float32 as in llama.cpp (``GMLX_SENSENOVA_STREAMS_F32=0`` keeps them in
+  the activation dtype).
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -78,9 +81,15 @@ class SenseNovaLoopDecoderLayer(OwnedQwen3_5DecoderLayer):
         self.mhc_attn = _mhc.MHCRouter(args.hidden_size, args.mhc)
         self.mhc_ffn = _mhc.MHCRouter(args.hidden_size, args.mhc)
 
-    def mhc_step(self, a, b, mask=None, cache=None, position_ids=None,
+    @property
+    def activation_dtype(self):
+        return self.input_layernorm.weight.dtype
+
+    def mhc_step(self, s, mask=None, cache=None, position_ids=None,
                  position_embeddings=None, gdn_sink=None, target_verify=False):
-        x, coef = self.mhc_attn(a, b)
+        """``s`` holds both streams, ``[..., 2 * hidden]``."""
+        act = self.activation_dtype
+        x, coef = self.mhc_attn(s, act)
         x = self.input_layernorm(x)
         if self.is_linear:
             r = self.linear_attn(x, mask, cache, gdn_sink=gdn_sink,
@@ -90,10 +99,10 @@ class SenseNovaLoopDecoderLayer(OwnedQwen3_5DecoderLayer):
                                position_ids=position_ids,
                                position_embeddings=position_embeddings,
                                target_verify=target_verify)
-        a, b = _mhc.merge(a, b, r, coef)
-        x, coef = self.mhc_ffn(a, b)
+        s = _mhc.merge(s, r, coef)
+        x, coef = self.mhc_ffn(s, act)
         r = self.mlp(self.post_attention_layernorm(x), target_verify)
-        return _mhc.merge(a, b, r, coef)
+        return _mhc.merge(s, r, coef)
 
 
 class LayerVisit:
@@ -102,13 +111,15 @@ class LayerVisit:
     ``self_attn`` and ``linear_attn`` as usual. Not a module: the
     parameter tree holds the physical layer once."""
 
-    __slots__ = ("layer", "physical", "enter", "leave")
+    __slots__ = ("layer", "physical", "enter", "leave", "streams_f32")
 
-    def __init__(self, layer, physical: int, enter: bool, leave: bool):
+    def __init__(self, layer, physical: int, enter: bool, leave: bool,
+                 streams_f32: bool = True):
         object.__setattr__(self, "layer", layer)
         object.__setattr__(self, "physical", physical)
         object.__setattr__(self, "enter", enter)
         object.__setattr__(self, "leave", leave)
+        object.__setattr__(self, "streams_f32", streams_f32)
 
     def __getattr__(self, name):
         return getattr(object.__getattribute__(self, "layer"), name)
@@ -117,9 +128,9 @@ class LayerVisit:
         layer = self.layer
         if not isinstance(layer, SenseNovaLoopDecoderLayer):
             return layer(h, **kwargs)
-        a, b = (h, h) if self.enter else h
-        a, b = layer.mhc_step(a, b, **kwargs)
-        return _mhc.leave(a, b) if self.leave else (a, b)
+        s = _mhc.enter(h, self.streams_f32) if self.enter else h
+        s = layer.mhc_step(s, **kwargs)
+        return _mhc.leave(s, layer.activation_dtype) if self.leave else s
 
 
 class SenseNovaLoopModel(OwnedQwen3_5Model):
@@ -142,12 +153,14 @@ class SenseNovaLoopModel(OwnedQwen3_5Model):
         self.norm = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
         self.ssm_idx = 0
         self.fa_idx = args.full_attention_interval - 1
+        streams_f32 = os.environ.get("GMLX_SENSENOVA_STREAMS_F32", "1") != "0"
         visits = []
         for p in execution_plan(args):
             visits.append(LayerVisit(
                 self.layers[p], p,
                 enter=m is not None and p == m["start"],
-                leave=m is not None and p == m["end"] - 1))
+                leave=m is not None and p == m["end"] - 1,
+                streams_f32=streams_f32))
         # Stored outside the module dict: not part of the parameter tree.
         object.__setattr__(self, "_visits", tuple(visits))
         plan = [v.physical for v in visits]

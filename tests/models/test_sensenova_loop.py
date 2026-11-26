@@ -130,3 +130,53 @@ def test_decode_on_the_cache_matches_the_full_forward(model):
                  for i in range(ids.shape[1] - 3, ids.shape[1])]
         got = np.array(mx.concatenate(steps, axis=1))
     np.testing.assert_allclose(got, full, rtol=1e-4, atol=1e-4)
+
+
+_GPU = pytest.mark.skipif(mx.default_device() != mx.gpu,
+                          reason="the mHC kernels are Metal-only")
+
+
+@_GPU
+@pytest.mark.parametrize("settings", [
+    {"iterations": 20},
+    {"iterations": 3, "fixed_identity": True, "pre_scale": 0.5},
+], ids=["sinkhorn", "identity-scaled"])
+@pytest.mark.parametrize("dtype", [mx.float32, mx.bfloat16], ids=["f32", "bf16"])
+@pytest.mark.parametrize("rows", [1, 5])
+def test_the_mhc_kernels_give_the_ops_path_bits(monkeypatch, settings, dtype, rows):
+    from gmlx.models.sensenova_loop import mhc
+
+    hidden = 96
+    router = mhc.MHCRouter(hidden, settings)
+    n = router.weight.shape[0]
+    rng = np.random.default_rng(1)
+    router.weight = mx.array(rng.standard_normal((n, 2 * hidden)), mx.float32) * 2
+    router.bias = mx.array(rng.standard_normal(n), mx.float32)
+    s = (mx.array(rng.standard_normal((1, rows, 2 * hidden)), mx.float32) * 3).astype(dtype)
+    y = mx.array(rng.standard_normal((1, rows, hidden)), mx.bfloat16)
+
+    def run(kernel):
+        monkeypatch.setenv("GMLX_SENSENOVA_MHC_KERNEL", kernel)
+        x, coef = router(s, mx.bfloat16)
+        out = mhc.merge(s, y, coef)
+        assert out.dtype == dtype and x.dtype == mx.bfloat16
+        return [np.array(v.astype(mx.float32)) for v in (x, coef, out)]
+
+    for ops, fused in zip(run("0"), run("1")):
+        np.testing.assert_array_equal(ops, fused)
+
+
+@_GPU
+def test_the_model_gives_the_same_logits_with_and_without_the_kernels(
+        tmp_path, monkeypatch):
+    import gmlx
+
+    path = tmp_path / "tiny.gguf"
+    T.write(path, ARCH, T.values(ARCH), fused=True)
+    model = gmlx.load_model(str(path), verbose=False)[0]
+    ids = mx.array(IDS)
+    out = {}
+    for kernel in ("0", "1"):
+        monkeypatch.setenv("GMLX_SENSENOVA_MHC_KERNEL", kernel)
+        out[kernel] = np.array(model(ids).astype(mx.float32))
+    np.testing.assert_array_equal(out["0"], out["1"])

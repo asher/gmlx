@@ -12,12 +12,22 @@ without gain and one float32 linear with bias, and returns
   rounds in log space (rows, then columns).
 
 The merge is ``a' = m00 a + m01 b + post0 y`` and ``b' = m10 a + m11 b +
-post1 y`` for the branch output ``y``. The routing runs in float32 and the
-streams keep the activation dtype.
+post1 y`` for the branch output ``y``. The routing runs in float32. The two
+streams sit side by side in one ``[..., 2 * hidden]`` array, float32 as in
+llama.cpp unless ``GMLX_SENSENOVA_STREAMS_F32=0`` keeps them in the
+activation dtype; the branch input and the layer outputs leave in the
+activation dtype.
+
+On the GPU two Metal kernels do the elementwise work: one computes the
+coefficients and the branch input of a router (the Sinkhorn rounds would
+otherwise be dozens of dispatches), the other the merge. They use MLX's own
+elementwise functions in the same order, so the bits equal the ops path
+(``GMLX_SENSENOVA_MHC_KERNEL=0``).
 """
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 import mlx.core as mx
@@ -60,12 +70,12 @@ def _coef_fn(iterations: int, fixed_identity: bool):
 
 
 @lru_cache(maxsize=None)
-def _branch_fn(pre_scale: float):
+def _branch_fn(pre_scale: float, out_dtype):
     def fn(a, b, coef):
         x = a.astype(mx.float32) * coef[..., 0:1] + b.astype(mx.float32) * coef[..., 1:2]
         if pre_scale != 1.0:
             x = x * pre_scale
-        return x.astype(a.dtype)
+        return x.astype(out_dtype)
 
     return mx.compile(fn)
 
@@ -79,14 +89,176 @@ def _merge(a, b, y, coef):
     return na.astype(a.dtype), nb.astype(b.dtype)
 
 
-merge = mx.compile(_merge)
+_merge_ops = mx.compile(_merge)
 
 
-def _mean(a, b):
-    return ((a.astype(mx.float32) + b.astype(mx.float32)) * 0.5).astype(a.dtype)
+@lru_cache(maxsize=None)
+def _leave_fn(out_dtype):
+    def fn(a, b):
+        return ((a.astype(mx.float32) + b.astype(mx.float32)) * 0.5).astype(out_dtype)
+
+    return mx.compile(fn)
 
 
-leave = mx.compile(_mean)
+# Metal kernels. The helpers copy MLX's Metal ``log1p``, ``LogAddExp`` and
+# ``Sigmoid``; each product and sum is its own statement, as in a compiled
+# MLX graph, so the compiler contracts nothing the ops path does not.
+_HEADER = r"""
+inline float snl_log1p(float x) {
+  float xp1 = 1.0f + x;
+  if (xp1 == metal::numeric_limits<float>::infinity()) {
+    return metal::numeric_limits<float>::infinity();
+  }
+  if (xp1 == 1.0f) {
+    return x;
+  }
+  return x * (metal::log(xp1) / (xp1 - 1.0f));
+}
+inline float snl_logaddexp(float x, float y) {
+  if (metal::isnan(x) || metal::isnan(y)) {
+    return metal::numeric_limits<float>::quiet_NaN();
+  }
+  constexpr float inf = metal::numeric_limits<float>::infinity();
+  float maxval = metal::max(x, y);
+  float minval = metal::min(x, y);
+  return (minval == -inf || maxval == inf)
+      ? maxval
+      : (maxval + snl_log1p(metal::exp(minval - maxval)));
+}
+inline float snl_sigmoid(float x) {
+  auto y = 1 / (1 + metal::precise::exp(metal::abs(x)));
+  return (x < 0) ? y : 1 - y;
+}
+inline void snl_norm(thread float& x, thread float& y) {
+  float d = x - y;
+  float nd = -d;
+  float u = -snl_logaddexp(nd, 0.0f);
+  float v = -snl_logaddexp(d, 0.0f);
+  x = u;
+  y = v;
+}
+"""
+
+_COEF_BRANCH = r"""
+  uint r = threadgroup_position_in_grid.y;
+  uint t = thread_position_in_threadgroup.x;
+  threadgroup float pre[2];
+  if (t == 0) {
+    auto l = logits + r * NR;
+    device float* o = coef + r * 8;
+    float p0 = snl_sigmoid(l[0]);
+    float p1 = snl_sigmoid(l[1]);
+    o[0] = p0;
+    o[1] = p1;
+    o[2] = 2.0f * snl_sigmoid(l[2]);
+    o[3] = 2.0f * snl_sigmoid(l[3]);
+    if (IDENT) {
+      o[4] = 1.0f; o[5] = 0.0f; o[6] = 0.0f; o[7] = 1.0f;
+    } else {
+      float m0 = l[4], m1 = l[5], m2 = l[6], m3 = l[7];
+      for (int i = 0; i < ITERS; i++) {
+        snl_norm(m0, m1);
+        snl_norm(m2, m3);
+        snl_norm(m0, m2);
+        snl_norm(m1, m3);
+      }
+      o[4] = metal::precise::exp(m0);
+      o[5] = metal::precise::exp(m1);
+      o[6] = metal::precise::exp(m2);
+      o[7] = metal::precise::exp(m3);
+    }
+    pre[0] = p0;
+    pre[1] = p1;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float c0 = pre[0];
+  float c1 = pre[1];
+  auto sr = s + (size_t)r * 2 * H;
+  device O* xr = x + (size_t)r * H;
+  for (uint i = t; i < (uint)H; i += TG) {
+    float u = float(sr[i]) * c0;
+    float v = float(sr[H + i]) * c1;
+    float w = u + v;
+    if (SCALED) {
+      w = w * pre_scale[0];
+    }
+    xr[i] = O(w);
+  }
+"""
+
+_MERGE = r"""
+  uint i = thread_position_in_grid.x;
+  uint r = thread_position_in_grid.y;
+  if (i >= (uint)H) return;
+  auto c = coef + r * 8;
+  size_t base = (size_t)r * 2 * H;
+  float a = float(s[base + i]);
+  float b = float(s[base + H + i]);
+  float yv = float(y[(size_t)r * H + i]);
+  float t1 = a * c[4];
+  float t2 = b * c[5];
+  float t3 = t1 + t2;
+  float t4 = yv * c[2];
+  float na = t3 + t4;
+  float u1 = a * c[6];
+  float u2 = b * c[7];
+  float u3 = u1 + u2;
+  float u4 = yv * c[3];
+  float nb = u3 + u4;
+  out[base + i] = T(na);
+  out[base + H + i] = T(nb);
+"""
+
+_TG = 256
+
+
+@lru_cache(maxsize=None)
+def _coef_branch_kernel():
+    return mx.fast.metal_kernel(
+        name="sensenova_mhc_coef_branch",
+        input_names=["logits", "s", "pre_scale"],
+        output_names=["coef", "x"],
+        header=_HEADER, source=_COEF_BRANCH)
+
+
+@lru_cache(maxsize=None)
+def _merge_kernel():
+    return mx.fast.metal_kernel(
+        name="sensenova_mhc_merge",
+        input_names=["s", "y", "coef"],
+        output_names=["out"],
+        source=_MERGE)
+
+
+def _use_kernel() -> bool:
+    return (os.environ.get("GMLX_SENSENOVA_MHC_KERNEL", "1") != "0"
+            and mx.default_device() == mx.gpu and mx.metal.is_available())
+
+
+def enter(h: mx.array, streams_f32: bool) -> mx.array:
+    """Both streams start from the layer input."""
+    s = mx.concatenate([h, h], axis=-1)
+    return s.astype(mx.float32) if streams_f32 else s
+
+
+def leave(s: mx.array, out_dtype) -> mx.array:
+    """The mean of the two streams, in ``out_dtype``."""
+    hidden = s.shape[-1] // 2
+    return _leave_fn(out_dtype)(s[..., :hidden], s[..., hidden:])
+
+
+def merge(s: mx.array, y: mx.array, coef: mx.array) -> mx.array:
+    """The streams after a branch output ``y``."""
+    hidden = y.shape[-1]
+    if _use_kernel():
+        rows = y.size // hidden
+        return _merge_kernel()(
+            inputs=[s, y, coef],
+            template=[("T", s.dtype), ("H", hidden)],
+            grid=(hidden, rows, 1), threadgroup=(min(hidden, _TG), 1, 1),
+            output_shapes=[s.shape], output_dtypes=[s.dtype])[0]
+    na, nb = _merge_ops(s[..., :hidden], s[..., hidden:], y, coef)
+    return mx.concatenate([na, nb], axis=-1)
 
 
 class MHCRouter(nn.Module):
@@ -102,10 +274,25 @@ class MHCRouter(nn.Module):
         self.weight = mx.zeros((n_route, 2 * hidden_size), dtype=mx.float32)
         self.bias = mx.zeros((n_route,), dtype=mx.float32)
 
-    def __call__(self, a: mx.array, b: mx.array):
-        """Returns (branch input, coefficients)."""
-        flat = mx.concatenate([a, b], axis=-1).astype(mx.float32)
-        flat = mx.fast.rms_norm(flat, None, _EPS)
+    def __call__(self, s: mx.array, out_dtype):
+        """Returns (branch input in ``out_dtype``, coefficients)."""
+        flat = mx.fast.rms_norm(s.astype(mx.float32), None, _EPS)
         logits = mx.addmm(self.bias, flat, self.weight.T)
+        hidden = s.shape[-1] // 2
+        if _use_kernel():
+            rows = s.size // s.shape[-1]
+            coef, x = _coef_branch_kernel()(
+                inputs=[logits, s, mx.array([self.pre_scale], mx.float32)],
+                template=[("T", s.dtype), ("O", out_dtype), ("H", hidden),
+                          ("NR", int(self.weight.shape[0])),
+                          ("ITERS", self.iterations),
+                          ("IDENT", self.fixed_identity),
+                          ("SCALED", self.pre_scale != 1.0), ("TG", _TG)],
+                grid=(_TG, rows, 1), threadgroup=(_TG, 1, 1),
+                output_shapes=[s.shape[:-1] + (8,), s.shape[:-1] + (hidden,)],
+                output_dtypes=[mx.float32, out_dtype])
+            return x, coef
         coef = _coef_fn(self.iterations, self.fixed_identity)(logits)
-        return _branch_fn(self.pre_scale)(a, b, coef), coef
+        x = _branch_fn(self.pre_scale, out_dtype)(
+            s[..., :hidden], s[..., hidden:], coef)
+        return x, coef
