@@ -212,6 +212,20 @@ def test_the_attention_layers_take_records_too(monkeypatch):
     _equal(plain, gdn_only)
 
 
+def test_an_attention_record_leaves_the_indexer_keys_out(monkeypatch):
+    """The plain call leaves the indexer keys lazy and below the sparse
+    depth only a cache evaluation reads them, so an attention record that
+    returned them would add their projection to every round and step."""
+    lm, _ = _decode(monkeypatch, True)
+    held = [(key, r) for layer in lm.model.layers
+            if not layer.is_linear and "indexer" in layer.self_attn
+            for key, r in vars(layer)["_verify_fused"][1].items()
+            if isinstance(r, tuple)]
+    assert held
+    for (shape, dtype), r in held:
+        assert len(kq.fused_call(r[0], [mx.zeros(shape, dtype)])) == 6
+
+
 def test_rollbacks_and_steps_in_eval_mode(monkeypatch):
     def serve(lm):
         lm.eval()

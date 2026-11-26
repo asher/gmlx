@@ -3672,12 +3672,12 @@ def _fused_gdn_decode(layer, h, c):
 def _fused_qsa_verify(layer, h, c, mask, positions):
     """One attention layer of a verify with its two ends as recorded
     graphs, or None where the plain call must run. The first record is
-    the stream mix and the projections, the second the output projection,
-    the combines and the MoE; both depend on the row count alone. Between
-    them the rope, the cache append, the block selection and the
-    attention core are built as the plain call builds them: they depend
-    on the cache offset and length. Records follow the rules of
-    _fused_gdn_verify."""
+    the stream mix and the projections but the indexer keys, the second
+    the output projection, the combines and the MoE; both depend on the
+    row count alone. Between them the rope, the cache append, the block
+    selection and the attention core are built as the plain call builds
+    them: they depend on the cache offset and length. Records follow the
+    rules of _fused_gdn_verify."""
     import mlx_kquant as kq
 
     if layer.training or _prof_on(h.shape[1]):
@@ -3715,7 +3715,10 @@ def _fused_qsa_verify(layer, h, c, mask, positions):
         table[key] = "plain"
         mixed, inject = layer.hc_attn(h)
         q, gate, k, v, ik = attn._project(mixed)
-        first = [mixed, inject, q, gate, k, v] + ([] if ik is None else [ik])
+        # The indexer keys stay a lazy node outside the record, as the plain
+        # call leaves them: below the sparse depth only a cache evaluation
+        # reads them.
+        first = [mixed, inject, q, gate, k, v]
         try:
             ha = kq.fuse_graph([h], first, **_fused_kw())
         except (ValueError, RuntimeError, TypeError):
@@ -3738,7 +3741,7 @@ def _fused_qsa_verify(layer, h, c, mask, positions):
     use[0] = _FUSED_TICK[0]
     r = kq.fused_call(ha, [h])
     mixed, inject, q, gate, k, v = r[:6]
-    ik = None if no_ik else r[6]
+    ik = None if no_ik else _indexer_proj(attn.indexer.k_proj, mixed)
     core = attn._attend(mixed, q, k, v, ik, mask, c, positions)
     if (core.shape, core.dtype) != core_key:
         return tail(h, core, gate, inject)
