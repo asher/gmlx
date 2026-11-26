@@ -598,6 +598,56 @@ def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
     assert moved
 
 
+def test_cut_verifies_replay_their_records(model, monkeypatch):
+    # A served round verifies under verify_row_keep. Its visits replay
+    # records that take the keep as an input: every row's logits match the
+    # plain cut verify's to the bit as the keep moves between rounds.
+    from types import SimpleNamespace
+
+    kq = pytest.importorskip("mlx_kquant")
+    if not (hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")):
+        pytest.skip("kq build without records")
+
+    from gmlx.models.inkling2 import records
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    def logits(h):
+        return np.array(spec.head(h)[0].astype(mx.float32))
+
+    def run(on):
+        monkeypatch.setattr(records, "_ON", [on])
+        records.invalidate()
+        cache = spec.make_cache()
+        spec.model(mx.array([IDS[:20]]), cache)
+        _buffer_mtp_target_cache(
+            cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+        out, pos, start = [], 20, records.STATS["replayed"]
+        for keep, accepted in ((1, 1), (0, 0), (2, 1), (3, 3), (0, 0),
+                               (2, 2)):
+            block = mx.array([IDS[pos:pos + 4]])
+            with spec.verify_row_keep(mx.array(keep)):
+                h, _, sink = spec.speculative_verify_hidden(block, cache)
+            out.append(logits(h))
+            spec.rollback_speculative_cache(cache, sink, accepted, 4)
+            pos += accepted + 1
+        return out, records.STATS["replayed"] - start
+
+    monkeypatch.setattr(records, "DIRECT_ONLY", [False])
+    monkeypatch.setattr(records, "_BLOCKED", [False])
+    monkeypatch.setattr(records, "_CACHE_ON", [False])
+    spec, plain = model, type(model)
+    spec.__class__ = Inkling2SpecLM
+    try:
+        want, _ = run(False)
+        got, replayed = run(True)
+    finally:
+        spec.__class__ = plain
+    assert replayed > 0
+    for g, w in zip(got, want):
+        np.testing.assert_array_equal(g, w)
+
+
 @pytest.mark.skipif(not _real_apple_gpu(), reason="GPU kernels")
 @pytest.mark.parametrize("experts", ["Q4_0", "Q8_0"])
 def test_a_cut_verify_reads_no_experts_past_the_keep(tmp_path, monkeypatch,

@@ -744,9 +744,9 @@ class Layer(nn.Module):
         ``cache`` is (conv ArraysCache, attention cache) for this visit."""
         conv_cache, kv_cache = cache if cache is not None else (None, None)
         L = h.shape[1]
-        out = (None if _row_keep_set() else
-               records.visit(self, h, ip, blocks, conv_cache, kv_cache,
-                             pad_mask, positions, messages, conv_sink))
+        out = records.visit(self, h, ip, blocks, conv_cache, kv_cache,
+                            pad_mask, positions, messages, conv_sink,
+                            getattr(_ROW_KEEP, "keep", None))
         if out is None:
             q, k, v, r, sink, gate = self.attn_inputs(
                 h, blocks, conv_cache, pad_mask, positions, messages,

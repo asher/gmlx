@@ -10,7 +10,8 @@ other two convolutions). Both depend on the row count alone. The cache
 append and the attention core, which depend on the cache offset, are
 built as the plain call builds them. A record holds the layer's arrays as
 constants; every array of the request it reads (the stream, the blocks,
-the messages, the convolution states, the positions) is an input.
+the messages, the convolution states, the positions, the keep of a cut
+verify) is an input.
 
 A layout runs plain on its first use, records on its second and replays
 after that. A record replays its Metal calls, so a layout whose record kq
@@ -195,11 +196,13 @@ def _windows(sink, n: int) -> list:
 
 
 def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
-          messages, conv_sink):
+          messages, conv_sink, keep=None):
     """The visit's output through its records, or None where the plain
     call must run. Leaves the caches, ``blocks`` and ``conv_sink`` as the
     plain call leaves them, except the convolution offset, which the
-    caller advances."""
+    caller advances. ``keep`` is the drafts a cut verify keeps (a lazy
+    scalar, model.verify_row_keep), an input of the tail record: the MoE
+    routes the rows past it from it."""
     if not _usable(layer, h, conv_cache, kv_cache, pad_mask):
         return None
     table = _table(layer)
@@ -208,8 +211,9 @@ def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
     a_in = [h, *blocks, *msgs[:3], conv_cache[0], conv_cache[1]]
     if full:
         a_in.append(positions)
+    cut = [] if keep is None else [keep]
     key = (conv_sink is not None, len(blocks), len(msgs),
-           tuple((a.shape, a.dtype) for a in a_in))
+           tuple((a.shape, a.dtype) for a in a_in + cut))
     rec = table.get(key)
     if rec is None:
         table[key] = "plain" if _has_lora(layer) else False
@@ -233,7 +237,13 @@ def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
                  *_windows(sink_a, 2)]
         att = layer.attn_core(q, k, v, r, sink, kv_cache)
         b_in = [h, att, gate, *blocks, *msgs[3:], conv_cache[2],
-                conv_cache[3]]
+                conv_cache[3], *cut]
+        if cut:
+            # The row maps a cut verify shares across its layers may be
+            # evaluated by now: this tail builds its own from the keep.
+            from gmlx.models.inkling2 import model as im
+
+            im._ROW_KEEP.src = {}
         sink_b = [] if windows else None
         out = layer.tail(h, ip, blocks, att, gate, conv_cache, None,
                          messages, sink_b)
@@ -271,7 +281,8 @@ def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
         if windows:
             conv_sink.extend(sink_b)
         return out
-    b_in = [h, att, gate, *blocks, *msgs[3:], conv_cache[2], conv_cache[3]]
+    b_in = [h, att, gate, *blocks, *msgs[3:], conv_cache[2], conv_cache[3],
+            *cut]
     b = _replay(rb, b_in)
     out, c2, c3 = b[:3]
     conv_cache[2], conv_cache[3] = c2, c3
