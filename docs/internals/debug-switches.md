@@ -99,7 +99,7 @@ is already running does not see a variable you export later.
 | `GMLX_DFLASH_LATTICE_WALK=0` | Build the whole DFlash 2 lattice before the walk, not only the rows of the path the walk kernel takes. |
 | `GMLX_DFLASH_LATTICE_TOPK=0` | Take the DFlash 2 lattice candidates from a full-width argpartition, not the hierarchical top-k. |
 | `GMLX_DFLASH_HEAD_SUBSET=0` | A DFlash 2 draft reads the whole head every round, not skipping the token ids the request has not used. |
-| `GMLX_DFLASH_DRAFT_CODEC=q4_k` | Re-encode the DFlash drafter's own quantized weights at load in this kq codec (q4_k, q5_k or q4_0) where they hold more bits. The target's embed and head stay. |
+| `GMLX_DFLASH_DRAFT_CODEC=q4_k` | Re-encode a DFlash 2 drafter's own quantized weights at load in this kq codec (q4_k, q5_k or q4_0) where they hold more bits. Other drafters ignore it. |
 | `GMLX_DFLASH_COMMIT_ASYNC=0` | A verified DFlash round's commit runs ahead of the next draft, not on the GPU as soon as it is built. |
 | `GMLX_DFLASH_CONV_KERNEL=0` | Run the DFlash draft's grouped conv as an op chain, not the fused kernels. |
 | `GMLX_SPEC_TOKEN_TRACE=1` | With GMLX_ROUND_LOG: a note per B=1 round with drafts, tokens out and the target's top two ids and logits. Adds a head pass. |

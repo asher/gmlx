@@ -816,6 +816,7 @@ def _load_deepseek4_mtp_drafter(
         )
         d_arch = "deepseek4-dspark"
     if d_arch == "deepseek4-dspark":
+        _note_codec_ignored("dspark")
         return _load_deepseek4_dspark_drafter(
             draft_gguf_path,
             target,
@@ -1920,6 +1921,20 @@ def _load_lilicorr_drafter(
     return drafter
 
 
+_CODEC_NOTED: list = []
+
+
+def _note_codec_ignored(kind: str) -> None:
+    """Warn once that GMLX_DFLASH_DRAFT_CODEC leaves a drafter that is not
+    DFlash 2 as its file has it."""
+    from .dflash_drafter import _LAYER_CODEC
+
+    if _LAYER_CODEC and not _CODEC_NOTED:
+        _CODEC_NOTED.append(kind)
+        loadlog.warn(f"[mtp] GMLX_DFLASH_DRAFT_CODEC reaches DFlash 2 drafters "
+                     f"only; this {kind} drafter keeps its file's weights")
+
+
 def _load_dflash_drafter(
     draft_gguf_path: str,
     target,
@@ -1956,6 +1971,8 @@ def _load_dflash_drafter(
             f"{draft_gguf_path}: this dflash GGUF holds the {container} "
             f"drafter, which loads only against a deepseek_v4 target"
         )
+    if container != "dflash2":
+        _note_codec_ignored(container)
     return loader(
         draft_gguf_path,
         target,

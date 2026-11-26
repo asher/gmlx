@@ -954,6 +954,41 @@ def test_layer_codec_re_encodes_the_drafter_layers_and_puts_them_back():
     assert (l0.kquant_type, l0.bits) == ("q6_k", 6)
 
 
+def test_resident_bytes_book_the_layers_the_codec_re_encodes(tmp_path,
+                                                             monkeypatch):
+    """Under GMLX_DFLASH_DRAFT_CODEC a DFlash 2 drafter's file is booked
+    with the bytes kq writes for each linear it re-encodes; the selector
+    codebooks and a linear at the codec's bits or fewer add nothing."""
+    gguf = pytest.importorskip("gguf")
+    kq = pytest.importorskip("mlx_kquant")
+    from gmlx.load.discovery import drafter_resident_bytes
+
+    Q = gguf.GGMLQuantizationType
+    tensors = {"fc.weight": (Q.Q6_K, 64, 512),
+               "selector_hidden.weight": (Q.Q6_K, 32, 256),
+               "selector_predecessor.weight": (Q.Q6_K, 128, 256),
+               "selector_successor.weight": (Q.Q6_K, 128, 256),
+               "blk.0.attn_q.weight": (Q.Q4_K, 64, 256)}
+    path = tmp_path / "dflash2.gguf"
+    w = gguf.GGUFWriter(str(path), "dflash")
+    w.add_uint32("dflash.selector_top_k", 4)
+    for name, (qt, rows, cols) in tensors.items():
+        nb = cols // 256 * {Q.Q6_K: 210, Q.Q4_K: 144}[qt]
+        w.add_tensor(name, np.zeros((rows, nb), np.uint8), raw_dtype=qt)
+    w.add_tensor("output_norm.weight", np.ones(64, np.float32))
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_tensors_to_file()
+    w.close()
+    size = os.path.getsize(path)
+    assert drafter_resident_bytes(str(path)) == size
+    monkeypatch.setenv("GMLX_DFLASH_DRAFT_CODEC", "q4_k")
+    monkeypatch.setattr(dd, "_LAYER_CODEC", "q4_k")
+    built = sum(kq.quantize(mx.zeros((r, c)), "q4_k")[0].nbytes
+                for r, c in ((64, 512), (32, 256)))
+    assert drafter_resident_bytes(str(path)) - size == built
+
+
 def test_head_rows_leaves_unknown_heads_whole():
     assert dd.head_rows(lambda x: x, mx.zeros((1, 2, 8)), 0, 4) is None
 
