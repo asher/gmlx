@@ -293,6 +293,8 @@ _VISION = {
     "qwen3.5": ("qwen3_5", "qwen35_template.jinja", _QWEN),
     "qwen3.6": ("qwen3_5_moe", "qwen36_template.jinja", _QWEN),
     "qwen3.8": ("qwen3_5", "qwen38_template.jinja", _QWEN),
+    "sensenova-loop": ("sensenova_loop", "sensenova_loop_template.jinja",
+                       _QWEN),
     "kimi-k2.5": ("kimi_k25", "kimi_k25_template.jinja", "<|media_pad|>"),
     "gemma4-12b": ("gemma4_unified", "gemma4_12b_template.jinja",
                    "<|image|>"),
@@ -319,7 +321,7 @@ _VISION = {
 _IN_TOOL_TURN = ("gemma4-12b", "glm-5.3", "inkling2", "kimi-k2.5", "lfm3-omni",
                  "lfm3-vl", "minicpm-v-4.6", "minicpm-v-4.7", "minimax-m3.1",
                  "muse", "muse-spark", "nemotron-bolt", "qwen3.5", "qwen3.6",
-                 "qwen3.8")
+                 "qwen3.8", "sensenova-loop")
 
 
 def test_the_tool_image_types_are_the_checked_ones():

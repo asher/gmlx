@@ -60,6 +60,13 @@ FAMILIES: dict[str, dict] = {
             },
         },
     },
+    # https://huggingface.co/sensenova/SenseNova-Loop-9B generation_config.
+    "sensenova-loop": {
+        "label": "SenseNova Loop",
+        "arches": ("sensenova_loop",),
+        "base": {"sampling": {"temperature": 1.0, "top_p": 0.95}},
+        "intents": {},
+    },
     # https://huggingface.co/Qwen/Qwen3-30B-A3B (thinking/non-thinking), 2026-07.
     "qwen3": {
         "label": "Qwen3",

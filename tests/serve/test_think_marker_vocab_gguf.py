@@ -66,6 +66,7 @@ NO_VOCAB = (
     "fixtures/muse_spark_template.jinja", "fixtures/muse_template.jinja",
     "fixtures/nemotron_transcribe/chat_template.jinja",
     "fixtures/ricursive_template.jinja",
+    "fixtures/sensenova_loop_template.jinja",
 )
 
 

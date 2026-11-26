@@ -307,6 +307,16 @@ def _config_kinds(c, layers):
     return ["kv"] * layers
 
 
+def _executed_layers(c, layers):
+    """Layer visits per token: a ``loop`` config (sensenova_loop) runs
+    layers [start, end) ``count`` times, each visit with its own cache."""
+    loop = _get(c, "loop")
+    if isinstance(loop, dict) and int(loop.get("count", 1)) > 1:
+        return layers + (int(loop["count"]) - 1) * (
+            int(loop["end"]) - int(loop["start"]))
+    return layers
+
+
 def config_geometry(c):
     """The cache-stack geometry a model of this config builds, one entry
     per cache the stack owns, or None when the layer count is unreadable.
@@ -318,6 +328,7 @@ def config_geometry(c):
     visits = _get(c, "layer_visits")
     if isinstance(visits, (list, tuple)) and visits:
         return _visit_geometry(c, layers, visits)
+    layers = _executed_layers(c, layers)
     kinds = _config_kinds(c, layers)
     windows = _layer_windows(c, layers)
     state = recurrent_state_bytes(c)
@@ -357,6 +368,8 @@ def stack_geometry(model, stack):
     cfg = _lm_config(model)
     state = recurrent_state_bytes(cfg)
     layers = _get(cfg, "num_hidden_layers")
+    if isinstance(layers, int):
+        layers = _executed_layers(cfg, layers)
     # A kv_policy_exempt side cache (Granite Switch's router lanes) is not
     # a config layer. It grows at the few bytes per token it declares.
     exempt = [bool(getattr(c, "kv_policy_exempt", False)) for c in stack]

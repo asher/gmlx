@@ -325,8 +325,11 @@ def _owned_model_call(
     if h.shape[1] == 0:
         return self.norm(h)
 
+    # A looped model runs some layers more than once, each visit with its
+    # own cache entry; ``execution_layers`` lists the visits in order.
+    layers = getattr(self, "execution_layers", None) or self.layers
     if cache is None:
-        cache = [None] * len(self.layers)
+        cache = [None] * len(layers)
 
     # Packed-hidden capture armed by DFlashCaptureHooks for this call. A
     # separate sink, so capture never implies target_verify (which would
@@ -358,11 +361,11 @@ def _owned_model_call(
         if isinstance(fa_mask, str) and fa_mask == "left_padded_decode"
         else None
     )
-    _set_qwen3_5_decode_left_padding(cache, self.layers, decode_left_padding)
+    _set_qwen3_5_decode_left_padding(cache, layers, decode_left_padding)
 
     position_embeddings = None
     if position_ids is not None:
-        for layer in self.layers:
+        for layer in layers:
             if not layer.is_linear:
                 if not fused_rope_active(layer.self_attn.rotary_emb):
                     position_embeddings = rope_cos_sin(
@@ -371,7 +374,7 @@ def _owned_model_call(
                 break
 
     capture_set = set(capture_layer_ids) if capture_layer_ids else set()
-    for i, (layer, c) in enumerate(zip(self.layers, cache)):
+    for i, (layer, c) in enumerate(zip(layers, cache)):
         layer_mask = ssm_mask if layer.is_linear else fa_mask
         h = layer(
             h,

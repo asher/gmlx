@@ -311,7 +311,7 @@ _IN_PLACE = ("deepseek_v41_vl", "deepseek_v4_vl", "gemma4", "gemma4_unified",
              "minicpmv4_7", "minimax_m3_vision", "mistral3", "muse_glimmer",
              "muse_spark", "nemotron_h_omni", "pixtral", "qwen3_5",
              "qwen3_5_moe", "qwen3_omni_moe", "qwen3_vl", "qwen3_vl_moe",
-             "qwen4_exp")
+             "qwen4_exp", "sensenova_loop")
 # The rows mlx-vlm's table lacks, which the loader adds on load.
 _LOADER_ROWS = ("deepseek_v41_vl", "deepseek_v4_vl")
 

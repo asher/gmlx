@@ -778,6 +778,11 @@ def install_view_rebinds(model, model_type: str | None) -> tuple[dict | None, in
         from gmlx.models.qwen4_exp.model import prepare_runtime
 
         counts = prepare_runtime(getattr(model, "language_model", model))
+    elif model_type == "sensenova_loop":
+        # Owned qwen3.5 tree on every path: arm its fused GDN routes.
+        from gmlx.models.qwen35.gdn import prepare_gdn
+
+        prepare_gdn(model)
     return counts, install_row_fusion(model, model_type)
 
 
@@ -995,6 +1000,9 @@ _FP32_KEEP_BY_MODEL_TYPE: dict[str, tuple[str, ...]] = {
     # computed fp32 (the vendored cast_predicate pins the same set).
     "kimi_k3": (".mlp.gate.weight", ".e_score_correction_bias",
                 ".a_folded", ".dt_bias", "_res_score"),
+    # sensenova_loop: the mHC routers are F32 on the wire and route in
+    # float32 in llama.cpp.
+    "sensenova_loop": (".mhc_",),
     # qwen4_exp: softmax top-10-of-512 routing is fp32 in llama.cpp (F32
     # wire); the GDN decay params feed the fp32 scan; the per-stream inject
     # scalars scale the residual streams directly.

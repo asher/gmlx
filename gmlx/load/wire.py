@@ -105,6 +105,9 @@ def load_gguf_wire_bytes(
         )
 
     arch = meta.get("general.architecture")
+    from .gguf_layout import normalize
+
+    normalize(arrays, kquant_meta, meta, tensor_shapes, arch)
     return arrays, kquant_meta, arch, meta, tensor_shapes
 
 

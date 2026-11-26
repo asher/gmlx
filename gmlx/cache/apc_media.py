@@ -52,7 +52,7 @@ _WHOLE_BLOCK_TYPES = ("gemma4_text", "gemma4_unified_text")
 # attention and short convolutions are causal, and its positions are the
 # token positions.
 _CAUSAL_SERVE_TYPES = ("qwen3_5", "qwen3_5_moe", "minicpmv4_6", "minicpmv4_7",
-                       "lfm3")
+                       "lfm3", "sensenova_loop")
 
 
 class WholeMediaBlocks(set):
