@@ -254,9 +254,9 @@ fusions.
 | `GMLX_HY4_IHC_KERNEL=0` | Run Hy4-preview and Hy4-flash hyper-connection steps op by op instead of on the fused kernels. |
 | `GMLX_HY4_IHC_FUSE=0` | Run the expand that closes a hyper-connected sublayer and the next sublayer's collapse as two dispatches instead of one. Output is bit-identical. |
 | `GMLX_HY4_IHC_STAGED=0` | Run a decode step's hyper-connection collapse as one dispatch instead of the staged form that spreads a row over many threadgroups. |
-| `GMLX_SENSENOVA_MHC_KERNEL=0` | Run SenseNova Loop's mHC routing and merges op by op instead of on two Metal kernels. Output is bit-identical. |
+| `GMLX_SENSENOVA_MHC_KERNEL=0` | Run SenseNova Loop's mHC routing and merges op by op, with no Metal kernels. Bit-identical to `GMLX_SENSENOVA_MHC_FUSED=0`. |
 | `GMLX_SENSENOVA_STREAMS_F32=0` | Keep SenseNova Loop's two mHC residual streams in the activation dtype instead of float32. |
-| `GMLX_SENSENOVA_MHC_FUSED=1` | Run each SenseNova Loop router, with the merge before it, as one Metal kernel. Rounds the router logits differently, closer to float32. |
+| `GMLX_SENSENOVA_MHC_FUSED=0` | Run each SenseNova Loop router as MLX ops and two kernels instead of one kernel that also does the merge before it. Router logits round differently. |
 | `GMLX_HY4_IDX_KERNEL=0` | Score the Hy4-preview indexer and pick its top-k on the op chain instead of the fused kernels. |
 | `GMLX_HY4_IDX_KQ=0` | Score the Hy4-flash pooled indexer and pick its top-k on the op chain instead of the mlx-kquant kernels. |
 | `GMLX_HY4_SPARSE_KQ=0` | Run Hy4-flash sparse attention as a gather and op chain instead of the mlx-kquant sparse kernels. |

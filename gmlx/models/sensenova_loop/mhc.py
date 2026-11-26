@@ -18,11 +18,12 @@ llama.cpp unless ``GMLX_SENSENOVA_STREAMS_F32=0`` keeps them in the
 activation dtype; the branch input and the layer outputs leave in the
 activation dtype.
 
-On the GPU two Metal kernels do the elementwise work: one computes the
-coefficients and the branch input of a router (the Sinkhorn rounds would
-otherwise be dozens of dispatches), the other the merge. They use MLX's own
-elementwise functions in the same order, so the bits equal the ops path
-(``GMLX_SENSENOVA_MHC_KERNEL=0``).
+On the GPU each router runs as one Metal kernel (``route``): the merge of
+the branch before it, the RMS norm and the router linear, the coefficients
+and the branch input. Its norm and linear sum in their own order, closer to
+a float64 reference than MLX's matmul. ``GMLX_SENSENOVA_MHC_FUSED=0`` runs
+the router as MLX ops plus two kernels (coefficients with branch input, and
+the merge) whose bits equal the ops path (``GMLX_SENSENOVA_MHC_KERNEL=0``).
 """
 
 from __future__ import annotations
@@ -430,7 +431,7 @@ def _route_kernel():
 
 
 def _use_fused() -> bool:
-    return os.environ.get("GMLX_SENSENOVA_MHC_FUSED", "0") == "1" and _use_kernel()
+    return os.environ.get("GMLX_SENSENOVA_MHC_FUSED", "1") != "0" and _use_kernel()
 
 
 def route(router: MHCRouter, s: mx.array, y, coef_prev, out_dtype):

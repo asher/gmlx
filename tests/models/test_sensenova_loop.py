@@ -155,6 +155,8 @@ def test_the_mhc_kernels_give_the_ops_path_bits(monkeypatch, settings, dtype, ro
     s = (mx.array(rng.standard_normal((1, rows, 2 * hidden)), mx.float32) * 3).astype(dtype)
     y = mx.array(rng.standard_normal((1, rows, hidden)), mx.bfloat16)
 
+    monkeypatch.setenv("GMLX_SENSENOVA_MHC_FUSED", "0")
+
     def run(kernel):
         monkeypatch.setenv("GMLX_SENSENOVA_MHC_KERNEL", kernel)
         x, coef = router(s, mx.bfloat16)
@@ -175,6 +177,7 @@ def test_the_model_gives_the_same_logits_with_and_without_the_kernels(
     T.write(path, ARCH, T.values(ARCH), fused=True)
     model = gmlx.load_model(str(path), verbose=False)[0]
     ids = mx.array(IDS)
+    monkeypatch.setenv("GMLX_SENSENOVA_MHC_FUSED", "0")
     out = {}
     for kernel in ("0", "1"):
         monkeypatch.setenv("GMLX_SENSENOVA_MHC_KERNEL", kernel)
@@ -205,7 +208,7 @@ def test_a_verify_width_router_gives_each_row_the_one_row_bits(rows):
 @_GPU
 @pytest.mark.parametrize("rows", [1, 7])
 def test_the_one_dispatch_router_is_no_further_from_float64(monkeypatch, rows):
-    # GMLX_SENSENOVA_MHC_FUSED sums the norm and the linear in its own
+    # The one-dispatch router sums the norm and the linear in its own
     # order, so the gate is distance to a float64 reference.
     from gmlx.models.sensenova_loop import mhc
 
@@ -231,3 +234,14 @@ def test_the_one_dispatch_router_is_no_further_from_float64(monkeypatch, rows):
         @ w.astype(np.float64).T + b, 20)
     err = {k: np.abs(v[2] - ref).max() for k, v in out.items()}
     assert err["1"] <= err["0"] * 1.5 + 1e-7, err
+
+
+@_GPU
+def test_the_one_dispatch_router_is_the_default(monkeypatch):
+    from gmlx.models.sensenova_loop import mhc
+
+    monkeypatch.delenv("GMLX_SENSENOVA_MHC_FUSED", raising=False)
+    monkeypatch.delenv("GMLX_SENSENOVA_MHC_KERNEL", raising=False)
+    assert mhc._use_fused()
+    monkeypatch.setenv("GMLX_SENSENOVA_MHC_FUSED", "0")
+    assert not mhc._use_fused()
