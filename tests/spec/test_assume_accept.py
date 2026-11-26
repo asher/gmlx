@@ -213,18 +213,69 @@ def test_a_stop_inside_a_counted_round_leaves_the_plain_order_state(
     _close(plain, on)
 
 
-@pytest.mark.parametrize("gather", [True, False])
-def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, gather):
+@pytest.mark.parametrize("stop_after", [None, 13])
+def test_counted_rounds_read_in_place_keep_the_plain_tokens_and_state(
+        monkeypatch, stop_after):
+    """The in-place counted draft (kq key bounds) through the round loop,
+    bf16 at head dim 128 on the GPU: commit ahead, counted draft, trim,
+    redraft and a stop leave the plain order's tokens and state."""
+    import dataclasses
+
+    import gmlx.spec.dflash_drafter as dd
+    import test_early_draft
+    from gmlx.spec.dflash_drafter import DFlash2Drafter
+    from test_dflash2_drafter import _config, _tcfg
+
+    if not dd._in_place_ready():
+        pytest.skip("kq.sdpa_fa_verify with key bounds needs the GPU and kq")
+    calls = []
+    real = dd._bounded_sdpa
+    monkeypatch.setattr(dd, "_bounded_sdpa",
+                        lambda *a: calls.append(1) or real(*a))
+
+    def target():
+        lm = _target()
+        lm.set_dtype(mx.bfloat16)
+        return lm
+
+    def drafter(lm):
+        d = DFlash2Drafter(dataclasses.replace(_config(_tcfg(), window=8),
+                                               head_dim=128))
+        d.set_dtype(mx.bfloat16)
+        mx.eval(d.parameters())
+        d.reset(lm)
+        return d
+
+    monkeypatch.setattr(test_early_draft, "_target", target)
+    monkeypatch.setattr(test_early_draft, "_drafter", drafter)
+    kw = dict(n=96, floor=0.5)
+    if stop_after is not None:
+        kw["stop_after"] = stop_after
+    monkeypatch.setattr(sp, "_ACCEPT_COUNTED", False)
+    plain = _run(monkeypatch, False, **kw)
+    assert not calls
+    monkeypatch.setattr(sp, "_ACCEPT_COUNTED", True)
+    on = _run(monkeypatch, False, **kw)
+    assert on["stats"]["counted"] > 0 and calls
+    _close(plain, on)
+
+
+@pytest.mark.parametrize("form", ["two_piece", "one_take", "masked"])
+def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, form):
     """The counted draft against the plain draft of the same ring, for
-    every count of dead rows. Read by row index it has the plain draft's
-    keys in the plain order: the same bits."""
+    every count of dead rows. Read by row index, in two pieces or (on the
+    GPU, beside the in-place read) one take, it has the plain draft's keys
+    in the plain order: the same bits. Only the one take writes the rows
+    past the live end."""
     import numpy as np
 
     import gmlx.spec.dflash_drafter as dd
     from test_dflash2_drafter import BLOCK, CAPTURE
 
-    monkeypatch.setattr(dd, "_COUNTED_GATHER", gather)
-    monkeypatch.setattr(dd, "_COUNTED_IN_PLACE", False)
+    monkeypatch.setattr(dd, "_COUNTED_GATHER", form != "masked")
+    monkeypatch.setattr(dd, "_COUNTED_IN_PLACE", form == "one_take")
+    if form == "one_take" and not dd._in_place_ready():
+        pytest.skip("the one-take gather runs on the GPU beside kq key bounds")
 
     lm = _target()
     drafter = _drafter(lm, window=8)
@@ -243,13 +294,19 @@ def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, gather
     for dead in range(BLOCK):
         drafter.append_context(drafter._captures(rows))
         assert drafter.counted_ok(BLOCK, most)
+        ring = drafter._cache[0]
+        idx = int(ring._idx)
+        past = np.array(ring.keys[..., idx:idx + BLOCK, :])
         got = drafter._draft_hidden(block, (mx.array(dead), most))
         mx.eval(got)
+        written = not np.array_equal(
+            past, np.array(drafter._cache[0].keys[..., idx:idx + BLOCK, :]))
+        assert written == (form != "two_piece")
         kept = drafter.accept_trim(mark, dead)
         want = drafter._draft_hidden(block)
         g = np.array(got.astype(mx.float32))
         w = np.array(want.astype(mx.float32))
-        if gather:
+        if form != "masked":
             assert np.array_equal(g, w)
         else:
             # Same sums in another key order: equal to rounding.
@@ -272,8 +329,8 @@ def test_a_counted_block_read_in_place_is_the_plain_block_to_rounding(
     from gmlx.spec.dflash_drafter import DFlash2Drafter
     from test_dflash2_drafter import BLOCK, CAPTURE, _config, _tcfg
 
-    if dd._kq_bounds() is None:
-        pytest.skip("kq.sdpa_fa_verify with key bounds needs Metal and kq")
+    if not dd._in_place_ready():
+        pytest.skip("kq.sdpa_fa_verify with key bounds needs the GPU and kq")
     calls = []
     real = dd._bounded_sdpa
     monkeypatch.setattr(dd, "_bounded_sdpa",

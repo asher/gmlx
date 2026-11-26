@@ -87,13 +87,16 @@ _COUNTED_F32 = env_bool("GMLX_DFLASH_COUNTED_F32", True)
 # order (1), which keeps the plain attention kernel; 0 is the array mask
 # over the buffer rows.
 _COUNTED_GATHER = env_bool("GMLX_DFLASH_COUNTED_GATHER", True)
-# The counted gather writes the block into the ring's spare rows and reads
-# the whole view with one gather, in place of a gather and a join.
+# With the in-place read on, on the GPU, a counted round its layout does
+# not fit gathers in one take: the block goes into the ring's spare rows
+# and one gather reads the whole view, in place of a gather and a join.
+# The same bits on the GPU; the CPU's attention rounds a take otherwise.
 _COUNTED_ONE_TAKE = env_bool("GMLX_DFLASH_COUNTED_ONE_TAKE", True)
 # A counted draft reads the ring in place: the plain draft's layout goes in
 # after the live rows, at a row the GPU computes, and kq.sdpa_fa_verify
 # takes the bounds of the view as GPU scalars. Equal to the gather to
-# rounding, as the key splits fall elsewhere. 0 keeps the gather.
+# rounding, as the key splits fall elsewhere. 0 keeps the two-piece gather
+# (the one-take form runs only beside the in-place read).
 _COUNTED_IN_PLACE = env_bool("GMLX_DFLASH_COUNTED_IN_PLACE", True)
 # The counted draft on a ring still shorter than the sliding window (a
 # context under about one window): masked rows in place of the plain key
@@ -333,14 +336,22 @@ def _kq_bounds():
     return _KQ_BOUNDS[0]
 
 
+def _in_place_ready() -> bool:
+    """Whether the in-place counted forms run here: the lever, a kq that
+    takes key bounds, and the GPU as the default device (the kq kernel has
+    no CPU form)."""
+    return (_COUNTED_IN_PLACE and mx.default_device().type == mx.DeviceType.gpu
+            and _kq_bounds() is not None)
+
+
 def _bounded_ok(q: mx.array, k: mx.array, v: mx.array) -> bool:
-    """Whether ``_bounded_sdpa`` takes these shapes."""
+    """Whether ``_bounded_sdpa`` takes these shapes here."""
     B, hq, L, D = q.shape
     kv = int(k.shape[1])
     return (B == 1 and q.dtype in (mx.float16, mx.bfloat16)
             and k.dtype == q.dtype and v.dtype == q.dtype and D in (64, 128, 256)
             and kv > 0 and hq % kv == 0 and 2 <= L <= 8
-            and (hq // kv) * L <= 64 and _kq_bounds() is not None)
+            and (hq // kv) * L <= 64 and _in_place_ready())
 
 
 def _bounded_sdpa(q, k, v, scale: float, starts: mx.array,
@@ -1299,7 +1310,7 @@ class DFlashAttention(nn.Module):
             return (q, mx.concatenate([cache.keys[..., :idx, :], k], axis=2),
                     mx.concatenate([cache.values[..., :idx, :], v], axis=2),
                     mask, False)
-        if (_COUNTED_IN_PLACE and L > 1 and w1 >= L - 1
+        if (_COUNTED_GATHER and L > 1 and w1 >= L - 1
                 and idx + 2 * L - 1 <= int(cache.keys.shape[2])
                 and _bounded_ok(q, k, v)):
             # The plain layout of _ring_in_place at ring index
@@ -1320,9 +1331,11 @@ class DFlashAttention(nn.Module):
             # ``idx - dead``, read by row index: the rows every block row
             # sees, the block, then the L - 1 oldest rows newest first.
             # Same keys in the same order as the plain draft, so the same
-            # attention kernel and the same bits; the ring is not written.
+            # attention kernel and the same bits. The one-take form writes
+            # the block into the rows past ``idx``, which are not live.
             lo = (idx - w1) - dead
-            if _COUNTED_ONE_TAKE and idx + L <= int(cache.keys.shape[2]):
+            if (_COUNTED_ONE_TAKE and idx + L <= int(cache.keys.shape[2])
+                    and _in_place_ready()):
                 cache.keys[..., idx:idx + L, :] = k
                 cache.values[..., idx:idx + L, :] = v
                 rows = mx.concatenate([lo + mx.arange(L - 1, w1),
