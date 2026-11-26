@@ -216,15 +216,24 @@ def test_each_schedule_condition_names_a_declared_cron():
     assert named == crons, (named, crons)
 
 
-def test_the_gate_status_posts_only_for_this_repository():
-    """A fork's token cannot post, so its run skips the step instead of
-    failing. A dispatch run has no pull_request payload, so the step lets
-    it through and checks the head repository it looked up."""
-    steps = _yaml("gate.yml")["jobs"]["gate-status"]["steps"]
+def test_the_gate_status_posts_for_a_fork_without_running_its_code():
+    """pull_request_target gives a fork's pull request a token that can
+    post, and runs main's gate.py. The job checks out main only, keeps the
+    token out of .git/config, and reads the pull request's commits with git.
+    Called from test.yml, a fork's run has a read-only token, so it skips
+    the post instead of failing."""
+    gate = _yaml("gate.yml")
+    on = gate.get("on") or gate[True]
+    assert "pull_request_target" in on and "pull_request" not in on
+    steps = gate["jobs"]["gate-status"]["steps"]
+    checkout = next(s for s in steps if str(s.get("uses", "")).startswith("actions/checkout"))
+    assert "ref" not in checkout["with"]
+    assert checkout["with"]["persist-credentials"] is False
+    runs = [s.get("run", "") for s in steps]
+    assert not any(re.search(r"git (checkout|switch|worktree)|pip install|pytest", r) for r in runs)
     post = next(s for s in steps if s.get("name") == "Post")
-    assert post["if"] == ("github.event_name == 'workflow_dispatch' || "
+    assert post["if"] == ("github.event_name != 'pull_request' || "
                           "github.event.pull_request.head.repo.full_name == github.repository")
-    assert '[ "$HEAD_REPO" != "$GH_REPO" ]' in post["run"]
 
 
 def test_the_gate_job_follows_the_test_legs_of_a_pull_request():

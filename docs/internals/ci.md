@@ -6,6 +6,7 @@ they run it on the CPU. The `gate/gpu` status comes from a run of the GPU
 tests on a Mac, recorded in git and pushed with the branch.
 
 - [Gate a branch](#gate-a-branch)
+- [Gate a pull request from a fork](#gate-a-pull-request-from-a-fork)
 - [What the gate runs](#what-the-gate-runs)
 - [The gate/gpu status](#the-gategpu-status)
 - [How results reach GitHub](#how-results-reach-github)
@@ -39,6 +40,26 @@ gh workflow run gate.yml -f pr=<number>
 Every code push needs a new gate run, including a rebase onto a newer
 main. A push that changes only docs keeps the status of the tree it builds
 on, so it needs no run.
+
+## Gate a pull request from a fork
+
+A contributor's fork can't push gate results, so a maintainer can gate the
+pull request's tree. The gate runs the pull request's code and tests as you
+on your Mac, so read the whole diff first, tests and scripts included.
+Then run the gate on a worktree of it, push the results on their own and
+refresh the status:
+
+```sh
+git fetch origin pull/<number>/head:pr-<number>
+git worktree add ../gmlx-pr-<number> pr-<number>
+cd ../gmlx-pr-<number>
+python scripts/gate.py run
+git push origin 'refs/gmlx-gate-mine/*:refs/gmlx-gate/*'
+gh workflow run gate.yml -f pr=<number>
+```
+
+Use that push, not a plain `git push`, which would also publish the
+`pr-<number>` branch on origin.
 
 ## What the gate runs
 

@@ -6,32 +6,38 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-11-25
+
 ### Added
 
+- Hy4 GGUFs run, including the STQ1_0 build, and take image input through
+  the Hy4 VL mmproj.
 - Qwen3.8-Flash-Next speculates with Inco AI's DFlash 2 drafter, and
   `gmlx pull qwen3.8-flash-next` takes its Q6_K file beside the model.
-- Hy4 GGUFs run, including the STQ1_0 build, and take image input through
-  the Hy4 VL mmproj. STQ1_0 files need mlx-kquant 0.5.14 or later.
 - `gmlx pull inkling-2-mini --quant fastest` pulls bartowski's Q4_0 file,
   which decodes faster than the balanced tier.
 
 ### Changed
 
-- With mlx-kquant 0.5.14 or later, Qwen3.8-Flash-Next prefills and decodes
-  faster.
-- Inkling-2-Mini decodes faster with mlx-kquant 0.5.14 or later and its
-  DSpark drafter.
+- Qwen3.8-Flash-Next prefills and decodes faster.
+- Inkling-2-Mini decodes faster with its DSpark drafter.
+- An idle server keeps its model wired 10 minutes for a faster next request,
+  unless apps need memory. `GMLX_RESIDENCY_KEEPALIVE_S=0` turns it off.
 - A Qwen3.8-Flash-Next load spends about 10 more seconds packing its experts
   into a copy; `GMLX_MOE_EXPERT_STORE=0` keeps them as zero-copy GGUF views.
 - A speculative reply sends its first token sooner, and its last token goes
   out before the request is stored in the prompt cache.
-- An idle server keeps its model wired 10 minutes for a faster next request,
-  unless apps need memory. `GMLX_RESIDENCY_KEEPALIVE_S=0` turns it off.
+- Requires mlx-kquant 0.5.15.
 
 ### Fixed
 
+- Nemotron-H BF16 GGUFs stream their SwitchMLP experts from disk.
+- Expert lookahead on Nemotron-H scales its predictions by the MoE block's
+  norm, so streaming prefetches the right experts more often.
 - A fresh `gmlx pull inkling-2-mini` speculates again. Unsloth's DSpark
   drafter now uses llama.cpp's layout, which gmlx left unpaired.
+- `gmlx sync-models --add-companions` and discover scans pair a gemma-4
+  assistant drafter that sits in its model's folder, which they skipped.
 
 ## [0.5.7] - 2026-11-21
 
@@ -56,8 +62,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file was not found. It now says that gmlx pulls `.gguf` files only.
 - With the prompt cache off, a model with a drafter read a repeated prompt
   again in full. The repeat now reuses all but the prompt's last token.
-- `gmlx sync-models --add-companions` and discover scans pair a gemma-4
-  assistant drafter that sits in its model's folder, which they skipped.
 
 ## [0.5.6] - 2026-11-19
 

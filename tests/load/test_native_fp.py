@@ -367,6 +367,15 @@ def test_expert_gpu_ok_gates_cpu_only_codecs(monkeypatch):
     assert _kq_expert_gpu_ok(glu("mxfp4", "mxfp4", "mxfp4"))
     assert not _kq_expert_gpu_ok(glu("fake_cpu_only", "q4_k", "q4_k"))
     assert not _kq_expert_gpu_ok(glu("q4_k", "q4_k", "fake_cpu_only"))
+    # A SwitchMLP (nemotron_h) is checked before the offload wrapper
+    # aliases fc1/fc2 as up_proj/down_proj.
+    from gmlx._vendor.mlx_lm.models.switch_layers import SwitchMLP
+
+    mlp = SwitchMLP(16, 32, 4)
+    assert _kq_expert_gpu_ok(mlp)
+    mlp.fc2.kquant_type = "fake_cpu_only"
+    assert not hasattr(mlp, "down_proj")
+    assert not _kq_expert_gpu_ok(mlp)
     # non-kquant projections (packed native-fp, plain float) don't gate
     assert _kq_expert_gpu_ok(SimpleNamespace(gate_proj=object()))
     # older kq builds without the query never gate

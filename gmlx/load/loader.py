@@ -409,7 +409,8 @@ def _kq_expert_gpu_ok(module) -> bool:
     has = getattr(kq, "codec_has_matmul", None)
     if has is None:
         return True
-    for name in ("gate_proj", "up_proj", "down_proj"):
+    # fc1/fc2: a SwitchMLP before the offload wrapper aliases them.
+    for name in ("gate_proj", "up_proj", "down_proj", "fc1", "fc2"):
         codec = getattr(getattr(module, name, None), "kquant_type", None)
         if codec is not None and not has(codec):
             return False
