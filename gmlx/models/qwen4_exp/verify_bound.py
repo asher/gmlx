@@ -12,10 +12,12 @@ the same; only the host path and the buffer boundaries differ.
 What stays mlx. A record input that is still lazy (the embedding, the
 table rows, a stage built from primitives between two records) is
 submitted in one ``mx.async_eval`` after our open buffer is committed, and
-the record is bound after it. A record that cannot be bound for another
-reason (no program yet, a layout that differs, a parameter out of its
-range) ends the bound part of that verify: our buffer is committed and the
-rest of the verify is the lazy graph of today, evaluated by the caller.
+the record is bound after it. A record still learning its program
+or with an input laid out another way runs in mlx's eval, and the record
+after it submits it as a lazy input. A record that cannot be bound for
+another reason (it never replays direct, a parameter out of its range)
+ends the bound part of that verify: our buffer is committed and the rest of
+the verify is the lazy graph of today, evaluated by the caller.
 
 Host reads. A bound output carries no mlx event (libmlx does not export
 the constructor), so a host read of one, or an eval of views of it alone,
@@ -50,6 +52,23 @@ _STATS = env_bool("GMLX_SPEC_VERIFY_BOUND_STATS", False)
 # Host seconds by piece in the stats (a harness sets it): the encodes, the
 # mlx submissions, the commits, the prepare pass.
 _TIMES = False
+# GMLX_SPEC_VERIFY_BOUND_TRACE=PATH: a line per commit and mlx submission
+# (perf_counter seconds, what, layer), to put names on command buffer stamps.
+_TRACE_PATH = os.environ.get("GMLX_SPEC_VERIFY_BOUND_TRACE")
+_trace_lines: list = []
+
+
+def _trace(what: str, li: int) -> None:
+    _trace_lines.append(f"{time.perf_counter():.6f} {what} {li}\n")
+    if len(_trace_lines) >= 4096:
+        _trace_flush()
+
+
+def _trace_flush() -> None:
+    if _trace_lines and _TRACE_PATH:
+        with open(_TRACE_PATH, "a") as f:
+            f.writelines(_trace_lines)
+    _trace_lines.clear()
 
 
 def _parse_marks(text: str) -> frozenset:
@@ -67,7 +86,7 @@ _kq_mod: list = [None]
 stats = {"verifies": 0, "whole": 0, "bound_calls": 0, "lazy_calls": 0,
          "commits": 0, "submits": 0, "copies": 0, "ended": {}, "lazy_in": {},
          "t_encode": 0.0, "t_submit": 0.0, "t_commit": 0.0,
-         "t_prepare": 0.0}
+         "t_prepare": 0.0, "qsa": {}, "lazy_rec": {}}
 
 
 def _kq():
@@ -114,6 +133,8 @@ class Session:
         if self.open:
             t0 = time.perf_counter() if _TIMES else 0.0
             self.kq.bound_commit(self.sid)
+            if _TRACE_PATH:
+                _trace("commit", self.li)
             self.open = False
             stats["commits"] += 1
             if _TIMES:
@@ -127,7 +148,11 @@ class Session:
         self.pending = []
         if todo:
             t0 = time.perf_counter() if _TIMES else 0.0
+            if _TRACE_PATH:
+                _trace("submit", self.li)
             mx.async_eval(*todo)
+            if _TRACE_PATH:
+                _trace("submitted", self.li)
             stats["submits"] += 1
             if _TIMES:
                 stats["t_submit"] += time.perf_counter() - t0
@@ -157,8 +182,16 @@ class Session:
             self.submit(ins)
             r = kq.bound_call(self.sid, handle, ins)
         if type(r) is int:
-            self._end(r)
             self.lazy += 1
+            if r == 5 or (r == 4 and kq.fused_direct_info(handle).get(
+                    "state") in ("new", "recorded")):
+                # A record still learning its program, or an input laid out
+                # another way: this one runs in mlx's eval, and the record
+                # that reads it submits it as a lazy input.
+                key = (self.li, r)
+                stats["lazy_rec"][key] = stats["lazy_rec"].get(key, 0) + 1
+                return kq.fused_call(handle, ins)
+            self._end(r)
             return kq.fused_call(handle, ins)
         self.open = True
         self.bound += 1
@@ -205,14 +238,31 @@ def begin(B: int):
         held = _local.sid = (kq, kq.bound_session())
     s = Session(kq, held[1])
     _local.session = s
+    if _TRACE_PATH:
+        _trace("begin", -1)
     return s
 
 
 def end(s: Session) -> None:
     try:
         s.close()
+        if _TRACE_PATH:
+            _trace("end", s.li)
     finally:
         _local.session = None
+
+
+def noting() -> bool:
+    return _STATS or _TIMES
+
+
+def note(layer, why: str) -> None:
+    """With the stats on: what an attention layer of a verify took
+    (the whole record, or why not), by layer ratio."""
+    if _STATS or _TIMES:
+        key = (getattr(layer.self_attn, "ratio", 0), why)
+        q = stats["qsa"]
+        q[key] = q.get(key, 0) + 1
 
 
 def wait() -> None:
@@ -250,3 +300,5 @@ def _report() -> None:
 
 if _STATS and _MODE > 0:
     atexit.register(_report)
+if _TRACE_PATH and _MODE > 0:
+    atexit.register(_trace_flush)

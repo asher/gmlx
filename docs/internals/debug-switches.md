@@ -109,6 +109,7 @@ is already running does not see a variable you export later.
 | `GMLX_Q4_VERIFY_FUSED_WHOLE=1` | A qwen4_exp verify records each attention layer and PLE block whole. Same bits. On with `GMLX_SPEC_VERIFY_BOUND`. |
 | `GMLX_SPEC_VERIFY_BOUND_MARKS=1,2,4,8,16,32` | With `GMLX_SPEC_VERIFY_BOUND`, the layers a bound command buffer is committed ahead of. |
 | `GMLX_SPEC_VERIFY_BOUND_STATS=1` | With `GMLX_SPEC_VERIFY_BOUND`, print bound and lazy record calls and where verifies left the bound path at exit. |
+| `GMLX_SPEC_VERIFY_BOUND_TRACE=PATH` | With `GMLX_SPEC_VERIFY_BOUND`, append a line per session commit and mlx submission (perf_counter seconds) to PATH. |
 | `GMLX_MOE_EXPERT_STORE=0` | Keep a Flash-Next load's routed experts as zero-copy views of the GGUF, not in the kq store layout. Other models keep the views by default. |
 | `GMLX_MOE_EXPERT_STORE=full` | Hold the routed experts of every fused MoE block in the kq store layout, on any model. |
 | `GMLX_MOE_EXPERT_STORE`, load | A store load reads each stack from the file past the page cache and never wires the mapped copy. Outputs differ from the views in rounding. |

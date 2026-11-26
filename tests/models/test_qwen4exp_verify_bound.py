@@ -39,8 +39,8 @@ def _levers(monkeypatch):
     monkeypatch.setattr(vb, "_MODE", 0)
     monkeypatch.setattr(vb, "_kq_mod", [None])
     for k in vb.stats:
-        monkeypatch.setitem(
-            vb.stats, k, {} if k in ("ended", "lazy_in") else 0)
+        monkeypatch.setitem(vb.stats, k, {} if isinstance(
+            vb.stats[k], dict) else 0)
     kq.env_cache(True)
     yield
     kq.env_cache(False)
@@ -59,6 +59,11 @@ class _AtOnce:
         self.open = 0
         self.max_open = 0
         self.refuse = set()
+        # What kq says of a refused record: still learning, or never.
+        self.state = "refused"
+
+    def fused_direct_info(self, handle):
+        return {"state": self.state}
 
     def bound_session(self):
         return 0
@@ -179,28 +184,58 @@ def test_a_record_kq_cannot_bind_leaves_the_rest_of_the_verify_lazy(monkeypatch)
     assert all(why in (1, 4) for _, why in vb.stats["ended"])
 
 
-def test_a_refusal_in_the_middle_commits_what_was_bound(monkeypatch):
+@pytest.mark.parametrize("state", ["refused", "recorded"])
+def test_a_refusal_in_the_middle(monkeypatch, state):
+    # From the third pass every attention record is refused. A record that
+    # never replays direct ends the bound part: the layers before it stay
+    # bound, the buffer is committed, the rest is lazy. A record still
+    # learning its program runs in mlx's eval and the layers after it stay
+    # bound.
     ref = _run(monkeypatch, 0, plan=PASS * 3)
     shim = _AtOnce()
+    shim.state = state
     monkeypatch.setattr(vb, "_MODE", 1)
     monkeypatch.setattr(vb, "_kq_mod", [shim])
     lm, cache = _prefilled()
     out: list = []
     _rounds(lm, cache, PASS * 2, out)
-    # From here every attention record is refused: the layers before it
-    # stay bound, the buffer is committed, the rest is lazy.
+    attn = set()
     for layer in lm.model.layers:
         if not layer.is_linear:
             for rec in vars(layer)["_verify_fused"][1].values():
                 if isinstance(rec, tuple):
-                    shim.refuse.add(rec[0])
+                    attn.add(rec[0])
+    shim.refuse |= attn
+    seen: list = []
+    real, begin = shim.bound_call, vb.begin
+
+    def spy(sid, handle, ins):
+        r = real(sid, handle, ins)
+        seen[-1].append((handle in attn, type(r) is not int))
+        return r
+
+    def spy_begin(B):
+        seen.append([])
+        return begin(B)
+
+    shim.bound_call = spy
+    monkeypatch.setattr(vb, "begin", spy_begin)
     before = shim.commits
     _rounds(lm, cache, PASS, out)
     out.extend(np.array(a.astype(mx.float32))
                for c in cache for a in c.state if isinstance(a, mx.array))
     _equal(ref, out)
     assert shim.commits > before and shim.open == 0
-    assert any(why == 4 for _, why in vb.stats["ended"])
+    # Records sent to the session after the first refused one of a verify,
+    # and whether each was bound.
+    after = [b for v in seen for i, (is_attn, b) in enumerate(v)
+             if not is_attn and any(x[0] for x in v[:i])]
+    if state == "refused":
+        assert any(why == 4 for _, why in vb.stats["ended"])
+        assert not after
+    else:
+        assert not vb.stats["ended"]
+        assert vb.stats["lazy_rec"] and after and all(after)
 
 
 def test_a_copied_cache_keeps_its_rows_under_records_run_at_once(monkeypatch):

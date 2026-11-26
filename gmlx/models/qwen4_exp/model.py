@@ -3740,15 +3740,19 @@ def _fused_qsa_whole_dense(layer, h, c, table):
     L = h.shape[1]
     st = W.dense_state(layer.self_attn, c, L)
     if st is None:
+        _vb.note(layer, "no dense form")
         return None
     vals, cap, span = st
     key = _whole_d_key(h.shape, h.dtype, c, cap)
     rec = table.get(key)
     if rec is None:
+        _vb.note(layer, "dense new layout")
         table[key] = "plain" if _layer_has_lora(layer) else False
         return None
     if rec == "plain":
+        _vb.note(layer, "dense plain")
         return None
+    _vb.note(layer, "dense whole" if rec is not False else "dense recorded")
     W.own(c)
     p = W.params(vals)
     ins = [h, c._kt, c._vt, c._it, c._kb, c._vb, p]
@@ -3791,19 +3795,28 @@ def _fused_qsa_whole(layer, h, c, mask, positions, table):
 
     if (positions is not None or isinstance(mask, mx.array)
             or h.shape[0] != 1):
+        _vb.note(layer, "positions" if positions is not None else "mask")
         return None
     L = h.shape[1]
     st = W.state(layer.self_attn, c, L)
     if st is None:
+        if _vb.noting():
+            a = layer.self_attn
+            r, topk = a.ratio, a.indexer.block_topk
+            _vb.note(layer, f"topk {topk}" if topk != 512 else
+                     "dense depth" if (c.offset + 1) // r <= topk else "state")
         return _fused_qsa_whole_dense(layer, h, c, table)
     vals, nb_new = st
     key = _whole_key(h.shape, h.dtype, c, L)
     rec = table.get(key)
     if rec is None:
+        _vb.note(layer, "new layout")
         table[key] = "plain" if _layer_has_lora(layer) else False
         return None
     if rec == "plain":
+        _vb.note(layer, "plain")
         return None
+    _vb.note(layer, "whole" if rec is not False else "recorded")
     W.ensure_block_tail(c, vals[3])
     W.own(c)
     p = W.params(vals)
