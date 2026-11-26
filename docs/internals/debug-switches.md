@@ -104,6 +104,7 @@ is already running does not see a variable you export later.
 | `GMLX_Q4_VERIFY_FUSED=0` | Run a qwen4_exp verify's layers as plain calls, not recorded kq graphs that replay their Metal calls. Same bits. A LoRA or streamed experts run plain anyway. |
 | `GMLX_Q4_VERIFY_FUSED_QSA=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep the attention layers of the verify on the plain call. |
 | `GMLX_Q4_VERIFY_FUSED_CAP=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep per-width record arrays in the gated-delta verify (one record layout per pair of round widths). |
+| `GMLX_Q4_DECODE_FUSED=1` | Run the layers of a B=1 one-token qwen4_exp decode step as recorded kq graphs, under the rules of `GMLX_Q4_VERIFY_FUSED`. Same bits. |
 | `GMLX_Q4_VERIFY_FUSED_MAX_RECORDS`, `GMLX_Q4_VERIFY_FUSED_MAX_MB` | Bound on the recorded verify graphs of the process (4096 handles, 256 MB of programs); the least recently used go first. |
 | `GMLX_MOE_EXPERT_STORE=0` | Keep a Flash-Next load's routed experts as zero-copy views of the GGUF, not in the kq store layout. Other models keep the views by default. |
 | `GMLX_MOE_EXPERT_STORE=full` | Hold the routed experts of every fused MoE block in the kq store layout, on any model. |

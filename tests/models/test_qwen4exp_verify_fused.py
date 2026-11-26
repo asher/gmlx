@@ -35,6 +35,7 @@ def _levers(monkeypatch):
     monkeypatch.setattr(q4, "_VERIFY_FUSED", False)
     monkeypatch.setattr(q4, "_VERIFY_FUSED_QSA", True)
     monkeypatch.setattr(q4, "_VERIFY_FUSED_CAP", True)
+    monkeypatch.setattr(q4, "_DECODE_FUSED", False)
     monkeypatch.setattr(q4, "_FUSED_LIMITS", (4096, 256 << 20))
     yield
     kq.env_cache(False)
@@ -272,6 +273,50 @@ def test_the_record_table_is_bounded(monkeypatch):
     _equal(plain, fused)
     stats = q4.verify_fused_stats(lm)
     assert stats["evicted"] > 0 and 0 < stats["records"] <= 2 * 4 + 2
+
+
+def _decode(monkeypatch, fused, steps=14, rounds=()):
+    """Prefill, then one-token decode steps, with verify rounds (plain
+    ones) and their rollbacks among them."""
+    monkeypatch.setattr(q4, "_DECODE_FUSED", fused)
+    kq.env_cache(fused)
+    lm, args = _lm(True)
+    lm.eval()
+    mx.random.seed(11)
+    cache = lm.make_cache()
+    mx.eval(lm(mx.random.randint(0, args.vocab_size, (1, 9)),
+               cache=cache).logits)
+    out = []
+    for i in range(steps):
+        if i in rounds:
+            block = mx.random.randint(0, args.vocab_size, (1, 4))
+            hid, _, sink = lm.speculative_verify_hidden(block, cache)
+            lm.rollback_speculative_cache(cache, sink, rounds[i] - 1, 4)
+            out.append(np.array(hid.astype(mx.float32)))
+        tok = mx.random.randint(0, args.vocab_size, (1, 1))
+        logits = lm(tok, cache=cache).logits
+        mx.eval(logits, [c.state for c in cache])
+        out.append(np.array(logits.astype(mx.float32)))
+    out.extend(np.array(a.astype(mx.float32))
+               for c in cache for a in c.state if isinstance(a, mx.array))
+    return lm, out
+
+
+def test_decode_steps_through_records(monkeypatch):
+    """GMLX_Q4_DECODE_FUSED: one-token steps carry the plain bits, alone
+    and after a verify round left a pending replay (full accept and
+    rollback)."""
+    _, plain = _decode(monkeypatch, False)
+    lm, fused = _decode(monkeypatch, True)
+    assert _records(lm) > 0
+    assert any(k[0] == "decode" for layer in _gdn_layers(lm)
+               for k in vars(layer)["_verify_fused"][1])
+    _equal(plain, fused)
+    rounds = {3: 4, 5: 2, 6: 2, 9: 4, 10: 1, 12: 4}
+    _, plain = _decode(monkeypatch, False, rounds=rounds)
+    lm, fused = _decode(monkeypatch, True, rounds=rounds)
+    assert _records(lm) > 0
+    _equal(plain, fused)
 
 
 @pytest.mark.parametrize("fused", [False, True])

@@ -3247,6 +3247,26 @@ def _verify_fused() -> bool:
     return _VERIFY_FUSED and not _VERIFY_BLOCKED
 
 
+_DECODE_FUSED = None
+
+
+def _decode_fused() -> bool:
+    """Whether a B=1 decode step of one token runs its gated-delta and
+    attention layers as recorded kq graphs (``GMLX_Q4_DECODE_FUSED=1``),
+    under the rules of _verify_fused."""
+    global _DECODE_FUSED
+    if _DECODE_FUSED is None:
+        on = env_bool("GMLX_Q4_DECODE_FUSED", False)
+        if on:
+            import mlx_kquant as kq
+
+            on = hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")
+            if on:
+                kq.env_cache(True)
+        _DECODE_FUSED = on
+    return _DECODE_FUSED and not _VERIFY_BLOCKED
+
+
 _VERIFY_FUSED_QSA = None
 
 
@@ -3566,6 +3586,86 @@ def _fused_gdn_verify(layer, h, c, gdn_sink):
         "conv_input": None, "inter": None, "K": K,
         "conv": _gp.GdnConvRows(cbase, crows),
         "records": _gp.GdnRecords(rbase, (rd, rk, rg))})
+    return out
+
+
+def _fused_gdn_decode(layer, h, c):
+    """One gated-delta layer of a one-token decode step through its
+    recorded graph, or None where the plain call must run (the cases of
+    _fused_gdn_verify, and a step the one-kernel decode does not take).
+    The layer call from behind its PLE block on."""
+    import mlx_kquant as kq
+
+    gdn = layer.linear_attn
+    slots = list(c.cache)[:2]
+    if (len(slots) != 2 or not all(isinstance(a, mx.array) for a in slots)
+            or layer.training or _prof_on(1)
+            or getattr(c, "lengths", None) is not None
+            or not gdn._fused_decode_ok(1, 1, None, c)):
+        return None
+    recs = vars(layer).get("_verify_fused")
+    if (recs is None or recs[0] != _VERIFY_EPOCH
+            or not all(d[k] is v for d, k, v in recs[2])):
+        if recs is not None:
+            _fused_release(recs[1])
+        else:
+            import weakref
+
+            _FUSED_LAYERS.append(weakref.ref(layer))
+        recs = (_VERIFY_EPOCH, {}, _layer_leaves(layer, []))
+        object.__setattr__(layer, "_verify_fused", recs)
+    table = recs[1]
+    # The pending replay as the decode kernel's take would see it. A
+    # pending conv window is read through cache[0], the lazy window.
+    rp = getattr(c, "_gdn_replay", None)
+    if rp is not None and rp[0] is not slots[1]:
+        rp = None
+    cand = [h, slots[0], slots[1]]
+    if rp is not None:
+        cand += [rp[1], *rp[2], rp[3]]
+    key = ("decode", rp is not None,
+           tuple((a.shape, a.dtype) for a in cand))
+    rec = table.get(key)
+    if rec is None:
+        table[key] = "plain" if _layer_has_lora(layer) else False
+        return None
+    if rec == "plain":
+        return None
+    if rec is False:
+        table[key] = "plain"
+        mixed, inject = layer.hc_attn(h)
+        out = _hc_combine(h, gdn(mixed, mask=None, cache=c), inject,
+                          kern=True)
+        mixed, inject = layer.hc_ffn(out)
+        out = _hc_combine(out, layer.mlp(mixed), inject, kern=True)
+        if getattr(c, "_gdn_replay", None) is not None:
+            return out
+        want = [out, c[0], c[1]]
+        ins = {id(a): i for i, a in enumerate(cand)}
+        if len(ins) != len(cand) or any(id(a) in ins for a in want):
+            return out
+        try:
+            probe = kq.fuse_graph(cand, want)
+            used = kq.fused_info(probe)[2]
+            kq.fuse_release(probe)
+            pick = [i for i, u in enumerate(used) if u or i == 0]
+            handle = kq.fuse_graph([cand[i] for i in pick], want,
+                                   **_fused_kw())
+        except (ValueError, RuntimeError, TypeError):
+            return out
+        table[key] = (handle, None, pick, _fused_use())
+        _fused_note_new(1)
+        return out
+    handle, _, pick, use = rec
+    _FUSED_TICK[0] += 1
+    use[0] = _FUSED_TICK[0]
+    out, conv, state = kq.fused_call(handle, [cand[i] for i in pick])
+    # As _gdn_fused_decode_body leaves the cache.
+    if rp is not None:
+        c._gdn_replay = None
+    c[0] = conv
+    c[1] = state
+    c.advance(1)
     return out
 
 
@@ -4025,6 +4125,31 @@ class Qwen4ExpModel(nn.Module):
                     and "ple" not in layer and type(c) is QSAKVCache
                     and "indexer" in layer.self_attn and _verify_fused_qsa()):
                 out = _fused_qsa_verify(layer, h, c, mask, position_ids)
+                if out is not None:
+                    h = out
+                    if li in cap_ids:
+                        cap_sink.append(h.mean(axis=2))
+                    continue
+            elif (gdn_sink is None and T == 1 and B == 1 and c is not None
+                    and _decode_fused()):
+                out = None
+                if layer.is_linear and mask is None:
+                    hp = (layer.ple(h, inputs, c, table, mask)
+                          if "ple" in layer else h)
+                    out = _fused_gdn_decode(layer, hp, c)
+                    if out is None and hp is not h:
+                        # The PLE block has run: the rest of the layer.
+                        mixed, inject = layer.hc_attn(hp)
+                        out = _hc_combine(hp, layer.linear_attn(
+                            mixed, mask=None, cache=c), inject,
+                            kern=not layer.training)
+                        mixed, inject = layer.hc_ffn(out)
+                        out = _hc_combine(out, layer.mlp(mixed), inject,
+                                          kern=not layer.training)
+                elif (not layer.is_linear and "ple" not in layer
+                        and type(c) is QSAKVCache
+                        and "indexer" in layer.self_attn):
+                    out = _fused_qsa_verify(layer, h, c, mask, position_ids)
                 if out is not None:
                     h = out
                     if li in cap_ids:
