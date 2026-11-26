@@ -462,8 +462,10 @@ def test_recorded_visits_match_the_plain_call(model, monkeypatch):
 
     # The record machinery on any kq, direct replay or not, and unblocked
     # by a weight swap in an earlier test (feeder_common.swapped_weights).
+    # The lever cache an earlier test left off goes on with the first record.
     monkeypatch.setattr(records, "DIRECT_ONLY", [False])
     monkeypatch.setattr(records, "_BLOCKED", [False])
+    monkeypatch.setattr(records, "_CACHE_ON", [False])
     spec, plain = model, type(model)
     spec.__class__ = Inkling2SpecLM
     try:
@@ -475,6 +477,59 @@ def test_recorded_visits_match_the_plain_call(model, monkeypatch):
     assert records.STATS["replayed"] > replayed
     for g, w in zip(got, want):
         np.testing.assert_array_equal(g, w)
+
+
+def test_a_new_layout_keeps_the_calls_other_records_learned(model, monkeypatch):
+    # Decode records that replay their Metal calls still hold them after a
+    # verify layout records: making a record leaves the others alone.
+    from types import SimpleNamespace
+
+    kq = pytest.importorskip("mlx_kquant")
+    if not (hasattr(kq, "fuse_graph") and hasattr(kq, "fused_direct_info")):
+        pytest.skip("kq build without direct records")
+
+    from gmlx.models.inkling2 import records
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    def states(verify):
+        return [kq.fused_direct_info(handle)["state"]
+                for m in spec.modules()
+                if (recs := vars(m).get("_ink_records")) is not None
+                for key, rec in recs[1].items()
+                if isinstance(rec, tuple) and key[0] == verify
+                for handle in rec[:2]]
+
+    # The tiny model's tail records hold primitives kq does not replay:
+    # kept, they run their primitives beside the replaying ones.
+    monkeypatch.setattr(records, "_ON", [True])
+    monkeypatch.setattr(records, "DIRECT_ONLY", [False])
+    monkeypatch.setattr(records, "_BLOCKED", [False])
+    monkeypatch.setattr(records, "_CACHE_ON", [False])
+    records.invalidate()
+    spec, plain = model, type(model)
+    spec.__class__ = Inkling2SpecLM
+    try:
+        cache = spec.make_cache()
+        spec.model(mx.array([IDS[:20]]), cache)
+        _buffer_mtp_target_cache(
+            cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+        for t in IDS[20:25]:
+            mx.eval(spec.model(mx.array([[t]]), cache))
+        before = states(False)
+        if "replay" not in before:
+            pytest.skip("no decode record replays Metal calls on this kq")
+        pos = 25
+        for _ in range(2):
+            h, _, sink = spec.speculative_verify_hidden(
+                mx.array([IDS[pos:pos + 4]]), cache)
+            mx.eval(h)
+            spec.rollback_speculative_cache(cache, sink, 3, 4)
+            pos += 4
+        assert states(True)
+        assert states(False) == before
+    finally:
+        spec.__class__ = plain
 
 
 def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):

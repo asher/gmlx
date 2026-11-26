@@ -45,6 +45,9 @@ STATS = {"recorded": 0, "replayed": 0, "plain": 0}
 # one, slower than the plain call: the layout runs plain. Tests turn this
 # off to check the records on any kq.
 DIRECT_ONLY = [True]
+# Whether this module turned kq's lever cache on. Turning it on again drops
+# the Metal calls every record of the process has learned.
+_CACHE_ON = [False]
 
 
 def enabled() -> bool:
@@ -159,7 +162,9 @@ def _record(inputs: list, outputs: list):
             outs.append(a)
         refs.append((1, j))
     # Direct replay needs the cache of KQ_* reads.
-    kq.env_cache(True)
+    if not _CACHE_ON[0]:
+        kq.env_cache(True)
+        _CACHE_ON[0] = True
     try:
         probe = kq.fuse_graph(inputs, outs)
         used = kq.fused_info(probe)[2]
