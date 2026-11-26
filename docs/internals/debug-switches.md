@@ -92,7 +92,7 @@ is already running does not see a variable you export later.
 | `GMLX_DFLASH_COUNTED_SHORT=0` | A ring shorter than the window takes the plain draft, not the counted one with its dead rows masked. The two differ in rounding only. |
 | `GMLX_DFLASH_RING_SLACK=N` | Spare rows of the DFlash ring past its window (512, at least 16): more rows, fewer compactions, which a commit ahead cannot take back. |
 | `GMLX_SPEC_DEFER_CUT=0` | A DFlash 2 drafter cuts its draft rows before it returns. Flash-Next then verifies the cut rows only, so output differs in rounding. |
-| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft where the product of the selector's untempered pick probabilities falls under P. The first draft stays. Default 0.5, `0` off. |
+| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft where the product of the selector's untempered pick probabilities falls under P. The first draft stays. Default 0.3 on Flash-Next, `0` off. |
 | `GMLX_DFLASH_RING_IN_PLACE=0` | DFlash draft attention copies the ring buffer per layer, not reading it in place. |
 | `GMLX_DFLASH_QMM_MULTI=0` | Run each DFlash draft projection that shares an input (q/k/v, gate/up) as its own dispatch, not one per codec. |
 | `GMLX_DFLASH_WALK_KERNEL=0` | Run the DFlash 2 selector walk (picks, proposal rows, row cut) as an op chain, not one kernel. |

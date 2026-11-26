@@ -1678,7 +1678,7 @@ def _load_plain_dflash_drafter(
 # under which a draft is not worth its verify row. A row costs most where
 # the target is a mixture of experts, since each row routes its own.
 _DFLASH2_ROW_FLOOR = {
-    "qwen4_exp": 0.5,
+    "qwen4_exp": 0.3,
 }
 
 
