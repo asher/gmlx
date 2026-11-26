@@ -180,3 +180,54 @@ def test_the_model_gives_the_same_logits_with_and_without_the_kernels(
         monkeypatch.setenv("GMLX_SENSENOVA_MHC_KERNEL", kernel)
         out[kernel] = np.array(model(ids).astype(mx.float32))
     np.testing.assert_array_equal(out["0"], out["1"])
+
+
+@pytest.mark.parametrize("rows", [2, 5])
+def test_a_verify_width_router_gives_each_row_the_one_row_bits(rows):
+    # A few-row float32 matmul runs a slow TF32 GEMM tile on M5; verify
+    # widths run the router linear one matvec a row instead.
+    from gmlx.models.sensenova_loop import mhc
+
+    hidden = 512
+    router = mhc.MHCRouter(hidden, {"iterations": 20})
+    rng = np.random.default_rng(2)
+    router.weight = mx.array(rng.standard_normal((8, 2 * hidden)), mx.float32) * 0.05
+    router.bias = mx.array(rng.standard_normal(8), mx.float32)
+    s = mx.array(rng.standard_normal((1, rows, 2 * hidden)), mx.float32)
+    x, coef = router(s, mx.bfloat16)
+    for i in range(rows):
+        xi, ci = router(s[:, i:i + 1], mx.bfloat16)
+        np.testing.assert_array_equal(np.array(coef[:, i:i + 1]), np.array(ci))
+        np.testing.assert_array_equal(np.array(x[:, i:i + 1].astype(mx.float32)),
+                                      np.array(xi.astype(mx.float32)))
+
+
+@_GPU
+@pytest.mark.parametrize("rows", [1, 7])
+def test_the_one_dispatch_router_is_no_further_from_float64(monkeypatch, rows):
+    # GMLX_SENSENOVA_MHC_FUSED sums the norm and the linear in its own
+    # order, so the gate is distance to a float64 reference.
+    from gmlx.models.sensenova_loop import mhc
+
+    hidden = 1024
+    router = mhc.MHCRouter(hidden, {"iterations": 20})
+    rng = np.random.default_rng(3)
+    w = (rng.standard_normal((8, 2 * hidden)) * 0.03).astype(np.float32)
+    b = rng.standard_normal(8).astype(np.float32)
+    router.weight, router.bias = mx.array(w), mx.array(b)
+    prev = rng.random((1, rows, 8)).astype(np.float32)
+    s = rng.standard_normal((1, rows, 2 * hidden)).astype(np.float32)
+    y = mx.array(rng.standard_normal((1, rows, hidden)), mx.bfloat16)
+
+    out = {}
+    for fused in ("0", "1"):
+        monkeypatch.setenv("GMLX_SENSENOVA_MHC_FUSED", fused)
+        out[fused] = [np.array(v.astype(mx.float32)) for v in mhc.route(
+            router, mx.array(s), y, mx.array(prev), mx.bfloat16)]
+    np.testing.assert_array_equal(out["0"][0], out["1"][0])  # merged streams
+    merged = out["0"][0].astype(np.float64)
+    ref = _reference_coef(
+        merged / np.sqrt((merged ** 2).mean(-1, keepdims=True) + 1e-6)
+        @ w.astype(np.float64).T + b, 20)
+    err = {k: np.abs(v[2] - ref).max() for k, v in out.items()}
+    assert err["1"] <= err["0"] * 1.5 + 1e-7, err

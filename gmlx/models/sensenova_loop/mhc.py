@@ -34,6 +34,8 @@ import mlx.core as mx
 import mlx.nn as nn
 
 _EPS = 1e-6
+# Up to this many rows the router linear runs one matvec a row.
+_ROWWISE_MAX_ROWS = 16
 
 
 def _normalize(x, y):
@@ -274,10 +276,22 @@ class MHCRouter(nn.Module):
         self.weight = mx.zeros((n_route, 2 * hidden_size), dtype=mx.float32)
         self.bias = mx.zeros((n_route,), dtype=mx.float32)
 
+    def _linear(self, flat: mx.array) -> mx.array:
+        # A float32 matmul with a few rows and 8 outputs runs as one long
+        # GEMM tile, about 10x a one-row matvec on M5 and in TF32. Verify
+        # widths run one matvec a row instead, the bits of a decode step.
+        rows = flat.size // flat.shape[-1]
+        if 1 < rows <= _ROWWISE_MAX_ROWS:
+            lead = flat.shape[:-1]
+            flat = flat.reshape(rows, 1, flat.shape[-1])
+            out = [mx.addmm(self.bias, flat[i], self.weight.T) for i in range(rows)]
+            return mx.concatenate(out, axis=0).reshape(*lead, -1)
+        return mx.addmm(self.bias, flat, self.weight.T)
+
     def __call__(self, s: mx.array, out_dtype):
         """Returns (branch input in ``out_dtype``, coefficients)."""
         flat = mx.fast.rms_norm(s.astype(mx.float32), None, _EPS)
-        logits = mx.addmm(self.bias, flat, self.weight.T)
+        logits = self._linear(flat)
         hidden = s.shape[-1] // 2
         if _use_kernel():
             rows = s.size // s.shape[-1]
@@ -296,3 +310,154 @@ class MHCRouter(nn.Module):
         x = _branch_fn(self.pre_scale, out_dtype)(
             s[..., :hidden], s[..., hidden:], coef)
         return x, coef
+
+
+# One dispatch a router: the merge of the branch before it (when one is
+# pending), the RMS norm and the router linear, the coefficients and the
+# branch input. The merge bits equal ``merge``; the norm and the linear sum
+# in another order and scale the dots by the norm factor after the sums, so
+# the logits differ from the ops path by rounding.
+_ROUTE = r"""
+  uint r = threadgroup_position_in_grid.y;
+  uint t = thread_position_in_threadgroup.x;
+  uint lane = thread_index_in_simdgroup;
+  uint sg = simdgroup_index_in_threadgroup;
+  size_t base = (size_t)r * 2 * H;
+  auto c = cprev + r * 8;
+  float sq = 0.0f;
+  float dot[NR];
+  for (int j = 0; j < NR; j++) dot[j] = 0.0f;
+  for (uint i = t; i < (uint)H; i += TG) {
+    float a = float(s[base + i]);
+    float b = float(s[base + H + i]);
+    if (MERGE) {
+      float yv = float(y[(size_t)r * H + i]);
+      float t1 = a * c[4];
+      float t2 = b * c[5];
+      float t3 = t1 + t2;
+      float t4 = yv * c[2];
+      float na = t3 + t4;
+      float u1 = a * c[6];
+      float u2 = b * c[7];
+      float u3 = u1 + u2;
+      float u4 = yv * c[3];
+      float nb = u3 + u4;
+      T ta = T(na);
+      T tb = T(nb);
+      s_out[base + i] = ta;
+      s_out[base + H + i] = tb;
+      a = float(ta);
+      b = float(tb);
+    }
+    sq = metal::fma(a, a, sq);
+    sq = metal::fma(b, b, sq);
+    for (int j = 0; j < NR; j++) {
+      dot[j] = metal::fma(w[(size_t)j * 2 * H + i], a, dot[j]);
+      dot[j] = metal::fma(w[(size_t)j * 2 * H + H + i], b, dot[j]);
+    }
+  }
+  threadgroup float part[TG / 32][NR + 1];
+  float v = simd_sum(sq);
+  if (lane == 0) part[sg][NR] = v;
+  for (int j = 0; j < NR; j++) {
+    float d = simd_sum(dot[j]);
+    if (lane == 0) part[sg][j] = d;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+  threadgroup float pre[2];
+  if (t == 0) {
+    float tot = 0.0f;
+    float l[8];
+    for (int j = 0; j <= NR; j++) {
+      float acc = 0.0f;
+      for (uint g = 0; g < TG / 32; g++) acc += part[g][j];
+      if (j == NR) tot = acc; else l[j] = acc;
+    }
+    float inv = metal::precise::rsqrt(tot / float(2 * H) + EPS);
+    for (int j = 0; j < NR; j++) l[j] = l[j] * inv + bias[j];
+    device float* o = coef + r * 8;
+    float p0 = snl_sigmoid(l[0]);
+    float p1 = snl_sigmoid(l[1]);
+    o[0] = p0;
+    o[1] = p1;
+    o[2] = 2.0f * snl_sigmoid(l[2]);
+    o[3] = 2.0f * snl_sigmoid(l[3]);
+    if (IDENT) {
+      o[4] = 1.0f; o[5] = 0.0f; o[6] = 0.0f; o[7] = 1.0f;
+    } else {
+      float m0 = l[4], m1 = l[5], m2 = l[6], m3 = l[7];
+      for (int i = 0; i < ITERS; i++) {
+        snl_norm(m0, m1);
+        snl_norm(m2, m3);
+        snl_norm(m0, m2);
+        snl_norm(m1, m3);
+      }
+      o[4] = metal::precise::exp(m0);
+      o[5] = metal::precise::exp(m1);
+      o[6] = metal::precise::exp(m2);
+      o[7] = metal::precise::exp(m3);
+    }
+    pre[0] = p0;
+    pre[1] = p1;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float c0 = pre[0];
+  float c1 = pre[1];
+  device O* xr = x + (size_t)r * H;
+  for (uint i = t; i < (uint)H; i += TG) {
+    float a = MERGE ? float(s_out[base + i]) : float(s[base + i]);
+    float b = MERGE ? float(s_out[base + H + i]) : float(s[base + H + i]);
+    float u = a * c0;
+    float v2 = b * c1;
+    float w2 = u + v2;
+    if (SCALED) {
+      w2 = w2 * pre_scale[0];
+    }
+    xr[i] = O(w2);
+  }
+"""
+
+_ROUTE_TG = 512
+
+
+@lru_cache(maxsize=None)
+def _route_kernel():
+    return mx.fast.metal_kernel(
+        name="sensenova_mhc_route",
+        input_names=["s", "y", "cprev", "w", "bias", "pre_scale"],
+        output_names=["s_out", "coef", "x"],
+        header=_HEADER, source=_ROUTE.replace("EPS", f"{_EPS!r}f"))
+
+
+def _use_fused() -> bool:
+    return os.environ.get("GMLX_SENSENOVA_MHC_FUSED", "0") == "1" and _use_kernel()
+
+
+def route(router: MHCRouter, s: mx.array, y, coef_prev, out_dtype):
+    """Merge the pending branch output ``y`` (if any) into the streams, then
+    run ``router``. Returns (streams, branch input, coefficients)."""
+    if _use_fused():
+        hidden = s.shape[-1] // 2
+        rows = s.size // s.shape[-1]
+        merging = y is not None
+        if not merging:
+            y = mx.zeros((1,), out_dtype)
+            coef_prev = mx.zeros((1,), mx.float32)
+        s_out, coef, x = _route_kernel()(
+            inputs=[s, y, coef_prev, router.weight, router.bias,
+                    mx.array([router.pre_scale], mx.float32)],
+            template=[("T", s.dtype), ("O", out_dtype), ("H", hidden),
+                      ("NR", int(router.weight.shape[0])),
+                      ("ITERS", router.iterations),
+                      ("IDENT", router.fixed_identity),
+                      ("SCALED", router.pre_scale != 1.0),
+                      ("MERGE", merging), ("TG", _ROUTE_TG)],
+            grid=(_ROUTE_TG, rows, 1), threadgroup=(_ROUTE_TG, 1, 1),
+            output_shapes=[s.shape if merging else (1,),
+                           s.shape[:-1] + (8,), s.shape[:-1] + (hidden,)],
+            output_dtypes=[s.dtype, mx.float32, out_dtype])
+        return (s_out if merging else s), x, coef
+    if y is not None:
+        s = merge(s, y, coef_prev)
+    x, coef = router(s, out_dtype)
+    return s, x, coef

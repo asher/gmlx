@@ -85,11 +85,14 @@ class SenseNovaLoopDecoderLayer(OwnedQwen3_5DecoderLayer):
     def activation_dtype(self):
         return self.input_layernorm.weight.dtype
 
-    def mhc_step(self, s, mask=None, cache=None, position_ids=None,
+    def mhc_step(self, state, mask=None, cache=None, position_ids=None,
                  position_embeddings=None, gdn_sink=None, target_verify=False):
-        """``s`` holds both streams, ``[..., 2 * hidden]``."""
+        """``state`` is (streams ``[..., 2 * hidden]``, pending branch
+        output or None, its coefficients). Returns the state with this
+        layer's MLP output pending, so the next router merges it."""
         act = self.activation_dtype
-        x, coef = self.mhc_attn(s, act)
+        s, y, coef = state
+        s, x, coef = _mhc.route(self.mhc_attn, s, y, coef, act)
         x = self.input_layernorm(x)
         if self.is_linear:
             r = self.linear_attn(x, mask, cache, gdn_sink=gdn_sink,
@@ -99,10 +102,9 @@ class SenseNovaLoopDecoderLayer(OwnedQwen3_5DecoderLayer):
                                position_ids=position_ids,
                                position_embeddings=position_embeddings,
                                target_verify=target_verify)
-        s = _mhc.merge(s, r, coef)
-        x, coef = self.mhc_ffn(s, act)
+        s, x, coef = _mhc.route(self.mhc_ffn, s, r, coef, act)
         r = self.mlp(self.post_attention_layernorm(x), target_verify)
-        return _mhc.merge(s, r, coef)
+        return s, r, coef
 
 
 class LayerVisit:
@@ -128,9 +130,12 @@ class LayerVisit:
         layer = self.layer
         if not isinstance(layer, SenseNovaLoopDecoderLayer):
             return layer(h, **kwargs)
-        s = _mhc.enter(h, self.streams_f32) if self.enter else h
-        s = layer.mhc_step(s, **kwargs)
-        return _mhc.leave(s, layer.activation_dtype) if self.leave else s
+        state = (_mhc.enter(h, self.streams_f32), None, None) if self.enter else h
+        state = layer.mhc_step(state, **kwargs)
+        if not self.leave:
+            return state
+        s, y, coef = state
+        return _mhc.leave(_mhc.merge(s, y, coef), layer.activation_dtype)
 
 
 class SenseNovaLoopModel(OwnedQwen3_5Model):
