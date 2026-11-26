@@ -18,10 +18,10 @@ after that. A record replays its Metal calls, so a layout whose record kq
 refuses to replay that way (``kq.fused_direct_info``) stays plain. Bits
 equal the plain call's.
 
-Off by default: on an M5 Max both steps are GPU-bound, and the replay's
-barriers cost more GPU time than the host build it saves.
-``GMLX_INKLING2_RECORDS=1`` turns it on where the host build bounds the
-step.
+Off by default: on an M5 Max both steps are GPU-bound, so the host build
+the records save does not shorten a served round (Q4_0 rounds run a
+little slower with them). ``GMLX_INKLING2_RECORDS=1`` turns it on where
+the host build bounds the step.
 """
 
 import mlx.core as mx

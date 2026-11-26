@@ -6,6 +6,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Qwen3.8-Flash-Next verify steps take less GPU time.
+
 ## [0.5.8] - 2026-11-25
 
 ### Added
