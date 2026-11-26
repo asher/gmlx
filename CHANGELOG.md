@@ -14,8 +14,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the Hy4 VL mmproj. STQ1_0 files need mlx-kquant 0.5.14 or later.
 - `gmlx pull inkling-2-mini --quant fastest` pulls bartowski's Q4_0 file,
   which decodes faster than the balanced tier.
-- SenseNova-Loop-9B GGUFs run, with image input through its mmproj and
-  speculative decoding on its built-in MTP head.
+- SenseNova-Loop-9B GGUFs run, with image input through its mmproj,
+  speculative decoding on its built-in MTP head, and LoRA adapters from
+  `gmlx train` or llama.cpp.
 
 ### Changed
 
@@ -33,7 +34,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Qwen3.5, Qwen3.6 and Qwen3.8-Flash-Next GGUFs from newer llama.cpp
-  converters, which merge `attn_qkv_gate` and `ssm_beta_alpha`, now load.
+  converters, which merge `attn_qkv_gate` and `ssm_beta_alpha`, now load and
+  take LoRA adapters, including ones on the merged tensors.
 - A fresh `gmlx pull inkling-2-mini` speculates again. Unsloth's DSpark
   drafter now uses llama.cpp's layout, which gmlx left unpaired.
 

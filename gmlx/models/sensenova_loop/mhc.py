@@ -250,10 +250,11 @@ def leave(s: mx.array, out_dtype) -> mx.array:
     return _leave_fn(out_dtype)(s[..., :hidden], s[..., hidden:])
 
 
-def merge(s: mx.array, y: mx.array, coef: mx.array) -> mx.array:
-    """The streams after a branch output ``y``."""
+def merge(s: mx.array, y: mx.array, coef: mx.array, kernel: bool = True) -> mx.array:
+    """The streams after a branch output ``y``. ``kernel=False`` runs the
+    ops, which have a backward."""
     hidden = y.shape[-1]
-    if _use_kernel():
+    if kernel and _use_kernel():
         rows = y.size // hidden
         return _merge_kernel()(
             inputs=[s, y, coef],
@@ -289,12 +290,12 @@ class MHCRouter(nn.Module):
             return mx.concatenate(out, axis=0).reshape(*lead, -1)
         return mx.addmm(self.bias, flat, self.weight.T)
 
-    def __call__(self, s: mx.array, out_dtype):
+    def __call__(self, s: mx.array, out_dtype, kernel: bool = True):
         """Returns (branch input in ``out_dtype``, coefficients)."""
         flat = mx.fast.rms_norm(s.astype(mx.float32), None, _EPS)
         logits = self._linear(flat)
         hidden = s.shape[-1] // 2
-        if _use_kernel():
+        if kernel and _use_kernel():
             rows = s.size // s.shape[-1]
             coef, x = _coef_branch_kernel()(
                 inputs=[logits, s, mx.array([self.pre_scale], mx.float32)],
@@ -434,10 +435,12 @@ def _use_fused() -> bool:
     return os.environ.get("GMLX_SENSENOVA_MHC_FUSED", "1") != "0" and _use_kernel()
 
 
-def route(router: MHCRouter, s: mx.array, y, coef_prev, out_dtype):
+def route(router: MHCRouter, s: mx.array, y, coef_prev, out_dtype,
+          kernel: bool = True):
     """Merge the pending branch output ``y`` (if any) into the streams, then
-    run ``router``. Returns (streams, branch input, coefficients)."""
-    if _use_fused():
+    run ``router``. Returns (streams, branch input, coefficients).
+    ``kernel=False`` runs the ops, which have a backward (training)."""
+    if kernel and _use_fused():
         hidden = s.shape[-1] // 2
         rows = s.size // s.shape[-1]
         merging = y is not None
@@ -459,6 +462,6 @@ def route(router: MHCRouter, s: mx.array, y, coef_prev, out_dtype):
             output_dtypes=[s.dtype, mx.float32, out_dtype])
         return (s_out if merging else s), x, coef
     if y is not None:
-        s = merge(s, y, coef_prev)
-    x, coef = router(s, out_dtype)
+        s = merge(s, y, coef_prev, kernel)
+    x, coef = router(s, out_dtype, kernel)
     return s, x, coef

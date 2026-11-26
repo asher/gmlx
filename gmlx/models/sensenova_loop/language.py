@@ -85,14 +85,16 @@ class SenseNovaLoopDecoderLayer(OwnedQwen3_5DecoderLayer):
     def activation_dtype(self):
         return self.input_layernorm.weight.dtype
 
-    def mhc_step(self, state, mask=None, cache=None, position_ids=None,
+    def __call__(self, s, y, coef, mask=None, cache=None, position_ids=None,
                  position_embeddings=None, gdn_sink=None, target_verify=False):
-        """``state`` is (streams ``[..., 2 * hidden]``, pending branch
-        output or None, its coefficients). Returns the state with this
-        layer's MLP output pending, so the next router merges it."""
+        """One visit on the streams ``s`` ``[..., 2 * hidden]``, with the
+        pending branch output ``y`` and its coefficients (None on entry).
+        Returns ``(s, y, coef)`` with this layer's MLP output pending, so
+        the next router merges it. Training runs the routers as MLX ops,
+        which have a backward."""
         act = self.activation_dtype
-        s, y, coef = state
-        s, x, coef = _mhc.route(self.mhc_attn, s, y, coef, act)
+        kernel = not self.training
+        s, x, coef = _mhc.route(self.mhc_attn, s, y, coef, act, kernel)
         x = self.input_layernorm(x)
         if self.is_linear:
             r = self.linear_attn(x, mask, cache, gdn_sink=gdn_sink,
@@ -102,7 +104,7 @@ class SenseNovaLoopDecoderLayer(OwnedQwen3_5DecoderLayer):
                                position_ids=position_ids,
                                position_embeddings=position_embeddings,
                                target_verify=target_verify)
-        s, x, coef = _mhc.route(self.mhc_ffn, s, r, coef, act)
+        s, x, coef = _mhc.route(self.mhc_ffn, s, r, coef, act, kernel)
         r = self.mlp(self.post_attention_layernorm(x), target_verify)
         return s, r, coef
 
@@ -130,12 +132,13 @@ class LayerVisit:
         layer = self.layer
         if not isinstance(layer, SenseNovaLoopDecoderLayer):
             return layer(h, **kwargs)
-        state = (_mhc.enter(h, self.streams_f32), None, None) if self.enter else h
-        state = layer.mhc_step(state, **kwargs)
+        s, y, coef = (_mhc.enter(h, self.streams_f32), None, None) if self.enter else h
+        state = layer(s, y, coef, **kwargs)
         if not self.leave:
             return state
         s, y, coef = state
-        return _mhc.leave(_mhc.merge(s, y, coef), layer.activation_dtype)
+        return _mhc.leave(_mhc.merge(s, y, coef, not layer.training),
+                          layer.activation_dtype)
 
 
 class SenseNovaLoopModel(OwnedQwen3_5Model):
@@ -202,6 +205,12 @@ class SenseNovaLoopLanguageModel(OwnedQwen3_5LanguageModel):
     @property
     def layers(self):
         return list(self.model.execution_layers)
+
+    @property
+    def parameter_layers(self):
+        """Each physical layer once, in order: what training adapts and
+        checkpoints, where ``layers`` lists the visits."""
+        return list(self.model.layers)
 
     @property
     def cast_predicate(self):

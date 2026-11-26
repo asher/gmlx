@@ -45,12 +45,14 @@ def layer_seed() -> int:
 def layer_list(model):
     """The decoder layers of ``model``, looking under a language-model
     wrapper and an inner ``model`` attribute as mlx-lm and mlx-vlm lay
-    them out. Empty when none are found."""
+    them out. A model whose ``layers`` repeat a layer (a looped model
+    lists its visits) names each one once in ``parameter_layers``. Empty
+    when none are found."""
     for owner in (model, getattr(model, "language_model", None),
                   getattr(model, "model", None)):
         if owner is None:
             continue
-        layers = getattr(owner, "layers", None)
+        layers = getattr(owner, "parameter_layers", None) or getattr(owner, "layers", None)
         if layers is None:
             inner = getattr(owner, "model", None)
             layers = getattr(inner, "layers", None)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -24,6 +25,10 @@ from typing import NamedTuple
 import mlx.core as mx
 
 from . import loadlog
+from .gguf_layout import (
+    sensenova_loop_block,
+    shared_input_parts,
+)
 from .remap import RemapDecision, parse_gguf_name
 
 _A_SUFFIX = ".lora_a"
@@ -51,6 +56,10 @@ class LoraModule:
     transform: str = "passthrough"   # remap hint: passthrough | qk_permute | ...
     experts: bool = False     # 3-D pair: a (E, rank, in), b (E, out, rank)
     embedding: bool = False   # token_embd pair: a (n_vocab, rank), b (n_embd, rank)
+    # A pair on a merged shared-input tensor: the module paths of its two
+    # parts, first rows first. ``b`` holds the rows of both until the
+    # install splits it by the modules' own output rows.
+    split: tuple[str, str] | None = None
 
 
 @dataclass
@@ -148,6 +157,10 @@ def build_adapter_plan(meta: dict, arrays: dict,
             # llama.cpp's suffix test sends this pair down its token
             # embedding path, which never reads it.
             raise ValueError(per_layer_embd_message(base_name))
+        parts = shared_input_parts(base_name)
+        if parts is not None:
+            modules.update(_split_pair(remap_arch, base_name, parts, a, b, alpha))
+            continue
         dec = parse_gguf_name(remap_arch, base_name)
         if dec.kind != RemapDecision.KIND_MAP:
             raise ValueError(
@@ -194,6 +207,28 @@ def build_adapter_plan(meta: dict, arrays: dict,
     if not modules:
         raise ValueError("adapter GGUF contains no lora_a/lora_b tensor pairs")
     return LoraAdapter(alpha=alpha, arch=arch, modules=modules)
+
+
+def _split_pair(arch: str, base_name: str, parts, a, b, alpha: float) -> dict:
+    """The plan entries of a pair on a merged shared-input tensor: one per
+    part, sharing ``a``."""
+    if a.ndim != 2 or b.ndim != 2 or a.shape[0] != b.shape[1]:
+        raise ValueError(
+            f"{base_name}: lora_a {tuple(a.shape)} / lora_b {tuple(b.shape)} "
+            f"are not (r, in) / (out, r)")
+    paths = []
+    for part in parts:
+        dec = parse_gguf_name(arch, part)
+        if dec.kind != RemapDecision.KIND_MAP or dec.transform not in _FACTOR_PASSTHROUGH:
+            raise ValueError(
+                f"adapter targets {base_name!r}, whose part {part!r} doesn't map "
+                f"to a module a LoRA pair can follow (arch {arch!r})")
+        paths.append(dec.hf_name.removesuffix(".weight"))
+    rank = int(a.shape[0])
+    split = (paths[0], paths[1])
+    return {p: LoraModule(module_path=p, a=a, b=b, rank=rank,
+                          scale=_lora_scale(alpha, rank), split=split)
+            for p in paths}
 
 
 def _file_key(path: str) -> tuple:
@@ -281,11 +316,85 @@ def install_gguf_adapter(raw_model, config, plan: LoraAdapter, *, slot: int = 0,
             for k, m in plan.modules.items()})
     cfg = _config_as_dict(config)
     text_cfg = cfg.get("text_config") or {}
+    if not isinstance(text_cfg, dict):
+        text_cfg = _config_as_dict(text_cfg)
     n_head = cfg.get("num_attention_heads", text_cfg.get("num_attention_heads"))
     n_head_kv = cfg.get("num_key_value_heads",
                         text_cfg.get("num_key_value_heads", n_head))
-    return install_lora_adapter(_text_root(raw_model, plan), plan, n_head=n_head,
+    root = _text_root(raw_model, plan)
+    plan = _split_merged(root, _fold_loop(plan, _visit_loop(cfg, text_cfg)))
+    return install_lora_adapter(root, plan, n_head=n_head,
                                 n_head_kv=n_head_kv, slot=slot, config=cfg)
+
+
+_LAYER_RE = re.compile(r"^(.*?\blayers\.)(\d+)(\..*)$")
+
+
+def _visit_loop(*cfgs) -> dict | None:
+    """The layer loop of a SenseNova Loop config, whose file names the
+    layers after the loop by visit."""
+    for c in cfgs:
+        if c.get("model_type") == "sensenova_loop" and c.get("loop"):
+            return c["loop"]
+    return None
+
+
+def _fold_loop(plan: LoraAdapter, loop: dict | None) -> LoraAdapter:
+    """A looped base holds each layer once. Its file, and an adapter keyed
+    to it, name the layers after the loop by visit; move those pairs onto
+    the physical layers, as the base load does."""
+    if not loop:
+        return plan
+    start, end, count = int(loop["start"]), int(loop["end"]), int(loop["count"])
+
+    def fold(path: str) -> str:
+        m = _LAYER_RE.match(path)
+        if m is None:
+            return path
+        try:
+            layer = sensenova_loop_block(int(m.group(2)), start, end, count)
+        except ValueError:
+            raise ValueError(
+                f"adapter targets layer {m.group(2)}, a repeated visit of the "
+                f"loop [{start}, {end}); its pairs belong to the layer's own "
+                f"block") from None
+        return f"{m.group(1)}{layer}{m.group(3)}"
+
+    modules = {}
+    for path, lm in plan.modules.items():
+        split = tuple(fold(p) for p in lm.split) if lm.split else None
+        new = fold(path)
+        modules[new] = dataclasses.replace(lm, module_path=new, split=split)
+    return dataclasses.replace(plan, modules=modules)
+
+
+def _out_rows(module) -> int | None:
+    base = getattr(module, "base", module)
+    weight = getattr(base, "weight", None)
+    return int(weight.shape[0]) if weight is not None and weight.ndim == 2 else None
+
+
+def _split_merged(root, plan: LoraAdapter) -> LoraAdapter:
+    """Give each part of a merged pair the rows of ``b`` its module
+    outputs."""
+    if not any(lm.split for lm in plan.modules.values()):
+        return plan
+    by_path = dict(root.named_modules())
+    modules = {}
+    for path, lm in plan.modules.items():
+        if not lm.split:
+            modules[path] = lm
+            continue
+        first, second = lm.split
+        rows = [_out_rows(by_path.get(p)) for p in (first, second)]
+        total = int(lm.b.shape[0])
+        if None in rows or rows[0] + rows[1] != total:
+            raise ValueError(
+                f"LoRA pair on {first} and {second}: lora_b has {total} rows, "
+                f"the two modules output {rows[0]} and {rows[1]}")
+        b = lm.b[:rows[0]] if path == first else lm.b[rows[0]:]
+        modules[path] = dataclasses.replace(lm, b=b, split=None)
+    return dataclasses.replace(plan, modules=modules)
 
 
 def _text_root(model, plan):
@@ -427,33 +536,54 @@ def adapter_load_refusal(base_gguf_path: str, adapter_paths) -> None:
     return None
 
 
-def base_tensor_names(gguf_path: str) -> list[str]:
-    """Every tensor name of a GGUF, across its shards, read from the
-    headers alone."""
+def base_tensor_names(gguf_path: str) -> dict[str, tuple]:
+    """Every tensor of a GGUF across its shards, from the headers alone:
+    file name -> ``((name as loaded, output rows), ...)``
+    (:func:`gguf_layout.loaded_tensor_names`). Iterating it gives the
+    file's names."""
+    from .gguf_layout import loaded_tensor_names
     from .headerscan import scan_gguf
     from .preflight import find_split_shards
 
-    return [t.name for shard in find_split_shards(gguf_path)
-            for t in scan_gguf(shard).tensors]
+    shards = [scan_gguf(shard) for shard in find_split_shards(gguf_path)]
+    shapes = {t.name: list(t.shape) for shard in shards for t in shard.tensors}
+    kv = shards[0].kv if shards else {}
+    return loaded_tensor_names(shapes, kv, kv.get("general.architecture"))
+
+
+class AdapterTarget(NamedTuple):
+    """The base tensor a module's LoRA pair is written to. A part of a
+    merged tensor has ``part`` and the output rows of every part."""
+    tensor: str
+    transform: str
+    part: int = 0
+    rows: tuple = ()
 
 
 def adapter_tensor_names(module_paths, *, base_arch: str,
                          base_names) -> tuple[dict, dict]:
     """Resolve in-memory module paths to the base GGUF tensors their LoRA
-    pairs are keyed to. The loader's name remap runs over the base's own
-    tensor names and is inverted, so a written pair is found again by
+    pairs are keyed to. The loader's name remap runs over the base's
+    tensors as loaded (``base_names``, from :func:`base_tensor_names`; a
+    plain list of names is taken as loaded under the same names) and is
+    inverted, so a written pair is found again by
     :func:`build_adapter_plan` and by llama.cpp, whatever the architecture.
 
-    Returns ``(names, refused)``: path -> ``(tensor name, transform)`` for
-    the paths an adapter can hold, and path -> reason for the others."""
+    Returns ``(names, refused)``: path -> :class:`AdapterTarget` for the
+    paths an adapter can hold, and path -> reason for the others."""
+    loaded = (base_names.items() if isinstance(base_names, dict)
+              else ((n, ((n, None),)) for n in base_names))
     index: dict[str, list] = {}
-    for name in base_names:
+    for name, parts in loaded:
         if not name.endswith(".weight"):
             continue
-        dec = parse_gguf_name(base_arch, name)
-        if dec.kind != RemapDecision.KIND_MAP or not (dec.hf_name or "").endswith(".weight"):
-            continue
-        index.setdefault(dec.hf_name[: -len(".weight")], []).append((name, dec.transform))
+        rows = tuple(r for _n, r in parts) if len(parts) > 1 else ()
+        for k, (part, _rows) in enumerate(parts):
+            dec = parse_gguf_name(base_arch, part)
+            if dec.kind != RemapDecision.KIND_MAP or not (dec.hf_name or "").endswith(".weight"):
+                continue
+            index.setdefault(dec.hf_name[: -len(".weight")], []).append(
+                AdapterTarget(name, dec.transform, k, rows))
     names: dict = {}
     refused: dict = {}
     for path in module_paths:
@@ -462,8 +592,12 @@ def adapter_tensor_names(module_paths, *, base_arch: str,
             refused[path] = "no tensor of the base GGUF loads into it"
         elif len(hits) > 1:
             refused[path] = f"{len(hits)} tensors of the base GGUF load into it"
-        elif hits[0][1] not in _FACTOR_TRANSFORMS:
-            refused[path] = (f"its base tensor {hits[0][0]} loads through the {hits[0][1]!r} "
+        elif hits[0].rows and hits[0].transform not in _FACTOR_PASSTHROUGH:
+            refused[path] = (f"its base tensor {hits[0].tensor} loads through the "
+                             f"{hits[0].transform!r} transform, which a LoRA pair on "
+                             "a merged tensor cannot follow")
+        elif hits[0].transform not in _FACTOR_TRANSFORMS:
+            refused[path] = (f"its base tensor {hits[0].tensor} loads through the {hits[0].transform!r} "
                              "transform, which a LoRA pair cannot follow")
         else:
             names[path] = hits[0]
@@ -500,8 +634,32 @@ def _gguf_py_names(module_paths, *, base_arch: str, n_layers: int) -> tuple[dict
             refused[path] = (f"its base tensor {stem}.weight loads through the "
                              f"{dec.transform!r} transform, which a LoRA pair cannot follow")
             continue
-        names[path] = (stem + ".weight", dec.transform)
+        names[path] = AdapterTarget(stem + ".weight", dec.transform)
     return names, refused
+
+
+def _merge_parts(tensor: str, members) -> tuple:
+    """One pair on a merged tensor from the pairs of its parts: ``a``
+    stacks the parts' factors and ``b`` places each part's rows in its own
+    columns, zero for a part not trained. The adapter's one alpha divides
+    by the stacked rank, so ``b`` is scaled by the part count to keep each
+    part's ``alpha / rank``."""
+    import numpy as np
+
+    rows = members[0][0].rows
+    ranks = {int(a.shape[0]) for _t, a, _b in members}
+    if len(ranks) != 1:
+        raise ValueError(f"the parts of {tensor} were trained at ranks {sorted(ranks)}")
+    rank = ranks.pop()
+    members = sorted(members, key=lambda m: m[0].part)
+    stacked = len(members) * rank
+    a = np.concatenate([np.array(a.astype(mx.float32)) for _t, a, _b in members])
+    b = np.zeros((sum(rows), stacked), np.float32)
+    offsets = np.cumsum((0,) + rows)
+    for col, (target, _a, part_b) in enumerate(members):
+        b[offsets[target.part]:offsets[target.part + 1], col * rank:(col + 1) * rank] = (
+            np.array(part_b.astype(mx.float32)) * len(members))
+    return mx.array(a), mx.array(b)
 
 
 def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
@@ -523,7 +681,8 @@ def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
     Without them the map is gguf-py's (``gguf.get_tensor_name_map``), which
     covers the architectures gguf-py knows. Every module is resolved before
     anything is written, and one that cannot be held raises ``ValueError``
-    naming it. Returns the number of pairs written."""
+    naming it. The parts of a merged tensor (``attn_qkv_gate``) go out as
+    one pair on it. Returns the number of modules written."""
     import gguf
     import numpy as np
 
@@ -535,8 +694,8 @@ def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
         names, refused = adapter_tensor_names(paths, base_arch=base_arch, base_names=base_names)
     else:
         names, refused = _gguf_py_names(paths, base_arch=base_arch, n_layers=n_layers)
-    for mod, (tensor, _transform) in list(names.items()):
-        if tensor.endswith(_TOKEN_EMBD):
+    for mod, target in list(names.items()):
+        if target.tensor.endswith(_TOKEN_EMBD):
             # The writer stores the linear layout, which an embedding pair
             # does not use.
             refused[mod] = "embedding pairs are not exported"
@@ -550,16 +709,20 @@ def save_lora_adapter(path: str, modules, *, alpha: float, base_arch: str,
     writer.add_string(gguf.Keys.Adapter.TYPE, "lora")
     writer.add_float32(gguf.Keys.Adapter.LORA_ALPHA, float(alpha))
 
-    n = 0
+    pairs: dict[str, list] = {}
     for module_path, a, b in modules:
-        # convert_lora_to_gguf keys lora_a/b off <name>.weight
-        gguf_base, transform = names[module_path]
-        if transform == "qk_permute":
+        target = names[module_path]
+        if target.transform == "qk_permute":
             nh = n_head_kv if module_path.endswith("k_proj") else n_head
             b = qk_permute_wire_inverse(b, nh)
-        writer.add_tensor(gguf_base + ".lora_a", np.array(a.astype(mx.float32)))
-        writer.add_tensor(gguf_base + ".lora_b", np.array(b.astype(mx.float32)))
-        n += 1
+        pairs.setdefault(target.tensor, []).append((target, a, b))
+    n = 0
+    for tensor, members in pairs.items():
+        a, b = _merge_parts(tensor, members) if members[0][0].rows else members[0][1:]
+        # convert_lora_to_gguf keys lora_a/b off <name>.weight
+        writer.add_tensor(tensor + ".lora_a", np.array(a.astype(mx.float32)))
+        writer.add_tensor(tensor + ".lora_b", np.array(b.astype(mx.float32)))
+        n += len(members)
 
     if n == 0:
         writer.close()

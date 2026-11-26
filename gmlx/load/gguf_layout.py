@@ -40,35 +40,50 @@ _MERGES = (
 )
 _MERGE_RE = re.compile(
     r"^blk\.(\d+)\.(" + "|".join(m[0] for m in _MERGES) + r")\.weight$")
+_MERGE_PARTS = {m[0]: m[1:] for m in _MERGES}
 
 
 def _scales_name(weight_name: str) -> str:
     return weight_name[: -len(".weight")] + ".scales"
 
 
+def shared_input_parts(name: str) -> tuple[str, str] | None:
+    """The two tensors a merged shared-input tensor ``name`` holds, first
+    rows first, or None for any other name."""
+    m = _MERGE_RE.match(name)
+    if m is None:
+        return None
+    bid, kind = m.groups()
+    first, second, _key = _MERGE_PARTS[kind]
+    return f"blk.{bid}.{first}.weight", f"blk.{bid}.{second}.weight"
+
+
+def shared_input_rows(name: str, total: int, meta: dict,
+                      arch: str | None) -> tuple[int, int]:
+    """The output rows of the two parts of merged tensor ``name`` with
+    ``total`` rows."""
+    kind = _MERGE_RE.match(name).group(2)
+    first, second, key = _MERGE_PARTS[kind]
+    if key is None:
+        n_second = total // 2
+    else:
+        n_second = read_int(meta, f"{arch}.{key}") or 0
+    if not (0 < n_second < total) or (key is None and total % 2):
+        raise ValueError(
+            f"{name}: cannot split {total} rows into {first} and "
+            f"{second} ({arch}.{key} = {n_second})")
+    return total - n_second, n_second
+
+
 def split_shared_input(arrays: dict, kquant_meta: dict, meta: dict,
                        shapes: dict, arch: str | None) -> int:
     """Split every merged shared-input tensor in place. Returns the count."""
     merged = [n for n in arrays if _MERGE_RE.match(n)]
-    if not merged:
-        return 0
-    rows = {m[0]: m[1:] for m in _MERGES}
     for name in merged:
-        bid, kind = _MERGE_RE.match(name).groups()
-        first, second, key = rows[kind]
+        a_name, b_name = shared_input_parts(name)
         arr = arrays.pop(name)
         total = arr.shape[-2] if arr.ndim >= 2 else 0
-        if key is None:
-            n_second = total // 2
-        else:
-            n_second = read_int(meta, f"{arch}.{key}") or 0
-        if not (0 < n_second < total) or (key is None and total % 2):
-            raise ValueError(
-                f"{name}: cannot split {total} rows into {first} and "
-                f"{second} ({arch}.{key} = {n_second})")
-        n_first = total - n_second
-        a_name = f"blk.{bid}.{first}.weight"
-        b_name = f"blk.{bid}.{second}.weight"
+        n_first, n_second = shared_input_rows(name, total, meta, arch)
         arrays[a_name] = arr[..., :n_first, :]
         arrays[b_name] = arr[..., n_first:, :]
         codec = kquant_meta.pop(name, None)
@@ -123,23 +138,24 @@ def sensenova_loop_plan(meta: dict) -> tuple[int, int, int, int, int]:
 _BLK_RE = re.compile(r"^blk\.(\d+)\.")
 
 
+def sensenova_loop_block(bid: int, start: int, end: int, count: int) -> int:
+    """The physical layer that file block ``bid`` holds (the NextN head
+    lands right after the trunk). Raises for a block a looped file never
+    writes."""
+    extra = (count - 1) * (end - start)
+    if bid < end:
+        return bid
+    if bid >= end + extra:
+        return bid - extra
+    raise ValueError(
+        f"sensenova_loop: block {bid} is a repeated loop visit; the "
+        f"file should hold each looped layer once")
+
+
 def fold_sensenova_loop(arrays: dict, kquant_meta: dict, meta: dict,
                         shapes: dict) -> int:
     """Rename visit-indexed blocks to physical ones. Returns the count."""
-    visits, physical, start, end, count = sensenova_loop_plan(meta)
-    extra = visits - physical
-
-    def target(bid: int) -> int | None:
-        if bid < end:
-            return None
-        if bid >= visits:
-            return bid - extra          # NextN head: right after the trunk
-        if bid >= end + extra:
-            return bid - extra          # layers after the loop
-        raise ValueError(
-            f"sensenova_loop: block {bid} is a repeated loop visit; the "
-            f"file should hold each looped layer once")
-
+    _visits, _physical, start, end, count = sensenova_loop_plan(meta)
     moved = 0
     for table in (arrays, kquant_meta, shapes):
         renames = {}
@@ -147,14 +163,39 @@ def fold_sensenova_loop(arrays: dict, kquant_meta: dict, meta: dict,
             m = _BLK_RE.match(name)
             if m is None:
                 continue
-            new = target(int(m.group(1)))
-            if new is not None:
+            bid = int(m.group(1))
+            new = sensenova_loop_block(bid, start, end, count)
+            if new != bid:
                 renames[name] = f"blk.{new}." + name[m.end():]
         for old, new in renames.items():
             table[new] = table.pop(old)
         if table is arrays:
             moved = sum(1 for n in renames if not n.endswith(".scales"))
     return moved
+
+
+def loaded_tensor_names(shapes: dict, meta: dict,
+                        arch: str | None) -> dict[str, tuple]:
+    """What the reader loads each tensor of a file as: tensor name ->
+    ``((name as loaded, output rows), ...)``, one entry for most tensors
+    and two for a merged shared-input tensor. ``shapes`` holds the file's
+    shapes in GGUF order (rows second)."""
+    loop = None
+    if arch == "sensenova_loop" and read_string(meta, "general.type") != "adapter":
+        loop = sensenova_loop_plan(meta)[2:]
+    out = {}
+    for name, ne in shapes.items():
+        loaded = name
+        m = _BLK_RE.match(name)
+        if loop is not None and m is not None:
+            loaded = f"blk.{sensenova_loop_block(int(m.group(1)), *loop)}." + name[m.end():]
+        rows = int(ne[1]) if len(ne) >= 2 else None
+        parts = shared_input_parts(loaded)
+        if parts is None or rows is None:
+            out[name] = ((loaded, rows),)
+        else:
+            out[name] = tuple(zip(parts, shared_input_rows(loaded, rows, meta, arch)))
+    return out
 
 
 def normalize(arrays: dict, kquant_meta: dict, meta: dict, shapes: dict,
