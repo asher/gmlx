@@ -1225,6 +1225,10 @@ def _no_records() -> tuple:
 
 
 _STEPS_CONST: dict = {}
+# Set by a caller that replays records outside an eval (qwen4_exp
+# verify_bound): step counts are then arrays built from host values, there
+# with no eval, one a (count, rows, use).
+HOST_STEPS = False
 
 
 def replay_steps(steps, rows: int, use: int = 0) -> mx.array:
@@ -1235,9 +1239,8 @@ def replay_steps(steps, rows: int, use: int = 0) -> mx.array:
     if isinstance(steps, mx.array):
         return steps.astype(mx.int32).reshape(rows)
     if isinstance(steps, int):
-        # Built from host values, so the array is there with no eval: a
-        # record replayed outside an eval (qwen4_exp verify_bound) reads it
-        # as it is.
+        if not HOST_STEPS:
+            return mx.full((rows,), steps, dtype=mx.int32)
         key = (steps, rows, use)
         a = _STEPS_CONST.get(key)
         if a is None:

@@ -218,6 +218,16 @@ def own(cache) -> None:
     _mark(cache)
 
 
+def cut_base(cache) -> None:
+    """A block base longer than its live blocks (a rollback into blocks a
+    verify finished) cut to them, as a rebuild leaves it: the record reads
+    the base whole. The plain path reads the first rows of the longer
+    array, as on main."""
+    b, nbb = cache.blocks, cache._nbb
+    if b is not None and 0 < nbb < b.shape[1]:
+        cache.blocks = mx.contiguous(b[:, :nbb])
+
+
 def ensure_block_tail(cache, nt: int) -> None:
     """Give the cache its block key tail at the fixed capacity (the live
     rows kept, zeros after them)."""

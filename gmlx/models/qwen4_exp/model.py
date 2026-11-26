@@ -2060,12 +2060,6 @@ class QSAKVCache(KVCache):
         self._tl = max(0, self._tl - n)
         self.n_blocks = min(self.n_blocks, self.offset // self.ratio)
         self._nbb = min(self._nbb, self.n_blocks)
-        if self.blocks is not None and self._nbb < self.blocks.shape[1]:
-            # Blocks of the rolled back rows were in the base: the base
-            # keeps its live blocks alone, as a rebuild leaves it (the
-            # whole-layer record reads the base whole).
-            self.blocks = (mx.contiguous(self.blocks[:, :self._nbb])
-                           if self._nbb else None)
         return n
 
     def to_quantized(self, group_size: int = 64, bits: int = 4):
@@ -3327,10 +3321,11 @@ def _fused_kw() -> dict:
     """Keywords of a record that replays its Metal calls. With the whole
     layer forms (_fused_whole) a record runs its primitives by depth from
     its inputs (kq fuse_graph level): the same kernels on the same
-    operands, with fewer barriers between them."""
-    if _fused_whole():
-        return {"direct": True, "level": 1}
-    return {"direct": True}
+    operands, with fewer barriers between them. With the bound verify on,
+    a record is one a kq session replays (verify_bound.record_kw)."""
+    kw = {"direct": True, "level": 1} if _fused_whole() else {"direct": True}
+    kw.update(_vb.record_kw())
+    return kw
 
 
 # Record handles held by the process, handles made since the last bound
@@ -3704,6 +3699,7 @@ def _bound_prepare(model, cache, h, vb) -> None:
         if hin is None:
             continue
         h_shape = (h.shape[0], L) + hin[0]
+        W.cut_base(c)
         st = W.state(layer.self_attn, c, L)
         if st is not None:
             if type(recs[1].get(_whole_key(h_shape, hin[1], c, L))) is not tuple:
@@ -3804,6 +3800,7 @@ def _fused_qsa_whole(layer, h, c, mask, positions, table):
         _vb.note(layer, "positions" if positions is not None else "mask")
         return None
     L = h.shape[1]
+    W.cut_base(c)
     st = W.state(layer.self_attn, c, L)
     if st is None:
         if _vb.noting():

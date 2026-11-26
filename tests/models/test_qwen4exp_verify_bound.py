@@ -18,6 +18,7 @@ import pytest
 import gmlx.models.qwen4_exp.model as q4
 from gmlx.models.qwen4_exp import verify_bound as vb
 from gmlx.spec import verify_submit
+from gmlx.upstream import gdn_patches
 
 from helpers import _real_apple_gpu
 from test_qwen4exp_qsa_whole import PASS, PROMPT, _equal, _lm
@@ -38,6 +39,7 @@ def _levers(monkeypatch):
     monkeypatch.setenv("GMLX_Q4_KV_TAIL", "64")
     monkeypatch.setattr(vb, "_MODE", 0)
     monkeypatch.setattr(vb, "_kq_mod", [None])
+    monkeypatch.setattr(gdn_patches, "HOST_STEPS", False)
     for k in vb.stats:
         monkeypatch.setitem(vb.stats, k, {} if isinstance(
             vb.stats[k], dict) else 0)
@@ -86,6 +88,8 @@ class _AtOnce:
         return outs
 
     def bound_commit(self, sid):
+        if not self.open:
+            return False
         self.commits += 1
         self.open = 0
         return True
@@ -297,3 +301,94 @@ def test_a_handout_before_the_rollback_keeps_its_rows_under_records_run_at_once(
     for a, tl, want in held:
         assert np.array_equal(
             np.array(a[..., :tl, :].astype(mx.float32)), want)
+
+
+def _record(n):
+    """A direct record of y = x @ w * 0.5 + 1 over x [n, n] float32, past
+    its learning (kq's list holds its primitives)."""
+    rng = np.random.default_rng(3)
+    w = mx.array(rng.standard_normal((n, n)).astype(np.float32) / n)
+
+    def f(x):
+        return (x @ w) * 0.5 + 1.0
+
+    x = _rand(n, 49)
+    handle = kq.fuse_graph([x], [f(x)], direct=True)
+    for seed in (50, 51):
+        mx.eval(kq.fused_call(handle, [_rand(n, seed)]))
+    assert kq.fused_direct_info(handle)["state"] == "replay"
+    return handle, f
+
+
+def _rand(n, seed):
+    a = mx.array(np.random.default_rng(seed).standard_normal(
+        (n, n)).astype(np.float32))
+    mx.eval(a)
+    return a
+
+
+def test_a_stage_between_records_runs_after_our_buffer(monkeypatch):
+    # kq's own command buffers, no stand-in. A stage built from primitives
+    # between two records reads the first record's output: the session
+    # commits its buffer ahead of the stage's mlx submission (mlx's encoder
+    # then waits for the session's fence), and the second record is bound
+    # on the stage while mlx still runs it (the session's encoder waits for
+    # mlx's fence). Fails when the submission does not commit first: the
+    # stage reads the first output before it is written.
+    n = 1024
+    handle, f = _record(n)
+    monkeypatch.setattr(vb, "_MODE", 1)
+    x = _rand(n, 5)
+    want_y = f(x)
+    want = f(want_y * 2.0 - 3.0)
+    mx.eval(want_y, want)
+    try:
+        with verify_submit.now():
+            s = vb.begin(1)
+            assert s is not None
+            try:
+                y = vb.call(handle, [x])
+                out = vb.call(handle, [y[0] * 2.0 - 3.0])
+            finally:
+                vb.end(s)
+        info = kq.bound_session_info(s.sid)
+        vb.wait()
+        assert np.array_equal(np.array(out[0]), np.array(want))
+        assert vb.stats["bound_calls"] == 2 and vb.stats["submits"] == 1
+        assert info["fence_waits"] > 0
+    finally:
+        kq.fuse_release(handle)
+
+
+@pytest.mark.skipif(not hasattr(kq, "bound_session_fail"),
+                    reason="needs a kq build with bound_session_fail")
+def test_a_failed_session_buffer_raises_and_the_next_verify_opens_a_new_one(
+        monkeypatch):
+    # A command buffer of the session that ended in error: the next verify
+    # raises (as mlx words its own) and drops the session; the one after
+    # runs on a new session.
+    n = 256
+    handle, f = _record(n)
+    monkeypatch.setattr(vb, "_MODE", 1)
+    x = _rand(n, 6)
+
+    def verify():
+        s = vb.begin(1)
+        try:
+            return s, vb.call(handle, [x])
+        finally:
+            vb.end(s)
+
+    try:
+        with verify_submit.now():
+            s, _ = verify()
+            kq.bound_session_fail(
+                s.sid, "[METAL] Command buffer execution failed: test")
+            with pytest.raises(RuntimeError, match="failed: test"):
+                verify()
+            s2, out = verify()
+        assert s2.sid != s.sid
+        vb.wait()
+        assert np.array_equal(np.array(out[0]), np.array(f(x)))
+    finally:
+        kq.fuse_release(handle)

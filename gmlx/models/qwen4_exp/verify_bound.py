@@ -46,6 +46,7 @@ import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
 from gmlx.spec.verify_submit import is_now
+from gmlx.upstream import gdn_patches as _gdn
 
 _MODE = env_int("GMLX_SPEC_VERIFY_BOUND", 0)
 _STATS = env_bool("GMLX_SPEC_VERIFY_BOUND_STATS", False)
@@ -102,6 +103,26 @@ def _kq():
 
 def mode() -> int:
     return _MODE
+
+
+_bound_kw: list = [None]
+
+
+def record_kw() -> dict:
+    """Keywords for kq.fuse_graph of a verify record while the lever is
+    on: a record a session replays (kq lists more primitive types for it).
+    Empty with the lever off or a kq without them."""
+    if _MODE <= 0:
+        return {}
+    if _bound_kw[0] is None:
+        try:
+            import mlx_kquant as kq
+
+            doc = (getattr(kq.fuse_graph, "__doc__", None) or "").split("\n")[0]
+        except ImportError:
+            doc = ""
+        _bound_kw[0] = "bound" in doc
+    return {"bound": True} if _bound_kw[0] else {}
 
 
 def wanted() -> bool:
@@ -236,6 +257,8 @@ def begin(B: int):
     held = getattr(_local, "sid", None)
     if held is None or held[0] is not kq:
         held = _local.sid = (kq, kq.bound_session())
+        # Step counts the records read as they are (gdn_patches).
+        _gdn.HOST_STEPS = True
     s = Session(kq, held[1])
     _local.session = s
     if _TRACE_PATH:
@@ -244,12 +267,33 @@ def begin(B: int):
 
 
 def end(s: Session) -> None:
+    """Close the verify's session. A command buffer of the session that
+    ended in error raises here or at the session's next kq call, worded as
+    mlx words its own; the session is then dropped (the thread's next
+    verify opens a new one) and the request's caches are not to be used
+    again: rows the failed buffer was to write in place are not there."""
     try:
         s.close()
         if _TRACE_PATH:
             _trace("end", s.li)
+        # With nothing open, a commit is the failure check alone (kq raises
+        # once a buffer of the session has failed).
+        s.kq.bound_commit(s.sid)
+    except BaseException:
+        _drop(s)
+        raise
     finally:
         _local.session = None
+
+
+def _drop(s: Session) -> None:
+    held = getattr(_local, "sid", None)
+    if held is not None and held[1] == s.sid:
+        _local.sid = None
+    try:
+        s.kq.bound_session_close(s.sid)
+    except Exception:  # noqa: S110 - closing a failed session is best effort
+        pass
 
 
 def noting() -> bool:
