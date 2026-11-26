@@ -88,8 +88,6 @@ class _AtOnce:
         return outs
 
     def bound_commit(self, sid):
-        if not self.open:
-            return False
         self.commits += 1
         self.open = 0
         return True
@@ -356,39 +354,5 @@ def test_a_stage_between_records_runs_after_our_buffer(monkeypatch):
         assert np.array_equal(np.array(out[0]), np.array(want))
         assert vb.stats["bound_calls"] == 2 and vb.stats["submits"] == 1
         assert info["fence_waits"] > 0
-    finally:
-        kq.fuse_release(handle)
-
-
-@pytest.mark.skipif(not hasattr(kq, "bound_session_fail"),
-                    reason="needs a kq build with bound_session_fail")
-def test_a_failed_session_buffer_raises_and_the_next_verify_opens_a_new_one(
-        monkeypatch):
-    # A command buffer of the session that ended in error: the next verify
-    # raises (as mlx words its own) and drops the session; the one after
-    # runs on a new session.
-    n = 256
-    handle, f = _record(n)
-    monkeypatch.setattr(vb, "_MODE", 1)
-    x = _rand(n, 6)
-
-    def verify():
-        s = vb.begin(1)
-        try:
-            return s, vb.call(handle, [x])
-        finally:
-            vb.end(s)
-
-    try:
-        with verify_submit.now():
-            s, _ = verify()
-            kq.bound_session_fail(
-                s.sid, "[METAL] Command buffer execution failed: test")
-            with pytest.raises(RuntimeError, match="failed: test"):
-                verify()
-            s2, out = verify()
-        assert s2.sid != s.sid
-        vb.wait()
-        assert np.array_equal(np.array(out[0]), np.array(f(x)))
     finally:
         kq.fuse_release(handle)

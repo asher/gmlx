@@ -32,6 +32,9 @@ that waits for it. The open buffer is therefore committed ahead of every
 mlx eval this module makes and at the end of the forward, and code that
 runs between two bound records must not evaluate an array that depends on
 the open buffer.
+
+Failure. A command buffer of the session that ends in error ends the
+process from kq's completion handler, as a failed buffer of mlx's does.
 """
 
 from __future__ import annotations
@@ -267,33 +270,12 @@ def begin(B: int):
 
 
 def end(s: Session) -> None:
-    """Close the verify's session. A command buffer of the session that
-    ended in error raises here or at the session's next kq call, worded as
-    mlx words its own; the session is then dropped (the thread's next
-    verify opens a new one) and the request's caches are not to be used
-    again: rows the failed buffer was to write in place are not there."""
     try:
         s.close()
         if _TRACE_PATH:
             _trace("end", s.li)
-        # With nothing open, a commit is the failure check alone (kq raises
-        # once a buffer of the session has failed).
-        s.kq.bound_commit(s.sid)
-    except BaseException:
-        _drop(s)
-        raise
     finally:
         _local.session = None
-
-
-def _drop(s: Session) -> None:
-    held = getattr(_local, "sid", None)
-    if held is not None and held[1] == s.sid:
-        _local.sid = None
-    try:
-        s.kq.bound_session_close(s.sid)
-    except Exception:  # noqa: S110 - closing a failed session is best effort
-        pass
 
 
 def noting() -> bool:
