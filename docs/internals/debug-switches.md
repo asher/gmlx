@@ -78,7 +78,9 @@ is already running does not see a variable you export later.
 | `GMLX_SPEC_REUSE_ROWS=1` | A verify rebuilt after a missed deferred row cut takes the table rows the whole block read (model reuse_verify_rows). Same bits. |
 | `GMLX_SPEC_ACCEPT_COUNTED=0` | Read a B=1 round's accepted count on the host before its commit and next draft go out. On, a DFlash 2 draft on Flash-Next reads it on the GPU. |
 | `GMLX_DFLASH_COUNTED_F32=0` | A counted draft (GMLX_SPEC_ACCEPT_COUNTED) keeps the ring's stored dtype in its attention in place of float32. |
-| `GMLX_DFLASH_COUNTED_GATHER=0` | A counted draft masks the ring buffer rows (stock attention) in place of reading them by row index in the plain key order. |
+| `GMLX_DFLASH_COUNTED_GATHER=0` | A counted draft masks the ring buffer rows (stock attention), not reading them by row index in the plain key order or in place. |
+| `GMLX_DFLASH_COUNTED_IN_PLACE=0` | A counted draft gathers its ring rows and joins the block, not reading the ring in place within bounds the GPU holds. Rounding differs. |
+| `GMLX_DFLASH_COUNTED_ONE_TAKE=0` | A counted round the in-place layout does not fit gathers the ring rows and joins the block, not one take. Same bits on the GPU. |
 | `GMLX_SPEC_VERIFY_AHEAD=N` | Submit a B=1 verify whole before the row cut is read: 1 after a whole round, 2 always, 0 never. Default 1 where the verify is one submission, else 0. |
 | `GMLX_SPEC_VERIFY_PREBUILT=N` | With a counted commit and VERIFY_AHEAD=2: the next verify is built ahead for the N likeliest accept counts; the others are dropped. |
 | `GMLX_SPEC_APC_LONGER=1` | A prompt both prefix cache levels hold restores the longer record; a DFlash request keeps its last hidden rows to seed that turn. |
@@ -90,13 +92,14 @@ is already running does not see a variable you export later.
 | `GMLX_DFLASH_COUNTED_SHORT=0` | A ring shorter than the window takes the plain draft, not the counted one with its dead rows masked. The two differ in rounding only. |
 | `GMLX_DFLASH_RING_SLACK=N` | Spare rows of the DFlash ring past its window (512, at least 16): more rows, fewer compactions, which a commit ahead cannot take back. |
 | `GMLX_SPEC_DEFER_CUT=0` | A DFlash 2 drafter cuts its draft rows before it returns. Flash-Next then verifies the cut rows only, so output differs in rounding. |
-| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft where the product of the selector's untempered pick probabilities falls under P. The first draft stays. Default 0.5, `0` off. |
+| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft where the product of the selector's untempered pick probabilities falls under P. The first draft stays. Default 0.3 on Flash-Next, `0` off. |
 | `GMLX_DFLASH_RING_IN_PLACE=0` | DFlash draft attention copies the ring buffer per layer, not reading it in place. |
 | `GMLX_DFLASH_QMM_MULTI=0` | Run each DFlash draft projection that shares an input (q/k/v, gate/up) as its own dispatch, not one per codec. |
 | `GMLX_DFLASH_WALK_KERNEL=0` | Run the DFlash 2 selector walk (picks, proposal rows, row cut) as an op chain, not one kernel. |
 | `GMLX_DFLASH_LATTICE_WALK=0` | Build the whole DFlash 2 lattice before the walk, not only the rows of the path the walk kernel takes. |
 | `GMLX_DFLASH_LATTICE_TOPK=0` | Take the DFlash 2 lattice candidates from a full-width argpartition, not the hierarchical top-k. |
 | `GMLX_DFLASH_HEAD_SUBSET=0` | A DFlash 2 draft reads the whole head every round, not skipping the token ids the request has not used. |
+| `GMLX_DFLASH_DRAFT_CODEC=q4_k` | Re-encode a DFlash 2 drafter's own quantized weights at load in this kq codec (q4_k, q5_k or q4_0) where they hold more bits. Other drafters ignore it. |
 | `GMLX_DFLASH_COMMIT_ASYNC=0` | A verified DFlash round's commit runs ahead of the next draft, not on the GPU as soon as it is built. |
 | `GMLX_DFLASH_CONV_KERNEL=0` | Run the DFlash draft's grouped conv as an op chain, not the fused kernels. |
 | `GMLX_SPEC_TOKEN_TRACE=1` | With GMLX_ROUND_LOG: a note per B=1 round with drafts, tokens out and the target's top two ids and logits. Adds a head pass. |

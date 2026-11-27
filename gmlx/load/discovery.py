@@ -1409,12 +1409,48 @@ def text_tensor_bytes(path: str) -> int | None:
     return total or None
 
 
+# The DFlash 2 tensors that load as embeddings, which the codec lever keeps.
+_DFLASH2_EMBEDS = ("selector_predecessor.weight", "selector_successor.weight",
+                   "token_embd.weight", "output.weight")
+
+
+def _layer_codec_bytes(scan) -> int:
+    """Bytes of a DFlash 2 drafter's linears re-encoded at load under
+    GMLX_DFLASH_DRAFT_CODEC (``DFlashDrafter.layer_codec``), else 0. They
+    are new arrays; the file's pages of the weights they replace are booked
+    too, as nothing shows those are let go."""
+    if not os.environ.get("GMLX_DFLASH_DRAFT_CODEC"):
+        return 0
+    from gmlx.spec.dflash_drafter import _LAYER_CODEC
+
+    if (not _LAYER_CODEC or read_string(scan.kv, "general.architecture") != "dflash"
+            or _arch_table.dflash_container(t.name for t in scan.tensors) != "dflash2"):
+        return 0
+    from mlx_kquant.codec_geometry import CODEC_GEOMETRY
+
+    _, bits, block_bytes, block_n = CODEC_GEOMETRY[_LAYER_CODEC]
+    total = 0
+    for t in scan.tensors:
+        geo = CODEC_GEOMETRY.get(t.type_name.lower())
+        if geo is not None and geo[1] > bits and t.name not in _DFLASH2_EMBEDS:
+            n = 1
+            for d in t.shape:
+                n *= int(d)
+            total += n // block_n * block_bytes
+    return total
+
+
 def drafter_derived_bytes(scan) -> int:
     """Bytes a drafter builds beyond its file: the Inkling 2 DSpark
     drafter derives its folded head and a draft copy of the target's head
     (``gmlx.models.inkling2.dspark.derived_bytes``); in llama.cpp's
     mainline layout the file carries the folded head (``markov_w2``,
-    [rank, unpadded vocab]). 0 for every other drafter."""
+    [rank, unpadded vocab]). A DFlash 2 drafter under the codec lever
+    builds its re-encoded linears (``_layer_codec_bytes``). 0 for every
+    other drafter."""
+    codec = _layer_codec_bytes(scan)
+    if codec:
+        return codec
     names = {t.name: t for t in scan.tensors}
     w2 = names.get("markov_w2.weight")
     mainline = w2 is not None and "markov_ctx_mix.weight" in names
