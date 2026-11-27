@@ -186,22 +186,49 @@ def test_an_invalidation_drops_the_records(monkeypatch):
     assert _records(lm) == 0
 
 
+def _live_handles(lm):
+    """(record handles the model's tables hold, decode records)."""
+    recs = [(key, rec) for m in lm.modules()
+            if (t := vars(m).get("_verify_fused")) is not None
+            for key, rec in t[1].items() if isinstance(rec, tuple)]
+    return ([handle for _, rec in recs for handle in rec[:2]
+             if isinstance(handle, int)],
+            sum(key[0] == "decode" for key, _ in recs))
+
+
 def test_a_dropped_model_releases_its_records(monkeypatch):
     # A record holds its layer's arrays as constants: the records of a
     # model let go (a server unloading it) leave kq's table with it.
     import gc
 
     lm, _ = _walk(monkeypatch, True, rounds=ROUNDS[:4])
-    handles = [handle for m in lm.modules()
-               if (recs := vars(m).get("_verify_fused")) is not None
-               for rec in recs[1].values() if isinstance(rec, tuple)
-               for handle in rec[:2] if isinstance(handle, int)]
+    handles = _live_handles(lm)[0]
     assert handles
     del lm
     gc.collect()
     for handle in handles:
         with pytest.raises(ValueError, match="bad handle"):
             kq.fused_direct_info(handle)
+
+
+def test_the_record_count_is_the_handles_the_tables_hold(monkeypatch):
+    # The count bounds the process's records
+    # (GMLX_Q4_VERIFY_FUSED_MAX_RECORDS). A table a weight swap replaced
+    # goes twice, released and then dropped, and counts once; the bound
+    # check counts a decode record's one handle as one.
+    import gc
+
+    gc.collect()
+    monkeypatch.setattr(q4, "_FUSED_HELD", [0, 0, 0])
+    monkeypatch.setattr(q4, "_FUSED_LAYERS", [])
+    monkeypatch.setattr(q4, "_DECODE_FUSED", True)
+    lm, _ = _walk(monkeypatch, True, rounds=ROUNDS, swap_at=8,
+                  step_at=range(10, 20), before=lambda lm: lm.eval())
+    handles, decode = _live_handles(lm)
+    assert handles and decode
+    assert q4._FUSED_HELD[0] == len(handles)
+    q4._fused_bound()
+    assert q4._FUSED_HELD[0] == len(handles)
 
 
 def test_a_weight_swap_turns_the_path_off(monkeypatch):

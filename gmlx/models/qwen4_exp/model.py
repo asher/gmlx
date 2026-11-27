@@ -3423,21 +3423,25 @@ def _fused_bound() -> None:
             continue
         for key, rec in recs[1].items():
             if isinstance(rec, tuple):
-                held.append((rec[-1][0], _fused_bytes(rec), recs[1], key, rec))
-    handles = 2 * len(held)
+                # A pair (gated-delta verify, split attention) holds two
+                # handles; the PLE, whole and decode records one.
+                n = sum(isinstance(handle, int) for handle in rec[:2])
+                held.append((rec[-1][0], _fused_bytes(rec), recs[1], key, rec,
+                             n))
+    handles = sum(h[5] for h in held)
     total = sum(h[1] for h in held)
     _FUSED_HELD[0] = handles
     if handles <= max_handles and total <= max_bytes:
         return
     held.sort(key=lambda h: h[0])
-    for _, nbytes, table, key, rec in held:
+    for _, nbytes, table, key, rec, n in held:
         if handles <= max_handles * 3 // 4 and total <= max_bytes * 3 // 4:
             break
         for handle in rec[:2]:
             if isinstance(handle, int):
                 kq.fuse_release(handle)
         table[key] = False
-        handles -= 2
+        handles -= n
         total -= nbytes
         _FUSED_HELD[2] += 1
     _FUSED_HELD[0] = handles

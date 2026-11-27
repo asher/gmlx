@@ -530,10 +530,9 @@ def test_a_new_layout_keeps_the_calls_other_records_learned(model, monkeypatch):
         spec.__class__ = plain
 
 
-def test_a_dropped_model_releases_its_records(tmp_path, monkeypatch):
-    # A record holds its layer's arrays as constants: the records of a
-    # model let go (a server unloading it) leave kq's table with it.
-    import gc
+def _records_spec(tmp_path, monkeypatch):
+    """The tiny model with records on, prefilled into a buffered cache:
+    (spec, cache, kq, records)."""
     from types import SimpleNamespace
 
     kq = pytest.importorskip("mlx_kquant")
@@ -557,18 +556,52 @@ def test_a_dropped_model_releases_its_records(tmp_path, monkeypatch):
     spec.model(mx.array([IDS[:20]]), cache)
     _buffer_mtp_target_cache(
         cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+    return spec, cache, kq, records
+
+
+def _ink_handles(spec):
+    return [handle for m in spec.modules()
+            if (recs := vars(m).get("_ink_records")) is not None
+            for rec in recs[1].values() if isinstance(rec, tuple)
+            for handle in rec[:2]]
+
+
+def test_a_dropped_model_releases_its_records(tmp_path, monkeypatch):
+    # A record holds its layer's arrays as constants: the records of a
+    # model let go (a server unloading it) leave kq's table with it.
+    import gc
+
+    spec, cache, kq, _ = _records_spec(tmp_path, monkeypatch)
     for t in IDS[20:25]:
         mx.eval(spec.model(mx.array([[t]]), cache))
-    handles = [handle for m in spec.modules()
-               if (recs := vars(m).get("_ink_records")) is not None
-               for rec in recs[1].values() if isinstance(rec, tuple)
-               for handle in rec[:2]]
+    handles = _ink_handles(spec)
     assert handles
     del spec, cache
     gc.collect()
     for handle in handles:
         with pytest.raises(ValueError, match="bad handle"):
             kq.fused_direct_info(handle)
+
+
+def test_the_record_count_is_the_handles_the_tables_hold(tmp_path,
+                                                         monkeypatch):
+    # The count bounds the process's records (GMLX_INKLING2_RECORDS_MAX).
+    # A table an invalidate replaced goes twice, released and then dropped,
+    # and counts once.
+    import gc
+
+    gc.collect()
+    spec, cache, _, records = _records_spec(tmp_path, monkeypatch)
+    monkeypatch.setattr(records, "_HELD", [0])
+    monkeypatch.setattr(records, "_EPOCH", [0])
+    for t in IDS[20:25]:
+        mx.eval(spec.model(mx.array([[t]]), cache))
+    records.invalidate()
+    for t in IDS[25:30]:
+        mx.eval(spec.model(mx.array([[t]]), cache))
+    handles = _ink_handles(spec)
+    assert handles
+    assert records._HELD[0] == len(handles)
 
 
 def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
