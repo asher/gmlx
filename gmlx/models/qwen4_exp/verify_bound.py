@@ -330,8 +330,9 @@ def begin(B: int):
     held = getattr(_local, "sid", None)
     if held is None or held.kq is not kq:
         held = _local.sid = _Held(kq, kq.bound_session())
-        # Step counts the records read as they are (gdn_patches).
-        _gdn.HOST_STEPS = True
+        # Step counts the records read as they are (gdn_patches), on this
+        # thread while it holds a session.
+        _gdn.host_steps(True)
     s = Session(kq, held.sid)
     _local.session = s
     if _TRACE_PATH:
@@ -375,6 +376,7 @@ def _drop() -> None:
     held = getattr(_local, "sid", None)
     _local.sid = None
     _local.unchecked = None
+    _gdn.host_steps(False)
     if held is not None:
         held.close()
 

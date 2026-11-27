@@ -41,7 +41,7 @@ def _levers(monkeypatch):
     monkeypatch.setenv("GMLX_Q4_KV_TAIL", "64")
     monkeypatch.setattr(vb, "_MODE", 0)
     monkeypatch.setattr(vb, "_kq_mod", [None])
-    monkeypatch.setattr(gdn_patches, "HOST_STEPS", False)
+    monkeypatch.setattr(gdn_patches, "_host_steps", threading.local())
     monkeypatch.setattr(vb, "_local", threading.local())
     for k in vb.stats:
         monkeypatch.setitem(vb.stats, k, {} if isinstance(
@@ -504,3 +504,44 @@ def test_a_failure_the_round_did_not_check_raises_at_the_next_verify(
         assert np.array_equal(np.array(out[0]), np.array(want))
     finally:
         kq.fuse_release(handle)
+
+
+def test_host_step_counts_stay_on_the_thread_of_a_session(monkeypatch):
+    # The records of a bound verify read step counts built on the host. A
+    # model on another thread (a server's generation worker, one a model
+    # load) builds its counts as before, while the session lives and after.
+    # A thread whose session failed builds them as before too.
+    from gmlx._vendor.mlx_vlm._stream_cleanup import clear_mlx_streams
+
+    def cached():
+        return gdn_patches.replay_steps(3, 2) is gdn_patches.replay_steps(3, 2)
+
+    monkeypatch.setattr(vb, "_MODE", 1)
+    seen = {}
+
+    def worker():
+        n = 256
+        handle, _ = _record(n)
+        try:
+            _verify(handle, _rand(n, 8))
+            vb.check()
+            seen["session"] = cached()
+            other = threading.Thread(
+                target=lambda: seen.setdefault("other", cached()))
+            other.start()
+            other.join()
+            vb._drop()
+            seen["dropped"] = cached()
+        finally:
+            kq.fuse_release(handle)
+            clear_mlx_streams()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    later = threading.Thread(target=lambda: seen.setdefault("later", cached()))
+    later.start()
+    later.join()
+    assert seen == {"session": True, "other": False, "dropped": False,
+                    "later": False}
+

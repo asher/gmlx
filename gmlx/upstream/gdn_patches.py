@@ -15,6 +15,7 @@ import mlx.nn as nn
 import atexit
 import os
 import sys
+import threading
 from functools import lru_cache
 from typing import Callable, NamedTuple, cast
 
@@ -1226,9 +1227,16 @@ def _no_records() -> tuple:
 
 _STEPS_CONST: dict = {}
 # Set by a caller that replays records outside an eval (qwen4_exp
-# verify_bound): step counts are then arrays built from host values, there
-# with no eval, one a (count, rows, use).
-HOST_STEPS = False
+# verify_bound), for its own thread: step counts are then arrays built from
+# host values, there with no eval, one a (count, rows, use). A model loaded
+# later runs on a thread of its own (a server's generation worker), which
+# keeps the step counts of today.
+_host_steps = threading.local()
+
+
+def host_steps(on: bool) -> None:
+    """Host-built step counts for replay_steps on this thread, or not."""
+    _host_steps.on = bool(on)
 
 
 def replay_steps(steps, rows: int, use: int = 0) -> mx.array:
@@ -1239,7 +1247,7 @@ def replay_steps(steps, rows: int, use: int = 0) -> mx.array:
     if isinstance(steps, mx.array):
         return steps.astype(mx.int32).reshape(rows)
     if isinstance(steps, int):
-        if not HOST_STEPS:
+        if not getattr(_host_steps, "on", False):
             return mx.full((rows,), steps, dtype=mx.int32)
         key = (steps, rows, use)
         a = _STEPS_CONST.get(key)
