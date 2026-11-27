@@ -2425,6 +2425,13 @@ def _owned_decode_rounds(
                        rows=0 if forced is not None else 1)
             _prev_end = time.perf_counter()
 
+    except RuntimeError:
+        if _round_check is not None:
+            # A read that failed behind the verify (an mlx buffer that
+            # waited on it): the verify's own buffers ran first, so their
+            # failure is the one raised, once, as mlx keeps its earliest.
+            _round_check()
+        raise
     finally:
         _drop_prebuilt()
         _walk_report()
