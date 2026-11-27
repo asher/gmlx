@@ -3671,14 +3671,14 @@ def _fused_gdn_decode(layer, h, c):
 
 
 def _fused_qsa_verify(layer, h, c, mask, positions):
-    """One attention layer of a verify with its two ends as recorded
-    graphs, or None where the plain call must run. The first record is
-    the stream mix and the projections but the indexer keys, the second
-    the output projection, the combines and the MoE; both depend on the
-    row count alone. Between them the rope, the cache append, the block
-    selection and the attention core are built as the plain call builds
-    them: they depend on the cache offset and length. Records follow the
-    rules of _fused_gdn_verify."""
+    """One attention layer of a verify, or of a one-row decode step
+    (_decode_fused), with its two ends as recorded graphs, or None where
+    the plain call must run. The first record is the stream mix and the
+    projections but the indexer keys, the second the output projection,
+    the combines and the MoE; both depend on the row count alone. Between
+    them the rope, the cache append, the block selection and the attention
+    core are built as the plain call builds them: they depend on the cache
+    offset and length. Records follow the rules of _fused_gdn_verify."""
     import mlx_kquant as kq
 
     if layer.training or _prof_on(h.shape[1]):

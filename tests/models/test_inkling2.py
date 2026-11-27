@@ -603,7 +603,10 @@ def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
 def test_cut_verifies_replay_their_records(model, monkeypatch):
     # A served round verifies under verify_row_keep. Its visits replay
     # records that take the keep as an input: every row's logits match the
-    # plain cut verify's to the bit as the keep moves between rounds.
+    # plain cut verify's to the bit as the keep moves between rounds. On
+    # this tiny model kq refuses the tail record for direct replay, so it
+    # runs through the per-primitive tape; direct replay of a moving keep
+    # is covered by kq's test_row_keep_* cases and the served runs.
     from types import SimpleNamespace
 
     kq = pytest.importorskip("mlx_kquant")

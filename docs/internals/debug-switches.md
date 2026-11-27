@@ -104,7 +104,7 @@ is already running does not see a variable you export later.
 | `GMLX_Q4_VERIFY_FUSED=0` | Run a qwen4_exp verify's layers as plain calls, not recorded kq graphs that replay their Metal calls. Same bits. A LoRA or streamed experts run plain anyway. |
 | `GMLX_Q4_VERIFY_FUSED_QSA=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep the attention layers of the verify on the plain call. |
 | `GMLX_Q4_VERIFY_FUSED_CAP=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep per-width record arrays in the gated-delta verify (one record layout per pair of round widths). |
-| `GMLX_Q4_DECODE_FUSED=1` | Run a B=1 one-token qwen4_exp decode step's layers as recorded kq graphs, as `GMLX_Q4_VERIFY_FUSED` does. Same bits. Off: served decode is slower. |
+| `GMLX_Q4_DECODE_FUSED=1` | Run a B=1 one-token qwen4_exp decode step's layers as recorded kq graphs, as `GMLX_Q4_VERIFY_FUSED` does. Same bits. Off by default: it slows served decode. |
 | `GMLX_Q4_VERIFY_FUSED_MAX_RECORDS`, `GMLX_Q4_VERIFY_FUSED_MAX_MB` | Bound on the recorded verify graphs of the process (4096 handles, 256 MB of programs); the least recently used go first. |
 | `GMLX_MOE_EXPERT_STORE=0` | Keep a Flash-Next load's routed experts as zero-copy views of the GGUF, not in the kq store layout. Other models keep the views by default. |
 | `GMLX_MOE_EXPERT_STORE=full` | Hold the routed experts of every fused MoE block in the kq store layout, on any model. |
@@ -262,7 +262,7 @@ fusions.
 | `GMLX_HY4_KEYS_DENSE=0` | Expand Hy4-flash per-head keys through the K-quant gather instead of a matmul on the dequantized stack. |
 | `GMLX_HY4_ROW_KERNEL=0` | Build a Hy4-flash decode step's key and query rows on the op chain instead of one kernel each. Output is bit-identical. |
 | `GMLX_INKLING2_DRAFT_HEAD_BITS=<n>` | Bits of the head copy the Inkling 2 DSpark draft rows read (default 4); 0 reads the target's head. Verify keeps the target's head. |
-| `GMLX_INKLING2_RECORDS=1` | Replay each Inkling 2 decode and verify layer visit as two kq records. Less host time. Off: a served round is GPU-bound and no faster. Bit-identical. |
+| `GMLX_INKLING2_RECORDS=1` | Replay each Inkling 2 decode and verify layer visit as two kq records: less host time, same bits. Off by default: served rounds are GPU-bound and gain nothing. |
 | `GMLX_INKLING2_RECORDS_MAX=<n>` | Cap the kq record handles Inkling 2 holds (default 2048). Layouts past the cap run plain. |
 | `GMLX_INKLING2_ROW_KERNEL=0` | Run Inkling 2's decode and verify kernels, the fused verify attention among them, as op chains. Output matches to rounding. |
 | `GMLX_INKLING2_ROW_CUT=<p>` | Keep only the leading drafts whose DSpark chance stays at or above `p`; 0 is off. Default 0.3 where every expert layer can skip or share cut rows, else 0. |
