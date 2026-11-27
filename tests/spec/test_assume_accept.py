@@ -407,6 +407,38 @@ def test_builds_ahead_that_hold_their_rows_leave_the_rounds_as_they_were(
     assert len(held[2]) > len(held[1])
 
 
+@pytest.mark.parametrize("sampled", MODES)
+def test_only_the_rounds_own_verify_is_built_as_submitted_at_once(
+        monkeypatch, sampled):
+    """verify_submit.now: a build ahead for a count the round may not
+    return can be dropped unevaluated and is not marked; the build of a
+    round's own verify with no snapshot held is."""
+    from gmlx.spec import verify_submit
+
+    cls = type(_target())
+    inner = cls.speculative_verify_hidden
+    seen: list = []
+
+    def spy(self, *a, **k):
+        seen.append(verify_submit.is_now())
+        return inner(self, *a, **k)
+
+    monkeypatch.setattr(cls, "speculative_verify_hidden", spy)
+    monkeypatch.setattr(sp, "_prebuilt_seen", {})
+    on = _run_ahead(monkeypatch, 1, True, n=64, floor=0.5,
+                    **_kw(monkeypatch, sampled))
+    assert seen and not verify_submit.is_now()
+    own = list(seen)
+    if on["stats"]["ahead"] > 0:
+        assert any(own)
+    seen.clear()
+    monkeypatch.setattr(sp, "_prebuilt_seen", {})
+    _run_prebuilt(monkeypatch, 3, 2, True, n=64, floor=0.5,
+                  **_kw(monkeypatch, sampled))
+    # The builds ahead are there and are not marked.
+    assert seen.count(False) > 0
+
+
 # --- the verify ahead of the cut at the width the cut is expected to keep ---------
 
 @pytest.mark.parametrize("rows", [1, 2])

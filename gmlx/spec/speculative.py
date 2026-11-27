@@ -30,7 +30,7 @@ import resource
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, ParamSpec
 from collections.abc import Callable, Iterator
 
 import mlx.core as mx
@@ -1307,6 +1307,35 @@ def _plain_step(lm, token: int, prompt_cache: list, *, greedy: bool,
         logits=out.logits)
 
 
+_P = ParamSpec("_P")
+
+
+def _round_checked(fn: Callable[_P, Iterator[int]]) -> Callable[_P, Iterator[int]]:
+    """The round loop of a target with a round check (qwen4_exp's
+    verify_bound) runs it before a RuntimeError leaves the loop: a read
+    that failed behind a verify (an mlx buffer that waited on it) then
+    raises the verify's own failure, which came first, once, as mlx keeps
+    its earliest. Other targets get the loop itself."""
+
+    @functools.wraps(fn)
+    def rounds(*args: _P.args, **kwargs: _P.kwargs) -> Iterator[int]:
+        it = fn(*args, **kwargs)
+        lm = args[2] if len(args) > 2 else kwargs.get("lm")
+        check = getattr(lm, "speculative_round_check", None)
+        return _checked_rounds(it, check) if callable(check) else it
+
+    return rounds
+
+
+def _checked_rounds(it: Iterator[int], check) -> Iterator[int]:
+    try:
+        yield from it
+    except RuntimeError:
+        check()
+        raise
+
+
+@_round_checked
 def _owned_decode_rounds(
     model,
     drafter,
@@ -1519,6 +1548,12 @@ def _owned_decode_rounds(
     _has_accept = callable(_accept_fn)
     _rollback_fn = getattr(lm, "rollback_speculative_cache", None)
     _has_rollback = callable(_rollback_fn)
+    # A target whose verify can run outside mlx's evals (qwen4_exp's
+    # verify_bound) raises a failed command buffer of it after the round's
+    # host read, as mlx raises its own at the read.
+    _round_check = getattr(lm, "speculative_round_check", None)
+    if not callable(_round_check):
+        _round_check = None
     _draft_hidden_fn = getattr(lm, "speculative_draft_hidden", None)
     _has_draft_hidden = callable(_draft_hidden_fn)
     _walk_sampler = None if greedy else sampler
@@ -1559,10 +1594,14 @@ def _owned_decode_rounds(
     if not callable(_hold_rows):
         _hold_rows = None
 
-    def _build_verify(drafts: mx.array, first: mx.array | None = None):
-        """``first`` is the round's bonus as a [1, 1] array not yet read."""
+    def _build_verify(drafts: mx.array, first: mx.array | None = None,
+                      now: bool = False):
+        """``first`` is the round's bonus as a [1, 1] array not yet read.
+        ``now``: the caller submits this verify at once and never drops it
+        unevaluated."""
         with mx.stream(generation_stream), lora_rows.published([row_uid]), \
-                _verify_marks():
+                _verify_marks(), \
+                (_verify_submit.now() if now else contextlib.nullcontext()):
             verify_input = mx.concatenate(
                 [mx.array([[b]], dtype=token_dtype) if first is None
                  else first, drafts], axis=1)
@@ -1845,7 +1884,9 @@ def _owned_decode_rounds(
                         with _row_keep_cm(row_keep):
                             verify = _build_verify(draft_tokens)
                     else:
-                        verify = _build_verify(draft_tokens)
+                        verify = _build_verify(
+                            draft_tokens,
+                            now=cut_snap is None and snap is None)
                     if cut_snap is not None:
                         draft_src = draft_tokens
                         n_cut = drafter.pending_row_cut()     # waits for the draft
@@ -1861,7 +1902,8 @@ def _owned_decode_rounds(
                                 _reuse_rows(prompt_cache)
                             draft_tokens = _cut_drafts(draft_tokens, n_cut)
                             bs = n_cut + 1
-                            verify = _build_verify(draft_tokens)
+                            verify = _build_verify(draft_tokens,
+                                                   now=snap is None)
                         # Dropped before the verify runs: a live handle on a
                         # cache buffer keeps a layer's write from reusing it.
                         cut_snap = None
@@ -2035,6 +2077,8 @@ def _owned_decode_rounds(
                                 base = _cache_snapshot(prompt_cache)
                     mx.eval(*w_graph)                         # the one sync
                     _span("sy")
+                    if _round_check is not None:
+                        _round_check()
                     # Read from the evaluated block: a read of the cut view
                     # would be one more wait.
                     drf = draft_src.tolist()[0][:bs - 1]
@@ -2131,6 +2175,8 @@ def _owned_decode_rounds(
                               else None),
                         pq=list(pq_stash) if pq_stash and not copied else None,
                         base_pos=emitted, process=process)
+            if _round_check is not None:
+                _round_check()
             if row_keep is not None and not gated:
                 # Evaluated with the verify: no wait. The rows past the keep
                 # read other experts, so nothing they decide is emitted.
