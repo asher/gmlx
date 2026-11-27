@@ -55,6 +55,7 @@ from gmlx.cache.attention import (
 from gmlx.cache.kv_cache import ArraysCache, KVCache, _BaseCache
 from gmlx.envflags import env_bool, env_int
 from gmlx.gen import deferred_clear
+from gmlx.models.kq_levers import lever_cache_on
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
@@ -3233,7 +3234,7 @@ def _verify_fused() -> bool:
     input layout and replayed as one primitive, which on a GPU stream
     replays the layer's Metal calls. On by default (0 turns it off). Needs
     a kq build with fuse_graph; the kq lever cache goes on with it, so a
-    KQ_* lever is read once."""
+    KQ_* lever is read once (gmlx.models.kq_levers)."""
     global _VERIFY_FUSED
     if _VERIFY_FUSED is None:
         on = env_bool("GMLX_Q4_VERIFY_FUSED", True)
@@ -3242,7 +3243,7 @@ def _verify_fused() -> bool:
 
             on = hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")
             if on:
-                kq.env_cache(True)
+                lever_cache_on()
         _VERIFY_FUSED = on
     return _VERIFY_FUSED and not _VERIFY_BLOCKED
 
@@ -3262,7 +3263,7 @@ def _decode_fused() -> bool:
 
             on = hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")
             if on:
-                kq.env_cache(True)
+                lever_cache_on()
         _DECODE_FUSED = on
     return _DECODE_FUSED and not _VERIFY_BLOCKED
 

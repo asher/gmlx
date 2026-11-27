@@ -435,6 +435,7 @@ def test_recorded_visits_match_the_plain_call(model, monkeypatch):
     if not (hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")):
         pytest.skip("kq build without records")
 
+    from gmlx.models import kq_levers
     from gmlx.models.inkling2 import records
     from gmlx.models.inkling2.mtp import Inkling2SpecLM
     from gmlx.spec.helpers import _buffer_mtp_target_cache
@@ -465,7 +466,7 @@ def test_recorded_visits_match_the_plain_call(model, monkeypatch):
     # The lever cache an earlier test left off goes on with the first record.
     monkeypatch.setattr(records, "DIRECT_ONLY", [False])
     monkeypatch.setattr(records, "_BLOCKED", [False])
-    monkeypatch.setattr(records, "_CACHE_ON", [False])
+    monkeypatch.setattr(kq_levers, "_ON", [False])
     spec, plain = model, type(model)
     spec.__class__ = Inkling2SpecLM
     try:
@@ -488,6 +489,7 @@ def test_a_new_layout_keeps_the_calls_other_records_learned(model, monkeypatch):
     if not (hasattr(kq, "fuse_graph") and hasattr(kq, "fused_direct_info")):
         pytest.skip("kq build without direct records")
 
+    from gmlx.models import kq_levers
     from gmlx.models.inkling2 import records
     from gmlx.models.inkling2.mtp import Inkling2SpecLM
     from gmlx.spec.helpers import _buffer_mtp_target_cache
@@ -505,7 +507,7 @@ def test_a_new_layout_keeps_the_calls_other_records_learned(model, monkeypatch):
     monkeypatch.setattr(records, "_ON", [True])
     monkeypatch.setattr(records, "DIRECT_ONLY", [False])
     monkeypatch.setattr(records, "_BLOCKED", [False])
-    monkeypatch.setattr(records, "_CACHE_ON", [False])
+    monkeypatch.setattr(kq_levers, "_ON", [False])
     records.invalidate()
     spec, plain = model, type(model)
     spec.__class__ = Inkling2SpecLM
@@ -608,6 +610,7 @@ def test_cut_verifies_replay_their_records(model, monkeypatch):
     if not (hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")):
         pytest.skip("kq build without records")
 
+    from gmlx.models import kq_levers
     from gmlx.models.inkling2 import records
     from gmlx.models.inkling2.mtp import Inkling2SpecLM
     from gmlx.spec.helpers import _buffer_mtp_target_cache
@@ -635,7 +638,7 @@ def test_cut_verifies_replay_their_records(model, monkeypatch):
 
     monkeypatch.setattr(records, "DIRECT_ONLY", [False])
     monkeypatch.setattr(records, "_BLOCKED", [False])
-    monkeypatch.setattr(records, "_CACHE_ON", [False])
+    monkeypatch.setattr(kq_levers, "_ON", [False])
     spec, plain = model, type(model)
     spec.__class__ = Inkling2SpecLM
     try:

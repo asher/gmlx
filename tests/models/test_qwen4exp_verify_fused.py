@@ -333,6 +333,23 @@ def test_decode_steps_through_records(monkeypatch):
     _equal(plain, fused)
 
 
+def test_the_decode_and_verify_records_turn_the_kq_cache_on_once(monkeypatch):
+    """Each call that turns kq's lever cache on drops the Metal calls the
+    records have learned: with both switches on, the first verify after
+    some decode steps leaves the decode records' calls in place."""
+    from gmlx.models import kq_levers
+
+    calls = []
+    monkeypatch.setattr(kq, "env_cache", calls.append)
+    monkeypatch.setattr(kq_levers, "_ON", [False])
+    monkeypatch.setattr(q4, "_DECODE_FUSED", None)
+    monkeypatch.setattr(q4, "_VERIFY_FUSED", None)
+    monkeypatch.setenv("GMLX_Q4_DECODE_FUSED", "1")
+    monkeypatch.setenv("GMLX_Q4_VERIFY_FUSED", "1")
+    assert q4._decode_fused() and q4._verify_fused()
+    assert calls == [True]
+
+
 @pytest.mark.parametrize("fused", [False, True])
 def test_a_verify_that_holds_its_rows_submits_none_and_carries_the_same_bits(
         monkeypatch, fused):
