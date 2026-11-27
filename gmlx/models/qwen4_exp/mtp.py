@@ -253,6 +253,13 @@ class Qwen4ExpSpecHooks:
                 _vb.end(vb)
         return hidden, {}, sink
 
+    @property
+    def speculative_round_check(self):
+        """Called by the round loop after its host read of a verify: raises
+        the error of a failed command buffer of the verify's kq session
+        (verify_bound). None with the lever off."""
+        return _vb.check if _vb.mode() > 0 else None
+
     def rollback_speculative_cache(
         self, prompt_cache, gdn_states, accepted, block_size: int
     ) -> None:

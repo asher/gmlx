@@ -103,3 +103,43 @@ def test_consumer_stop_on_the_bonus_keeps_the_round():
     assert out == [4, 5, 6, 7, 8, 9]
     assert lm.rollbacks == []
     assert d.accepts[-1] == (2, [7, 8, 9])
+
+
+class _CheckedEchoLM(_RollbackEchoLM):
+    """A target with a round check (qwen4_exp's bound verify) that raises
+    once armed, as the check of a verify whose command buffer failed."""
+
+    def __init__(self):
+        super().__init__()
+        self.checks = 0
+        self.armed = False
+
+    def speculative_round_check(self):
+        self.checks += 1
+        if self.armed:
+            raise RuntimeError(
+                "[METAL] Command buffer execution failed: Insufficient Memory "
+                "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory).")
+
+
+def test_a_round_check_that_raises_ends_the_loop_before_its_tokens():
+    # The check runs after the round's host read; a raise there leaves the
+    # loop with none of that round's tokens delivered.
+    from gmlx.serve import tick_guard
+
+    d = _AcceptEchoDrafter(cap=0)
+    lm = _CheckedEchoLM()
+    shared = {"full": (mx.zeros((1, 2, 4, 4)), mx.zeros((1, 2, 4, 4)))}
+    gen = spec._owned_decode_rounds(
+        SimpleNamespace(), d, lm, [_FakeCache(width=1)],
+        hidden=mx.zeros((1, 4, 8)), b=3, shared_kv=shared,
+        seed_tokens=None, emitted=1, max_tokens=20, sampler=None,
+        draft_block_size=None)
+    out = [int(next(gen)) for _ in range(3)]
+    assert out == [4, 5, 6] and lm.checks >= 1
+    lm.armed = True
+    try:
+        out.append(int(next(gen)))
+    except RuntimeError as e:
+        assert tick_guard.is_memory_error(e)
+    assert out == [4, 5, 6]

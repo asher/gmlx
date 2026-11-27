@@ -33,8 +33,13 @@ mlx eval this module makes and at the end of the forward, and code that
 runs between two bound records must not evaluate an array that depends on
 the open buffer.
 
-Failure. A command buffer of the session that ends in error ends the
-process from kq's completion handler, as a failed buffer of mlx's does.
+Failure. kq handles a command buffer of the session that ends in error as
+mlx 0.32 handles its own: the completion handler keeps the error, worded as
+mlx words it, and the session raises it on its caller's thread. The round
+loop calls ``check()`` after its host read of the verify and ahead of any
+use of the round's tokens (``speculative_round_check``), so tick_guard takes
+the RuntimeError as it takes mlx's with the lever off. A session that
+raised is closed, and the thread's next verify opens a new one.
 """
 
 from __future__ import annotations
@@ -136,7 +141,7 @@ class Session:
     """One verify forward. ``call`` stands in for ``kq.fused_call``."""
 
     __slots__ = ("kq", "sid", "live", "open", "pending", "li", "bound",
-                 "lazy")
+                 "lazy", "sent")
 
     def __init__(self, kq, sid: int):
         self.kq, self.sid = kq, sid
@@ -146,6 +151,7 @@ class Session:
         self.li = -1
         self.bound = 0
         self.lazy = 0
+        self.sent = False       # a buffer of ours was committed
 
     def layer(self, li: int) -> None:
         """The forward reached layer ``li``."""
@@ -156,7 +162,12 @@ class Session:
     def flush(self) -> None:
         if self.open:
             t0 = time.perf_counter() if _TIMES else 0.0
-            self.kq.bound_commit(self.sid)
+            self.sent = True
+            try:
+                self.kq.bound_commit(self.sid)
+            except RuntimeError:
+                self._failed()
+                raise
             if _TRACE_PATH:
                 _trace("commit", self.li)
             self.open = False
@@ -181,6 +192,13 @@ class Session:
             if _TIMES:
                 stats["t_submit"] += time.perf_counter() - t0
 
+    def _failed(self) -> None:
+        # kq raised the failure of a buffer of the session (or an mlx
+        # submission between records raised): the session is closed.
+        self.live = self.open = False
+        self.pending = []
+        _drop()
+
     def _end(self, why) -> None:
         self.flush()
         self.live = False
@@ -193,18 +211,23 @@ class Session:
             self.lazy += 1
             return kq.fused_call(handle, ins)
         t0 = time.perf_counter() if _TIMES else 0.0
-        r = kq.bound_call(self.sid, handle, ins)
-        if _TIMES:
-            stats["t_encode"] += time.perf_counter() - t0
-        if type(r) is int and r == 3:
-            if _TIMES:
-                key = (self.li,
-                       kq.bound_session_info(self.sid)["last_lazy_input"])
-                stats["lazy_in"][key] = stats["lazy_in"].get(key, 0) + 1
-            # A lazy input (the embedding, the table rows, a stage built
-            # from primitives): one mlx submission, then the record.
-            self.submit(ins)
+        try:
             r = kq.bound_call(self.sid, handle, ins)
+            if _TIMES:
+                stats["t_encode"] += time.perf_counter() - t0
+            if type(r) is int and r == 3:
+                if _TIMES:
+                    key = (self.li,
+                           kq.bound_session_info(self.sid)["last_lazy_input"])
+                    stats["lazy_in"][key] = stats["lazy_in"].get(key, 0) + 1
+                # A lazy input (the embedding, the table rows, a stage built
+                # from primitives): one mlx submission, then the record.
+                self.submit(ins)
+                r = kq.bound_call(self.sid, handle, ins)
+        except RuntimeError:
+            if self.live:
+                self._failed()
+            raise
         if type(r) is int:
             self.lazy += 1
             if r == 5 or (r == 4 and kq.fused_direct_info(handle).get(
@@ -226,7 +249,11 @@ class Session:
         where kq cannot (a lazy array): the caller copies through mlx."""
         if not self.live or not arrays:
             return None
-        r = self.kq.bound_copy(self.sid, arrays)
+        try:
+            r = self.kq.bound_copy(self.sid, arrays)
+        except RuntimeError:
+            self._failed()
+            raise
         if type(r) is int:
             return None
         self.open = True
@@ -257,6 +284,9 @@ def begin(B: int):
     kq = _kq()
     if not kq or current() is not None:
         return None
+    # The check a round left out (it raised first) is made here: no verify
+    # starts on a session one of whose buffers failed.
+    check()
     held = getattr(_local, "sid", None)
     if held is None or held[0] is not kq:
         held = _local.sid = (kq, kq.bound_session())
@@ -276,6 +306,35 @@ def end(s: Session) -> None:
             _trace("end", s.li)
     finally:
         _local.session = None
+        held = getattr(_local, "sid", None)
+        if s.sent and held is not None and held[1] == s.sid:
+            _local.unchecked = held
+
+
+def check() -> None:
+    """After the round's host read of the verify, ahead of any use of its
+    tokens: waits for the buffers the thread's session committed (they ran
+    ahead of what the read waited for) and raises the error of one that
+    failed, worded as mlx words its own. The session is then closed."""
+    held = getattr(_local, "unchecked", None)
+    if held is None:
+        return
+    _local.unchecked = None
+    try:
+        held[0].bound_wait(held[1])
+    except RuntimeError:
+        _drop()
+        raise
+
+
+def _drop() -> None:
+    # Closing commits a buffer the session holds open, so no fence of it
+    # in mlx's map is left without its update.
+    held = getattr(_local, "sid", None)
+    _local.sid = None
+    _local.unchecked = None
+    if held is not None and held[0]:
+        held[0].bound_session_close(held[1])
 
 
 def noting() -> bool:
@@ -298,7 +357,11 @@ def wait() -> None:
     of views of it alone) does not wait for our buffer."""
     held = getattr(_local, "sid", None)
     if held is not None and held[0]:
-        held[0].bound_wait(held[1])
+        try:
+            held[0].bound_wait(held[1])
+        except RuntimeError:
+            _drop()
+            raise
 
 
 def prepare(fn, *args) -> None:

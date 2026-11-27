@@ -9,6 +9,7 @@ land when the record is called, not when the caller evaluates.
 """
 
 import copy
+import threading
 
 import mlx.core as mx
 import mlx_kquant as kq
@@ -17,6 +18,7 @@ import pytest
 
 import gmlx.models.qwen4_exp.model as q4
 from gmlx.models.qwen4_exp import verify_bound as vb
+from gmlx.serve import tick_guard
 from gmlx.spec import verify_submit
 from gmlx.upstream import gdn_patches
 
@@ -40,6 +42,7 @@ def _levers(monkeypatch):
     monkeypatch.setattr(vb, "_MODE", 0)
     monkeypatch.setattr(vb, "_kq_mod", [None])
     monkeypatch.setattr(gdn_patches, "HOST_STEPS", False)
+    monkeypatch.setattr(vb, "_local", threading.local())
     for k in vb.stats:
         monkeypatch.setitem(vb.stats, k, {} if isinstance(
             vb.stats[k], dict) else 0)
@@ -91,6 +94,12 @@ class _AtOnce:
         self.commits += 1
         self.open = 0
         return True
+
+    def bound_wait(self, sid):
+        pass
+
+    def bound_session_close(self, sid):
+        pass
 
     fused_call = staticmethod(kq.fused_call)
 
@@ -354,5 +363,92 @@ def test_a_stage_between_records_runs_after_our_buffer(monkeypatch):
         assert np.array_equal(np.array(out[0]), np.array(want))
         assert vb.stats["bound_calls"] == 2 and vb.stats["submits"] == 1
         assert info["fence_waits"] > 0
+    finally:
+        kq.fuse_release(handle)
+
+
+def _fail_hook():
+    from mlx_kquant import _ext
+
+    return getattr(_ext, "_bound_fail", None)
+
+
+_OOM = "Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"
+_TIMEOUT = "Caused GPU Timeout Error (00000002:kIOGPUCommandBufferCallbackErrorTimeout)"
+
+
+def _verify(handle, x, fail=None, now=True):
+    """One bound verify of the record on ``x``; ``fail`` (what, next) marks
+    the session failed through kq's test hook ahead of the call."""
+    with verify_submit.now():
+        s = vb.begin(1)
+        assert s is not None
+        try:
+            if fail is not None:
+                _fail_hook()(s.sid, fail[0], next=fail[1])
+            return s, vb.call(handle, [x])
+        finally:
+            vb.end(s)
+
+
+@pytest.mark.skipif(_fail_hook() is None,
+                    reason="needs a kq build with the _bound_fail test hook")
+@pytest.mark.parametrize("why", [_OOM, _TIMEOUT])
+def test_a_failed_session_buffer_raises_at_the_round_check(monkeypatch, why):
+    # kq's own buffers. The verify's buffer fails (the hook marks it as it
+    # is committed): the verify returns and an mlx read of its output runs,
+    # then the round's check raises mlx's words on this thread, which
+    # tick_guard classes as it classes mlx's with the lever off. The
+    # session is closed; the next verify opens a new one and runs.
+    n = 256
+    handle, f = _record(n)
+    monkeypatch.setattr(vb, "_MODE", 1)
+    x = _rand(n, 6)
+    want = f(x)
+    mx.eval(want)
+    try:
+        s, out = _verify(handle, x, (why, True))
+        mx.eval(out[0] + 0)
+        with pytest.raises(RuntimeError) as e:
+            vb.check()
+        assert str(e.value) == f"[METAL] Command buffer execution failed: {why}."
+        assert tick_guard.is_memory_error(e.value) == (why == _OOM)
+        assert tick_guard.is_gpu_fault(e.value) == (why == _TIMEOUT)
+        with pytest.raises(ValueError):
+            kq.bound_session_info(s.sid)
+        vb.check()
+        s2, out2 = _verify(handle, x)
+        assert s2.sid != s.sid
+        vb.check()
+        assert np.array_equal(np.array(out2[0]), np.array(want))
+    finally:
+        kq.fuse_release(handle)
+
+
+@pytest.mark.skipif(_fail_hook() is None,
+                    reason="needs a kq build with the _bound_fail test hook")
+def test_a_failure_the_round_did_not_check_raises_at_the_next_verify(
+        monkeypatch):
+    # A failure kq knows while the verify runs ends it at the next record
+    # (raised once, the session closed by then). A round that raised before
+    # its check leaves it to the next verify's begin, which raises it and
+    # opens no work on the failed session.
+    n = 256
+    handle, f = _record(n)
+    monkeypatch.setattr(vb, "_MODE", 1)
+    x = _rand(n, 7)
+    want = f(x)
+    mx.eval(want)
+    try:
+        with pytest.raises(RuntimeError, match="execution failed: "):
+            _verify(handle, x, (_OOM, False))
+        assert getattr(vb._local, "sid", None) is None
+        vb.check()
+        _verify(handle, x, (_TIMEOUT, True))
+        with pytest.raises(RuntimeError, match="Timeout"):
+            _verify(handle, x)
+        s, out = _verify(handle, x)
+        vb.check()
+        assert np.array_equal(np.array(out[0]), np.array(want))
     finally:
         kq.fuse_release(handle)

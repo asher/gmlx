@@ -1519,6 +1519,12 @@ def _owned_decode_rounds(
     _has_accept = callable(_accept_fn)
     _rollback_fn = getattr(lm, "rollback_speculative_cache", None)
     _has_rollback = callable(_rollback_fn)
+    # A target whose verify can run outside mlx's evals (qwen4_exp's
+    # verify_bound) raises a failed command buffer of it after the round's
+    # host read, as mlx raises its own at the read.
+    _round_check = getattr(lm, "speculative_round_check", None)
+    if not callable(_round_check):
+        _round_check = None
     _draft_hidden_fn = getattr(lm, "speculative_draft_hidden", None)
     _has_draft_hidden = callable(_draft_hidden_fn)
     _walk_sampler = None if greedy else sampler
@@ -2042,6 +2048,8 @@ def _owned_decode_rounds(
                                 base = _cache_snapshot(prompt_cache)
                     mx.eval(*w_graph)                         # the one sync
                     _span("sy")
+                    if _round_check is not None:
+                        _round_check()
                     # Read from the evaluated block: a read of the cut view
                     # would be one more wait.
                     drf = draft_src.tolist()[0][:bs - 1]
@@ -2138,6 +2146,8 @@ def _owned_decode_rounds(
                               else None),
                         pq=list(pq_stash) if pq_stash and not copied else None,
                         base_pos=emitted, process=process)
+            if _round_check is not None:
+                _round_check()
             if row_keep is not None and not gated:
                 # Evaluated with the verify: no wait. The rows past the keep
                 # read other experts, so nothing they decide is emitted.
