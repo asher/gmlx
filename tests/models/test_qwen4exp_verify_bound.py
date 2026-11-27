@@ -118,8 +118,10 @@ def _rounds(lm, cache, plan, out, now=True):
         out.append(np.array(hid.astype(mx.float32)))
 
 
-def _prefilled(seed=5):
+def _prefilled(seed=5, prep=None):
     lm, args = _lm(mx.bfloat16)
+    if prep is not None:
+        prep(lm)
     mx.random.seed(seed)
     cache = lm.make_cache()
     mx.eval(lm(mx.random.randint(0, args.vocab_size, (1, PROMPT)),
@@ -127,10 +129,10 @@ def _prefilled(seed=5):
     return lm, cache
 
 
-def _run(monkeypatch, mode, shim=None, plan=None, now=True):
+def _run(monkeypatch, mode, shim=None, plan=None, now=True, prep=None):
     monkeypatch.setattr(vb, "_MODE", mode)
     monkeypatch.setattr(vb, "_kq_mod", [shim])
-    lm, cache = _prefilled()
+    lm, cache = _prefilled(prep=prep)
     out: list = []
     _rounds(lm, cache, plan or PASS * 4, out, now=now)
     out.extend(np.array(a.astype(mx.float32))
@@ -504,6 +506,43 @@ def test_a_failure_the_round_did_not_check_raises_at_the_next_verify(
         assert np.array_equal(np.array(out[0]), np.array(want))
     finally:
         kq.fuse_release(handle)
+
+
+def _lora_every_layer(lm):
+    """A LoRA on a linear of every layer, as an adapter install leaves the
+    model (its recorded verify graphs dropped)."""
+    import mlx.nn as nn
+
+    from gmlx.load.modules import LoRAKQuantLinear
+
+    mx.random.seed(7)
+    for layer in lm.model.layers:
+        name, m = next((n, m) for n, m in layer.named_modules()
+                       if n and type(m) is nn.Linear)
+        *path, key = name.split(".")
+        parent = layer
+        for p in path:
+            parent = parent[int(p)] if isinstance(parent, list) else parent[p]
+        out_d, in_d = m.weight.shape
+        parent[key] = LoRAKQuantLinear(
+            m, mx.random.normal((4, in_d)) * 0.01,
+            mx.random.normal((out_d, 4)) * 0.01, 0.5)
+    q4.invalidate_verify_compile()
+
+
+@pytest.mark.parametrize("why", ["streamed experts", "an adapter on every layer"])
+def test_a_verify_with_no_records_opens_no_session(monkeypatch, why):
+    # Streamed experts swap the weights around each layer call, so the
+    # recorded verify is off for the process from the first swap
+    # (stream/feeder_common.py); a layer with a LoRA runs plain. A session
+    # there would bind nothing and submit the verify's input on its own.
+    monkeypatch.setattr(q4, "_VERIFY_EPOCH", q4._VERIFY_EPOCH)
+    prep = (_lora_every_layer if why == "an adapter on every layer"
+            else lambda lm: q4.invalidate_verify_compile(block=True))
+    ref = _run(monkeypatch, 0, plan=PASS * 2, prep=prep)
+    got = _run(monkeypatch, 1, None, plan=PASS * 2, prep=prep)
+    _equal(ref, got)
+    assert vb.stats["verifies"] == 0 and vb.stats["submits"] == 0
 
 
 def test_host_step_counts_stay_on_the_thread_of_a_session(monkeypatch):
