@@ -530,6 +530,47 @@ def test_a_new_layout_keeps_the_calls_other_records_learned(model, monkeypatch):
         spec.__class__ = plain
 
 
+def test_a_dropped_model_releases_its_records(tmp_path, monkeypatch):
+    # A record holds its layer's arrays as constants: the records of a
+    # model let go (a server unloading it) leave kq's table with it.
+    import gc
+    from types import SimpleNamespace
+
+    kq = pytest.importorskip("mlx_kquant")
+    if not (hasattr(kq, "fuse_graph") and hasattr(kq, "fused_direct_info")):
+        pytest.skip("kq build without records")
+
+    import gmlx
+    from gmlx.models.inkling2 import records
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float32")
+    path = tmp_path / "tiny.gguf"
+    T.write(path, "root", T.values(seed=3), experts_q8=False)
+    spec = gmlx.load_model(str(path), verbose=False)[0]
+    spec.__class__ = Inkling2SpecLM
+    monkeypatch.setattr(records, "_ON", [True])
+    monkeypatch.setattr(records, "DIRECT_ONLY", [False])
+    monkeypatch.setattr(records, "_BLOCKED", [False])
+    cache = spec.make_cache()
+    spec.model(mx.array([IDS[:20]]), cache)
+    _buffer_mtp_target_cache(
+        cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+    for t in IDS[20:25]:
+        mx.eval(spec.model(mx.array([[t]]), cache))
+    handles = [handle for m in spec.modules()
+               if (recs := vars(m).get("_ink_records")) is not None
+               for rec in recs[1].values() if isinstance(rec, tuple)
+               for handle in rec[:2]]
+    assert handles
+    del spec, cache
+    gc.collect()
+    for handle in handles:
+        with pytest.raises(ValueError, match="bad handle"):
+            kq.fused_direct_info(handle)
+
+
 def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
     # Under verify_row_keep the rows past the keep route to the experts of
     # the last kept row. The kept rows' logits, and every step after a

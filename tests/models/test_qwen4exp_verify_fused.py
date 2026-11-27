@@ -186,6 +186,24 @@ def test_an_invalidation_drops_the_records(monkeypatch):
     assert _records(lm) == 0
 
 
+def test_a_dropped_model_releases_its_records(monkeypatch):
+    # A record holds its layer's arrays as constants: the records of a
+    # model let go (a server unloading it) leave kq's table with it.
+    import gc
+
+    lm, _ = _walk(monkeypatch, True, rounds=ROUNDS[:4])
+    handles = [handle for m in lm.modules()
+               if (recs := vars(m).get("_verify_fused")) is not None
+               for rec in recs[1].values() if isinstance(rec, tuple)
+               for handle in rec[:2] if isinstance(handle, int)]
+    assert handles
+    del lm
+    gc.collect()
+    for handle in handles:
+        with pytest.raises(ValueError, match="bad handle"):
+            kq.fused_direct_info(handle)
+
+
 def test_a_weight_swap_turns_the_path_off(monkeypatch):
     monkeypatch.setattr(q4, "_VERIFY_FUSED", True)
     assert q4._verify_fused()

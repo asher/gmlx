@@ -27,7 +27,7 @@ the host build bounds the step.
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
-from gmlx.models.kq_levers import lever_cache_on
+from gmlx.models.kq_levers import RecordTable, lever_cache_on
 
 # Visits wider than this run plain: a prefill chunk's shapes rarely repeat.
 MAX_ROWS = 16
@@ -113,6 +113,7 @@ def _release(table: dict) -> None:
             for handle in rec[:2]:
                 kq.fuse_release(handle)
                 _HELD[0] -= 1
+    table.clear()
 
 
 def _table(layer) -> dict:
@@ -123,7 +124,7 @@ def _table(layer) -> dict:
             or not all(d[k] is v for d, k, v in recs[2])):
         if recs is not None:
             _release(recs[1])
-        recs = (_EPOCH[0], {}, _leaves(layer, []))
+        recs = (_EPOCH[0], RecordTable(_release), _leaves(layer, []))
         object.__setattr__(layer, "_ink_records", recs)
     return recs[1]
 

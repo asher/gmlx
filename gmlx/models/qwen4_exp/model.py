@@ -56,7 +56,7 @@ from gmlx.cache.attention import (
 from gmlx.cache.kv_cache import ArraysCache, KVCache, _BaseCache
 from gmlx.envflags import env_bool, env_int
 from gmlx.gen import deferred_clear
-from gmlx.models.kq_levers import lever_cache_on
+from gmlx.models.kq_levers import RecordTable, lever_cache_on
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
@@ -3310,6 +3310,7 @@ def _fused_release(table: dict) -> None:
                 if isinstance(handle, int):
                     kq.fuse_release(handle)
                     _FUSED_HELD[0] -= 1
+    table.clear()
 
 
 def drop_verify_records(layers) -> None:
@@ -3491,7 +3492,8 @@ def _fused_gdn_verify(layer, h, c, gdn_sink):
             import weakref
 
             _FUSED_LAYERS.append(weakref.ref(layer))
-        recs = (_VERIFY_EPOCH, {}, _layer_leaves(layer, []))
+        recs = (_VERIFY_EPOCH, RecordTable(_fused_release),
+                _layer_leaves(layer, []))
         object.__setattr__(layer, "_verify_fused", recs)
         if _verify_fused_cap():
             # From here on the layer's one-kernel verify leaves records
@@ -3901,7 +3903,8 @@ def _fused_gdn_decode(layer, h, c):
             import weakref
 
             _FUSED_LAYERS.append(weakref.ref(layer))
-        recs = (_VERIFY_EPOCH, {}, _layer_leaves(layer, []))
+        recs = (_VERIFY_EPOCH, RecordTable(_fused_release),
+                _layer_leaves(layer, []))
         object.__setattr__(layer, "_verify_fused", recs)
     table = recs[1]
     # The pending replay as the decode kernel's take would see it. A
@@ -3982,7 +3985,8 @@ def _fused_qsa_verify(layer, h, c, mask, positions):
             import weakref
 
             _FUSED_LAYERS.append(weakref.ref(layer))
-        recs = (_VERIFY_EPOCH, {}, _layer_leaves(layer, []))
+        recs = (_VERIFY_EPOCH, RecordTable(_fused_release),
+                _layer_leaves(layer, []))
         object.__setattr__(layer, "_verify_fused", recs)
     table = recs[1]
     if _fused_whole():
