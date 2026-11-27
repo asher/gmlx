@@ -10,6 +10,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Qwen3.8-Flash-Next verify steps take less GPU time.
 
+### Fixed
+
+- Unloading a Qwen3.8-Flash-Next or Inkling-2-Mini model frees its recorded
+  layer graphs, which kept the model's weights in memory.
+
 ## [0.5.8] - 2026-11-25
 
 ### Added
