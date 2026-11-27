@@ -441,3 +441,22 @@ def test_a_word_that_turns_off_one_verify_switch_turns_off_the_other(
     monkeypatch.setattr(vb, "_MODE", vb._read_mode())
     monkeypatch.setattr(q4, "_FUSED_WHOLE", None)
     assert (vb.on(), q4._fused_whole()) == (False, False)
+
+
+def test_the_whole_forms_follow_a_bound_verify_kq_can_run(monkeypatch):
+    # The bound verify is on by default and takes the whole forms with it.
+    # A kq without bound sessions (the release before them) runs neither:
+    # its verifies keep the split records.
+    import mlx_kquant as kq
+
+    import gmlx.models.qwen4_exp.model as q4
+    from gmlx.models.qwen4_exp import verify_bound as vb
+
+    monkeypatch.delenv("GMLX_Q4_VERIFY_FUSED_WHOLE", raising=False)
+    monkeypatch.setattr(vb, "_MODE", 1)
+    seen = {}
+    for name, mod in (("with sessions", kq), ("without", False)):
+        monkeypatch.setattr(vb, "_kq_mod", [mod])
+        monkeypatch.setattr(q4, "_FUSED_WHOLE", None)
+        seen[name] = q4._fused_whole()
+    assert seen == {"with sessions": True, "without": False}

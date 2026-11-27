@@ -371,20 +371,6 @@ def test_a_stage_between_records_runs_after_our_buffer(monkeypatch):
         kq.fuse_release(handle)
 
 
-def test_the_whole_forms_follow_a_bound_verify_kq_can_run(monkeypatch):
-    # The bound verify is on by default and takes the whole forms with it.
-    # A kq without bound sessions (the release before them) runs neither:
-    # its verifies keep the split records.
-    monkeypatch.delenv("GMLX_Q4_VERIFY_FUSED_WHOLE", raising=False)
-    monkeypatch.setattr(vb, "_MODE", 1)
-    seen = {}
-    for name, mod in (("with sessions", kq), ("without", False)):
-        monkeypatch.setattr(vb, "_kq_mod", [mod])
-        monkeypatch.setattr(q4, "_FUSED_WHOLE", None)
-        seen[name] = q4._fused_whole()
-    assert seen == {"with sessions": True, "without": False}
-
-
 def test_a_threads_session_closes_when_the_thread_ends(monkeypatch):
     # kq's own sessions. A server's generation worker is a thread a model
     # load, which makes its records and runs its verifies on its own
