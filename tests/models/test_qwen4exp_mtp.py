@@ -422,3 +422,22 @@ def test_default_lora_keys_train_through_the_hyper_connection_inject():
     finally:
         restore()
     assert any("inject.lora_a" in k for k, _ in tree_flatten(g))
+
+
+@pytest.mark.parametrize("word", ["0", "off", "false", "no", ""])
+def test_a_word_that_turns_off_one_verify_switch_turns_off_the_other(
+        monkeypatch, word):
+    # GMLX_SPEC_VERIFY_BOUND and GMLX_Q4_VERIFY_FUSED_WHOLE read the same
+    # words, so the pair set to one word is off on both, never a bound
+    # verify with split records.
+    import mlx_kquant as kq
+
+    import gmlx.models.qwen4_exp.model as q4
+    from gmlx.models.qwen4_exp import verify_bound as vb
+
+    monkeypatch.setattr(vb, "_kq_mod", [kq])
+    monkeypatch.setenv("GMLX_SPEC_VERIFY_BOUND", word)
+    monkeypatch.setenv("GMLX_Q4_VERIFY_FUSED_WHOLE", word)
+    monkeypatch.setattr(vb, "_MODE", vb._read_mode())
+    monkeypatch.setattr(q4, "_FUSED_WHOLE", None)
+    assert (vb.on(), q4._fused_whole()) == (False, False)

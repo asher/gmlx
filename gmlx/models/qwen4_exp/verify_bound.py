@@ -1,7 +1,7 @@
 """Bound replay of a verify: its records go onto command buffers of ours.
 
-``GMLX_SPEC_VERIFY_BOUND`` (on by default, ``0`` off; needs a kq build
-with ``bound_call``). A B=1 verify that its caller submits at once
+``GMLX_SPEC_VERIFY_BOUND`` (on by default; ``0``, ``false``, ``no``, ``off``
+or an empty value turn it off; needs a kq build with ``bound_call``). A B=1 verify that its caller submits at once
 (``gmlx.spec.verify_submit.now``) does not build one mlx node a record and
 hand the graph to ``mx.async_eval``: each record that has its program is
 encoded as it is reached, onto a command buffer of a kq bound session, and
@@ -58,11 +58,18 @@ import time
 
 import mlx.core as mx
 
-from gmlx.envflags import env_bool, env_int
+from gmlx.envflags import env_bool
 from gmlx.spec.verify_submit import is_now
 from gmlx.upstream import gdn_patches as _gdn
 
-_MODE = env_int("GMLX_SPEC_VERIFY_BOUND", 1)
+
+def _read_mode() -> int:
+    """GMLX_SPEC_VERIFY_BOUND, read as GMLX_Q4_VERIFY_FUSED_WHOLE is (the
+    whole forms follow it), so a word that turns one off turns off both."""
+    return int(env_bool("GMLX_SPEC_VERIFY_BOUND", True))
+
+
+_MODE = _read_mode()
 _STATS = env_bool("GMLX_SPEC_VERIFY_BOUND_STATS", False)
 # Host seconds by piece in the stats (a harness sets it): the encodes, the
 # mlx submissions, the commits, the prepare pass.
