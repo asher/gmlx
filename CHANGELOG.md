@@ -13,6 +13,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   over its key ring in place instead of copying the rows it reads.
 - Qwen3.8-Flash-Next cuts fewer DFlash 2 draft rows before the verify
   (`GMLX_DFLASH_ROW_FLOOR` default 0.3, was 0.5), which decodes faster.
+- Qwen3.8-Flash-Next decodes faster with its DFlash 2 drafter: a verify goes
+  to the GPU as it is built. `GMLX_SPEC_VERIFY_BOUND=0` turns it off.
 
 ### Fixed
 
