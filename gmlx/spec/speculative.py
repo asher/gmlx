@@ -30,7 +30,7 @@ import resource
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, ParamSpec
 from collections.abc import Callable, Iterator
 
 import mlx.core as mx
@@ -1307,6 +1307,35 @@ def _plain_step(lm, token: int, prompt_cache: list, *, greedy: bool,
         logits=out.logits)
 
 
+_P = ParamSpec("_P")
+
+
+def _round_checked(fn: Callable[_P, Iterator[int]]) -> Callable[_P, Iterator[int]]:
+    """The round loop of a target with a round check (qwen4_exp's
+    verify_bound) runs it before a RuntimeError leaves the loop: a read
+    that failed behind a verify (an mlx buffer that waited on it) then
+    raises the verify's own failure, which came first, once, as mlx keeps
+    its earliest. Other targets get the loop itself."""
+
+    @functools.wraps(fn)
+    def rounds(*args: _P.args, **kwargs: _P.kwargs) -> Iterator[int]:
+        it = fn(*args, **kwargs)
+        lm = args[2] if len(args) > 2 else kwargs.get("lm")
+        check = getattr(lm, "speculative_round_check", None)
+        return _checked_rounds(it, check) if callable(check) else it
+
+    return rounds
+
+
+def _checked_rounds(it: Iterator[int], check) -> Iterator[int]:
+    try:
+        yield from it
+    except RuntimeError:
+        check()
+        raise
+
+
+@_round_checked
 def _owned_decode_rounds(
     model,
     drafter,
@@ -2425,13 +2454,6 @@ def _owned_decode_rounds(
                        rows=0 if forced is not None else 1)
             _prev_end = time.perf_counter()
 
-    except RuntimeError:
-        if _round_check is not None:
-            # A read that failed behind the verify (an mlx buffer that
-            # waited on it): the verify's own buffers ran first, so their
-            # failure is the one raised, once, as mlx keeps its earliest.
-            _round_check()
-        raise
     finally:
         _drop_prebuilt()
         _walk_report()
