@@ -314,13 +314,15 @@ def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, form):
         drafter.accept_undo(kept)
 
 
+@pytest.mark.parametrize("gather", [True, False])
 def test_a_counted_block_read_in_place_is_the_plain_block_to_rounding(
-        monkeypatch):
+        monkeypatch, gather):
     """The counted draft that reads the ring in place, its bounds on the
     GPU (GMLX_DFLASH_COUNTED_IN_PLACE, kq.sdpa_fa_verify), against the
     plain draft of the same ring, for every count of dead rows, at a head
     size and dtype the kq kernel takes. The keys split elsewhere: equal to
-    rounding."""
+    rounding. GMLX_DFLASH_COUNTED_GATHER=0 takes the masked form in its
+    place, also equal to rounding."""
     import dataclasses
 
     import numpy as np
@@ -329,6 +331,8 @@ def test_a_counted_block_read_in_place_is_the_plain_block_to_rounding(
     from gmlx.spec.dflash_drafter import DFlash2Drafter
     from test_dflash2_drafter import BLOCK, CAPTURE, _config, _tcfg
 
+    monkeypatch.setattr(dd, "_COUNTED_IN_PLACE", True)
+    monkeypatch.setattr(dd, "_COUNTED_GATHER", gather)
     if not dd._in_place_ready():
         pytest.skip("kq.sdpa_fa_verify with key bounds needs the GPU and kq")
     calls = []
@@ -357,7 +361,7 @@ def test_a_counted_block_read_in_place_is_the_plain_block_to_rounding(
         n = len(calls)
         got = drafter._draft_hidden(block, (mx.array(dead), most))
         mx.eval(got)
-        assert len(calls) > n
+        assert (len(calls) > n) == gather
         kept = drafter.accept_trim(mark, dead)
         want = drafter._draft_hidden(block)
         assert np.allclose(np.array(got.astype(mx.float32)),
