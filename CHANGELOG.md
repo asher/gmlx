@@ -9,6 +9,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Qwen3.8-Flash-Next verify steps take less GPU time.
+- Qwen3.8-Flash-Next drafts faster with its DFlash 2 drafter, which attends
+  over its key ring in place instead of copying the rows it reads.
+- Qwen3.8-Flash-Next cuts fewer DFlash 2 draft rows before the verify
+  (`GMLX_DFLASH_ROW_FLOOR` default 0.3, was 0.5), which decodes faster.
 
 ### Fixed
 
