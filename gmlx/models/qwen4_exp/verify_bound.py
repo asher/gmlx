@@ -40,6 +40,12 @@ loop calls ``check()`` after its host read of the verify and ahead of any
 use of the round's tokens (``speculative_round_check``), so tick_guard takes
 the RuntimeError as it takes mlx's with the lever off. A session that
 raised is closed, and the thread's next verify opens a new one.
+
+Lifetime. A thread keeps one session, and kq keeps its pool of buffers
+between kernels, as large as the largest verify it ran, until it is
+closed. The thread-local holder closes it when it goes: its thread ended
+(a server's generation worker, one a model load) or the thread-local was
+replaced.
 """
 
 from __future__ import annotations
@@ -135,6 +141,27 @@ def record_kw() -> dict:
 
 def wanted() -> bool:
     return bool(_MODE > 0 and is_now())
+
+
+class _Held:
+    """A thread's kq bound session, closed when the thread-local lets it
+    go."""
+
+    __slots__ = ("kq", "sid")
+
+    def __init__(self, kq, sid: int):
+        self.kq, self.sid = kq, sid
+
+    def close(self) -> None:
+        kq, self.kq = self.kq, None
+        if kq:
+            kq.bound_session_close(self.sid)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:  # noqa: S110 (kq may be gone at exit)
+            pass
 
 
 class Session:
@@ -288,11 +315,11 @@ def begin(B: int):
     # starts on a session one of whose buffers failed.
     check()
     held = getattr(_local, "sid", None)
-    if held is None or held[0] is not kq:
-        held = _local.sid = (kq, kq.bound_session())
+    if held is None or held.kq is not kq:
+        held = _local.sid = _Held(kq, kq.bound_session())
         # Step counts the records read as they are (gdn_patches).
         _gdn.HOST_STEPS = True
-    s = Session(kq, held[1])
+    s = Session(kq, held.sid)
     _local.session = s
     if _TRACE_PATH:
         _trace("begin", -1)
@@ -307,7 +334,7 @@ def end(s: Session) -> None:
     finally:
         _local.session = None
         held = getattr(_local, "sid", None)
-        if s.sent and held is not None and held[1] == s.sid:
+        if s.sent and held is not None and held.sid == s.sid:
             _local.unchecked = held
 
 
@@ -320,8 +347,10 @@ def check() -> None:
     if held is None:
         return
     _local.unchecked = None
+    if not held.kq:
+        return
     try:
-        held[0].bound_wait(held[1])
+        held.kq.bound_wait(held.sid)
     except RuntimeError:
         _drop()
         raise
@@ -333,8 +362,8 @@ def _drop() -> None:
     held = getattr(_local, "sid", None)
     _local.sid = None
     _local.unchecked = None
-    if held is not None and held[0]:
-        held[0].bound_session_close(held[1])
+    if held is not None:
+        held.close()
 
 
 def noting() -> bool:
@@ -356,9 +385,9 @@ def wait() -> None:
     of: such an array carries no event, so reading its bytes (or an eval
     of views of it alone) does not wait for our buffer."""
     held = getattr(_local, "sid", None)
-    if held is not None and held[0]:
+    if held is not None and held.kq:
         try:
-            held[0].bound_wait(held[1])
+            held.kq.bound_wait(held.sid)
         except RuntimeError:
             _drop()
             raise

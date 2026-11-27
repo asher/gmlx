@@ -367,6 +367,44 @@ def test_a_stage_between_records_runs_after_our_buffer(monkeypatch):
         kq.fuse_release(handle)
 
 
+def test_a_threads_session_closes_when_the_thread_ends(monkeypatch):
+    # kq's own sessions. A server's generation worker is a thread a model
+    # load, which makes its records and runs its verifies on its own
+    # stream: the verifies open a session, whose pool holds the scratch of
+    # the largest verify it ran. When the thread ends kq holds the session
+    # no more, or every load and unload leaves one behind.
+    import gc
+
+    from gmlx._vendor.mlx_vlm._stream_cleanup import clear_mlx_streams
+
+    monkeypatch.setattr(vb, "_MODE", 1)
+    seen = {}
+
+    def worker():
+        n = 256
+        handle, f = _record(n)
+        try:
+            x = _rand(n, 8)
+            want = f(x)
+            mx.eval(want)
+            s, out = _verify(handle, x)
+            vb.check()
+            seen["sid"] = s.sid
+            seen["equal"] = np.array_equal(np.array(out[0]), np.array(want))
+        finally:
+            kq.fuse_release(handle)
+            clear_mlx_streams()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert seen.get("equal")
+    del t
+    gc.collect()
+    with pytest.raises(ValueError, match="bad session"):
+        kq.bound_session_info(seen["sid"])
+
+
 def _fail_hook():
     from mlx_kquant import _ext
 
