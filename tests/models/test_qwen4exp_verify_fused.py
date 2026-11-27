@@ -35,6 +35,7 @@ def _levers(monkeypatch):
     monkeypatch.setattr(q4, "_VERIFY_FUSED", False)
     monkeypatch.setattr(q4, "_VERIFY_FUSED_QSA", True)
     monkeypatch.setattr(q4, "_VERIFY_FUSED_CAP", True)
+    monkeypatch.setattr(q4, "_DECODE_FUSED", False)
     monkeypatch.setattr(q4, "_FUSED_LIMITS", (4096, 256 << 20))
     yield
     kq.env_cache(False)
@@ -211,6 +212,20 @@ def test_the_attention_layers_take_records_too(monkeypatch):
     _equal(plain, gdn_only)
 
 
+def test_an_attention_record_leaves_the_indexer_keys_out(monkeypatch):
+    """The plain call leaves the indexer keys lazy and below the sparse
+    depth only a cache evaluation reads them, so an attention record that
+    returned them would add their projection to every round and step."""
+    lm, _ = _decode(monkeypatch, True)
+    held = [(key, r) for layer in lm.model.layers
+            if not layer.is_linear and "indexer" in layer.self_attn
+            for key, r in vars(layer)["_verify_fused"][1].items()
+            if isinstance(r, tuple)]
+    assert held
+    for (shape, dtype), r in held:
+        assert len(kq.fused_call(r[0], [mx.zeros(shape, dtype)])) == 6
+
+
 def test_rollbacks_and_steps_in_eval_mode(monkeypatch):
     def serve(lm):
         lm.eval()
@@ -272,6 +287,67 @@ def test_the_record_table_is_bounded(monkeypatch):
     _equal(plain, fused)
     stats = q4.verify_fused_stats(lm)
     assert stats["evicted"] > 0 and 0 < stats["records"] <= 2 * 4 + 2
+
+
+def _decode(monkeypatch, fused, steps=14, rounds=()):
+    """Prefill, then one-token decode steps, with verify rounds (plain
+    ones) and their rollbacks among them."""
+    monkeypatch.setattr(q4, "_DECODE_FUSED", fused)
+    kq.env_cache(fused)
+    lm, args = _lm(True)
+    lm.eval()
+    mx.random.seed(11)
+    cache = lm.make_cache()
+    mx.eval(lm(mx.random.randint(0, args.vocab_size, (1, 9)),
+               cache=cache).logits)
+    out = []
+    for i in range(steps):
+        if i in rounds:
+            block = mx.random.randint(0, args.vocab_size, (1, 4))
+            hid, _, sink = lm.speculative_verify_hidden(block, cache)
+            lm.rollback_speculative_cache(cache, sink, rounds[i] - 1, 4)
+            out.append(np.array(hid.astype(mx.float32)))
+        tok = mx.random.randint(0, args.vocab_size, (1, 1))
+        logits = lm(tok, cache=cache).logits
+        mx.eval(logits, [c.state for c in cache])
+        out.append(np.array(logits.astype(mx.float32)))
+    out.extend(np.array(a.astype(mx.float32))
+               for c in cache for a in c.state if isinstance(a, mx.array))
+    return lm, out
+
+
+def test_decode_steps_through_records(monkeypatch):
+    """GMLX_Q4_DECODE_FUSED: one-token steps carry the plain bits, alone
+    and after a verify round left a pending replay (full accept and
+    rollback)."""
+    _, plain = _decode(monkeypatch, False)
+    lm, fused = _decode(monkeypatch, True)
+    assert _records(lm) > 0
+    assert any(k[0] == "decode" for layer in _gdn_layers(lm)
+               for k in vars(layer)["_verify_fused"][1])
+    _equal(plain, fused)
+    rounds = {3: 4, 5: 2, 6: 2, 9: 4, 10: 1, 12: 4}
+    _, plain = _decode(monkeypatch, False, rounds=rounds)
+    lm, fused = _decode(monkeypatch, True, rounds=rounds)
+    assert _records(lm) > 0
+    _equal(plain, fused)
+
+
+def test_the_decode_and_verify_records_turn_the_kq_cache_on_once(monkeypatch):
+    """Each call that turns kq's lever cache on drops the Metal calls the
+    records have learned: with both switches on, the first verify after
+    some decode steps leaves the decode records' calls in place."""
+    from gmlx.models import kq_levers
+
+    calls = []
+    monkeypatch.setattr(kq, "env_cache", calls.append)
+    monkeypatch.setattr(kq_levers, "_ON", [False])
+    monkeypatch.setattr(q4, "_DECODE_FUSED", None)
+    monkeypatch.setattr(q4, "_VERIFY_FUSED", None)
+    monkeypatch.setenv("GMLX_Q4_DECODE_FUSED", "1")
+    monkeypatch.setenv("GMLX_Q4_VERIFY_FUSED", "1")
+    assert q4._decode_fused() and q4._verify_fused()
+    assert calls == [True]
 
 
 @pytest.mark.parametrize("fused", [False, True])

@@ -309,6 +309,29 @@ def test_l_the_next_test_finds_none_of_them():
     assert capacity._CAP == _MIRRORS["cap"]
 
 
+def test_m_a_record_turns_the_kq_lever_cache_on(monkeypatch):
+    from gmlx.models import kq_levers
+
+    monkeypatch.setattr(kq, "env_cache", lambda on: None, raising=False)
+    kq_levers.lever_cache_on()
+    assert kq_levers._ON[0]
+    _MIRRORS["kq_levers"] = True
+
+
+def test_n_the_next_record_turns_it_on_again(monkeypatch):
+    # The conftest turned kq's cache off after the test before. The first
+    # record of this test turns it back on, or the records would run their
+    # primitives one by one with the same bits.
+    if "kq_levers" not in _MIRRORS:
+        pytest.skip("runs after test_m")
+    from gmlx.models import kq_levers
+
+    calls = []
+    monkeypatch.setattr(kq, "env_cache", calls.append, raising=False)
+    kq_levers.lever_cache_on()
+    assert calls == [True]
+
+
 # The harness itself, run in a fresh pytest process on the CPU device over
 # copies of the conftest, this file and the modules of this folder they
 # import.
