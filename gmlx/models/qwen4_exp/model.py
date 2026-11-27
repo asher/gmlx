@@ -4092,6 +4092,10 @@ class Qwen4ExpModel(nn.Module):
             for layer, c in zip(self.layers, cache):
                 if "ple" in layer:
                     layer.ple.rows_ahead(inputs, c, table)
+        # Read once a forward, so the records off cost a layer one test; a
+        # weight swap inside a layer call still turns them off at once.
+        decode = (_DECODE_FUSED is not False and gdn_sink is None and T == 1
+                  and B == 1 and _decode_fused())
         for li, (layer, c) in enumerate(zip(self.layers, cache)):
             mask = ssm_mask if layer.is_linear else fa_mask
             if _VERIFY_LAYER_HOOK is not None and gdn_sink is not None:
@@ -4134,8 +4138,7 @@ class Qwen4ExpModel(nn.Module):
                     if li in cap_ids:
                         cap_sink.append(h.mean(axis=2))
                     continue
-            elif (gdn_sink is None and T == 1 and B == 1 and c is not None
-                    and _decode_fused()):
+            elif decode and c is not None and not _VERIFY_BLOCKED:
                 out = None
                 if layer.is_linear and mask is None:
                     hp = (layer.ple(h, inputs, c, table, mask)

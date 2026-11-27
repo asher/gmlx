@@ -32,6 +32,8 @@ from gmlx.models.kq_levers import lever_cache_on
 # Visits wider than this run plain: a prefill chunk's shapes rarely repeat.
 MAX_ROWS = 16
 
+# The switch, None until enabled() reads it; a visit skips this module once
+# it is False.
 _ON: list = [None]
 # Bumped by invalidate: records of an older epoch are dropped at their
 # next use. Blocked for the process once weights are swapped around a
@@ -127,9 +129,9 @@ def _table(layer) -> dict:
 
 
 def _usable(layer, h, conv_cache, kv_cache, pad_mask) -> bool:
-    if (kv_cache is None or conv_cache is None or pad_mask is not None
-            or layer.training or h.shape[0] != 1 or h.shape[1] > MAX_ROWS
-            or not enabled()):
+    if (not enabled() or kv_cache is None or conv_cache is None
+            or pad_mask is not None or layer.training or h.shape[0] != 1
+            or h.shape[1] > MAX_ROWS):
         return False
     if conv_cache.lengths is not None or conv_cache.history_capacity:
         return False
