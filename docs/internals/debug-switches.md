@@ -109,8 +109,8 @@ is already running does not see a variable you export later.
 | `GMLX_Q4_VERIFY_FUSED_CAP=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep per-width record arrays in the gated-delta verify (one record layout per pair of round widths). |
 | `GMLX_Q4_DECODE_FUSED=1` | Run a B=1 one-token qwen4_exp decode step's layers as recorded kq graphs, as `GMLX_Q4_VERIFY_FUSED` does. Same bits. Off by default: it slows served decode. |
 | `GMLX_Q4_VERIFY_FUSED_MAX_RECORDS`, `GMLX_Q4_VERIFY_FUSED_MAX_MB` | Bound on the recorded verify graphs of the process (4096 handles, 256 MB of programs); the least recently used go first. |
-| `GMLX_SPEC_VERIFY_BOUND=1` | A B=1 qwen4_exp verify submitted at once encodes its records on kq command buffers of its own as they are reached. Same bits. |
-| `GMLX_Q4_VERIFY_FUSED_WHOLE=1` | A qwen4_exp verify records each attention layer and PLE block whole. Same bits. On with `GMLX_SPEC_VERIFY_BOUND`. |
+| `GMLX_SPEC_VERIFY_BOUND=0` | A B=1 qwen4_exp verify submitted at once goes to mlx as one graph, not encoding its records on kq command buffers of its own as they are reached. Same bits. |
+| `GMLX_Q4_VERIFY_FUSED_WHOLE=0` | A qwen4_exp verify records each attention layer and PLE block in parts, not whole. Same bits. On by default where the bound verify runs (`GMLX_SPEC_VERIFY_BOUND` and a kq with bound sessions); `=1` turns it on elsewhere. |
 | `GMLX_SPEC_VERIFY_BOUND_MARKS=1,2,4,8,16,32` | With `GMLX_SPEC_VERIFY_BOUND`, the layers a bound command buffer is committed ahead of. |
 | `GMLX_SPEC_VERIFY_BOUND_STATS=1` | With `GMLX_SPEC_VERIFY_BOUND`, print bound and lazy record calls and where verifies left the bound path at exit. |
 | `GMLX_SPEC_VERIFY_BOUND_TRACE=PATH` | With `GMLX_SPEC_VERIFY_BOUND`, append a line per session commit and mlx submission (perf_counter seconds) to PATH. |

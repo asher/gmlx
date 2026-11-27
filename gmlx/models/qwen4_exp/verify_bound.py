@@ -1,7 +1,7 @@
 """Bound replay of a verify: its records go onto command buffers of ours.
 
-``GMLX_SPEC_VERIFY_BOUND=1`` (off by default; needs a kq build with
-``bound_call``). A B=1 verify that its caller submits at once
+``GMLX_SPEC_VERIFY_BOUND`` (on by default, ``0`` off; needs a kq build
+with ``bound_call``). A B=1 verify that its caller submits at once
 (``gmlx.spec.verify_submit.now``) does not build one mlx node a record and
 hand the graph to ``mx.async_eval``: each record that has its program is
 encoded as it is reached, onto a command buffer of a kq bound session, and
@@ -62,7 +62,7 @@ from gmlx.envflags import env_bool, env_int
 from gmlx.spec.verify_submit import is_now
 from gmlx.upstream import gdn_patches as _gdn
 
-_MODE = env_int("GMLX_SPEC_VERIFY_BOUND", 0)
+_MODE = env_int("GMLX_SPEC_VERIFY_BOUND", 1)
 _STATS = env_bool("GMLX_SPEC_VERIFY_BOUND_STATS", False)
 # Host seconds by piece in the stats (a harness sets it): the encodes, the
 # mlx submissions, the commits, the prepare pass.
@@ -117,6 +117,12 @@ def _kq():
 
 def mode() -> int:
     return _MODE
+
+
+def on() -> bool:
+    """The bound verify can run: the lever on and a kq with bound
+    sessions."""
+    return _MODE > 0 and bool(_kq())
 
 
 _bound_kw: list = [None]

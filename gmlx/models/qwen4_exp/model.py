@@ -3629,10 +3629,11 @@ def _fused_whole() -> bool:
     block (qsa_whole), the PLE block from its table rows on as one record,
     and every record in level order (_fused_kw). Same bits as the split
     form. ``GMLX_Q4_VERIFY_FUSED_WHOLE``, on by default where the bound
-    verify is (``GMLX_SPEC_VERIFY_BOUND``), off otherwise."""
+    verify runs (``GMLX_SPEC_VERIFY_BOUND`` and a kq with bound sessions),
+    off otherwise."""
     global _FUSED_WHOLE
     if _FUSED_WHOLE is None:
-        on = env_bool("GMLX_Q4_VERIFY_FUSED_WHOLE", _vb.mode() > 0)
+        on = env_bool("GMLX_Q4_VERIFY_FUSED_WHOLE", _vb.on())
         if on:
             import mlx_kquant as kq
 
