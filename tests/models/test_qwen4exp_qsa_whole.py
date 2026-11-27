@@ -57,10 +57,11 @@ def _lm(dtype):
 
 
 def _walk(monkeypatch, mode, dtype=mx.bfloat16, passes=6, tail=64,
-          rounds=None, steps_at=(), prompt=PROMPT, restore=False):
+          rounds=None, steps_at=(), prompt=PROMPT, restore=False, decode=0):
     """mode: "plain", "split" (two records and the Python middle) or
     "whole". restore: the attention caches are set from their state after
-    the prefill, as a prompt cache restore sets them."""
+    the prefill, as a prompt cache restore sets them. decode: one-row steps
+    after the rounds."""
     monkeypatch.setenv("GMLX_Q4_KV_TAIL", str(tail))
     monkeypatch.setattr(q4, "_VERIFY_FUSED", mode != "plain")
     monkeypatch.setattr(q4, "_FUSED_WHOLE", mode == "whole")
@@ -95,6 +96,9 @@ def _walk(monkeypatch, mode, dtype=mx.bfloat16, passes=6, tail=64,
         lm.rollback_speculative_cache(cache, sink, kept - 1, S)
         mx.eval(hid, [c.state for c in cache])
         out.append(np.array(hid.astype(mx.float32)))
+    for _ in range(decode):
+        tok = mx.random.randint(0, args.vocab_size, (1, 1))
+        out.append(np.array(lm(tok, cache=cache).logits.astype(mx.float32)))
     out.extend(np.array(a.astype(mx.float32))
                for c in cache for a in c.state if isinstance(a, mx.array))
     return lm, out
@@ -159,6 +163,32 @@ def test_decode_steps_between_whole_layer_rounds(monkeypatch):
     _, plain = _walk(monkeypatch, "plain", passes=4, steps_at=at)
     lm, whole = _walk(monkeypatch, "whole", passes=4, steps_at=at)
     assert _whole(lm)[1] >= 8
+    _equal(plain, whole)
+
+
+def test_decode_steps_replay_whole_layer_records(monkeypatch):
+    # GMLX_Q4_DECODE_FUSED with the whole forms on (by hand, or with the
+    # bound verify): a one-row step's attention layers replay a whole-layer
+    # record of their own, keyed by the step's place in the compression
+    # block, and carry the plain bits through folds of the tail.
+    from gmlx.models.qwen4_exp import verify_bound as vb
+
+    monkeypatch.setattr(q4, "_DECODE_FUSED", False)
+    _, plain = _walk(monkeypatch, "plain", passes=1, tail=16, decode=56)
+    calls, real = [], vb.call
+
+    def call(handle, ins):
+        calls.append(handle)
+        return real(handle, ins)
+
+    monkeypatch.setattr(vb, "call", call)
+    monkeypatch.setattr(q4, "_DECODE_FUSED", True)
+    lm, whole = _walk(monkeypatch, "whole", passes=1, tail=16, decode=56)
+    one_row = {r[0] for layer in lm.model.layers if not layer.is_linear
+               for k, r in vars(layer).get("_verify_fused", (0, {}, []))[1]
+               .items() if isinstance(r, tuple) and r[2] == "whole"
+               and k[1][1] == 1}
+    assert sum(h in one_row for h in calls) >= 8, len(one_row)
     _equal(plain, whole)
 
 
