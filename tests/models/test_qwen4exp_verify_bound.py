@@ -1,11 +1,13 @@
 """Bound replay of a verify (GMLX_SPEC_VERIFY_BOUND): the session's rules.
 
 The tiny model's records run their primitives (its hyper-connection norm
-and float MoE are not on kq's direct list), so kq refuses to bind them. The
-tests that need records to run outside an eval put a stand-in behind the
-session that runs a record at once, the way a bound replay does once its
-command buffer has completed: the in-place writes of the whole-layer record
-land when the record is called, not when the caller evaluates.
+and float MoE are not on kq's direct list), so kq refuses to bind them
+unless KQ_FUSED_DIRECT_ANY lets them replay direct (the round loop test).
+The other tests that need records to run outside an eval put a stand-in
+behind the session that runs a record at once, the way a bound replay does
+once its command buffer has completed: the in-place writes of the
+whole-layer record land when the record is called, not when the caller
+evaluates.
 """
 
 import copy
@@ -584,3 +586,50 @@ def test_host_step_counts_stay_on_the_thread_of_a_session(monkeypatch):
     assert seen == {"session": True, "other": False, "dropped": False,
                     "later": False}
 
+
+def _spec_decode(monkeypatch, mode, n_gen=40, block=4):
+    """Greedy speculative decode of the tiny model with its MTP drafter
+    through the round loop (stream_speculative, _owned_decode_rounds): the
+    tokens, the target's cache states and the bound stats. KQ_FUSED_DIRECT_ANY
+    lets the records learn their programs with the primitives kq does not
+    list, so with the lever on they bind."""
+    from gmlx.models.qwen4_exp.mtp import Qwen4ExpMTPConfig, Qwen4ExpMTPDrafter
+    from gmlx.spec.speculative import stream_speculative
+    from test_qwen4exp_mtp import _randomize, _Wrap
+
+    monkeypatch.setenv("KQ_FUSED_DIRECT_ANY", "1")
+    kq.env_cache(True)
+    monkeypatch.setattr(vb, "_MODE", mode)
+    monkeypatch.setattr(vb, "_local", threading.local())
+    monkeypatch.setattr(q4, "_FUSED_WHOLE", None)
+    for k in vb.stats:
+        monkeypatch.setitem(vb.stats, k, {} if isinstance(
+            vb.stats[k], dict) else 0)
+    lm, args = _lm(mx.bfloat16)
+    drafter = Qwen4ExpMTPDrafter(Qwen4ExpMTPConfig(text=args, block_size=block))
+    _randomize(drafter, seed=3)
+    drafter.set_dtype(mx.bfloat16)
+    drafter.reset(_Wrap(lm))
+    mx.random.seed(11)
+    prompt = mx.random.randint(0, args.vocab_size, (1, PROMPT))
+    cache = lm.make_cache()
+    toks = list(stream_speculative(
+        lm, drafter, prompt, prompt_cache=cache, max_tokens=n_gen,
+        sampler=None, draft_block_size=block))
+    states = [np.array(a.astype(mx.float32)) for c in cache for a in c.state
+              if isinstance(a, mx.array)]
+    return toks, states, dict(vb.stats), q4._fused_whole()
+
+
+def test_the_round_loop_binds_records_with_the_same_tokens(monkeypatch):
+    # kq's own sessions through the round loop, bound verify on against
+    # off: the records bind (no verify ends its bound part early), and the
+    # tokens and the caches after the last round are the same.
+    off = _spec_decode(monkeypatch, 0)
+    on = _spec_decode(monkeypatch, 1)
+    assert off[2]["verifies"] == 0 and off[3] is False
+    assert on[3] is True
+    assert on[2]["verifies"] > 0 and on[2]["bound_calls"] > 0
+    assert on[2]["whole"] > 0 and on[2]["ended"] == {}
+    assert len(on[0]) == len(off[0]) > 0 and on[0] == off[0]
+    _equal(off[1], on[1])
