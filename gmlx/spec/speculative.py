@@ -1833,6 +1833,11 @@ def _owned_decode_rounds(
                         drafter.apply_row_cut(n_cut)
                         draft_tokens = _cut_drafts(draft_tokens, n_cut)
                         bs = n_cut + 1
+                elif _defer_cut and not copied and not gated:
+                    # No cut pending (a row floor of 0): the block is whole
+                    # as drafted, and the round commits ahead as one whose
+                    # cut kept every row.
+                    draft_src = draft_tokens
 
                 if _ROUND_PROFILE:
                     mx.eval(draft_tokens)

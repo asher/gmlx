@@ -190,11 +190,15 @@ def test_counted_rounds_on_a_ring_shorter_than_the_window(
         assert on["stats"]["counted"] > 0
 
 
+@pytest.mark.parametrize("floor", [0.5, 0.0])
 @pytest.mark.parametrize("sampled", MODES)
-def test_counted_rounds_keep_the_plain_tokens_and_state(monkeypatch, sampled):
-    plain = _run_counted(monkeypatch, False, n=96, floor=0.5,
+def test_counted_rounds_keep_the_plain_tokens_and_state(monkeypatch, sampled,
+                                                         floor):
+    """A row floor of 0 leaves no cut pending: its rounds are counted as a
+    cut round's are."""
+    plain = _run_counted(monkeypatch, False, n=96, floor=floor,
                          **_kw(monkeypatch, sampled))
-    on = _run_counted(monkeypatch, True, n=96, floor=0.5,
+    on = _run_counted(monkeypatch, True, n=96, floor=floor,
                       **_kw(monkeypatch, sampled))
     _close(plain, on)
     # Every round past the ring's fill is counted, whatever it accepted.
