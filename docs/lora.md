@@ -87,6 +87,8 @@ The training loss should fall steadily. With only 90 examples, stop at about
 itself.
 
 The adapter covers every linear layer in the top `--num-layers` layers.
+On SenseNova Loop, which runs some layers twice, each layer counts once and
+its adapter applies on every pass.
 `--num-layers` and `--rank` trade what the adapter can learn against
 memory, and the defaults of 8 layers at rank 8 are a good start. When a
 longer `--max-seq-length` runs out of memory, add `--grad-checkpoint`,

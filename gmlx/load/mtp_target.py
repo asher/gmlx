@@ -186,6 +186,16 @@ def _mtp_target_classes(
             return language_model_cls(text_config, model_config)
 
         return language_model_cls, build
+    if model_type == "sensenova_loop":
+        # The owned qwen3.5 language model over the loop's visit list.
+        lang = importlib.import_module("gmlx.models.sensenova_loop.language")
+
+        def build(config: dict) -> nn.Module:
+            text_config = lang.TextConfig.from_dict(config)
+            return lang.SenseNovaLoopLanguageModel(
+                text_config, lang.model_config(text_config))
+
+        return lang.SenseNovaLoopLanguageModel, build
     if model_type == "gemma4_text":
         # gmlx's own Gemma 4 language model, on the copied mlx-vlm config.
         lang = importlib.import_module("gmlx.models.gemma4.language")
@@ -330,7 +340,7 @@ def _vlm_spec_language_model(model_type: str):
     NemotronHSpecLM, and the owned gemma4 containers
     hold the owned language model), or the arch has no spec support
     (the per-arch hook check downstream fails loud)."""
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "sensenova_loop"):
         cls, _ = _mtp_target_classes(model_type)
 
         def build(model_config):

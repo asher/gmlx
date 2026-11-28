@@ -76,6 +76,7 @@ _HANDLERS = {
     "qwen35_9b_template.jinja": "qwen3-coder",
     "qwen36_template.jinja": "qwen3-coder",
     "qwen38_template.jinja": "qwen3-coder",
+    "sensenova_loop_template.jinja": "qwen3-coder",
     "minicpmv46_template.jinja": "qwen3-coder",
     "minicpmv47_template.jinja": "qwen3-coder",
     "nemotron_bolt_template.jinja": "qwen3-coder",

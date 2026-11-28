@@ -138,6 +138,8 @@ _OWNED = {
                      ("model.layers.1.mlp.up_proj", "blk.1.ffn_up.weight", IN)],
     "muse-spark": [("model.layers.0.self_attn.gate_proj", "blk.0.attn_gate.weight", IN),
                    ("model.layers.1.mlp.latent_down", "blk.1.ffn_latent_down.weight", IN)],
+    "sensenova_loop": [("model.layers.0.linear_attn.in_proj_qkv", "blk.0.attn_qkv.weight", IN),
+                       ("model.layers.4.mlp.up_proj", "blk.4.ffn_up.weight", IN)],
     "qwen4exp": [("model.layers.0.linear_attn.in_proj_qkv", "blk.0.attn_qkv.weight", IN),
                  ("model.layers.1.mlp.shared_expert_gate", "blk.1.ffn_gate_inp_shexp.weight", 1)],
 }
@@ -222,8 +224,8 @@ def test_base_tensor_names_reads_every_shard(tmp_path):
         w.write_kv_data_to_file()
         w.write_tensors_to_file()
         w.close()
-    assert adapter.base_tensor_names(str(tmp_path / "m-00001-of-00002.gguf")) == [
-        "blk.0.attn_q.weight", "blk.1.attn_q.weight", "output.weight"]
+    assert adapter.base_tensor_names(str(tmp_path / "m-00001-of-00002.gguf")) == {
+        n: ((n, 2),) for n in ("blk.0.attn_q.weight", "blk.1.attn_q.weight", "output.weight")}
 
 
 @pytest.mark.parametrize("base_names", [None, ["token_embd.weight", "blk.0.attn_q.weight"]])

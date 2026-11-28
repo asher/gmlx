@@ -92,6 +92,7 @@ flags refuses.
 | `qwen4exp` | The sparse attention indexer scales with the attention. |
 | `ricursive` | Only the sliding window layers rotate, and they keep the header's scale, so the flags change only the reported context. |
 | `seed_oss` | |
+| `sensenova_loop` | |
 | `smollm3` | |
 
 ## Speculative decoding

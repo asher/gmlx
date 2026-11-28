@@ -75,6 +75,7 @@ _FAMILY_NOTES = {
     "qwen35moe":      ("qwen3",    "Qwen3.5/3.6 MoE (e.g. Qwen3.6-27B): the qwen35 gated-DeltaNet hybrid + fine-grained MoE with shared expert; fused-GDN kernels + native-head MTP as on qwen35; the MiniCPM-V 4.7 35B-A3B text tower (minicpmv4_7 mmproj, DSpark drafter via dflash_dspark)"),
     "qwen3moe":       ("qwen3",    "Qwen3-MoE (30B-A3B / 235B-A22B); all-MoE switch_mlp, no shared expert"),
     "qwen4exp":       ("qwen3",    "Qwen3.8-Flash-Next (llama.cpp PR 27742): the qwen35 gated-DeltaNet hybrid (sigmoid output gate, tiled V heads) + every-layer 512-expert MoE with shared expert, plus hyper-connections (4 residual streams, low-rank sigmoid mixers replacing every norm), QSA sparse attention (4-head indexer over mean-pooled blocks of 4 keys, top 512 blocks + the incomplete tail; dense below 2052 cached tokens) and PLE n-gram hash embeddings on layer 1 (320M-row IQ4_NL table kept as wire bytes, rows gathered per token). Vendored gmlx.models.qwen4_exp.model; all norms arrive +1 baked (passthrough). The MTP head is not in the model shards: speculative decoding reads a companion GGUF, either the qwen4exp-mtp one built from the HF mtp.* tensors or the llama.cpp mtp-*.gguf NextN sidecar (arch qwen4exp, block num_hidden_layers, one joined eh_proj), autodetected beside the target or in an MTP/ folder, or named by --draft-gguf. Pairs with the Qwen3-VL mmproj (--mmproj) via a vendored wrapper on the qwen3_5 vision tower; mmproj and the companion MTP compose, so a --mmproj load speculates on text turns"),
+    "sensenova_loop": ("qwen3",    "SenseNova-Loop-9B (OpenSenseNova llama.cpp 'sensenova_loop'): the qwen35 dense hybrid with a layer loop (physical layers [loop.start, loop.end) run loop.count times, each visit with its own KV or recurrent cache) and two-stream mHC routers (Sinkhorn-mixed residual streams) on the looped layers; the file stores each looped layer once and is folded to physical indices on read. Native-head MTP as on qwen35; pairs with its Qwen3.5 mmproj (--mmproj) for image input"),
     "qwen3vlmoe":     ("qwen3",    "Qwen3-Omni thinker text tower (MoE, qwen3moe layout); pairs with the Qwen3-Omni mmproj (--mmproj) for vision + audio input"),
     "qwen3vl":        ("qwen3",    "Qwen3-VL dense text tower (run on the 8B; Qwen3 dense layout, rope base from the file); the rotary position has three axes (time, height, width), and a text-only prompt puts the same position on all three, which reduces it to the one-axis rope of the qwen3 class; pairs with the Qwen3-VL mmproj (--mmproj) for image input, where the vision tower's deepstack features join the first decoder layers"),
     "llama":          ("llama",    "Llama-2/3, Mistral-7B-as-llama, Vicuna; SPM merges reconstructed from scores. Sparse-MoE variants (Mixtral-8x7B/8x22B) ship under this arch with an expert count -> routed to model_type=mixtral (block_sparse_moe + SwitchGLU); legacy per-expert split weights are coalesced to the stacked form on load"),
@@ -183,7 +184,7 @@ class UnsupportedArchError(Exception):
 MTP_WIRED_MODEL_TYPES = frozenset({
     "qwen3_5", "qwen3_5_moe", "gemma4_text", "deepseek_v4", "hy_v3",
     "muse_glimmer", "qwen4_exp", "glm5_next", "nemotron_h", "ricursive",
-    "hy_v4_flash", "inkling2",
+    "hy_v4_flash", "inkling2", "sensenova_loop",
 })
 
 

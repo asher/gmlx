@@ -101,6 +101,7 @@ projector and architecture that it found. gmlx supports these families:
 | Qwen3-VL | `qwen3vl_merger` with `qwen3vl` | Qwen3-VL-8B-Instruct | Each image becomes 64 to 4096 tokens. The vision encoder runs in float32. |
 | Qwen3.5 and Qwen3.6 | `qwen3vl_merger` with `qwen35` or `qwen35moe` | Qwen3.5-VL-9B, Qwen3.6-VL | `GMLX_QWEN35_VISION_FP32=1` runs the vision encoder in float32. |
 | Qwen3.8-Flash-Next | `qwen3vl_merger` with `qwen4exp` | Qwen3.8-Flash-Next | |
+| SenseNova Loop | `qwen3vl_merger` with `sensenova_loop` | SenseNova-Loop-9B | |
 | Qwen3-Omni | `qwen3vl_merger` with `qwen3vlmoe` | Qwen3-Omni | It reads images and audio. |
 | gemma-4 E-series | `gemma4v`, `gemma4a` | gemma-4-E2B, gemma-4-E4B | It reads images and audio. |
 | gemma-4 unified | `gemma4uv`, `gemma4ua` | gemma-4-12B | It reads images, and audio when the companion has an audio encoder. |
@@ -172,5 +173,5 @@ Chat and the server keep each image with the user message that sent it,
 so a later question about an earlier image reads the right history. Once a
 conversation holds media, chat reads the whole conversation and encodes
 the media again on every turn. The server reuses the cached earlier turns
-when a turn adds an image, on Gemma-4 and on the qwen35 and qwen35moe
-architectures.
+when a turn adds an image, on Gemma-4 and on the qwen35, qwen35moe and
+sensenova_loop architectures.

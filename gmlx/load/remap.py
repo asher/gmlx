@@ -65,6 +65,11 @@ ARCH_ALIAS = {
     # qwen35 tensors ride the canonical reverse map, everything new
     # (hyper-connections, PLE, indexer, MoE targets) is claimed below.
     "qwen4exp": "QWEN4EXP",
+    # SenseNova Loop: the qwen35 hybrid with a layer loop and two-stream mHC.
+    # The loop visits are folded to physical blocks when the file is read
+    # (gguf_layout), so the qwen35 tensors ride the canonical map and the
+    # SENSENOVA_LOOP block claims the mHC routers.
+    "sensenova_loop": "SENSENOVA_LOOP",
     "llama": "LLAMA",
     # llama.cpp's 'mistral3' arch (Ministral-3 / Mistral-Small-3.1) uses the
     # canonical Llama tensor layout (q/k permuted at convert time, ffn_norm
@@ -2560,6 +2565,18 @@ ARCH_PRIORITY_OVERRIDES: dict[str, list[tuple[re.Pattern, str | None, str]]] = {
 # (the flash key norm is a weight-only RMSNorm), plus the rows the flash
 # layout adds. Targets follow gmlx.models.hy_v4_flash. The MTP block's
 # standard tensors land past the trunk and the model's sanitize drops them.
+ARCH_PRIORITY_OVERRIDES["SENSENOVA_LOOP"] = [
+    # mHC routers, float32 on the wire: [8, 2 * hidden] weight and [8] bias.
+    (re.compile(r"^blk\.(\d+)\.hc_attn_fn\.weight$"),
+     "model.layers.{bid}.mhc_attn.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.hc_attn_fn\.bias$"),
+     "model.layers.{bid}.mhc_attn.bias", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.hc_ffn_fn\.weight$"),
+     "model.layers.{bid}.mhc_ffn.weight", "passthrough"),
+    (re.compile(r"^blk\.(\d+)\.hc_ffn_fn\.bias$"),
+     "model.layers.{bid}.mhc_ffn.bias", "passthrough"),
+]
+
 ARCH_PRIORITY_OVERRIDES["HYV4FLASH"] = [
     row for row in ARCH_PRIORITY_OVERRIDES["HYV4"]
     if "k_norm\\.bias" not in row[0].pattern

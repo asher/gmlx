@@ -64,6 +64,9 @@ OWNED_LM_MODELS = {
     # mlx-lm nemotron_h, with per-layer MoE sizes (Nemotron-3.5-Bolt) and
     # llama.cpp's fp32 routing.
     "nemotron_h": "gmlx.models.nemotron_h.model",
+    # OpenSenseNova llama.cpp LLM_ARCH_SENSENOVA_LOOP; the HF class is
+    # remote code over transformers' qwen3_5.
+    "sensenova_loop": "gmlx.models.sensenova_loop.model",
 }
 
 # mlx-vlm model_type -> the gmlx module that stands for the model package
@@ -83,6 +86,7 @@ OWNED_VLM_MODELS = {
     "muse_glimmer": "gmlx.models.muse_glimmer.vlm_model",
     "muse_spark": "gmlx.models.muse_spark.vlm_model",
     "qwen4_exp": "gmlx.models.qwen4_exp.vlm_model",
+    "sensenova_loop": "gmlx.models.sensenova_loop.vlm_model",
     "nemotron_h_omni": "gmlx.models.nemotron_h.vlm_model",
     "nemotron_h_transcribe": "gmlx.models.nemotron_h.transcribe_model",
     # The copy's minimax_m3_vl package packs the shared expert into the

@@ -257,6 +257,10 @@ def resolve_vlm_model_type(llm_arch: str, mm_meta: dict) -> str:
         # features join the first decoder layers.
         if llm_arch == "qwen3vl":
             return "qwen3_vl"
+        # SenseNova Loop: the looped qwen3.5 text model with the Qwen3.5
+        # vision tower (gmlx.models.sensenova_loop.vlm_model).
+        if llm_arch == "sensenova_loop":
+            return "sensenova_loop"
         return "qwen3_5"
     if llm_arch == "gemma4":
         # gemma-4 ships two omni families: the E-series (E2B/E4B) with CLIP +
@@ -1950,7 +1954,8 @@ def _remap_float_arrays(
             out[f"{base}.{tgt}.{leaf}"] = arr
         return out, skipped
 
-    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp", "qwen3_vl"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp", "qwen3_vl",
+                      "sensenova_loop"):
         # Only the qwen3_vl container reads the deepstack features, so only
         # it maps the mergers; the other containers leave them unused.
         deepstack = (_qwen3vl_deepstack_blocks(mm_meta or {})
@@ -2151,9 +2156,10 @@ def _synthesize_qwen35_vlm_config(
     miscomputes image position ids."""
     text_config = dict(text_config)
     text_config["model_type"] = model_type
-    # The qwen4exp pair reuses the qwen3_5 tower class, whose VisionConfig
-    # whitelists its own model_type names.
-    vision_mt = "qwen3_5" if model_type == "qwen4_exp" else model_type
+    # The qwen4exp and SenseNova pairs reuse the qwen3_5 tower class, whose
+    # VisionConfig whitelists its own model_type names.
+    vision_mt = ("qwen3_5" if model_type in ("qwen4_exp", "sensenova_loop")
+                 else model_type)
     config = {
         "model_type": model_type,
         "text_config": text_config,
@@ -3561,7 +3567,7 @@ def synthesize_vlm_config(
             text_config, mm_meta, standardize=standardize)
     if model_type == "gemma4_unified":
         return _synthesize_gemma4_unified_vlm_config(text_config, mm_meta)
-    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen4_exp", "sensenova_loop"):
         return _synthesize_qwen35_vlm_config(
             text_config, mm_meta, model_type, llm_meta)
     if model_type == "qwen3_vl":
@@ -3854,7 +3860,7 @@ def _synthesize_vlm_processor(model_type: str, tokenizer, mm_meta: dict,
     if model_type == "gemma4_unified":
         return _attach_streaming_helpers(
             _synthesize_gemma4_unified_processor(tokenizer, mm_meta), tokenizer)
-    if model_type in ("qwen3_5", "qwen3_5_moe"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "sensenova_loop"):
         return _synthesize_qwen35_processor(tokenizer, mm_meta)
     if model_type == "qwen3_vl":
         return _synthesize_qwen35_processor(
@@ -6340,7 +6346,8 @@ def load_vlm_model(
         mmproj_path, zero_copy=zero_copy, expect_quant=False)
     with_audio = bool(mm_meta.get("clip.has_audio_encoder"))
     _log(f"[vlm] model_type={model_type} audio={with_audio}")
-    if model_type in ("qwen3_5", "qwen3_5_moe", "minicpmv4_6", "minicpmv4_7"):
+    if model_type in ("qwen3_5", "qwen3_5_moe", "minicpmv4_6", "minicpmv4_7",
+                      "sensenova_loop"):
         # Pre-M3 launch-ceiling guard for the vendored base ragged decode
         # (ungated 1024-thread kernels) on batched mixed-depth streams.
         # Unconditional: plain VLM builds and the spec_target base fallback

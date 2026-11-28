@@ -71,6 +71,9 @@ GGUF_ARCH_TO_MODEL_TYPE = {
     # Qwen3.8-Flash-Next: the qwen35 hybrid + hyper-connections + QSA sparse
     # attention + PLE n-gram embeddings; vendored gmlx.models.qwen4_exp.model.
     "qwen4exp": "qwen4_exp",
+    # SenseNova Loop: the qwen35 hybrid with a layer loop and two-stream
+    # mHC. Model class owned by gmlx.
+    "sensenova_loop": "sensenova_loop",
     "qwen3": "qwen3",
     # Qwen3-VL dense text tower (run on Qwen3-VL-8B). The tensor layout is
     # Qwen3 dense, and the rotary position has three axes. A text-only prompt
@@ -3174,6 +3177,52 @@ def _synth_qwen35(meta, shapes, config: dict, arch: str) -> None:
             config["shared_expert_intermediate_size"] = shared_ffn
 
 
+# sensenova_loop (SenseNova Loop)
+
+def _synth_sensenova_loop(meta, shapes, config: dict) -> None:
+    """The qwen35 fields, then the loop and mHC settings. ``block_count``
+    counts layer visits; the model holds the physical layers and the reader
+    folds the visit-indexed blocks onto them (``gguf_layout``)."""
+    from .gguf_layout import sensenova_loop_physical, sensenova_loop_plan
+
+    arch = "sensenova_loop"
+    _synth_qwen35(meta, shapes, config, arch)
+    visits, physical, start, end, count = sensenova_loop_plan(meta)
+    config["num_hidden_layers"] = physical
+    config["loop"] = {"start": start, "end": end, "count": count}
+
+    def req(read, key):
+        return _require(read(meta, f"{arch}.{key}"), arch=arch,
+                        gguf_field=f"{arch}.{key}")
+
+    mhc = {
+        "start": req(_read_int, "mhc.start"),
+        "end": req(_read_int, "mhc.end"),
+        "streams": req(_read_int, "mhc.streams"),
+        "iterations": req(_read_int, "mhc.iterations"),
+        "fixed_identity": bool(_read_bool(meta, f"{arch}.mhc.fixed_identity")),
+        "pre_scale": _read_float(meta, f"{arch}.mhc.pre_scale") or 1.0,
+    }
+    # llama.cpp's limits (load_arch_hparams).
+    if (mhc["streams"] != 2 or not 0 < mhc["iterations"] <= 20
+            or not 0 <= mhc["start"] < mhc["end"] <= physical
+            or not mhc["pre_scale"] > 0):
+        raise ValueError(f"sensenova_loop synth: unsupported mHC settings {mhc}")
+    config["mhc"] = mhc
+    # Every visit keeps the attention type of its slot (full attention on
+    # every full_attention_interval-th visit), as llama.cpp checks.
+    recurrent = _read_bool_array(meta, f"{arch}.attention.recurrent_layers")
+    interval = config["full_attention_interval"]
+    if recurrent:
+        for v in range(visits):
+            p = sensenova_loop_physical(v, start, end, count)
+            if (recurrent[v] != ((v + 1) % interval != 0)
+                    or recurrent[v] != ((p + 1) % interval != 0)):
+                raise ValueError(
+                    f"sensenova_loop synth: visit {v} (layer {p}) does not "
+                    f"follow the every-{interval} full-attention pattern")
+
+
 # mistral3 (Ministral-3 / Mistral-Small-3.1)
 
 def _synth_mistral3(meta, shapes, config: dict) -> None:
@@ -5008,6 +5057,7 @@ _SYNTH = {
     "qwen35": lambda m, s, c: _synth_qwen35(m, s, c, "qwen35"),
     "qwen35moe": lambda m, s, c: _synth_qwen35(m, s, c, "qwen35moe"),
     "qwen4exp": _synth_qwen4exp,
+    "sensenova_loop": _synth_sensenova_loop,
     "mistral3": _synth_mistral3,
     "nemotron_h_moe": _synth_nemotron_h_moe,
     "deepseek2": _synth_deepseek2,

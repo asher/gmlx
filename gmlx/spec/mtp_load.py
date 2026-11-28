@@ -87,6 +87,7 @@ _NATIVE_HEAD_WIDTH_CAP = 2
 _MTP_WIDTH_CAP_BY_MODEL_TYPE = {
     "qwen3_5": _NATIVE_HEAD_WIDTH_CAP,
     "qwen3_5_text": _NATIVE_HEAD_WIDTH_CAP,
+    "sensenova_loop": _NATIVE_HEAD_WIDTH_CAP,
     "qwen3_5_moe": 1,
     "qwen3_5_moe_text": 1,
     "gemma4_assistant": 2,
@@ -2536,7 +2537,8 @@ def _arm_spec_target(model, text_config_dict: dict, *, log) -> None:
     """
     mt = text_config_dict.get("model_type")
     require_tiled_gdn(model, text_config_dict)
-    if mt in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_text"):
+    if mt in ("qwen3_5_moe", "qwen3_5_moe_text", "qwen3_5", "qwen3_5_text",
+              "sensenova_loop"):
         if is_owned_language_model(model):
             prepare_gdn(model)
         _patch_dense_head_verify(model)

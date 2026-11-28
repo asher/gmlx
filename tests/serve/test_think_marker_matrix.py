@@ -225,6 +225,9 @@ ROWS: dict[str, Row] = {
         vlm="qwen3_5"),
     "fixtures/qwen3_template.jinja": Row(
         "qwen3", _THINK, (_ON, MAYBE), (_OFF, BARE), BARE, _THINK_SINGLES),
+    "fixtures/sensenova_loop_template.jinja": Row(
+        "sensenova_loop", _THINK, (_ON, WAIT), (_OFF, BARE), BARE,
+        _THINK_SINGLES, vlm="sensenova_loop"),
     "fixtures/ricursive_template.jinja": Row(
         "ricursive", _THINK, ({}, MAYBE), None, BARE, _THINK_SINGLES),
     "fixtures/smollm2_template.jinja": Row(

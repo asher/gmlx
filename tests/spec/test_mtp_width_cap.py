@@ -387,7 +387,7 @@ def test_a_target_that_rolls_back_one_row_caps_at_1(monkeypatch):
 
 
 # The MTP target classes whose rollback takes the per-row accept list.
-PER_ROW_TARGETS = {"qwen3_5", "qwen3_5_moe", "gemma4_text"}
+PER_ROW_TARGETS = {"qwen3_5", "qwen3_5_moe", "gemma4_text", "sensenova_loop"}
 
 
 def test_target_classes_declare_a_per_row_rollback():

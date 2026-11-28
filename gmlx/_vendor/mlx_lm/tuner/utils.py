@@ -92,6 +92,9 @@ def linear_to_lora_layers(
             dropout=config["dropout"],
         )
 
+    # gmlx: a looped model lists a layer once per visit in ``layers``;
+    # ``parameter_layers`` names each once, so none is wrapped twice.
+    layers = getattr(model, "parameter_layers", None) or model.layers
     if (keys := config.get("keys", None)) is None:
         keys = set()
 
@@ -107,10 +110,10 @@ def linear_to_lora_layers(
             if hasattr(m, "to_lora") or isinstance(m, types) or is_kquant(m):
                 keys.add(p)
 
-        for l in model.layers:
+        for l in layers:
             l.apply_to_modules(get_keys_for_lora)
 
-    for l in model.layers[-max(num_layers, 0) :]:
+    for l in layers[-max(num_layers, 0) :]:
         lora_layers = [(k, to_lora(m)) for k, m in l.named_modules() if k in keys]
         if lora_layers:
             l.update_modules(tree_unflatten(lora_layers))

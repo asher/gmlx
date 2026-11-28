@@ -6,6 +6,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- SenseNova-Loop-9B GGUFs run, with image input through its mmproj,
+  speculative decoding on its built-in MTP head, and LoRA adapters from
+  `gmlx train` or llama.cpp.
+
+### Fixed
+
+- Qwen3.5, Qwen3.6 and Qwen3.8-Flash-Next GGUFs from newer llama.cpp
+  converters, which merge `attn_qkv_gate` and `ssm_beta_alpha`, now load and
+  take LoRA adapters, including ones on the merged tensors.
+
 ### Changed
 
 - Qwen3.8-Flash-Next verify steps take less GPU time.
