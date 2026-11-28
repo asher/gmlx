@@ -462,6 +462,7 @@ def test_recorded_visits_match_the_plain_call(model, monkeypatch):
 
     # The record machinery on any kq, direct replay or not, and unblocked
     # by a weight swap in an earlier test (feeder_common.swapped_weights).
+    # The lever cache an earlier test left off goes on with the first record.
     monkeypatch.setattr(records, "DIRECT_ONLY", [False])
     monkeypatch.setattr(records, "_BLOCKED", [False])
     spec, plain = model, type(model)
@@ -475,6 +476,132 @@ def test_recorded_visits_match_the_plain_call(model, monkeypatch):
     assert records.STATS["replayed"] > replayed
     for g, w in zip(got, want):
         np.testing.assert_array_equal(g, w)
+
+
+def test_a_new_layout_keeps_the_calls_other_records_learned(model, monkeypatch):
+    # Decode records that replay their Metal calls still hold them after a
+    # verify layout records: making a record leaves the others alone.
+    from types import SimpleNamespace
+
+    kq = pytest.importorskip("mlx_kquant")
+    if not (hasattr(kq, "fuse_graph") and hasattr(kq, "fused_direct_info")):
+        pytest.skip("kq build without direct records")
+
+    from gmlx.models.inkling2 import records
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    def states(verify):
+        return [kq.fused_direct_info(handle)["state"]
+                for m in spec.modules()
+                if (recs := vars(m).get("_ink_records")) is not None
+                for key, rec in recs[1].items()
+                if isinstance(rec, tuple) and key[0] == verify
+                for handle in rec[:2]]
+
+    # The tiny model's tail records hold primitives kq does not replay:
+    # kept, they run their primitives beside the replaying ones.
+    monkeypatch.setattr(records, "_ON", [True])
+    monkeypatch.setattr(records, "DIRECT_ONLY", [False])
+    monkeypatch.setattr(records, "_BLOCKED", [False])
+    records.invalidate()
+    spec, plain = model, type(model)
+    spec.__class__ = Inkling2SpecLM
+    try:
+        cache = spec.make_cache()
+        spec.model(mx.array([IDS[:20]]), cache)
+        _buffer_mtp_target_cache(
+            cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+        for t in IDS[20:25]:
+            mx.eval(spec.model(mx.array([[t]]), cache))
+        before = states(False)
+        if "replay" not in before:
+            pytest.skip("no decode record replays Metal calls on this kq")
+        pos = 25
+        for _ in range(2):
+            h, _, sink = spec.speculative_verify_hidden(
+                mx.array([IDS[pos:pos + 4]]), cache)
+            mx.eval(h)
+            spec.rollback_speculative_cache(cache, sink, 3, 4)
+            pos += 4
+        assert states(True)
+        assert states(False) == before
+    finally:
+        spec.__class__ = plain
+
+
+def _records_spec(tmp_path, monkeypatch):
+    """The tiny model with records on, prefilled into a buffered cache:
+    (spec, cache, kq, records)."""
+    from types import SimpleNamespace
+
+    kq = pytest.importorskip("mlx_kquant")
+    if not (hasattr(kq, "fuse_graph") and hasattr(kq, "fused_direct_info")):
+        pytest.skip("kq build without records")
+
+    import gmlx
+    from gmlx.models.inkling2 import records
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    monkeypatch.setenv("GMLX_ACTIVATION_DTYPE", "float32")
+    path = tmp_path / "tiny.gguf"
+    T.write(path, "root", T.values(seed=3), experts_q8=False)
+    spec = gmlx.load_model(str(path), verbose=False)[0]
+    spec.__class__ = Inkling2SpecLM
+    monkeypatch.setattr(records, "_ON", [True])
+    monkeypatch.setattr(records, "DIRECT_ONLY", [False])
+    monkeypatch.setattr(records, "_BLOCKED", [False])
+    cache = spec.make_cache()
+    spec.model(mx.array([IDS[:20]]), cache)
+    _buffer_mtp_target_cache(
+        cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+    return spec, cache, kq, records
+
+
+def _ink_handles(spec):
+    return [handle for m in spec.modules()
+            if (recs := vars(m).get("_ink_records")) is not None
+            for rec in recs[1].values() if isinstance(rec, tuple)
+            for handle in rec[:2]]
+
+
+def test_a_dropped_model_releases_its_records(tmp_path, monkeypatch):
+    # A record holds its layer's arrays as constants: the records of a
+    # model let go (a server unloading it) leave kq's table with it.
+    import gc
+
+    spec, cache, kq, _ = _records_spec(tmp_path, monkeypatch)
+    for t in IDS[20:25]:
+        mx.eval(spec.model(mx.array([[t]]), cache))
+    handles = _ink_handles(spec)
+    assert handles
+    del spec, cache
+    gc.collect()
+    for handle in handles:
+        with pytest.raises(ValueError, match="bad handle"):
+            kq.fused_direct_info(handle)
+
+
+def test_the_record_count_is_the_handles_the_tables_hold(tmp_path,
+                                                         monkeypatch):
+    # The count bounds the process's records (GMLX_INKLING2_RECORDS_MAX).
+    # A table an invalidate replaced goes twice, released and then dropped,
+    # and counts once.
+    import gc
+
+    gc.collect()
+    spec, cache, _, records = _records_spec(tmp_path, monkeypatch)
+    monkeypatch.setattr(records, "_HELD", [0])
+    monkeypatch.setattr(records, "_EPOCH", [0])
+    for t in IDS[20:25]:
+        mx.eval(spec.model(mx.array([[t]]), cache))
+    records.invalidate()
+    for t in IDS[25:30]:
+        mx.eval(spec.model(mx.array([[t]]), cache))
+    handles = _ink_handles(spec)
+    assert handles
+    assert records._HELD[0] == len(handles)
 
 
 def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
@@ -541,6 +668,58 @@ def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
             assert (c[keep + 1:] == c[keep]).all()
             moved |= not (w[keep + 1:] == w[keep]).all()
     assert moved
+
+
+def test_cut_verifies_replay_their_records(model, monkeypatch):
+    # A served round verifies under verify_row_keep. Its visits replay
+    # records that take the keep as an input: every row's logits match the
+    # plain cut verify's to the bit as the keep moves between rounds. On
+    # this tiny model kq refuses the tail record for direct replay, so it
+    # runs through the per-primitive tape; direct replay of a moving keep
+    # is covered by kq's test_row_keep_* cases and the served runs.
+    from types import SimpleNamespace
+
+    kq = pytest.importorskip("mlx_kquant")
+    if not (hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")):
+        pytest.skip("kq build without records")
+
+    from gmlx.models.inkling2 import records
+    from gmlx.models.inkling2.mtp import Inkling2SpecLM
+    from gmlx.spec.helpers import _buffer_mtp_target_cache
+
+    def logits(h):
+        return np.array(spec.head(h)[0].astype(mx.float32))
+
+    def run(on):
+        monkeypatch.setattr(records, "_ON", [on])
+        records.invalidate()
+        cache = spec.make_cache()
+        spec.model(mx.array([IDS[:20]]), cache)
+        _buffer_mtp_target_cache(
+            cache, SimpleNamespace(config=SimpleNamespace(block_size=4)), 4)
+        out, pos, start = [], 20, records.STATS["replayed"]
+        for keep, accepted in ((1, 1), (0, 0), (2, 1), (3, 3), (0, 0),
+                               (2, 2)):
+            block = mx.array([IDS[pos:pos + 4]])
+            with spec.verify_row_keep(mx.array(keep)):
+                h, _, sink = spec.speculative_verify_hidden(block, cache)
+            out.append(logits(h))
+            spec.rollback_speculative_cache(cache, sink, accepted, 4)
+            pos += accepted + 1
+        return out, records.STATS["replayed"] - start
+
+    monkeypatch.setattr(records, "DIRECT_ONLY", [False])
+    monkeypatch.setattr(records, "_BLOCKED", [False])
+    spec, plain = model, type(model)
+    spec.__class__ = Inkling2SpecLM
+    try:
+        want, _ = run(False)
+        got, replayed = run(True)
+    finally:
+        spec.__class__ = plain
+    assert replayed > 0
+    for g, w in zip(got, want):
+        np.testing.assert_array_equal(g, w)
 
 
 @pytest.mark.skipif(not _real_apple_gpu(), reason="GPU kernels")

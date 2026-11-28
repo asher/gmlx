@@ -15,6 +15,7 @@ import mlx.nn as nn
 import atexit
 import os
 import sys
+import threading
 from functools import lru_cache
 from typing import Callable, NamedTuple, cast
 
@@ -1224,14 +1225,37 @@ def _no_records() -> tuple:
     return _NO_RECORDS[0]
 
 
-def replay_steps(steps, rows: int) -> mx.array:
+_STEPS_CONST: dict = {}
+# Set by a caller that replays records outside an eval (qwen4_exp
+# verify_bound) on a thread while it holds a session: the thread's step
+# counts are then arrays built from host values, there with no eval, one a
+# (count, rows, use). Other threads keep the step counts of today (a later
+# model in a server runs on a generation worker of its own).
+_host_steps = threading.local()
+
+
+def host_steps(on: bool) -> None:
+    """Host-built step counts for replay_steps on this thread, or not."""
+    _host_steps.on = bool(on)
+
+
+def replay_steps(steps, rows: int, use: int = 0) -> mx.array:
     """Per-row replay step counts as the int32 [rows] array the replay
     kernels read: an int applies to every row, a sequence gives one count
-    per row."""
+    per row. ``use`` keeps the arrays of two readers apart (the state
+    replay and the conv window of one cache are two inputs of a record)."""
     if isinstance(steps, mx.array):
         return steps.astype(mx.int32).reshape(rows)
     if isinstance(steps, int):
-        return mx.full((rows,), steps, dtype=mx.int32)
+        if not getattr(_host_steps, "on", False):
+            return mx.full((rows,), steps, dtype=mx.int32)
+        key = (steps, rows, use)
+        a = _STEPS_CONST.get(key)
+        if a is None:
+            if len(_STEPS_CONST) > 256:
+                _STEPS_CONST.clear()
+            a = _STEPS_CONST[key] = mx.array([steps] * rows, dtype=mx.int32)
+        return a
     return mx.array([int(t) for t in steps], dtype=mx.int32)
 
 
@@ -1646,7 +1670,8 @@ def set_gdn_conv(cache, base: mx.array, rows: mx.array, steps) -> None:
     ``rows`` itself instead (take_gdn_conv)."""
     win = gdn_conv_window(base, rows, steps)
     cache[0] = win
-    cache._gdn_conv = (win, base, rows, replay_steps(steps, int(base.shape[0])))
+    cache._gdn_conv = (win, base, rows,
+                       replay_steps(steps, int(base.shape[0]), 1))
 
 
 def take_gdn_conv(cache):
@@ -1755,7 +1780,7 @@ def _gdn_verify_v2(self, inputs, mixed_qkv, ba, z, mask, cache, gdn_sink,
         base, records, steps = pend
     if pend_conv is None:
         conv_base, conv_rows, conv_steps = (
-            conv_state, _no_conv_rows(dtype), replay_steps(0, B))
+            conv_state, _no_conv_rows(dtype), replay_steps(0, B, 1))
     else:
         conv_base, conv_rows, conv_steps = pend_conv
     fold = ba_weight is not None
@@ -1815,7 +1840,8 @@ def _gdn_verify_v2(self, inputs, mixed_qkv, ba, z, mask, cache, gdn_sink,
         # conv_out is the window after all S rows. It is left pending as
         # one, so the next verify reads the same arrays after a full
         # accept as after a rollback (the same values either way).
-        cache._gdn_conv = (conv_out, conv.base, conv.rows, replay_steps(S, B))
+        cache._gdn_conv = (conv_out, conv.base, conv.rows,
+                           replay_steps(S, B, 1))
     if hasattr(cache, "advance"):
         cache.advance(S)
         from gmlx.models.qwen35.owned import (

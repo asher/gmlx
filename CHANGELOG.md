@@ -6,6 +6,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Qwen3.8-Flash-Next verify steps take less GPU time.
+- Qwen3.8-Flash-Next drafts faster with its DFlash 2 drafter, which attends
+  over its key ring in place instead of copying the rows it reads.
+- Qwen3.8-Flash-Next cuts fewer DFlash 2 draft rows before the verify
+  (`GMLX_DFLASH_ROW_FLOOR` default 0.3, was 0.5), which decodes faster.
+- Qwen3.8-Flash-Next decodes faster with its DFlash 2 or MTP drafter: a verify
+  goes to the GPU as it is built. `GMLX_SPEC_VERIFY_BOUND=0` turns it off.
+
+### Fixed
+
+- Unloading a Qwen3.8-Flash-Next or Inkling-2-Mini model frees its recorded
+  layer graphs, which kept the model's weights in memory.
+
 ## [0.5.8] - 2026-11-25
 
 ### Added

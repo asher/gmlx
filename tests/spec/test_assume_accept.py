@@ -190,11 +190,15 @@ def test_counted_rounds_on_a_ring_shorter_than_the_window(
         assert on["stats"]["counted"] > 0
 
 
+@pytest.mark.parametrize("floor", [0.5, 0.0])
 @pytest.mark.parametrize("sampled", MODES)
-def test_counted_rounds_keep_the_plain_tokens_and_state(monkeypatch, sampled):
-    plain = _run_counted(monkeypatch, False, n=96, floor=0.5,
+def test_counted_rounds_keep_the_plain_tokens_and_state(monkeypatch, sampled,
+                                                         floor):
+    """A row floor of 0 leaves no cut pending: its rounds are counted as a
+    cut round's are."""
+    plain = _run_counted(monkeypatch, False, n=96, floor=floor,
                          **_kw(monkeypatch, sampled))
-    on = _run_counted(monkeypatch, True, n=96, floor=0.5,
+    on = _run_counted(monkeypatch, True, n=96, floor=floor,
                       **_kw(monkeypatch, sampled))
     _close(plain, on)
     # Every round past the ring's fill is counted, whatever it accepted.
@@ -213,17 +217,69 @@ def test_a_stop_inside_a_counted_round_leaves_the_plain_order_state(
     _close(plain, on)
 
 
-@pytest.mark.parametrize("gather", [True, False])
-def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, gather):
+@pytest.mark.parametrize("stop_after", [None, 13])
+def test_counted_rounds_read_in_place_keep_the_plain_tokens_and_state(
+        monkeypatch, stop_after):
+    """The in-place counted draft (kq key bounds) through the round loop,
+    bf16 at head dim 128 on the GPU: commit ahead, counted draft, trim,
+    redraft and a stop leave the plain order's tokens and state."""
+    import dataclasses
+
+    import gmlx.spec.dflash_drafter as dd
+    import test_early_draft
+    from gmlx.spec.dflash_drafter import DFlash2Drafter
+    from test_dflash2_drafter import _config, _tcfg
+
+    if not dd._in_place_ready():
+        pytest.skip("kq.sdpa_fa_verify with key bounds needs the GPU and kq")
+    calls = []
+    real = dd._bounded_sdpa
+    monkeypatch.setattr(dd, "_bounded_sdpa",
+                        lambda *a: calls.append(1) or real(*a))
+
+    def target():
+        lm = _target()
+        lm.set_dtype(mx.bfloat16)
+        return lm
+
+    def drafter(lm):
+        d = DFlash2Drafter(dataclasses.replace(_config(_tcfg(), window=8),
+                                               head_dim=128))
+        d.set_dtype(mx.bfloat16)
+        mx.eval(d.parameters())
+        d.reset(lm)
+        return d
+
+    monkeypatch.setattr(test_early_draft, "_target", target)
+    monkeypatch.setattr(test_early_draft, "_drafter", drafter)
+    kw = dict(n=96, floor=0.5)
+    if stop_after is not None:
+        kw["stop_after"] = stop_after
+    monkeypatch.setattr(sp, "_ACCEPT_COUNTED", False)
+    plain = _run(monkeypatch, False, **kw)
+    assert not calls
+    monkeypatch.setattr(sp, "_ACCEPT_COUNTED", True)
+    on = _run(monkeypatch, False, **kw)
+    assert on["stats"]["counted"] > 0 and calls
+    _close(plain, on)
+
+
+@pytest.mark.parametrize("form", ["two_piece", "one_take", "masked"])
+def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, form):
     """The counted draft against the plain draft of the same ring, for
-    every count of dead rows. Read by row index it has the plain draft's
-    keys in the plain order: the same bits."""
+    every count of dead rows. Read by row index, in two pieces or (on the
+    GPU, beside the in-place read) one take, it has the plain draft's keys
+    in the plain order: the same bits. Only the one take writes the rows
+    past the live end."""
     import numpy as np
 
     import gmlx.spec.dflash_drafter as dd
     from test_dflash2_drafter import BLOCK, CAPTURE
 
-    monkeypatch.setattr(dd, "_COUNTED_GATHER", gather)
+    monkeypatch.setattr(dd, "_COUNTED_GATHER", form != "masked")
+    monkeypatch.setattr(dd, "_COUNTED_IN_PLACE", form == "one_take")
+    if form == "one_take" and not dd._in_place_ready():
+        pytest.skip("the one-take gather runs on the GPU beside kq key bounds")
 
     lm = _target()
     drafter = _drafter(lm, window=8)
@@ -242,17 +298,79 @@ def test_a_counted_block_is_the_block_drafted_after_the_trim(monkeypatch, gather
     for dead in range(BLOCK):
         drafter.append_context(drafter._captures(rows))
         assert drafter.counted_ok(BLOCK, most)
+        ring = drafter._cache[0]
+        idx = int(ring._idx)
+        past = np.array(ring.keys[..., idx:idx + BLOCK, :])
         got = drafter._draft_hidden(block, (mx.array(dead), most))
         mx.eval(got)
+        written = not np.array_equal(
+            past, np.array(drafter._cache[0].keys[..., idx:idx + BLOCK, :]))
+        assert written == (form != "two_piece")
         kept = drafter.accept_trim(mark, dead)
         want = drafter._draft_hidden(block)
         g = np.array(got.astype(mx.float32))
         w = np.array(want.astype(mx.float32))
-        if gather:
+        if form != "masked":
             assert np.array_equal(g, w)
         else:
             # Same sums in another key order: equal to rounding.
             assert np.allclose(g, w, rtol=2e-3, atol=2e-4)
+        drafter.accept_undo(kept)
+
+
+@pytest.mark.parametrize("gather", [True, False])
+def test_a_counted_block_read_in_place_is_the_plain_block_to_rounding(
+        monkeypatch, gather):
+    """The counted draft that reads the ring in place, its bounds on the
+    GPU (GMLX_DFLASH_COUNTED_IN_PLACE, kq.sdpa_fa_verify), against the
+    plain draft of the same ring, for every count of dead rows, at a head
+    size and dtype the kq kernel takes. The keys split elsewhere: equal to
+    rounding. GMLX_DFLASH_COUNTED_GATHER=0 takes the masked form in its
+    place, also equal to rounding."""
+    import dataclasses
+
+    import numpy as np
+
+    import gmlx.spec.dflash_drafter as dd
+    from gmlx.spec.dflash_drafter import DFlash2Drafter
+    from test_dflash2_drafter import BLOCK, CAPTURE, _config, _tcfg
+
+    monkeypatch.setattr(dd, "_COUNTED_IN_PLACE", True)
+    monkeypatch.setattr(dd, "_COUNTED_GATHER", gather)
+    if not dd._in_place_ready():
+        pytest.skip("kq.sdpa_fa_verify with key bounds needs the GPU and kq")
+    calls = []
+    real = dd._bounded_sdpa
+    monkeypatch.setattr(dd, "_bounded_sdpa",
+                        lambda *a: calls.append(1) or real(*a))
+    lm = _target()
+    lm.set_dtype(mx.bfloat16)
+    cfg = dataclasses.replace(_config(_tcfg(), window=40), head_dim=128)
+    drafter = DFlash2Drafter(cfg)
+    drafter.set_dtype(mx.bfloat16)
+    mx.eval(lm.parameters(), drafter.parameters())
+    lm.set_dflash_capture(CAPTURE)
+    drafter.reset(lm)
+    hidden = int(drafter._hidden) * (1 + drafter._n_targets)
+    mx.random.seed(3)
+    drafter.append_context(drafter._captures(
+        mx.random.normal((1, 43, hidden)).astype(mx.bfloat16)))
+    rows = mx.random.normal((1, BLOCK, hidden)).astype(mx.bfloat16)
+    block = mx.array([[5] + [int(drafter.config.mask_token_id)] * (BLOCK - 1)])
+    most = BLOCK - 1
+    mark = drafter.accept_mark(BLOCK)
+    assert mark is not None and drafter.counted_ok(BLOCK, most, BLOCK)
+    for dead in range(BLOCK):
+        drafter.append_context(drafter._captures(rows))
+        n = len(calls)
+        got = drafter._draft_hidden(block, (mx.array(dead), most))
+        mx.eval(got)
+        assert (len(calls) > n) == gather
+        kept = drafter.accept_trim(mark, dead)
+        want = drafter._draft_hidden(block)
+        assert np.allclose(np.array(got.astype(mx.float32)),
+                           np.array(want.astype(mx.float32)),
+                           rtol=2e-2, atol=2e-2)
         drafter.accept_undo(kept)
 
 
@@ -405,6 +523,38 @@ def test_builds_ahead_that_hold_their_rows_leave_the_rounds_as_they_were(
         _run_prebuilt(monkeypatch, 3, 2, True, n=64, floor=0.5,
                       **_kw(monkeypatch, sampled))
     assert len(held[2]) > len(held[1])
+
+
+@pytest.mark.parametrize("sampled", MODES)
+def test_only_the_rounds_own_verify_is_built_as_submitted_at_once(
+        monkeypatch, sampled):
+    """verify_submit.now: a build ahead for a count the round may not
+    return can be dropped unevaluated and is not marked; the build of a
+    round's own verify with no snapshot held is."""
+    from gmlx.spec import verify_submit
+
+    cls = type(_target())
+    inner = cls.speculative_verify_hidden
+    seen: list = []
+
+    def spy(self, *a, **k):
+        seen.append(verify_submit.is_now())
+        return inner(self, *a, **k)
+
+    monkeypatch.setattr(cls, "speculative_verify_hidden", spy)
+    monkeypatch.setattr(sp, "_prebuilt_seen", {})
+    on = _run_ahead(monkeypatch, 1, True, n=64, floor=0.5,
+                    **_kw(monkeypatch, sampled))
+    assert seen and not verify_submit.is_now()
+    own = list(seen)
+    if on["stats"]["ahead"] > 0:
+        assert any(own)
+    seen.clear()
+    monkeypatch.setattr(sp, "_prebuilt_seen", {})
+    _run_prebuilt(monkeypatch, 3, 2, True, n=64, floor=0.5,
+                  **_kw(monkeypatch, sampled))
+    # The builds ahead are there and are not marked.
+    assert seen.count(False) > 0
 
 
 # --- the verify ahead of the cut at the width the cut is expected to keep ---------

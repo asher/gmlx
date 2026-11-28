@@ -35,6 +35,7 @@ def _levers(monkeypatch):
     monkeypatch.setattr(q4, "_VERIFY_FUSED", False)
     monkeypatch.setattr(q4, "_VERIFY_FUSED_QSA", True)
     monkeypatch.setattr(q4, "_VERIFY_FUSED_CAP", True)
+    monkeypatch.setattr(q4, "_DECODE_FUSED", False)
     monkeypatch.setattr(q4, "_FUSED_LIMITS", (4096, 256 << 20))
     yield
     kq.env_cache(False)
@@ -185,6 +186,51 @@ def test_an_invalidation_drops_the_records(monkeypatch):
     assert _records(lm) == 0
 
 
+def _live_handles(lm):
+    """(record handles the model's tables hold, decode records)."""
+    recs = [(key, rec) for m in lm.modules()
+            if (t := vars(m).get("_verify_fused")) is not None
+            for key, rec in t[1].items() if isinstance(rec, tuple)]
+    return ([handle for _, rec in recs for handle in rec[:2]
+             if isinstance(handle, int)],
+            sum(key[0] == "decode" for key, _ in recs))
+
+
+def test_a_dropped_model_releases_its_records(monkeypatch):
+    # A record holds its layer's arrays as constants: the records of a
+    # model let go (a server unloading it) leave kq's table with it.
+    import gc
+
+    lm, _ = _walk(monkeypatch, True, rounds=ROUNDS[:4])
+    handles = _live_handles(lm)[0]
+    assert handles
+    del lm
+    gc.collect()
+    for handle in handles:
+        with pytest.raises(ValueError, match="bad handle"):
+            kq.fused_direct_info(handle)
+
+
+def test_the_record_count_is_the_handles_the_tables_hold(monkeypatch):
+    # The count bounds the process's records
+    # (GMLX_Q4_VERIFY_FUSED_MAX_RECORDS). A table a weight swap replaced
+    # goes twice, released and then dropped, and counts once; the bound
+    # check counts a decode record's one handle as one.
+    import gc
+
+    gc.collect()
+    monkeypatch.setattr(q4, "_FUSED_HELD", [0, 0, 0])
+    monkeypatch.setattr(q4, "_FUSED_LAYERS", [])
+    monkeypatch.setattr(q4, "_DECODE_FUSED", True)
+    lm, _ = _walk(monkeypatch, True, rounds=ROUNDS, swap_at=8,
+                  step_at=range(10, 20), before=lambda lm: lm.eval())
+    handles, decode = _live_handles(lm)
+    assert handles and decode
+    assert q4._FUSED_HELD[0] == len(handles)
+    q4._fused_bound()
+    assert q4._FUSED_HELD[0] == len(handles)
+
+
 def test_a_weight_swap_turns_the_path_off(monkeypatch):
     monkeypatch.setattr(q4, "_VERIFY_FUSED", True)
     assert q4._verify_fused()
@@ -209,6 +255,20 @@ def test_the_attention_layers_take_records_too(monkeypatch):
     assert not any("_verify_fused" in vars(layer) for layer in
                    lm.model.layers if not layer.is_linear)
     _equal(plain, gdn_only)
+
+
+def test_an_attention_record_leaves_the_indexer_keys_out(monkeypatch):
+    """The plain call leaves the indexer keys lazy and below the sparse
+    depth only a cache evaluation reads them, so an attention record that
+    returned them would add their projection to every round and step."""
+    lm, _ = _decode(monkeypatch, True)
+    held = [(key, r) for layer in lm.model.layers
+            if not layer.is_linear and "indexer" in layer.self_attn
+            for key, r in vars(layer)["_verify_fused"][1].items()
+            if isinstance(r, tuple)]
+    assert held
+    for (shape, dtype), r in held:
+        assert len(kq.fused_call(r[0], [mx.zeros(shape, dtype)])) == 6
 
 
 def test_rollbacks_and_steps_in_eval_mode(monkeypatch):
@@ -272,6 +332,67 @@ def test_the_record_table_is_bounded(monkeypatch):
     _equal(plain, fused)
     stats = q4.verify_fused_stats(lm)
     assert stats["evicted"] > 0 and 0 < stats["records"] <= 2 * 4 + 2
+
+
+def _decode(monkeypatch, fused, steps=14, rounds=()):
+    """Prefill, then one-token decode steps, with verify rounds (plain
+    ones) and their rollbacks among them."""
+    monkeypatch.setattr(q4, "_DECODE_FUSED", fused)
+    kq.env_cache(fused)
+    lm, args = _lm(True)
+    lm.eval()
+    mx.random.seed(11)
+    cache = lm.make_cache()
+    mx.eval(lm(mx.random.randint(0, args.vocab_size, (1, 9)),
+               cache=cache).logits)
+    out = []
+    for i in range(steps):
+        if i in rounds:
+            block = mx.random.randint(0, args.vocab_size, (1, 4))
+            hid, _, sink = lm.speculative_verify_hidden(block, cache)
+            lm.rollback_speculative_cache(cache, sink, rounds[i] - 1, 4)
+            out.append(np.array(hid.astype(mx.float32)))
+        tok = mx.random.randint(0, args.vocab_size, (1, 1))
+        logits = lm(tok, cache=cache).logits
+        mx.eval(logits, [c.state for c in cache])
+        out.append(np.array(logits.astype(mx.float32)))
+    out.extend(np.array(a.astype(mx.float32))
+               for c in cache for a in c.state if isinstance(a, mx.array))
+    return lm, out
+
+
+def test_decode_steps_through_records(monkeypatch):
+    """GMLX_Q4_DECODE_FUSED: one-token steps carry the plain bits, alone
+    and after a verify round left a pending replay (full accept and
+    rollback)."""
+    _, plain = _decode(monkeypatch, False)
+    lm, fused = _decode(monkeypatch, True)
+    assert _records(lm) > 0
+    assert any(k[0] == "decode" for layer in _gdn_layers(lm)
+               for k in vars(layer)["_verify_fused"][1])
+    _equal(plain, fused)
+    rounds = {3: 4, 5: 2, 6: 2, 9: 4, 10: 1, 12: 4}
+    _, plain = _decode(monkeypatch, False, rounds=rounds)
+    lm, fused = _decode(monkeypatch, True, rounds=rounds)
+    assert _records(lm) > 0
+    _equal(plain, fused)
+
+
+def test_the_decode_and_verify_records_turn_the_kq_cache_on_once(monkeypatch):
+    """Each call that turns kq's lever cache on drops the Metal calls the
+    records have learned: with both switches on, the first verify after
+    some decode steps leaves the decode records' calls in place."""
+    from gmlx.models import kq_levers
+
+    calls = []
+    monkeypatch.setattr(kq, "env_cache", calls.append)
+    monkeypatch.setattr(kq_levers, "_ON", [False])
+    monkeypatch.setattr(q4, "_DECODE_FUSED", None)
+    monkeypatch.setattr(q4, "_VERIFY_FUSED", None)
+    monkeypatch.setenv("GMLX_Q4_DECODE_FUSED", "1")
+    monkeypatch.setenv("GMLX_Q4_VERIFY_FUSED", "1")
+    assert q4._decode_fused() and q4._verify_fused()
+    assert calls == [True]
 
 
 @pytest.mark.parametrize("fused", [False, True])

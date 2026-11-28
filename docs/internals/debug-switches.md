@@ -78,7 +78,9 @@ is already running does not see a variable you export later.
 | `GMLX_SPEC_REUSE_ROWS=1` | A verify rebuilt after a missed deferred row cut takes the table rows the whole block read (model reuse_verify_rows). Same bits. |
 | `GMLX_SPEC_ACCEPT_COUNTED=0` | Read a B=1 round's accepted count on the host before its commit and next draft go out. On, a DFlash 2 draft on Flash-Next reads it on the GPU. |
 | `GMLX_DFLASH_COUNTED_F32=0` | A counted draft (GMLX_SPEC_ACCEPT_COUNTED) keeps the ring's stored dtype in its attention in place of float32. |
-| `GMLX_DFLASH_COUNTED_GATHER=0` | A counted draft masks the ring buffer rows (stock attention) in place of reading them by row index in the plain key order. |
+| `GMLX_DFLASH_COUNTED_GATHER=0` | A counted draft masks the ring buffer rows (stock attention), not reading them by row index in the plain key order or in place. |
+| `GMLX_DFLASH_COUNTED_IN_PLACE=0` | A counted draft gathers its ring rows and joins the block, not reading the ring in place within bounds the GPU holds. Rounding differs. |
+| `GMLX_DFLASH_COUNTED_ONE_TAKE=0` | A counted round the in-place layout does not fit gathers the ring rows and joins the block, not one take. Same bits on the GPU. |
 | `GMLX_SPEC_VERIFY_AHEAD=N` | Submit a B=1 verify whole before the row cut is read: 1 after a whole round, 2 always, 0 never. Default 1 where the verify is one submission, else 0. |
 | `GMLX_SPEC_VERIFY_PREBUILT=N` | With a counted commit and VERIFY_AHEAD=2: the next verify is built ahead for the N likeliest accept counts; the others are dropped. |
 | `GMLX_SPEC_APC_LONGER=1` | A prompt both prefix cache levels hold restores the longer record; a DFlash request keeps its last hidden rows to seed that turn. |
@@ -90,13 +92,14 @@ is already running does not see a variable you export later.
 | `GMLX_DFLASH_COUNTED_SHORT=0` | A ring shorter than the window takes the plain draft, not the counted one with its dead rows masked. The two differ in rounding only. |
 | `GMLX_DFLASH_RING_SLACK=N` | Spare rows of the DFlash ring past its window (512, at least 16): more rows, fewer compactions, which a commit ahead cannot take back. |
 | `GMLX_SPEC_DEFER_CUT=0` | A DFlash 2 drafter cuts its draft rows before it returns. Flash-Next then verifies the cut rows only, so output differs in rounding. |
-| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft where the product of the selector's untempered pick probabilities falls under P. The first draft stays. Default 0.5, `0` off. |
+| `GMLX_DFLASH_ROW_FLOOR=P` | Cut a DFlash 2 draft where the product of the selector's untempered pick probabilities falls under P. The first draft stays. Default 0.3 on Flash-Next, `0` off. |
 | `GMLX_DFLASH_RING_IN_PLACE=0` | DFlash draft attention copies the ring buffer per layer, not reading it in place. |
 | `GMLX_DFLASH_QMM_MULTI=0` | Run each DFlash draft projection that shares an input (q/k/v, gate/up) as its own dispatch, not one per codec. |
 | `GMLX_DFLASH_WALK_KERNEL=0` | Run the DFlash 2 selector walk (picks, proposal rows, row cut) as an op chain, not one kernel. |
 | `GMLX_DFLASH_LATTICE_WALK=0` | Build the whole DFlash 2 lattice before the walk, not only the rows of the path the walk kernel takes. |
 | `GMLX_DFLASH_LATTICE_TOPK=0` | Take the DFlash 2 lattice candidates from a full-width argpartition, not the hierarchical top-k. |
 | `GMLX_DFLASH_HEAD_SUBSET=0` | A DFlash 2 draft reads the whole head every round, not skipping the token ids the request has not used. |
+| `GMLX_DFLASH_DRAFT_CODEC=q4_k` | Re-encode a DFlash 2 drafter's own quantized weights at load in this kq codec (q4_k, q5_k or q4_0) where they hold more bits. Other drafters ignore it. |
 | `GMLX_DFLASH_COMMIT_ASYNC=0` | A verified DFlash round's commit runs ahead of the next draft, not on the GPU as soon as it is built. |
 | `GMLX_DFLASH_CONV_KERNEL=0` | Run the DFlash draft's grouped conv as an op chain, not the fused kernels. |
 | `GMLX_SPEC_TOKEN_TRACE=1` | With GMLX_ROUND_LOG: a note per B=1 round with drafts, tokens out and the target's top two ids and logits. Adds a head pass. |
@@ -104,7 +107,13 @@ is already running does not see a variable you export later.
 | `GMLX_Q4_VERIFY_FUSED=0` | Run a qwen4_exp verify's layers as plain calls, not recorded kq graphs that replay their Metal calls. Same bits. A LoRA or streamed experts run plain anyway. |
 | `GMLX_Q4_VERIFY_FUSED_QSA=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep the attention layers of the verify on the plain call. |
 | `GMLX_Q4_VERIFY_FUSED_CAP=0` | With `GMLX_Q4_VERIFY_FUSED` on, keep per-width record arrays in the gated-delta verify (one record layout per pair of round widths). |
+| `GMLX_Q4_DECODE_FUSED=1` | Run a B=1 one-token qwen4_exp decode step's layers as recorded kq graphs, as `GMLX_Q4_VERIFY_FUSED` does. Same bits. Off by default: it slows served decode. |
 | `GMLX_Q4_VERIFY_FUSED_MAX_RECORDS`, `GMLX_Q4_VERIFY_FUSED_MAX_MB` | Bound on the recorded verify graphs of the process (4096 handles, 256 MB of programs); the least recently used go first. |
+| `GMLX_SPEC_VERIFY_BOUND=0` | A B=1 qwen4_exp verify submitted at once goes to mlx as one graph, not encoding its records on kq command buffers of its own as they are reached. Same bits. |
+| `GMLX_Q4_VERIFY_FUSED_WHOLE=0` | A qwen4_exp verify records each attention layer and PLE block in parts, not whole. Same bits. On by default where the bound verify runs, off elsewhere. |
+| `GMLX_SPEC_VERIFY_BOUND_MARKS=1,2,4,8,16,32` | With `GMLX_SPEC_VERIFY_BOUND`, the layers a bound command buffer is committed ahead of. |
+| `GMLX_SPEC_VERIFY_BOUND_STATS=1` | With `GMLX_SPEC_VERIFY_BOUND`, print bound and lazy record calls and where verifies left the bound path at exit. |
+| `GMLX_SPEC_VERIFY_BOUND_TRACE=PATH` | With `GMLX_SPEC_VERIFY_BOUND`, append a line per session commit and mlx submission (perf_counter seconds) to PATH. |
 | `GMLX_MOE_EXPERT_STORE=0` | Keep a Flash-Next load's routed experts as zero-copy views of the GGUF, not in the kq store layout. Other models keep the views by default. |
 | `GMLX_MOE_EXPERT_STORE=full` | Hold the routed experts of every fused MoE block in the kq store layout, on any model. |
 | `GMLX_MOE_EXPERT_STORE`, load | A store load reads each stack from the file past the page cache and never wires the mapped copy. Outputs differ from the views in rounding. |
@@ -261,7 +270,7 @@ fusions.
 | `GMLX_HY4_KEYS_DENSE=0` | Expand Hy4-flash per-head keys through the K-quant gather instead of a matmul on the dequantized stack. |
 | `GMLX_HY4_ROW_KERNEL=0` | Build a Hy4-flash decode step's key and query rows on the op chain instead of one kernel each. Output is bit-identical. |
 | `GMLX_INKLING2_DRAFT_HEAD_BITS=<n>` | Bits of the head copy the Inkling 2 DSpark draft rows read (default 4); 0 reads the target's head. Verify keeps the target's head. |
-| `GMLX_INKLING2_RECORDS=1` | Replay each Inkling 2 decode and verify layer visit as two kq records instead of building it. Less host time, more GPU time. Bit-identical. |
+| `GMLX_INKLING2_RECORDS=1` | Replay each Inkling 2 decode and verify layer visit as two kq records: less host time, same bits. Off by default: served rounds are GPU-bound and gain nothing. |
 | `GMLX_INKLING2_RECORDS_MAX=<n>` | Cap the kq record handles Inkling 2 holds (default 2048). Layouts past the cap run plain. |
 | `GMLX_INKLING2_ROW_KERNEL=0` | Run Inkling 2's decode and verify kernels, the fused verify attention among them, as op chains. Output matches to rounding. |
 | `GMLX_INKLING2_ROW_CUT=<p>` | Keep only the leading drafts whose DSpark chance stays at or above `p`; 0 is off. Default 0.3 where every expert layer can skip or share cut rows, else 0. |
