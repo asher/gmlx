@@ -460,3 +460,61 @@ def test_the_whole_forms_follow_a_bound_verify_kq_can_run(monkeypatch):
         monkeypatch.setattr(q4, "_FUSED_WHOLE", None)
         seen[name] = q4._fused_whole()
     assert seen == {"with sessions": True, "without": False}
+
+
+def _lora_every_layer(lm):
+    """A LoRA on a linear of every layer, as an adapter install leaves the
+    model (its recorded verify graphs dropped)."""
+    from gmlx.load.modules import LoRAKQuantLinear
+    from gmlx.models.qwen4_exp.model import invalidate_verify_compile
+
+    mx.random.seed(7)
+    for layer in lm.model.layers:
+        name, m = next((n, m) for n, m in layer.named_modules()
+                       if n and type(m) is nn.Linear)
+        *path, key = name.split(".")
+        parent = layer
+        for p in path:
+            parent = parent[int(p)] if isinstance(parent, list) else parent[p]
+        out_d, in_d = m.weight.shape
+        parent[key] = LoRAKQuantLinear(
+            m, mx.random.normal((4, in_d)) * 0.01,
+            mx.random.normal((out_d, 4)) * 0.01, 0.5)
+    invalidate_verify_compile()
+
+
+def test_an_adapter_installed_after_verifies_stops_their_sessions(monkeypatch):
+    # A verify asks for a bound session only while a layer of the model
+    # makes records, which a LoRA on every layer stops. The model answered
+    # before the install; the install bumps the epoch, so the verifies after
+    # it ask for none. The session is counted, not opened: any device or kq.
+    import mlx_kquant as kq
+
+    import gmlx.models.qwen4_exp.model as q4
+    from gmlx.models.qwen4_exp import verify_bound as vb
+
+    monkeypatch.setattr(q4, "_VERIFY_EPOCH", q4._VERIFY_EPOCH)
+    monkeypatch.setattr(q4, "_VERIFY_FUSED", True)
+    monkeypatch.setattr(q4, "_VERIFY_BLOCKED", False)
+    monkeypatch.setattr(vb, "_MODE", 1)
+    monkeypatch.setattr(vb, "_kq_mod", [kq])
+    asked: list = []
+    monkeypatch.setattr(vb, "begin", asked.append)
+    args = _args()
+    lm = Qwen4ExpSpecLM(args)
+    _randomize(lm)
+    mx.random.seed(1)
+    cache = lm.make_cache()
+    mx.eval(lm(mx.random.randint(0, args.vocab_size, (1, 6)), cache=cache).logits)
+
+    def verifies(n):
+        for _ in range(n):
+            block = mx.random.randint(0, args.vocab_size, (1, 4))
+            hidden, _, sink = lm.speculative_verify_hidden(block, cache)
+            lm.rollback_speculative_cache(cache, sink, 1, 4)
+            mx.eval(hidden)
+        return len(asked)
+
+    before = verifies(2)
+    _lora_every_layer(lm)
+    assert (before, verifies(2) - before) == (2, 0)

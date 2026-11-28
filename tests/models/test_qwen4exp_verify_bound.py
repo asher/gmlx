@@ -25,6 +25,7 @@ from gmlx.spec import verify_submit
 from gmlx.upstream import gdn_patches
 
 from helpers import _real_apple_gpu
+from test_qwen4exp_mtp import _lora_every_layer
 from test_qwen4exp_qsa_whole import PASS, PROMPT, _equal, _lm
 
 pytestmark = pytest.mark.skipif(
@@ -494,28 +495,6 @@ def test_a_failure_the_round_did_not_check_raises_at_the_next_verify(
         assert np.array_equal(np.array(out[0]), np.array(want))
     finally:
         kq.fuse_release(handle)
-
-
-def _lora_every_layer(lm):
-    """A LoRA on a linear of every layer, as an adapter install leaves the
-    model (its recorded verify graphs dropped)."""
-    import mlx.nn as nn
-
-    from gmlx.load.modules import LoRAKQuantLinear
-
-    mx.random.seed(7)
-    for layer in lm.model.layers:
-        name, m = next((n, m) for n, m in layer.named_modules()
-                       if n and type(m) is nn.Linear)
-        *path, key = name.split(".")
-        parent = layer
-        for p in path:
-            parent = parent[int(p)] if isinstance(parent, list) else parent[p]
-        out_d, in_d = m.weight.shape
-        parent[key] = LoRAKQuantLinear(
-            m, mx.random.normal((4, in_d)) * 0.01,
-            mx.random.normal((out_d, 4)) * 0.01, 0.5)
-    q4.invalidate_verify_compile()
 
 
 @pytest.mark.parametrize("why", ["streamed experts", "an adapter on every layer"])

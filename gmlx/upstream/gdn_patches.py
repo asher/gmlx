@@ -1227,10 +1227,10 @@ def _no_records() -> tuple:
 
 _STEPS_CONST: dict = {}
 # Set by a caller that replays records outside an eval (qwen4_exp
-# verify_bound), for its own thread: step counts are then arrays built from
-# host values, there with no eval, one a (count, rows, use). A model loaded
-# later runs on a thread of its own (a server's generation worker), which
-# keeps the step counts of today.
+# verify_bound) on a thread while it holds a session: the thread's step
+# counts are then arrays built from host values, there with no eval, one a
+# (count, rows, use). Other threads keep the step counts of today (a later
+# model in a server runs on a generation worker of its own).
 _host_steps = threading.local()
 
 

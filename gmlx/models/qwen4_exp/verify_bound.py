@@ -1,9 +1,10 @@
 """Bound replay of a verify: its records go onto command buffers of ours.
 
 ``GMLX_SPEC_VERIFY_BOUND`` (on by default; ``0``, ``false``, ``no``, ``off``
-or an empty value turn it off; needs a kq build with ``bound_call``). A B=1 verify that its caller submits at once
-(``gmlx.spec.verify_submit.now``) does not build one mlx node a record and
-hand the graph to ``mx.async_eval``: each record that has its program is
+or an empty value turn it off; needs a kq build with ``bound_call``). A B=1
+verify that its caller submits at once (``gmlx.spec.verify_submit.now``)
+does not build one mlx node a record and hand the graph to
+``mx.async_eval``: each record that has its program is
 encoded as it is reached, onto a command buffer of a kq bound session, and
 the buffers are committed ahead of fixed layers. The Metal calls are the
 ones the replay inside an eval makes, on the same operands, so the bits are
