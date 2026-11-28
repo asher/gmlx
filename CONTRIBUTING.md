@@ -74,6 +74,9 @@ python scripts/gate.py run     # after you commit
 git push                       # a plain push carries the result
 ```
 
+From a fork, a push can't carry the result. Run the gate anyway and say
+in the pull request that it passed.
+
 [CI and the GPU gate](docs/internals/ci.md) explains the gate and what CI
 runs. If your change
 touches loading or numerics, say which integration tests you ran and on

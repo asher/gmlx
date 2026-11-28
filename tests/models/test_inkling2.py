@@ -19,6 +19,7 @@ import mlx.core as mx
 sys.path.insert(0, os.path.dirname(__file__))
 import inkling2_tiny as T  # noqa: E402
 from f32_exact import f32_exact  # noqa: E402
+from helpers import _real_apple_gpu  # noqa: E402
 
 L = 40
 IDS = np.random.default_rng(7).integers(2, len(T.tokens()), L).tolist()
@@ -542,6 +543,7 @@ def test_a_cut_verify_keeps_the_rows_it_keeps(model, monkeypatch):
     assert moved
 
 
+@pytest.mark.skipif(not _real_apple_gpu(), reason="GPU kernels")
 @pytest.mark.parametrize("experts", ["Q4_0", "Q8_0"])
 def test_a_cut_verify_reads_no_experts_past_the_keep(tmp_path, monkeypatch,
                                                      experts):
