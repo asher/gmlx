@@ -53,6 +53,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 from . import model as q4
+from . import verify_bound as _vb
 from gmlx.cache.attention import create_attention_mask
 from gmlx.envflags import env_bool, env_int
 from gmlx.spec.mtp_drafter import QwenMTPDrafter
@@ -238,11 +239,43 @@ class Qwen4ExpSpecHooks:
         plus the rollback sink in the ``gdn_states`` slot. ``rope_deltas`` is
         the rounds loop's per-row mrope delta."""
         sink: list = []
-        _, hidden = self._spec_forward(
-            verify_input, prompt_cache, gdn_sink=sink,
-            position_ids=self._spec_verify_positions(
-                verify_input, prompt_cache, rope_deltas))
+        # GMLX_SPEC_VERIFY_BOUND: the records of the forward run as they
+        # are reached, on command buffers of a kq session.
+        vb = (_vb.begin(int(verify_input.shape[0]))
+              if _vb.on() and self._verify_records() else None)
+        try:
+            _, hidden = self._spec_forward(
+                verify_input, prompt_cache, gdn_sink=sink,
+                position_ids=self._spec_verify_positions(
+                    verify_input, prompt_cache, rope_deltas))
+        finally:
+            if vb is not None:
+                _vb.end(vb)
         return hidden, {}, sink
+
+    def _verify_records(self) -> bool:
+        """Whether a verify of this model makes records a bound session can
+        take. Not with its experts streamed (the weights swapped around each
+        layer call turn the recorded verify off for the process), nor with
+        a LoRA on every layer (a layer with one runs plain): a session there
+        binds nothing and submits the verify's input on its own."""
+        if not q4._verify_fused():
+            return False
+        seen = getattr(self, "_vb_records", None)
+        if seen is None or seen[0] != q4._VERIFY_EPOCH:
+            # An adapter install bumps the epoch.
+            seen = (q4._VERIFY_EPOCH, not all(
+                q4._layer_has_lora(layer) for layer in self.model.layers))
+            object.__setattr__(self, "_vb_records", seen)
+        return seen[1]
+
+    @property
+    def speculative_round_check(self):
+        """Called by the round loop after its host read of a verify: raises
+        the error of a failed command buffer of the verify's kq session
+        (verify_bound). None with the lever off or a kq without bound
+        sessions."""
+        return _vb.check if _vb.on() else None
 
     def rollback_speculative_cache(
         self, prompt_cache, gdn_states, accepted, block_size: int

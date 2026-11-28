@@ -10,26 +10,30 @@ other two convolutions). Both depend on the row count alone. The cache
 append and the attention core, which depend on the cache offset, are
 built as the plain call builds them. A record holds the layer's arrays as
 constants; every array of the request it reads (the stream, the blocks,
-the messages, the convolution states, the positions) is an input.
+the messages, the convolution states, the positions, the keep of a cut
+verify) is an input.
 
 A layout runs plain on its first use, records on its second and replays
 after that. A record replays its Metal calls, so a layout whose record kq
 refuses to replay that way (``kq.fused_direct_info``) stays plain. Bits
 equal the plain call's.
 
-Off by default: on an M5 Max both steps are GPU-bound, and the replay's
-barriers cost more GPU time than the host build it saves.
-``GMLX_INKLING2_RECORDS=1`` turns it on where the host build bounds the
-step.
+Off by default: on an M5 Max both steps are GPU-bound, so the host build
+the records save does not shorten a served round (Q4_0 rounds run a
+little slower with them). ``GMLX_INKLING2_RECORDS=1`` turns it on where
+the host build bounds the step.
 """
 
 import mlx.core as mx
 
 from gmlx.envflags import env_bool, env_int
+from gmlx.models.kq_levers import RecordTable, lever_cache_on
 
 # Visits wider than this run plain: a prefill chunk's shapes rarely repeat.
 MAX_ROWS = 16
 
+# The switch, None until enabled() reads it; a visit skips this module once
+# it is False.
 _ON: list = [None]
 # Bumped by invalidate: records of an older epoch are dropped at their
 # next use. Blocked for the process once weights are swapped around a
@@ -109,6 +113,7 @@ def _release(table: dict) -> None:
             for handle in rec[:2]:
                 kq.fuse_release(handle)
                 _HELD[0] -= 1
+    table.clear()
 
 
 def _table(layer) -> dict:
@@ -119,15 +124,15 @@ def _table(layer) -> dict:
             or not all(d[k] is v for d, k, v in recs[2])):
         if recs is not None:
             _release(recs[1])
-        recs = (_EPOCH[0], {}, _leaves(layer, []))
+        recs = (_EPOCH[0], RecordTable(_release), _leaves(layer, []))
         object.__setattr__(layer, "_ink_records", recs)
     return recs[1]
 
 
 def _usable(layer, h, conv_cache, kv_cache, pad_mask) -> bool:
-    if (kv_cache is None or conv_cache is None or pad_mask is not None
-            or layer.training or h.shape[0] != 1 or h.shape[1] > MAX_ROWS
-            or not enabled()):
+    if (not enabled() or kv_cache is None or conv_cache is None
+            or pad_mask is not None or layer.training or h.shape[0] != 1
+            or h.shape[1] > MAX_ROWS):
         return False
     if conv_cache.lengths is not None or conv_cache.history_capacity:
         return False
@@ -159,13 +164,15 @@ def _record(inputs: list, outputs: list):
             outs.append(a)
         refs.append((1, j))
     # Direct replay needs the cache of KQ_* reads.
-    kq.env_cache(True)
+    lever_cache_on()
     try:
         probe = kq.fuse_graph(inputs, outs)
         used = kq.fused_info(probe)[2]
         kq.fuse_release(probe)
         pick = [i for i, u in enumerate(used) if u or i == 0]
-        handle = kq.fuse_graph([inputs[i] for i in pick], outs, direct=True)
+        # Barrier groups: fewer barriers than the walk's order, same bits.
+        handle = kq.fuse_graph([inputs[i] for i in pick], outs, direct=True,
+                               level=2)
     except (ValueError, RuntimeError, TypeError):
         return None
     if (DIRECT_ONLY[0]
@@ -188,11 +195,13 @@ def _windows(sink, n: int) -> list:
 
 
 def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
-          messages, conv_sink):
+          messages, conv_sink, keep=None):
     """The visit's output through its records, or None where the plain
     call must run. Leaves the caches, ``blocks`` and ``conv_sink`` as the
     plain call leaves them, except the convolution offset, which the
-    caller advances."""
+    caller advances. ``keep`` is the drafts a cut verify keeps (a lazy
+    scalar, model.verify_row_keep), an input of the tail record: the MoE
+    routes the rows past it from it."""
     if not _usable(layer, h, conv_cache, kv_cache, pad_mask):
         return None
     table = _table(layer)
@@ -201,8 +210,9 @@ def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
     a_in = [h, *blocks, *msgs[:3], conv_cache[0], conv_cache[1]]
     if full:
         a_in.append(positions)
+    cut = [] if keep is None else [keep]
     key = (conv_sink is not None, len(blocks), len(msgs),
-           tuple((a.shape, a.dtype) for a in a_in))
+           tuple((a.shape, a.dtype) for a in a_in + cut))
     rec = table.get(key)
     if rec is None:
         table[key] = "plain" if _has_lora(layer) else False
@@ -226,7 +236,13 @@ def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
                  *_windows(sink_a, 2)]
         att = layer.attn_core(q, k, v, r, sink, kv_cache)
         b_in = [h, att, gate, *blocks, *msgs[3:], conv_cache[2],
-                conv_cache[3]]
+                conv_cache[3], *cut]
+        if cut:
+            # The row maps a cut verify shares across its layers may be
+            # evaluated by now: this tail builds its own from the keep.
+            from gmlx.models.inkling2 import model as im
+
+            im._ROW_KEEP.src = {}
         sink_b = [] if windows else None
         out = layer.tail(h, ip, blocks, att, gate, conv_cache, None,
                          messages, sink_b)
@@ -264,7 +280,8 @@ def visit(layer, h, ip, blocks, conv_cache, kv_cache, pad_mask, positions,
         if windows:
             conv_sink.extend(sink_b)
         return out
-    b_in = [h, att, gate, *blocks, *msgs[3:], conv_cache[2], conv_cache[3]]
+    b_in = [h, att, gate, *blocks, *msgs[3:], conv_cache[2], conv_cache[3],
+            *cut]
     b = _replay(rb, b_in)
     out, c2, c3 = b[:3]
     conv_cache[2], conv_cache[3] = c2, c3

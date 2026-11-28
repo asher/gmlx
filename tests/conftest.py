@@ -372,11 +372,15 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture(autouse=True)
 def _kq_env_reads_live():
     # A model that records kq graphs turns on kq's cache of KQ_* reads for
-    # the process; the next test reads its levers fresh.
+    # the process; the next test reads its levers fresh, and its first
+    # record turns the cache on again (gmlx.models.kq_levers).
     yield
     kq = sys.modules.get("mlx_kquant")
     if kq is not None and hasattr(kq, "env_cache"):
         kq.env_cache(False)
+    levers = sys.modules.get("gmlx.models.kq_levers")
+    if levers is not None:
+        levers._ON[0] = False
 
 
 @pytest.fixture(autouse=True)

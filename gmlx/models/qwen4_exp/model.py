@@ -34,6 +34,7 @@ of 256 dims with interleaved mrope sections, which for text-only positions is
 plain NEOX rope.
 """
 
+import functools
 import importlib
 import math
 import os
@@ -55,9 +56,12 @@ from gmlx.cache.attention import (
 from gmlx.cache.kv_cache import ArraysCache, KVCache, _BaseCache
 from gmlx.envflags import env_bool, env_int
 from gmlx.gen import deferred_clear
+from gmlx.models.kq_levers import RecordTable, lever_cache_on
 from gmlx.tune.attention import blocked_attention
 from gmlx.tune.gdn import training_gated_delta_update
 from gmlx._vendor.mlx_lm.models.switch_layers import SwitchGLU
+
+from . import verify_bound as _vb
 
 
 def ensure_registered() -> None:
@@ -1730,6 +1734,8 @@ class QSAKVCache(KVCache):
     _tail_cap = None
     _bt = None              # finished blocks after the first _nbb
     _nbb = 0                # finished blocks live in ``blocks``
+    _bt_fixed = False       # _bt is kept at a fixed capacity (qsa_whole)
+    _w_mark = None          # the tails this cache alone holds (qsa_whole.own)
     _fence = None           # copies to wait for before the next write
     # Set by a model whose decode batch cannot keep its rows on their own
     # caches (Qwen4ExpModel._qsa_dense_batch): merge lifts such rows dense.
@@ -1956,7 +1962,14 @@ class QSAKVCache(KVCache):
             if held and new.dtype != held[0].dtype:
                 new = new.astype(held[0].dtype)
             if nb and m <= 2 and nt + m <= self._tail_rows() // r:
-                self._bt = mx.concatenate(held[1:] + [new], axis=1)
+                bt = self._bt
+                if (self._bt_fixed and bt is not None
+                        and bt.shape[1] >= nt + m and bt.dtype == new.dtype):
+                    # The whole-layer record keeps the block tail at a
+                    # fixed capacity: write the new keys in it.
+                    bt[:, nt:nt + m] = new
+                else:
+                    self._bt = mx.concatenate(held[1:] + [new], axis=1)
             else:
                 self.blocks = mx.concatenate(held + [new], axis=1)
                 self._bt, self._nbb = None, n_blocks
@@ -2038,6 +2051,11 @@ class QSAKVCache(KVCache):
             self.ratio = int(v)
 
     def trim(self, n):
+        # Rows another holder of the tail arrays still reads (a copy of
+        # this cache, a handout taken before a rollback) would now be
+        # appended over: the whole-layer record takes its own tails again
+        # before it writes in place. The rule of gmlx/cache/kv_append.py.
+        self._w_mark = None
         n = min(self.offset, n)
         self.offset -= n
         self._tl = max(0, self._tl - n)
@@ -3233,7 +3251,7 @@ def _verify_fused() -> bool:
     input layout and replayed as one primitive, which on a GPU stream
     replays the layer's Metal calls. On by default (0 turns it off). Needs
     a kq build with fuse_graph; the kq lever cache goes on with it, so a
-    KQ_* lever is read once."""
+    KQ_* lever is read once (gmlx.models.kq_levers)."""
     global _VERIFY_FUSED
     if _VERIFY_FUSED is None:
         on = env_bool("GMLX_Q4_VERIFY_FUSED", True)
@@ -3242,9 +3260,29 @@ def _verify_fused() -> bool:
 
             on = hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")
             if on:
-                kq.env_cache(True)
+                lever_cache_on()
         _VERIFY_FUSED = on
     return _VERIFY_FUSED and not _VERIFY_BLOCKED
+
+
+_DECODE_FUSED = None
+
+
+def _decode_fused() -> bool:
+    """Whether a B=1 decode step of one token runs its gated-delta and
+    attention layers as recorded kq graphs (``GMLX_Q4_DECODE_FUSED=1``),
+    under the rules of _verify_fused."""
+    global _DECODE_FUSED
+    if _DECODE_FUSED is None:
+        on = env_bool("GMLX_Q4_DECODE_FUSED", False)
+        if on:
+            import mlx_kquant as kq
+
+            on = hasattr(kq, "fuse_graph") and hasattr(kq, "env_cache")
+            if on:
+                lever_cache_on()
+        _DECODE_FUSED = on
+    return _DECODE_FUSED and not _VERIFY_BLOCKED
 
 
 _VERIFY_FUSED_QSA = None
@@ -3272,6 +3310,7 @@ def _fused_release(table: dict) -> None:
                 if isinstance(handle, int):
                     kq.fuse_release(handle)
                     _FUSED_HELD[0] -= 1
+    table.clear()
 
 
 def drop_verify_records(layers) -> None:
@@ -3301,8 +3340,15 @@ def _verify_fused_cap() -> bool:
 
 
 def _fused_kw() -> dict:
-    """Keywords of a record that replays its Metal calls."""
-    return {"direct": True}
+    """Keywords of a record that replays its Metal calls, its kernels in
+    barrier groups (fewer barriers than the walk's order, same bits). With
+    the whole layer forms (_fused_whole) a record runs its primitives by
+    depth from its inputs (kq fuse_graph level 1): the same kernels on the
+    same operands. With the bound verify on, a record is one a kq session
+    replays (verify_bound.record_kw)."""
+    kw = {"direct": True, "level": 1 if _fused_whole() else 2}
+    kw.update(_vb.record_kw())
+    return kw
 
 
 # Record handles held by the process, handles made since the last bound
@@ -3377,21 +3423,25 @@ def _fused_bound() -> None:
             continue
         for key, rec in recs[1].items():
             if isinstance(rec, tuple):
-                held.append((rec[-1][0], _fused_bytes(rec), recs[1], key, rec))
-    handles = 2 * len(held)
+                # A pair (gated-delta verify, split attention) holds two
+                # handles; the PLE, whole and decode records one.
+                n = sum(isinstance(handle, int) for handle in rec[:2])
+                held.append((rec[-1][0], _fused_bytes(rec), recs[1], key, rec,
+                             n))
+    handles = sum(h[5] for h in held)
     total = sum(h[1] for h in held)
     _FUSED_HELD[0] = handles
     if handles <= max_handles and total <= max_bytes:
         return
     held.sort(key=lambda h: h[0])
-    for _, nbytes, table, key, rec in held:
+    for _, nbytes, table, key, rec, n in held:
         if handles <= max_handles * 3 // 4 and total <= max_bytes * 3 // 4:
             break
         for handle in rec[:2]:
             if isinstance(handle, int):
                 kq.fuse_release(handle)
         table[key] = False
-        handles -= 2
+        handles -= n
         total -= nbytes
         _FUSED_HELD[2] += 1
     _FUSED_HELD[0] = handles
@@ -3405,12 +3455,13 @@ def _fused_steps(S: int, B: int) -> tuple:
     per shape for the process: evaluating one per record stopped the build
     of a verify for a GPU round trip at every layer. Two arrays, the
     pending conv window's and the replay's: the next round's record takes
-    both as inputs, and one array cannot be two inputs."""
+    both as inputs, and one array cannot be two inputs. They are the
+    arrays a rollback to ``S`` rows leaves (gdn_patches.replay_steps)."""
     steps = _FUSED_STEPS.get((S, B))
     if steps is None:
         import gmlx.upstream.gdn_patches as _gp
 
-        steps = (_gp.replay_steps(S, B), _gp.replay_steps(S, B))
+        steps = (_gp.replay_steps(S, B, 1), _gp.replay_steps(S, B, 0))
         mx.eval(steps)
         _FUSED_STEPS[(S, B)] = steps
     return steps
@@ -3445,7 +3496,8 @@ def _fused_gdn_verify(layer, h, c, gdn_sink):
             import weakref
 
             _FUSED_LAYERS.append(weakref.ref(layer))
-        recs = (_VERIFY_EPOCH, {}, _layer_leaves(layer, []))
+        recs = (_VERIFY_EPOCH, RecordTable(_fused_release),
+                _layer_leaves(layer, []))
         object.__setattr__(layer, "_verify_fused", recs)
         if _verify_fused_cap():
             # From here on the layer's one-kernel verify leaves records
@@ -3537,7 +3589,7 @@ def _fused_gdn_verify(layer, h, c, gdn_sink):
     handle, lazy, pick, refs, K, steps, pend_cv, use = rec
     _FUSED_TICK[0] += 1
     use[0] = _FUSED_TICK[0]
-    res = kq.fused_call(handle, [cand[i] for i in pick])
+    res = _vb.call(handle, [cand[i] for i in pick])
     out, conv_out, rbase, rd, rk, rg, cbase, crows = (
         (cand if kind == 0 else res)[i] for kind, i in refs)
     if pend_cv:
@@ -3568,15 +3620,365 @@ def _fused_gdn_verify(layer, h, c, gdn_sink):
     return out
 
 
+_FUSED_WHOLE = None
+
+
+def _fused_whole() -> bool:
+    """Whether a verify runs its layers whole as records: an attention
+    layer as one record whose offsets and lengths are slots of a parameter
+    block (qsa_whole), the PLE block from its table rows on as one record,
+    and every record in level order (_fused_kw). Same bits as the split
+    form. ``GMLX_Q4_VERIFY_FUSED_WHOLE``, on by default where the bound
+    verify runs (``GMLX_SPEC_VERIFY_BOUND`` and a kq with bound sessions),
+    off otherwise."""
+    global _FUSED_WHOLE
+    if _FUSED_WHOLE is None:
+        on = env_bool("GMLX_Q4_VERIFY_FUSED_WHOLE", _vb.on())
+        if on:
+            import mlx_kquant as kq
+
+            on = hasattr(kq, "kv_append") and hasattr(kq, "fused_bind")
+        _FUSED_WHOLE = on
+    return _FUSED_WHOLE
+
+
+def _fused_ple_verify(layer, ple, h, emb, cache):
+    """The PLE block of a verify from its table rows on as one record:
+    (output, conv input) with the conv state left in the cache, or None
+    where the plain code must run (no record table on the layer yet, a
+    layout at its first use, a LoRA, no conv state of this batch). The
+    record lives in the layer's table under the rules of
+    _fused_gdn_verify; the stream, the rows and the conv state are its
+    inputs."""
+    import mlx_kquant as kq
+
+    recs = vars(layer).get("_verify_fused")
+    if (recs is None or recs[0] != _VERIFY_EPOCH
+            or not all(d[k] is v for d, k, v in recs[2])):
+        return None
+    state = cache[2] if cache is not None else None
+    if (not isinstance(state, mx.array) or h.shape[0] != 1
+            or state.shape[0] != 1 or ple.training):
+        return None
+    table = recs[1]
+    key = ("ple", h.shape, h.dtype, emb.shape, emb.dtype, state.shape,
+           state.dtype)
+    rec = table.get(key)
+    if rec is None:
+        table[key] = "plain" if _layer_has_lora(layer) else False
+        return None
+    if rec == "plain":
+        return None
+    ins = [h, emb, state]
+    if rec is False:
+        table[key] = "plain"
+        out, conv_input, new_state = ple._math(h, emb, state)
+        try:
+            handle = kq.fuse_graph(ins, [out, conv_input, new_state],
+                                   **_fused_kw())
+        except (ValueError, RuntimeError, TypeError):
+            handle = None
+        if handle is not None:
+            table[key] = (handle, None, "ple", _fused_use())
+            _fused_note_new(1)
+        cache[2] = new_state
+        return out, conv_input
+    _FUSED_TICK[0] += 1
+    rec[-1][0] = _FUSED_TICK[0]
+    out, conv_input, new_state = _vb.call(rec[0], ins)
+    cache[2] = new_state
+    return out, conv_input
+
+
+def _whole_key(h_shape, h_dtype, c, L: int) -> tuple:
+    # one row: its tail rows are a shape of the gather
+    return ("whole", h_shape, h_dtype, c._kb.shape, c._kb.dtype,
+            c._vb.shape, c._ib.shape, c._nbb,
+            (c.offset + 1) % c.ratio if L == 1 else 0)
+
+
+def _whole_d_key(h_shape, h_dtype, c, cap: int) -> tuple:
+    return ("whole-d", h_shape, h_dtype, c._kb.shape, c._kb.dtype,
+            c._vb.shape, c._kt.shape, c._it.shape, cap)
+
+
+def _bound_prepare(model, cache, h, vb) -> None:
+    """Ahead of a bound verify (verify_bound): what each attention layer's
+    whole record would make lazily in front of its replay (the block tail
+    at capacity, the copies of qsa_whole.own) is made now for every layer
+    whose record is recorded. The copies go onto the session's buffer as
+    blit copies; where kq cannot make them they are the mlx copies of
+    own(), handed to the session so one submission carries them."""
+    if not _fused_whole():
+        return
+    from . import qsa_whole as W
+
+    L = h.shape[1]
+    todo = []
+    for layer, c in zip(model.layers, cache):
+        if (layer.is_linear or type(c) is not QSAKVCache or "ple" in layer
+                or "indexer" not in layer.self_attn):
+            continue
+        recs = vars(layer).get("_verify_fused")
+        if recs is None or recs[0] != _VERIFY_EPOCH:
+            continue
+        # The layer's input is not this h (its dtype and streams are those
+        # the layers below leave): the layer keeps what its record last saw.
+        hin = vars(layer).get("_whole_hin")
+        if hin is None:
+            continue
+        h_shape = (h.shape[0], L) + hin[0]
+        W.cut_base(c)
+        st = W.state(layer.self_attn, c, L)
+        if st is not None:
+            if type(recs[1].get(_whole_key(h_shape, hin[1], c, L))) is not tuple:
+                continue
+            W.ensure_block_tail(c, st[0][3])
+        else:
+            st = W.dense_state(layer.self_attn, c, L)
+            if st is None or type(recs[1].get(
+                    _whole_d_key(h_shape, hin[1], c, st[1]))) is not tuple:
+                continue
+        if not W.owned(c):
+            todo.append(c)
+    if not todo:
+        return
+    names = ("_kt", "_vt", "_it", "_bt")
+    src = [getattr(c, n) for c in todo for n in names
+           if getattr(c, n) is not None]
+    got = vb.copy(src)
+    if got is None:
+        for c in todo:
+            W.own(c)
+            vb.pending.extend(
+                a for a in (c._kt, c._vt, c._it, c._bt) if a is not None)
+        return
+    it = iter(got)
+    for c in todo:
+        for n in names:
+            if getattr(c, n) is not None:
+                setattr(c, n, next(it))
+        W._mark(c)
+
+
+def _fused_qsa_whole_dense(layer, h, c, table):
+    """_fused_qsa_whole below the sparse depth: the attention over every
+    key at a fixed key count, or None (qsa_whole.dense_state)."""
+    import mlx_kquant as kq
+
+    from . import qsa_whole as W
+
+    L = h.shape[1]
+    st = W.dense_state(layer.self_attn, c, L)
+    if st is None:
+        _vb.note(layer, "no dense form")
+        return None
+    vals, cap, span = st
+    key = _whole_d_key(h.shape, h.dtype, c, cap)
+    rec = table.get(key)
+    if rec is None:
+        _vb.note(layer, "dense new layout")
+        table[key] = "plain" if _layer_has_lora(layer) else False
+        return None
+    if rec == "plain":
+        _vb.note(layer, "dense plain")
+        return None
+    _vb.note(layer, "dense whole" if rec is not False else "dense recorded")
+    W.own(c)
+    p = W.params(vals)
+    ins = [h, c._kt, c._vt, c._it, c._kb, c._vb, p]
+    if rec is False:
+        table[key] = "plain"
+        try:
+            outs = W.dense_graph(layer, h, c, p, vals, cap)
+        except (ValueError, RuntimeError, TypeError):
+            outs = None
+        if outs is None:
+            return None
+        try:
+            handle = kq.fuse_graph(
+                ins, list(outs), params=len(ins) - 1,
+                param_ranges=W.dense_ranges(c, L, span), **_fused_kw())
+        except (ValueError, RuntimeError, TypeError):
+            handle = None
+        if handle is not None:
+            table[key] = (handle, None, "whole", _fused_use())
+            _fused_note_new(1)
+        return W.dense_commit(c, outs, L)
+    _FUSED_TICK[0] += 1
+    rec[-1][0] = _FUSED_TICK[0]
+    object.__setattr__(layer, "_whole_hin", (h.shape[2:], h.dtype))
+    try:
+        outs = _vb.call(rec[0], ins)
+    except ValueError:
+        return None
+    return W.dense_commit(c, outs, L)
+
+
+def _fused_qsa_whole(layer, h, c, mask, positions, table):
+    """One attention layer of a verify as one record, or None where the
+    split form or the plain call must run: a layout at its first use, a
+    depth the record does not cover, a cache about to fold its tail or
+    rebuild its block base, mrope positions, a mask array."""
+    import mlx_kquant as kq
+
+    from . import qsa_whole as W
+
+    if (positions is not None or isinstance(mask, mx.array)
+            or h.shape[0] != 1):
+        _vb.note(layer, "positions" if positions is not None else "mask")
+        return None
+    L = h.shape[1]
+    W.cut_base(c)
+    st = W.state(layer.self_attn, c, L)
+    if st is None:
+        if _vb.noting():
+            a = layer.self_attn
+            r, topk = a.ratio, a.indexer.block_topk
+            _vb.note(layer, f"topk {topk}" if topk != 512 else
+                     "dense depth" if (c.offset + 1) // r <= topk else
+                     "state: " + W._state(a, c, L))
+        return _fused_qsa_whole_dense(layer, h, c, table)
+    vals, nb_new = st
+    key = _whole_key(h.shape, h.dtype, c, L)
+    rec = table.get(key)
+    if rec is None:
+        _vb.note(layer, "new layout")
+        table[key] = "plain" if _layer_has_lora(layer) else False
+        return None
+    if rec == "plain":
+        _vb.note(layer, "plain")
+        return None
+    _vb.note(layer, "whole" if rec is not False else "recorded")
+    W.ensure_block_tail(c, vals[3])
+    W.own(c)
+    p = W.params(vals)
+    if rec is False:
+        table[key] = "plain"
+        try:
+            outs = W.graph(layer, h, c, p, vals)
+        except (ValueError, RuntimeError, TypeError):
+            outs = None
+        if outs is None:
+            return None
+        ins = [h, c._kt, c._vt, c._it, c._bt, c._kb, c._vb, c._ib,
+               c.blocks, p]
+        try:
+            handle = kq.fuse_graph(
+                ins, list(outs), params=len(ins) - 1,
+                param_ranges=W.ranges(layer.self_attn, c, L), **_fused_kw())
+        except (ValueError, RuntimeError, TypeError):
+            handle = None
+        if handle is not None:
+            table[key] = (handle, None, "whole", _fused_use())
+            _fused_note_new(1)
+        return W.commit(c, outs, L, nb_new)
+    _FUSED_TICK[0] += 1
+    rec[-1][0] = _FUSED_TICK[0]
+    object.__setattr__(layer, "_whole_hin", (h.shape[2:], h.dtype))
+    try:
+        outs = _vb.call(
+            rec[0], [h, c._kt, c._vt, c._it, c._bt, c._kb, c._vb, c._ib,
+                     c.blocks, p])
+    except ValueError:
+        return None
+    return W.commit(c, outs, L, nb_new)
+
+
+def _fused_gdn_decode(layer, h, c):
+    """One gated-delta layer of a one-token decode step through its
+    recorded graph, or None where the plain call must run (the cases of
+    _fused_gdn_verify, and a step the one-kernel decode does not take).
+    The layer call from behind its PLE block on."""
+    import mlx_kquant as kq
+
+    gdn = layer.linear_attn
+    slots = list(c.cache)[:2]
+    if (len(slots) != 2 or not all(isinstance(a, mx.array) for a in slots)
+            or layer.training or _prof_on(1)
+            or getattr(c, "lengths", None) is not None
+            or not gdn._fused_decode_ok(1, 1, None, c)):
+        return None
+    recs = vars(layer).get("_verify_fused")
+    if (recs is None or recs[0] != _VERIFY_EPOCH
+            or not all(d[k] is v for d, k, v in recs[2])):
+        if recs is not None:
+            _fused_release(recs[1])
+        else:
+            import weakref
+
+            _FUSED_LAYERS.append(weakref.ref(layer))
+        recs = (_VERIFY_EPOCH, RecordTable(_fused_release),
+                _layer_leaves(layer, []))
+        object.__setattr__(layer, "_verify_fused", recs)
+    table = recs[1]
+    # The pending replay as the decode kernel's take would see it. A
+    # pending conv window is read through cache[0], the lazy window.
+    rp = getattr(c, "_gdn_replay", None)
+    if rp is not None and rp[0] is not slots[1]:
+        rp = None
+    cand = [h, slots[0], slots[1]]
+    if rp is not None:
+        cand += [rp[1], *rp[2], rp[3]]
+    key = ("decode", rp is not None,
+           tuple((a.shape, a.dtype) for a in cand))
+    rec = table.get(key)
+    if rec is None:
+        table[key] = "plain" if _layer_has_lora(layer) else False
+        return None
+    if rec == "plain":
+        return None
+    if rec is False:
+        table[key] = "plain"
+        mixed, inject = layer.hc_attn(h)
+        out = _hc_combine(h, gdn(mixed, mask=None, cache=c), inject,
+                          kern=True)
+        mixed, inject = layer.hc_ffn(out)
+        out = _hc_combine(out, layer.mlp(mixed), inject, kern=True)
+        if getattr(c, "_gdn_replay", None) is not None:
+            return out
+        want = [out, c[0], c[1]]
+        ins = {id(a): i for i, a in enumerate(cand)}
+        if len(ins) != len(cand) or any(id(a) in ins for a in want):
+            return out
+        try:
+            probe = kq.fuse_graph(cand, want)
+            used = kq.fused_info(probe)[2]
+            kq.fuse_release(probe)
+            pick = [i for i, u in enumerate(used) if u or i == 0]
+            # A decode record is no verify record: the whole forms' level
+            # and the bound verify's keywords (_fused_kw) are not for it.
+            handle = kq.fuse_graph([cand[i] for i in pick], want,
+                                   direct=True, level=2)
+        except (ValueError, RuntimeError, TypeError):
+            return out
+        table[key] = (handle, None, pick, _fused_use())
+        _fused_note_new(1)
+        return out
+    handle, _, pick, use = rec
+    _FUSED_TICK[0] += 1
+    use[0] = _FUSED_TICK[0]
+    out, conv, state = kq.fused_call(handle, [cand[i] for i in pick])
+    # As _gdn_fused_decode_body leaves the cache.
+    if rp is not None:
+        c._gdn_replay = None
+    c[0] = conv
+    c[1] = state
+    c.advance(1)
+    return out
+
+
 def _fused_qsa_verify(layer, h, c, mask, positions):
-    """One attention layer of a verify with its two ends as recorded
-    graphs, or None where the plain call must run. The first record is
-    the stream mix and the projections, the second the output projection,
+    """One attention layer of a verify, or of a one-row decode step
+    (_decode_fused), with its two ends as recorded graphs, or None where
+    the plain call must run. The first record is the stream mix and the
+    projections but the indexer keys, the second the output projection,
     the combines and the MoE; both depend on the row count alone. Between
-    them the rope, the cache append, the block selection and the
-    attention core are built as the plain call builds them: they depend
-    on the cache offset and length. Records follow the rules of
-    _fused_gdn_verify."""
+    them the rope, the cache append, the block selection and the attention
+    core are built as the plain call builds them: they depend on the cache
+    offset and length. Records follow the rules of _fused_gdn_verify. A
+    decode step takes the verify's forms: the whole layer record with the
+    whole forms on, and _fused_kw's level and keywords."""
     import mlx_kquant as kq
 
     if layer.training or _prof_on(h.shape[1]):
@@ -3590,9 +3992,14 @@ def _fused_qsa_verify(layer, h, c, mask, positions):
             import weakref
 
             _FUSED_LAYERS.append(weakref.ref(layer))
-        recs = (_VERIFY_EPOCH, {}, _layer_leaves(layer, []))
+        recs = (_VERIFY_EPOCH, RecordTable(_fused_release),
+                _layer_leaves(layer, []))
         object.__setattr__(layer, "_verify_fused", recs)
     table = recs[1]
+    if _fused_whole():
+        out = _fused_qsa_whole(layer, h, c, mask, positions, table)
+        if out is not None:
+            return out
     key = (h.shape, h.dtype)
     rec = table.get(key)
     if rec is None:
@@ -3614,7 +4021,10 @@ def _fused_qsa_verify(layer, h, c, mask, positions):
         table[key] = "plain"
         mixed, inject = layer.hc_attn(h)
         q, gate, k, v, ik = attn._project(mixed)
-        first = [mixed, inject, q, gate, k, v] + ([] if ik is None else [ik])
+        # The indexer keys stay a lazy node outside the record, as the plain
+        # call leaves them: below the sparse depth only a cache evaluation
+        # reads them.
+        first = [mixed, inject, q, gate, k, v]
         try:
             ha = kq.fuse_graph([h], first, **_fused_kw())
         except (ValueError, RuntimeError, TypeError):
@@ -3635,13 +4045,13 @@ def _fused_qsa_verify(layer, h, c, mask, positions):
     ha, hb, no_ik, core_key, use = rec
     _FUSED_TICK[0] += 1
     use[0] = _FUSED_TICK[0]
-    r = kq.fused_call(ha, [h])
+    r = _vb.call(ha, [h])
     mixed, inject, q, gate, k, v = r[:6]
-    ik = None if no_ik else r[6]
+    ik = None if no_ik else _indexer_proj(attn.indexer.k_proj, mixed)
     core = attn._attend(mixed, q, k, v, ik, mask, c, positions)
     if (core.shape, core.dtype) != core_key:
         return tail(h, core, gate, inject)
-    return kq.fused_call(hb, [h, core, gate, inject])[0]
+    return _vb.call(hb, [h, core, gate, inject])[0]
 
 
 def verify_fused_stats(model) -> dict:
@@ -3738,8 +4148,30 @@ class PLELayer(nn.Module):
         object.__setattr__(self, "_rows_ahead", (input_ids, emb))
         mx.async_eval(emb)
 
+    def _math(self, h: mx.array, emb: mx.array, state: mx.array):
+        """The block from its table rows on, as a function of the stream,
+        the rows and the conv state alone (no mask): the output, the conv
+        input and the next conv state. What __call__ computes for a
+        verify; the form a verify records (_fused_ple_verify)."""
+        B, T, hc, D = h.shape
+        keys = self.norm_key(self.key_proj(emb).reshape(B, T, hc, D))
+        values = self.value_proj(emb)
+        queries = self.norm_query(h)
+        gate = (keys.astype(mx.float32) * queries.astype(mx.float32)).sum(
+            axis=-1, keepdims=True) * (1.0 / math.sqrt(D))
+        gate = mx.sign(gate) * mx.sqrt(mx.maximum(mx.abs(gate), 1e-6))
+        gate = mx.sigmoid(gate).astype(h.dtype)
+        gated = gate * values[:, :, None, :]
+        normed = self.norm_conv(gated).reshape(B, T, hc * D)
+        gated = gated.reshape(B, T, hc * D)
+        conv_input = mx.concatenate(
+            [_conv_state_in(state, normed.dtype), normed], axis=1)
+        new_state = mx.contiguous(conv_input[:, -self.conv_state_len:])
+        conv = nn.silu(self.conv1d(conv_input))
+        return h + (gated + conv).reshape(B, T, hc, D), conv_input, new_state
+
     def __call__(self, h: mx.array, input_ids: mx.array, cache, table,
-                 mask=None, gdn_sink=None) -> mx.array:
+                 mask=None, gdn_sink=None, record=None) -> mx.array:
         B, T, hc, D = h.shape
         ahead = vars(self).pop("_rows_ahead", None)
         prev = self.embedding.prev_history(cache, B)
@@ -3772,6 +4204,16 @@ class PLELayer(nn.Module):
             # verify built ahead that may be dropped reads them with its
             # own submission.
             mx.async_eval(emb)
+        if record is not None and gdn_sink is not None and mask is None:
+            # A verify: the block from here on through its record.
+            got = record(self, h, emb, cache)
+            if got is not None:
+                gdn_sink.append({
+                    "kind": "ple", "cache": cache, "prev": prev,
+                    "ids": input_ids, "ctx": self.embedding.context_len,
+                    "conv_input": got[1], "L": self.conv_state_len,
+                })
+                return got[0]
         keys = self.norm_key(self.key_proj(emb).reshape(B, T, hc, D))
         values = self.value_proj(emb)
         queries = self.norm_query(h)
@@ -3963,6 +4405,12 @@ class Qwen4ExpModel(nn.Module):
         h = input_embeddings if input_embeddings is not None else self.embed_tokens(inputs)
         B, T, D = h.shape
         h = mx.broadcast_to(h[:, :, None, :], (B, T, self.hc, D))
+        # A verify whose records go to command buffers of ours as they are
+        # reached (verify_bound), or None. Its input goes to the GPU first:
+        # after a row cut the GPU idles until this submission.
+        vb = _vb.current() if gdn_sink is not None else None
+        if vb is not None:
+            vb.submit([h])
         if cache is None:
             cache = [None] * len(self.layers)
         if self._qsa_dense_batch:
@@ -3987,16 +4435,35 @@ class Qwen4ExpModel(nn.Module):
             for layer, c in zip(self.layers, cache):
                 if "ple" in layer:
                     layer.ple.rows_ahead(inputs, c, table)
+        # Read once a forward, so the records off cost a layer one test; a
+        # weight swap inside a layer call still turns them off at once.
+        decode = (_DECODE_FUSED is not False and gdn_sink is None and T == 1
+                  and B == 1 and _decode_fused())
         for li, (layer, c) in enumerate(zip(self.layers, cache)):
             mask = ssm_mask if layer.is_linear else fa_mask
-            if _VERIFY_LAYER_HOOK is not None and gdn_sink is not None:
+            if vb is not None:
+                vb.layer(li)
+                if li == self.fa_idx:
+                    # Here, not ahead of the first layer: the GPU runs the
+                    # layers below while the host prepares.
+                    _vb.prepare(_bound_prepare, self, cache, h, vb)
+            if (_VERIFY_LAYER_HOOK is not None and gdn_sink is not None
+                    and not (vb is not None and vb.live)):
+                # Not under a bound verify: a mark is a lazy node, and the
+                # session sets its own boundaries.
                 h = _VERIFY_LAYER_HOOK(li, h)
             if (gdn_sink is not None and layer.is_linear and mask is None
                     and B == 1 and "ple" in layer and _verify_fused()
                     and not _prof_on(T)):
-                # The PLE block as the plain call runs it, then the rest
-                # of the layer through its record.
-                hp = layer.ple(h, inputs, c, table, mask, gdn_sink=gdn_sink)
+                # The PLE block as the plain call runs it (or as its
+                # record), then the rest of the layer through its record.
+                if vb is not None:
+                    # The block submits its table rows through mlx.
+                    vb.flush()
+                hp = layer.ple(
+                    h, inputs, c, table, mask, gdn_sink=gdn_sink,
+                    record=(functools.partial(_fused_ple_verify, layer)
+                            if _fused_whole() else None))
                 out = _fused_gdn_verify(layer, hp, c, gdn_sink)
                 if out is None:
                     kern = not layer.training
@@ -4024,6 +4491,30 @@ class Qwen4ExpModel(nn.Module):
                     and "ple" not in layer and type(c) is QSAKVCache
                     and "indexer" in layer.self_attn and _verify_fused_qsa()):
                 out = _fused_qsa_verify(layer, h, c, mask, position_ids)
+                if out is not None:
+                    h = out
+                    if li in cap_ids:
+                        cap_sink.append(h.mean(axis=2))
+                    continue
+            elif decode and c is not None and not _VERIFY_BLOCKED:
+                out = None
+                if layer.is_linear and mask is None:
+                    hp = (layer.ple(h, inputs, c, table, mask)
+                          if "ple" in layer else h)
+                    out = _fused_gdn_decode(layer, hp, c)
+                    if out is None and hp is not h:
+                        # The PLE block has run: the rest of the layer.
+                        mixed, inject = layer.hc_attn(hp)
+                        out = _hc_combine(hp, layer.linear_attn(
+                            mixed, mask=None, cache=c), inject,
+                            kern=not layer.training)
+                        mixed, inject = layer.hc_ffn(out)
+                        out = _hc_combine(out, layer.mlp(mixed), inject,
+                                          kern=not layer.training)
+                elif (not layer.is_linear and "ple" not in layer
+                        and type(c) is QSAKVCache
+                        and "indexer" in layer.self_attn):
+                    out = _fused_qsa_verify(layer, h, c, mask, position_ids)
                 if out is not None:
                     h = out
                     if li in cap_ids:

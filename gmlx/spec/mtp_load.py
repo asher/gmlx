@@ -817,6 +817,7 @@ def _load_deepseek4_mtp_drafter(
         )
         d_arch = "deepseek4-dspark"
     if d_arch == "deepseek4-dspark":
+        _note_codec_ignored("dspark")
         return _load_deepseek4_dspark_drafter(
             draft_gguf_path,
             target,
@@ -1679,7 +1680,7 @@ def _load_plain_dflash_drafter(
 # under which a draft is not worth its verify row. A row costs most where
 # the target is a mixture of experts, since each row routes its own.
 _DFLASH2_ROW_FLOOR = {
-    "qwen4_exp": 0.5,
+    "qwen4_exp": 0.3,
 }
 
 
@@ -1732,6 +1733,12 @@ def _load_dflash2_drafter(
         source_key=weights_source_key(draft_gguf_path),
         active_before=active_before,
     )
+    from . import dflash_drafter as _dd
+
+    if _dd._LAYER_CODEC:
+        nbytes = drafter.layer_codec(_dd._LAYER_CODEC)
+        log(f"[mtp] drafter layers re-encoded in {_dd._LAYER_CODEC}: "
+            f"{nbytes / 2**20:.1f} MiB")
     drafter.bind(target)
     _wire_dflash_capture(target, layer_ids)
     drafter.row_floor = _dflash2_row_floor(target_config_dict.get("model_type"))
@@ -1915,6 +1922,20 @@ def _load_lilicorr_drafter(
     return drafter
 
 
+_CODEC_NOTED: list = []
+
+
+def _note_codec_ignored(kind: str) -> None:
+    """Warn once that GMLX_DFLASH_DRAFT_CODEC leaves a drafter that is not
+    DFlash 2 as its file has it."""
+    from .dflash_drafter import _LAYER_CODEC
+
+    if _LAYER_CODEC and not _CODEC_NOTED:
+        _CODEC_NOTED.append(kind)
+        loadlog.warn(f"[mtp] GMLX_DFLASH_DRAFT_CODEC reaches DFlash 2 drafters "
+                     f"only; this {kind} drafter keeps its file's weights")
+
+
 def _load_dflash_drafter(
     draft_gguf_path: str,
     target,
@@ -1951,6 +1972,8 @@ def _load_dflash_drafter(
             f"{draft_gguf_path}: this dflash GGUF holds the {container} "
             f"drafter, which loads only against a deepseek_v4 target"
         )
+    if container != "dflash2":
+        _note_codec_ignored(container)
     return loader(
         draft_gguf_path,
         target,

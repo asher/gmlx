@@ -277,4 +277,4 @@ def test_pulled_flash_next_pairs_with_its_dflash2_drafter(tmp_path, monkeypatch,
     m = models["qwen3.8-flash-next-ud-iq4"]
     assert _base(m.draft_gguf) == "Qwen3.8-Flash-Next-DFlash2-Q6_K.gguf"
     assert m.speculative is True
-    assert _dflash2_row_floor(GGUF_ARCH_TO_MODEL_TYPE["qwen4exp"]) == 0.5
+    assert _dflash2_row_floor(GGUF_ARCH_TO_MODEL_TYPE["qwen4exp"]) == 0.3
